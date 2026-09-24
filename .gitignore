@@ -1,0 +1,37 @@
+# --- build products -------------------------------------------------------
+build/
+.Xil/
+xsim.dir/
+*.jou
+*.log
+*.pb
+*.str
+
+# Vivado leaves these in the project root
+FinalUnmatchedCellsToUnplace.txt
+clockInfo.txt
+tight_setup_hold_pins.txt
+--list
+
+# --- bitstreams -----------------------------------------------------------
+# Each is a few megabytes and every one is reproducible from the sources here.
+# cores/known-good/ is the set worth keeping on THIS machine as somewhere to
+# fall back to when a build will not come up; it is not worth 130 MB of history.
+cores/
+prebuilt/*.bit
+*.bit
+*.bin
+*.mcs
+
+# --- other people's copyrighted data --------------------------------------
+# sim/roms holds a converted Sony PlayStation BIOS and console test ROMs, and
+# the disc images live outside the tree entirely. None of it is ours to publish.
+sim/roms/
+
+# --- vendored third-party tools -------------------------------------------
+# arduino-cli is 37 MB and comes from its own project.
+tools/arduino/
+
+# --- python --------------------------------------------------------------
+__pycache__/
+*.pyc

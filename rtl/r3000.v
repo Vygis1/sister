@@ -1,0 +1,999 @@
+//////////////////////////////////////////////////////////////////////////////////
+// r3000.v - the PlayStation's CPU: a MIPS I R3000A, as the console has it.
+//
+// No TLB (the console's part has none: the address map is fixed and decoded
+// from the top three bits), no FPU, and the "cache" the BIOS clears through
+// SR.IsC is honoured by dropping the stores it makes while isolated. Every
+// instruction a user program or the BIOS executes is here: the full integer
+// set, the unaligned load/store four, multiply and divide into HI/LO, COP0
+// with SR/CAUSE/EPC/BadVaddr/PRID, the exception model, and interrupts.
+//
+// --- the two delay slots -----------------------------------------------------------
+//
+// The architecture has two, and both are visible to software:
+//
+//   * A branch's delay slot is executed whether or not the branch is taken.
+//   * A load's destination is not visible to the instruction after the load.
+//     That instruction reads the OLD value. The R3000 has no interlock; the
+//     compiler is expected to schedule around it, and some code reads the old
+//     value on purpose.
+//
+// Both are implemented as what they are rather than smoothed over. A CPU that
+// interlocks loads runs a PlayStation program wrongly in ways that take a long
+// time to find, because the program was written for the one that does not.
+//
+// --- the bus ------------------------------------------------------------------------
+//
+// One access per enable, answered on the next: the same shape as the other
+// three CPUs here, so it sits behind the same memory. `addr` is PHYSICAL --
+// the segment bits are stripped here, since that is the whole of the memory
+// management this chip has -- and `be` says which bytes of the word matter.
+//
+// The machine advances only when `ce` is high, and the top level withholds it
+// while memory is not ready. That is how a fetch from DDR3 stalls the pipeline
+// without the pipeline knowing.
+//
+// --- the shape --------------------------------------------------------------------------
+//
+// Multi-cycle, not pipelined: fetch, then execute, then a memory cycle if the
+// instruction has one. Three or four enables per instruction. The console's CPU
+// ran at 33 MHz and issued roughly one instruction per clock; this at 50 MHz
+// with three or four per instruction is not that, and it does not need to be
+// for the BIOS to draw its logo. When it needs to be, this is the module to
+// replace, and the test program will say whether the replacement is right.
+//////////////////////////////////////////////////////////////////////////////////
+
+`default_nettype none
+
+module r3000 (
+	input  wire        clk,
+	input  wire        rst,
+	input  wire        ce,
+
+	// --- the bus --------------------------------------------------------------
+	output reg  [31:0] addr,        // physical
+	input  wire [31:0] din,
+	output reg  [31:0] dout,
+	output reg  [3:0]  be,
+	output reg         we,
+	output reg         req,
+	// The instruction line the machine is already holding. An instruction cache
+	// line is four instructions and instructions come in order, so three fetches
+	// out of four are already in hand and need no bus cycle at all: the fetch
+	// and its wait state collapse into one clock. Without this the processor
+	// spent more than half its clocks waiting for memory it was always going
+	// to find.
+	output wire [31:0] fetch_addr,   // where the next instruction will come from
+	input  wire        fetch_hit,    // it is in the line already held
+	input  wire [31:0] fetch_word,   // and this is it
+	input  wire        no_overlap,   // switch off running one instruction per clock
+	output wire        fetching,     // this bus access is an instruction fetch
+
+	// --- COP2, the GTE --------------------------------------------------------------
+	// Register moves are one enable: the index and data go out, the coprocessor
+	// answers reads combinationally. A command is a strobe with its 25-bit word;
+	// `c2_busy` stalls the next move to the GTE until it has finished, which is
+	// the interlock the real pair has.
+	output reg         isc_inv,    // a store made with the cache isolated: drop this line
+	output reg  [31:0] isc_addr,
+	output reg         c2_we,       // MTC2 / CTC2 / LWC2: write c2_wdata to c2_reg
+	output reg         c2_ctl,      // ...a control register rather than a data one
+	output reg  [4:0]  c2_reg,      // (combinational: see below)
+	output reg  [31:0] c2_wdata,
+	input  wire [31:0] c2_rdata,    // the register at c2_reg, control if c2_ctl
+	output reg         c2_cmd,      // COP2: execute c2_word
+	output reg  [24:0] c2_word,
+	input  wire        c2_busy,
+
+	// --- interrupts -------------------------------------------------------------
+	// Six external lines into Cause.IP[15:10]; the console wires its interrupt
+	// controller to the first. Level-sensitive: hold it until acknowledged.
+	input  wire [5:0]  irq,
+
+	// --- for a testbench ---------------------------------------------------------
+	output wire [31:0] dbg_pc,
+	output wire [31:0] dbg_ir,
+	output wire        dbg_exec,     // this cycle commits the instruction at PC (din)
+	input  wire [5:0]  dbg_rsel,     // register peek: 0-31 = R, 32 = SR, 33 = CAUSE, 34 = EPC
+	output wire [31:0] dbg_rval,
+	output wire [31:0] dbg_a0, dbg_a1, dbg_ra, dbg_sp,   // for a snapshot at a watchpoint hit
+	// every write into the register file, for a trace of one register:
+	// port A is the queued writeback landing, port B an exception entry's load commit
+	output wire        dbg_wa_en,
+	output wire [4:0]  dbg_wa_reg,
+	output wire [31:0] dbg_wa_val,
+	output wire        dbg_wb_en,
+	output wire [4:0]  dbg_wb_reg,
+	output wire [31:0] dbg_wb_val,
+	output wire        dbg_halted,
+	// COP0 CAUSE and EPC, for reading what exception a program died on and where
+	output wire [31:0] dbg_cause,
+	output wire [31:0] dbg_epc
+);
+
+	// --- registers ------------------------------------------------------------------
+	reg [31:0] R [0:31];
+	reg [31:0] PC;                  // of the instruction being executed
+	reg [31:0] HI, LO;
+
+	// COP0
+	reg [31:0] SR, CAUSE, EPC, BADVADDR;
+	assign dbg_cause = CAUSE;
+	assign dbg_epc   = EPC;
+	localparam PRID = 32'h0000_0002;
+
+	// --- the delay slots ------------------------------------------------------------
+	reg        br_pend;             // a branch resolved; take it after this one
+	reg [31:0] br_target;
+	reg        in_slot;             // this instruction IS a delay slot
+	reg        ld_pend;             // a load landed; commit it after this one reads
+	reg [4:0]  ld_reg;
+	reg [31:0] ld_val;
+	// A loaded value goes through two fetches before it is written: promoted
+	// at the slot's fetch, written at the next. Writing it at the slot's own
+	// fetch lands it before the slot reads -- which is exactly the interlock
+	// the chip does not have, and case 2190 of the sweep is there to say so.
+	reg        ld_commit;
+	reg [4:0]  ld_creg;
+	reg [31:0] ld_cval;
+
+	// --- state ------------------------------------------------------------------------
+	// Memory answers TWO enables after the address: the word is registered on
+	// the enable after `req`, and readable on the one after that. So a fetch and
+	// a load each spend one enable waiting, as the 68000 here does in S_FETCH2.
+	localparam S_FETCH = 3'd0, S_EXEC = 3'd1, S_MEM = 3'd2, S_MEMR = 3'd3,
+	           S_DIV   = 3'd4, S_EXC  = 3'd5, S_FETCHW = 3'd6, S_MEMW = 3'd7;
+	localparam S_C2W = 4'd8;
+	reg [3:0]  st;
+	// Where the instruction just executed wants the processor to go. A
+	// blocking variable, so the cycle that runs the instruction can read it
+	// back and, when nothing is diverting, fetch the next instruction itself
+	// instead of spending a whole clock doing it.
+	reg [3:0]  nst;
+	reg [31:0] lv;                 // the word a load just brought back
+	reg [31:0] ir;
+	reg [31:0] if_word;            // an instruction taken from the held line
+	reg        if_fast;            // ...rather than fetched over the bus
+	reg        halted;
+	reg        c2_ctl_r;
+	reg [4:0]  c2_reg_r;
+
+	assign dbg_pc     = PC;
+	assign dbg_ir     = ir;
+	assign dbg_exec   = ce && (st == S_EXEC);
+	assign dbg_rval   = dbg_rsel[5] ? (dbg_rsel[1:0] == 2'd0 ? SR : dbg_rsel[1:0] == 2'd1 ? CAUSE : EPC)
+	                                : (dbg_rsel[4:0] == 5'd0 ? 32'd0 : R[dbg_rsel[4:0]]);
+	assign dbg_halted = halted;
+
+	// the instruction being executed: the one taken from the held line, or the
+	// one the bus brought back
+	wire [31:0] insn = if_fast ? if_word : din;
+
+	// --- decode ----------------------------------------------------------------------------
+	wire [5:0]  op    = ir[31:26];
+	wire [4:0]  rs    = ir[25:21];
+	wire [4:0]  rt    = ir[20:16];
+	wire [4:0]  rd    = ir[15:11];
+	wire [4:0]  sh    = ir[10:6];
+	wire [5:0]  fn    = ir[5:0];
+	wire [15:0] imm   = ir[15:0];
+	wire [31:0] simm  = {{16{imm[15]}}, imm};
+	wire [31:0] zimm  = {16'd0, imm};
+	wire [25:0] jt    = ir[25:0];
+
+	// Operands, with the pending load NOT yet visible -- that is the slot.
+	// A register write waiting to land: see rd_reg below.
+	reg        wb_en;
+	reg [4:0]  wb_reg;
+	reg [31:0] wb_val;
+
+	wire [31:0] a = (rs == 5'd0) ? 32'd0 : R[rs];
+	wire [31:0] b = (rt == 5'd0) ? 32'd0 : R[rt];
+	// rt with a load to it that has landed but not yet been written back (see LWL/LWR)
+	wire [31:0] b_ld = (rt != 5'd0 && ld_commit && ld_creg == rt) ? ld_cval
+	                 : (rt != 5'd0 && ld_pend   && ld_reg  == rt) ? ld_val
+	                 : b;
+
+	// An instruction's result is queued and lands at the top of the next enable.
+	// With a fetch cycle in between it reached the register file in good time;
+	// running one instruction per clock there is no cycle in between, so the
+	// instruction that wants it has to be handed it directly. Only the operand
+	// reads get this: the unaligned-load merge in S_MEMR must see the register
+	// as memory left it, and forwarding there corrupts it.
+	function [31:0] operand;
+		input [4:0] n;
+		begin
+			if (n == 5'd0)                 operand = 32'd0;
+			else if (wb_en && wb_reg == n) operand = wb_val;
+			else                           operand = R[n];
+		end
+	endfunction
+
+	wire is_special = (op == 6'h00);
+	wire is_regimm  = (op == 6'h01);
+	wire is_cop0    = (op == 6'h10);
+
+	// --- the ALU -------------------------------------------------------------------------------
+	wire [31:0] alu_b = is_special ? b : simm;
+	wire [32:0] sum   = {a[31], a} + {alu_b[31], alu_b};
+	wire [32:0] dif   = {a[31], a} - {alu_b[31], alu_b};
+	wire        ovf_add = sum[32] != sum[31];
+	wire        ovf_sub = dif[32] != dif[31];
+	wire [4:0]  shamt = is_special && (fn == 6'h04 || fn == 6'h06 || fn == 6'h07) ? a[4:0] : sh;
+
+	// multiply, one cycle; divide, iterated
+	wire signed [63:0] mul_s = $signed(a) * $signed(b);
+	wire [63:0]        mul_u = a * b;
+
+	reg [5:0]  div_cnt;
+	reg [31:0] div_q, div_r, div_d;
+	reg        div_neg_q, div_neg_r, div_signed;
+	reg        div_busy;
+	reg [2:0]  hl_wait;             // what is parked in S_DIV: 0 MFHI 1 MFLO 2 MTHI 3 MTLO 4 MULT 5 MULTU 6 DIV 7 DIVU
+	reg [31:0] hl_a, hl_b;          // its operands
+	// The multiplier is pipelined like the divider: operands registered on
+	// the instruction, the product a cycle later, HI/LO the cycle after. As
+	// one combinational step from the instruction word it was 20 ns from
+	// the bus register through four DSPs and a 32-bit add into HI, the
+	// worst path of the whole build once the GTE's was fixed.
+	reg        mul_busy;
+	reg [1:0]  mul_cnt;
+	reg [31:0] mul_a, mul_b;
+	reg        mul_sgn;
+	reg [63:0] mul_p;
+	wire       hl_busy = div_busy || mul_busy;
+	reg [4:0]  div_wait_rd;
+
+	// --- exceptions ----------------------------------------------------------------------------
+	localparam EXC_INT = 5'd0, EXC_ADEL = 5'd4, EXC_ADES = 5'd5, EXC_SYS = 5'd8,
+	           EXC_BP  = 5'd9, EXC_RI   = 5'd10, EXC_OV  = 5'd12;
+	reg [4:0]  exc_code;
+	reg        exc_take;
+	reg [31:0] exc_bad;
+	reg        exc_bd;              // the fault was in a delay slot
+
+	// Interrupts pending: the external lines land in CAUSE.IP[15:10]; IP[9:8]
+	// are software-writable. Taken at an instruction boundary when enabled.
+	wire [7:0] ip = {irq, CAUSE[9:8]};
+	wire irq_now = SR[0] && ((SR[15:8] & ip) != 8'd0);
+
+	// --- the physical address ----------------------------------------------------------------
+	// KSEG0/KSEG1 are the low 512 MB with the segment bits removed; KUSEG maps
+	// straight through. KSEG2 does not exist on this console.
+	wire [31:0] ea   = a + simm;
+	wire [31:0] phys = ea[31] ? {3'b000, ea[28:0]} : ea;
+	wire [31:0] pc_phys = PC[31] ? {3'b000, PC[28:0]} : PC;
+	// Where the next instruction lives. Execute assigns exactly this to PC on
+	// every ordinary instruction, and it is made of registers only, so it is
+	// known before the instruction has run -- which is what lets the same cycle
+	// fetch it.
+	wire [31:0] npc      = br_pend ? br_target : PC + 32'd4;
+	wire [31:0] npc_phys = npc[31] ? {3'b000, npc[28:0]} : npc;
+	// While executing, ask the cache about the instruction after this one; the
+	// rest of the time, about the one being fetched.
+	assign fetch_addr = (st == S_EXEC) ? npc_phys : pc_phys;
+	assign fetching   = (st == S_FETCHW);
+	// this fetch will go straight to execute: the instruction is in hand and
+	// nothing is diverting the processor first
+	wire fast_go = fetch_hit && !(irq_now && !in_slot) && (PC[1:0] == 2'b00);
+	// The same question asked from the states that follow a load or a store,
+	// where the program counter already points at the next instruction: can it
+	// be taken straight from the cache instead of spending a fetch cycle on it?
+	wire mem_go  = !no_overlap && fetch_hit && !irq_now && (PC[1:0] == 2'b00);
+
+	// The GTE's read side is combinational on c2_reg / c2_ctl, so for a move OUT
+	// of it those are driven from the instruction being executed (`insn`: the
+	// held word on the fast path, the arriving one otherwise). They used to be
+	// taken from `din` a cycle ahead, which is the next instruction on the fast
+	// path -- right when the move followed another fast instruction, wrong when
+	// it arrived through a fetch (a cache miss): the read then used the last
+	// register WRITTEN, and a game's square root read LZCS back instead of LZCR.
+	always @(*) begin
+		c2_reg = c2_reg_r;
+		c2_ctl = c2_ctl_r;
+		if (st == S_EXEC && insn[31:26] == 6'h12 && !insn[25]
+		    && (insn[25:21] == 5'h00 || insn[25:21] == 5'h02)) begin
+			c2_reg = insn[15:11];
+			c2_ctl = insn[22];     // CFC2 is 5'h02 in bits 25:21, i.e. bit 22 set
+		end
+		if (st == S_EXEC && insn[31:26] == 6'h3A) begin   // SWC2: data register rt
+			c2_reg = insn[20:16];
+			c2_ctl = 1'b0;
+		end
+	end
+
+	// --- the register file write --------------------------------------------------------------
+	assign dbg_a0 = R[4]; assign dbg_a1 = R[5]; assign dbg_ra = R[31]; assign dbg_sp = R[29];
+	// (the write-trace ports, after everything they look at is declared)
+	assign dbg_wa_en  = ce && wb_en && (wb_reg != 5'd0);
+	assign dbg_wa_reg = wb_reg;
+	assign dbg_wa_val = wb_val;
+	assign dbg_wb_en  = ce && (st == S_EXC) && ((ld_pend && ld_reg != 5'd0) || (ld_commit && ld_creg != 5'd0));
+	assign dbg_wb_reg = (ld_pend && ld_reg != 5'd0) ? ld_reg : ld_creg;
+	assign dbg_wb_val = (ld_pend && ld_reg != 5'd0) ? ld_val : ld_cval;
+
+	integer i;
+	always @(posedge clk) begin
+		if (rst) begin
+			for (i = 0; i < 32; i = i + 1) R[i] <= 32'd0;
+			PC       <= 32'hBFC0_0000;
+			HI <= 32'd0; LO <= 32'd0;
+			SR       <= 32'h0040_0000;     // BEV set, interrupts off, kernel
+			CAUSE    <= 32'd0;
+			EPC      <= 32'd0;
+			BADVADDR <= 32'd0;
+			st       <= S_FETCH;
+			req <= 1'b0; we <= 1'b0; be <= 4'd0; addr <= 32'd0; dout <= 32'd0;
+			if_word <= 32'd0; if_fast <= 1'b0;
+			br_pend <= 1'b0; in_slot <= 1'b0;
+			ld_pend <= 1'b0; ld_reg <= 5'd0; ld_val <= 32'd0;
+			ld_commit <= 1'b0; ld_creg <= 5'd0; ld_cval <= 32'd0;
+			halted <= 1'b0;
+			exc_take <= 1'b0; exc_code <= 5'd0; exc_bad <= 32'd0; exc_bd <= 1'b0;
+			isc_inv <= 1'b0; isc_addr <= 32'd0;
+			div_busy <= 1'b0; div_cnt <= 6'd0; mul_busy <= 1'b0; mul_cnt <= 2'd0; hl_wait <= 3'd0;
+			wb_en <= 1'b0; wb_reg <= 5'd0; wb_val <= 32'd0;
+			ir <= 32'd0;
+			c2_we <= 1'b0; c2_ctl_r <= 1'b0; c2_reg_r <= 5'd0; c2_wdata <= 32'd0;
+			c2_cmd <= 1'b0; c2_word <= 25'd0;
+		end else if (ce) begin
+			req <= 1'b0;
+			we  <= 1'b0;
+			isc_inv <= 1'b0;
+			c2_we  <= 1'b0;
+			c2_cmd <= 1'b0;
+
+			// The external lines are level-sensitive and always visible.
+			CAUSE[15:10] <= irq;
+
+			// A pending register write from the previous instruction lands now,
+			// before this one's operands are read -- unless it was a load, in
+			// which case it waited one instruction already and lands now too.
+			if (wb_en && wb_reg != 5'd0) R[wb_reg] <= wb_val;
+			wb_en <= 1'b0;
+
+			// the multiplier runs on its own: 33 x 33 signed covers MULTU too
+			if (mul_busy) begin
+				mul_p   <= $signed({mul_sgn & mul_a[31], mul_a}) * $signed({mul_sgn & mul_b[31], mul_b});
+				mul_cnt <= mul_cnt - 2'd1;
+				if (mul_cnt == 2'd1) begin mul_busy <= 1'b0; HI <= mul_p[63:32]; LO <= mul_p[31:0]; end
+			end
+			// the divider runs on its own
+			if (div_busy) begin
+				// restoring division, one bit per enable
+				if ({div_r[30:0], div_q[31]} >= div_d) begin
+					div_r <= {div_r[30:0], div_q[31]} - div_d;
+					div_q <= {div_q[30:0], 1'b1};
+				end else begin
+					div_r <= {div_r[30:0], div_q[31]};
+					div_q <= {div_q[30:0], 1'b0};
+				end
+				div_cnt <= div_cnt - 6'd1;
+				if (div_cnt == 6'd1) begin
+					div_busy <= 1'b0;
+					LO <= div_neg_q ? -({div_q[30:0], ({div_r[30:0], div_q[31]} >= div_d)})
+					                :  {div_q[30:0], ({div_r[30:0], div_q[31]} >= div_d)};
+					HI <= div_neg_r ? -(({div_r[30:0], div_q[31]} >= div_d)
+					                     ? {div_r[30:0], div_q[31]} - div_d
+					                     : {div_r[30:0], div_q[31]})
+					                :  (({div_r[30:0], div_q[31]} >= div_d)
+					                     ? {div_r[30:0], div_q[31]} - div_d
+					                     : {div_r[30:0], div_q[31]});
+				end
+			end
+
+			case (st)
+			// ---------------------------------------------------------------------------------
+			S_FETCH: begin
+					// The load delay slot ends here: whatever the last instruction
+					// left pending is committed once the NEXT one has been fetched
+					// -- i.e. after this instruction (the slot) has read its
+					// operands, which happens in S_EXEC. So the commit is queued
+					// through wb_*, which lands at the top of the next enable.
+					// An instruction taken straight from the instruction cache
+					// goes to execute with no wait state in between, and a write
+					// queued here would not reach the register file until the end
+					// of the cycle that reads it. On that path the loaded value
+					// goes straight in. This is the whole load delay slot: get it
+					// wrong and the instruction after the slot reads the register
+					// as it was before the load.
+					if (ld_commit) begin           // the slot has read; write now
+						// ...unless the slot itself wrote this register: its
+						// write (queued in wb_*, landing at the top of this
+						// enable) is later in program order and wins on the
+						// chip. `lw ra,36(sp)` followed by `jal` is exactly the
+						// BIOS's shell: the stale ra overwrote the link, the
+						// callee returned two levels up, and a function's
+						// stack restore was skipped.
+						if (!(wb_en && wb_reg == ld_creg)) begin
+							if (fast_go) begin
+								if (ld_creg != 5'd0) R[ld_creg] <= ld_cval;
+							end else begin
+								wb_en  <= 1'b1;
+								wb_reg <= ld_creg;
+								wb_val <= ld_cval;
+							end
+						end
+						ld_commit <= 1'b0;
+					end
+					if (ld_pend) begin             // this fetch is the slot's
+						ld_commit <= 1'b1;
+						ld_creg   <= ld_reg;
+						ld_cval   <= ld_val;
+						ld_pend   <= 1'b0;
+					end
+
+					if (irq_now && !in_slot) begin
+						// Interrupts are taken between instructions, and never in
+						// a delay slot: the branch would be lost.
+						exc_code <= EXC_INT;
+						exc_bd   <= 1'b0;
+						st       <= S_EXC;
+					end else if (PC[1:0] != 2'b00) begin
+						exc_code <= EXC_ADEL;
+						exc_bad  <= PC;
+						exc_bd   <= 1'b0;
+						st       <= S_EXC;
+					end else if (fetch_hit) begin
+						// already in hand: no bus cycle, no wait state
+						if_word <= fetch_word;
+						if_fast <= 1'b1;
+						st      <= S_EXEC;
+					end else begin
+						addr <= pc_phys;
+						be   <= 4'b1111;
+						req  <= 1'b1;
+						st   <= S_FETCHW;
+					end
+				end
+
+			S_FETCHW: st <= S_EXEC;         // the word lands on din now
+			S_MEMW:   st <= S_MEMR;
+			S_C2W:    if (!c2_busy) st <= S_FETCH;   // MFC2 re-executes once the GTE is done
+
+			// ---------------------------------------------------------------------------------
+			S_EXEC: begin
+					// from the held line if it was there, off the bus if not
+					if_fast <= 1'b0;
+					ir <= insn;
+					// Decode straight off the bus, so `ir` is for the debugger and
+					// the exception path; the work below uses `din` through the
+					// same wires by way of the continuous decode of `ir` -- which
+					// would be a cycle stale. So: decode `din` here, explicitly.
+					nst = S_FETCH;
+					exec(insn);
+
+					// One instruction per clock. The fetch cycle exists to walk the
+					// load delay pipeline on, look for an interrupt, and get the
+					// next instruction. When nothing is diverting the processor,
+					// the next instruction is already in the cache and no
+					// interrupt is waiting, all three can be done here and the
+					// next instruction executes on the next clock. Anything
+					// unusual -- a load, a store, an exception, a co-processor or
+					// divider stall, a misaligned jump, an interrupt, a cache miss
+					// -- goes the long way round, which is unchanged.
+					if (nst == S_FETCH && !no_overlap && !irq_now
+					    && (npc[1:0] == 2'b00) && fetch_hit) begin
+						if (ld_commit) begin
+							if (!(wb_en && wb_reg == ld_creg) && ld_creg != 5'd0)
+								R[ld_creg] <= ld_cval;
+							ld_commit <= 1'b0;
+						end
+						if (ld_pend) begin
+							ld_commit <= 1'b1;
+							ld_creg   <= ld_reg;
+							ld_cval   <= ld_val;
+							ld_pend   <= 1'b0;
+						end
+						if_word <= fetch_word;
+						if_fast <= 1'b1;
+						st      <= S_EXEC;
+					end else st <= nst;
+				end
+
+			// ---------------------------------------------------------------------------------
+			S_MEM: begin
+					// a store was issued last enable; nothing to collect, so the
+					// next instruction can be taken here rather than in a cycle
+					// of its own
+					if (mem_go) begin
+						if (ld_commit) begin
+							if (!(wb_en && wb_reg == ld_creg) && ld_creg != 5'd0)
+								R[ld_creg] <= ld_cval;
+							ld_commit <= 1'b0;
+						end
+						if (ld_pend) begin
+							ld_commit <= 1'b1; ld_creg <= ld_reg; ld_cval <= ld_val; ld_pend <= 1'b0;
+						end
+						if_word <= fetch_word; if_fast <= 1'b1; st <= S_EXEC;
+					end else st <= S_FETCH;
+				end
+
+			S_MEMR: begin
+					// a load was issued last enable; the word is on din now
+					case (op)
+					6'h20: lv = sext8(byte_of(din, exc_bad[1:0]));           // LB
+					6'h24: lv = {24'd0, byte_of(din, exc_bad[1:0])};          // LBU
+					6'h21: lv = sext16(half_of(din, exc_bad[1]));             // LH
+					6'h25: lv = {16'd0, half_of(din, exc_bad[1])};            // LHU
+					6'h23: lv = din;                                          // LW
+					// LWL/LWR merge into rt's CURRENT value -- and a compiler
+					// issues the pair back to back, so the second one's rt is
+					// the first one's result, still on its way to the register
+					// file. The chip forwards it; without that the second half
+					// merged into the stale register and every unaligned word
+					// (an ISO directory's extents, say) came out wrong.
+					6'h22: lv = lwl(b_ld, din, exc_bad[1:0]);                 // LWL
+					6'h26: lv = lwr(b_ld, din, exc_bad[1:0]);                 // LWR
+					default: lv = din;
+					endcase
+					if (op == 6'h32) begin                                    // LWC2
+						ld_pend  <= 1'b0;
+						c2_we    <= 1'b1;
+						c2_ctl_r <= 1'b0;
+						c2_reg_r <= rt;
+						c2_wdata <= din;
+						st <= S_FETCH;
+					end else if (mem_go) begin
+						// The fetch cycle would have moved this load from pending
+						// to about-to-commit; do that here, with the value that
+						// has just arrived, and take the next instruction too.
+						// The delay slot still reads the register as it was: the
+						// value does not reach the register file until the
+						// instruction after it.
+						if (ld_commit) begin
+							if (!(wb_en && wb_reg == ld_creg) && ld_creg != 5'd0)
+								R[ld_creg] <= ld_cval;
+						end
+						ld_commit <= 1'b1; ld_creg <= rt; ld_cval <= lv;
+						ld_pend   <= 1'b0;
+						if_word <= fetch_word; if_fast <= 1'b1; st <= S_EXEC;
+					end else begin
+						ld_pend <= 1'b1;
+						ld_reg  <= rt;
+						ld_val  <= lv;
+						st <= S_FETCH;
+					end
+				end
+
+			// ---------------------------------------------------------------------------------
+			S_DIV: begin
+					// MFHI/MFLO after a divide wait for it. Nothing else does;
+					// that is the interlock the real chip has. When it lands,
+					// the move that was waiting finally happens.
+					if (!hl_busy) begin
+						case (hl_wait)
+						3'd0: wreg(div_wait_rd, HI);
+						3'd1: wreg(div_wait_rd, LO);
+						3'd2: HI <= hl_a;
+						3'd3: LO <= hl_a;
+						3'd4, 3'd5: start_mul(hl_a, hl_b, !hl_wait[0]);
+						default:    start_div(hl_a, hl_b, !hl_wait[0]);
+						endcase
+						st <= S_FETCH;
+					end
+				end
+
+			// ---------------------------------------------------------------------------------
+			S_EXC: begin
+					// EPC is the faulting instruction, or the branch it was the
+					// slot of; BD says which. SR's mode/enable pairs shift up.
+					EPC   <= exc_bd ? PC - 32'd4 : PC;
+					CAUSE <= {exc_bd, CAUSE[30:7], exc_code, 2'b00};
+					if (exc_code == EXC_ADEL || exc_code == EXC_ADES)
+						BADVADDR <= exc_bad;
+					SR    <= {SR[31:6], SR[3:0], 2'b00};
+					PC    <= SR[22] ? 32'hBFC0_0180 : 32'h8000_0080;
+					br_pend <= 1'b0;
+					in_slot <= 1'b0;
+					// A load whose value is still in the delay pipeline has already
+					// executed: it completes now, as on the chip, where the handler
+					// sees the loaded register. Dropping it here left the BIOS's
+					// `lw ra` unwritten whenever VBlank landed on the next fetch,
+					// and the function returned through a stale ra.
+					if (ld_commit && ld_creg != 5'd0) R[ld_creg] <= ld_cval;
+					if (ld_pend   && ld_reg  != 5'd0) R[ld_reg]  <= ld_val;
+					ld_pend <= 1'b0;
+					ld_commit <= 1'b0;
+					st <= S_FETCH;
+				end
+			default: st <= S_FETCH;
+			endcase
+		end
+	end
+
+	// --- executing one instruction ---------------------------------------------------------
+	// A task, so that the decode reads the word on the bus rather than a
+	// register that is one enable stale. Everything it assigns is a register of
+	// this module, assigned non-blocking, exactly as if it were inline.
+	task exec;
+		input [31:0] w;
+		reg [5:0]  o; reg [4:0] s, t, d, h; reg [5:0] f;
+		reg [31:0] va, vb, si, zi, ea_t, ph;
+		reg [32:0] sm, df;
+		reg        take;
+		reg [31:0] link;
+		begin
+			o = w[31:26]; s = w[25:21]; t = w[20:16]; d = w[15:11]; h = w[10:6]; f = w[5:0];
+			va = operand(s);
+			vb = operand(t);
+			si = {{16{w[15]}}, w[15:0]};
+			zi = {16'd0, w[15:0]};
+			ea_t = va + si;
+			ph   = ea_t[31] ? {3'b000, ea_t[28:0]} : ea_t;
+			sm = {va[31], va} + {vb[31], vb};
+			df = {va[31], va} - {vb[31], vb};
+			link = PC + 32'd8;
+
+			// Where the next instruction comes from: the pending branch if this
+			// was its slot, else straight on.
+			if (br_pend) begin
+				PC      <= br_target;
+				br_pend <= 1'b0;
+				in_slot <= 1'b0;
+			end else begin
+				PC      <= PC + 32'd4;
+				in_slot <= 1'b0;
+			end
+
+			case (o)
+			// --- SPECIAL -----------------------------------------------------------------
+			6'h00: case (f)
+				6'h00: wreg(d, vb << h);                          // SLL
+				6'h02: wreg(d, vb >> h);                          // SRL
+				6'h03: wreg(d, $signed(vb) >>> h);                // SRA
+				6'h04: wreg(d, vb << va[4:0]);                    // SLLV
+				6'h06: wreg(d, vb >> va[4:0]);                    // SRLV
+				6'h07: wreg(d, $signed(vb) >>> va[4:0]);          // SRAV
+				6'h08: begin br_pend <= 1'b1; br_target <= va; in_slot <= 1'b1; end   // JR
+				6'h09: begin br_pend <= 1'b1; br_target <= va; in_slot <= 1'b1;
+				             wreg(d, link); end                                       // JALR
+				6'h0C: raise(EXC_SYS, 32'd0);                     // SYSCALL
+				6'h0D: raise(EXC_BP, 32'd0);                      // BREAK
+				// HI/LO: anything that touches them while a divide or multiply
+				// is still landing parks in S_DIV until it has (the interlock
+				// the real chip has for MFHI/MFLO; the rest is to keep the
+				// pipelined multiply from landing on top of a later writer)
+				6'h10: if (hl_busy) park(3'd0, d, va, vb); else wreg(d, HI);      // MFHI
+				6'h11: if (hl_busy) park(3'd2, d, va, vb); else HI <= va;         // MTHI
+				6'h12: if (hl_busy) park(3'd1, d, va, vb); else wreg(d, LO);      // MFLO
+				6'h13: if (hl_busy) park(3'd3, d, va, vb); else LO <= va;         // MTLO
+				6'h18: if (div_busy) park(3'd4, d, va, vb); else start_mul(va, vb, 1'b1);   // MULT
+				6'h19: if (div_busy) park(3'd5, d, va, vb); else start_mul(va, vb, 1'b0);   // MULTU
+				6'h1A: if (mul_busy) park(3'd6, d, va, vb); else start_div(va, vb, 1'b1);   // DIV
+				6'h1B: if (mul_busy) park(3'd7, d, va, vb); else start_div(va, vb, 1'b0);   // DIVU
+				6'h20: if (sm[32] != sm[31]) raise(EXC_OV, 32'd0); else wreg(d, sm[31:0]);  // ADD
+				6'h21: wreg(d, sm[31:0]);                         // ADDU
+				6'h22: if (df[32] != df[31]) raise(EXC_OV, 32'd0); else wreg(d, df[31:0]);  // SUB
+				6'h23: wreg(d, df[31:0]);                         // SUBU
+				6'h24: wreg(d, va & vb);                          // AND
+				6'h25: wreg(d, va | vb);                          // OR
+				6'h26: wreg(d, va ^ vb);                          // XOR
+				6'h27: wreg(d, ~(va | vb));                       // NOR
+				6'h2A: wreg(d, {31'd0, $signed(va) < $signed(vb)});  // SLT
+				6'h2B: wreg(d, {31'd0, va < vb});                 // SLTU
+				default: raise(EXC_RI, 32'd0);
+				endcase
+
+			// --- REGIMM: BLTZ/BGEZ and the linking pair ----------------------------------
+			6'h01: begin
+					take = t[0] ? !va[31] : va[31];
+					if (t[4]) wreg(5'd31, link);
+					if (take) begin br_pend <= 1'b1; br_target <= PC + 32'd4 + (si << 2); end
+					in_slot <= 1'b1;
+				end
+
+			6'h02: begin br_pend <= 1'b1; br_target <= {PC[31:28] , w[25:0], 2'b00}; in_slot <= 1'b1; end          // J
+			6'h03: begin br_pend <= 1'b1; br_target <= {PC[31:28] , w[25:0], 2'b00}; in_slot <= 1'b1;
+			             wreg(5'd31, link); end                                                                       // JAL
+			6'h04: begin if (va == vb)         begin br_pend <= 1'b1; br_target <= PC + 32'd4 + (si << 2); end in_slot <= 1'b1; end  // BEQ
+			6'h05: begin if (va != vb)         begin br_pend <= 1'b1; br_target <= PC + 32'd4 + (si << 2); end in_slot <= 1'b1; end  // BNE
+			6'h06: begin if (va[31] || va == 0) begin br_pend <= 1'b1; br_target <= PC + 32'd4 + (si << 2); end in_slot <= 1'b1; end // BLEZ
+			6'h07: begin if (!va[31] && va != 0) begin br_pend <= 1'b1; br_target <= PC + 32'd4 + (si << 2); end in_slot <= 1'b1; end // BGTZ
+
+			6'h08: begin sm = {va[31], va} + {si[31], si};
+			             if (sm[32] != sm[31]) raise(EXC_OV, 32'd0); else wreg(t, sm[31:0]); end   // ADDI
+			6'h09: wreg(t, va + si);                                          // ADDIU
+			6'h0A: wreg(t, {31'd0, $signed(va) < $signed(si)});               // SLTI
+			6'h0B: wreg(t, {31'd0, va < si});                                 // SLTIU
+			6'h0C: wreg(t, va & zi);                                          // ANDI
+			6'h0D: wreg(t, va | zi);                                          // ORI
+			6'h0E: wreg(t, va ^ zi);                                          // XORI
+			6'h0F: wreg(t, {w[15:0], 16'd0});                                 // LUI
+
+			// --- COP0 --------------------------------------------------------------------------
+			6'h10: begin
+					if (w[25]) begin                               // RFE
+						SR <= {SR[31:4], SR[5:2]};
+					end else case (w[25:21])
+					5'h00: case (d)                                // MFC0
+						5'd8:  wreg(t, BADVADDR);
+						5'd12: wreg(t, SR);
+						5'd13: wreg(t, CAUSE);
+						5'd14: wreg(t, EPC);
+						5'd15: wreg(t, PRID);
+						default: wreg(t, 32'd0);
+						endcase
+					5'h04: case (d)                                // MTC0
+						5'd12: SR    <= vb;
+						5'd13: CAUSE[9:8] <= vb[9:8];              // only the soft bits
+						5'd14: EPC   <= vb;
+						default: ;
+						endcase
+					default: ;
+					endcase
+				end
+
+			// --- COP2: the GTE ------------------------------------------------------------------
+			// Every access waits for a command in flight -- a read because the
+			// answer is not there yet, a write or a new command because the GTE
+			// would drop it (it takes nothing while it runs) and the program
+			// would go on with stale registers. The chip stalls on all of them;
+			// only stalling the reads left writes to vanish, which the BIOS's
+			// intro turned into an overflow it could not resolve.
+			// The hold must also keep the branch bookkeeping: the top of this enable
+			// already consumed a pending branch (cleared br_pend and in_slot on the
+			// way to PC <= target), and if this instruction is that branch's delay
+			// slot, re-executing it later without the branch would fall straight
+			// through -- which is how a wait in a delay slot became a jump to
+			// address 1. Reassigning them here keeps their pre-enable values.
+			6'h12: begin
+					if (c2_busy) begin PC <= PC; br_pend <= br_pend; in_slot <= in_slot; nst = S_C2W; end
+					else if (w[25]) begin                          // a GTE command
+						c2_cmd  <= 1'b1;
+						c2_word <= w[24:0];
+					end else case (w[25:21])
+					5'h00, 5'h02: wreg(t, c2_rdata);               // MFC2 / CFC2
+					5'h04, 5'h06: begin                            // MTC2 / CTC2
+						c2_we    <= 1'b1;
+						c2_ctl_r <= w[22];
+						c2_reg_r <= d;
+						c2_wdata <= vb;
+					end
+					default: ;
+					endcase
+				end
+			6'h32: if (c2_busy) begin PC <= PC; br_pend <= br_pend; in_slot <= in_slot; nst = S_C2W; end
+			       else load(ph, 4'b1111, ea_t);                   // LWC2: the value lands in the GTE
+			6'h3A: if (c2_busy) begin PC <= PC; br_pend <= br_pend; in_slot <= in_slot; nst = S_C2W; end
+			       else store({ph[31:2], 2'b00}, 4'b1111, c2_rdata);   // SWC2: store a GTE data register
+
+			// --- loads: issue now, collect in S_MEMR ------------------------------------
+			// A load says which bytes it wants, as a store does. The value is
+			// picked out of the word here either way, but a device with a FIFO
+			// behind a byte register (the CD-ROM's RDDATA) has to know whether
+			// it was that byte or a neighbour the program asked for: with every
+			// load claiming all four, polling the drive's status popped a byte
+			// of sector data each time, and the game's sectors came in shifted.
+			6'h20, 6'h24: load(ph, 4'b0001 << ea_t[1:0], ea_t);                          // LB/LBU
+			6'h21, 6'h25: if (ea_t[0]) raise(EXC_ADEL, ea_t); else load(ph, ea_t[1] ? 4'b1100 : 4'b0011, ea_t);   // LH/LHU
+			6'h23:        if (ea_t[1:0] != 2'b00) raise(EXC_ADEL, ea_t); else load(ph, 4'b1111, ea_t);  // LW
+			6'h22, 6'h26: load(ph, 4'b1111, ea_t);                                       // LWL/LWR
+
+			// --- stores: one enable, data and enables on the bus --------------------------
+			6'h28: store({ph[31:2], 2'b00}, 4'b0001 << ea_t[1:0], {4{vb[7:0]}});          // SB
+			6'h29: if (ea_t[0]) raise(EXC_ADES, ea_t);
+			       else store({ph[31:2], 2'b00}, ea_t[1] ? 4'b1100 : 4'b0011, {2{vb[15:0]}});  // SH
+			6'h2B: if (ea_t[1:0] != 2'b00) raise(EXC_ADES, ea_t);
+			       else store({ph[31:2], 2'b00}, 4'b1111, vb);                              // SW
+			6'h2A: store({ph[31:2], 2'b00}, swl_be(ea_t[1:0]), swl_data(vb, ea_t[1:0]));   // SWL
+			6'h2E: store({ph[31:2], 2'b00}, swr_be(ea_t[1:0]), swr_data(vb, ea_t[1:0]));   // SWR
+
+			default: raise(EXC_RI, 32'd0);
+			endcase
+		end
+	endtask
+
+	// --- helpers used by exec ------------------------------------------------------------
+	task wreg;
+		input [4:0]  r;
+		input [31:0] v;
+		begin
+			// Lands at the top of the next enable, after this instruction is
+			// done and before the next reads anything. Register zero stays zero.
+			wb_en  <= 1'b1;
+			wb_reg <= r;
+			wb_val <= v;
+		end
+	endtask
+
+	task raise;
+		input [4:0]  code;
+		input [31:0] bad;
+		begin
+			exc_code <= code;
+			exc_bad  <= bad;
+			exc_bd   <= in_slot;     // as it was when this instruction ran
+			// undo the PC advance: EPC wants THIS instruction
+			PC       <= PC;
+			br_pend  <= br_pend;
+			wb_en    <= 1'b0;
+			nst = S_EXC;
+		end
+	endtask
+
+	task load;
+		input [31:0] ph;
+		input [3:0]  b;
+		input [31:0] v;         // the virtual address, kept for the byte lane
+		begin
+			// SR.IsC: reads while isolated return whatever the cache holds,
+			// which here is nothing; the BIOS only isolates to WRITE.
+			addr    <= {ph[31:2], 2'b00};
+			be      <= b;
+			req     <= 1'b1;
+			exc_bad <= v;
+			nst = S_MEMW;
+		end
+	endtask
+
+	task store;
+		input [31:0] ph;
+		input [3:0]  b;
+		input [31:0] v;
+		begin
+			// Isolated (SR.IsC): a store goes to the CACHE, not to memory. That is
+			// how a program invalidates code it has just written -- isolate, store
+			// over the addresses, un-isolate. We dropped the store and did nothing
+			// else, so the instruction cache kept the OLD code. The processor then
+			// executed stale words, took a reserved-instruction exception, jumped
+			// to the handler, fetched the stale handler and looped there for ever:
+			// pc stuck at 80000080 with cause 10 and EPC pointing at the vector.
+			if (!SR[16]) begin
+				addr <= ph;
+				be   <= b;
+				dout <= v;
+				we   <= 1'b1;
+				req  <= 1'b1;
+			end else begin
+				isc_inv  <= 1'b1;         // drop the line this address maps to
+				isc_addr <= ph;
+			end
+			nst = S_MEM;
+		end
+	endtask
+
+	task park;
+		input [2:0]  what;
+		input [4:0]  rd;
+		input [31:0] x, y;
+		begin
+			nst = S_DIV; hl_wait <= what; div_wait_rd <= rd; hl_a <= x; hl_b <= y;
+		end
+	endtask
+
+	task start_mul;
+		input [31:0] x, y;
+		input        sgn;
+		begin
+			mul_a <= x; mul_b <= y; mul_sgn <= sgn; mul_cnt <= 2'd2; mul_busy <= 1'b1;
+		end
+	endtask
+
+	task start_div;
+		input [31:0] n;
+		input [31:0] dd;
+		input        sgn;
+		begin
+			if (dd == 32'd0) begin
+				// Divide by zero does not trap on this chip; it answers this.
+				HI <= n;
+				LO <= sgn ? (n[31] ? 32'd1 : 32'hFFFF_FFFF) : 32'hFFFF_FFFF;
+			end else if (sgn && n == 32'h8000_0000 && dd == 32'hFFFF_FFFF) begin
+				HI <= 32'd0;
+				LO <= 32'h8000_0000;
+			end else begin
+				div_signed <= sgn;
+				div_neg_q  <= sgn && (n[31] ^ dd[31]);
+				div_neg_r  <= sgn && n[31];
+				div_q      <= (sgn && n[31])  ? -n  : n;
+				div_d      <= (sgn && dd[31]) ? -dd : dd;
+				div_r      <= 32'd0;
+				div_cnt    <= 6'd32;
+				div_busy   <= 1'b1;
+			end
+		end
+	endtask
+
+	// --- pure functions ----------------------------------------------------------------------
+	function [63:0] mul_s_of;
+		input [31:0] x, y;
+		mul_s_of = $signed(x) * $signed(y);
+	endfunction
+
+	function [63:0] mul_u_of;
+		input [31:0] x, y;
+		mul_u_of = x * y;
+	endfunction
+
+	function [7:0] byte_of;
+		input [31:0] w;
+		input [1:0]  k;
+		byte_of = w[k*8 +: 8];
+	endfunction
+
+	function [15:0] half_of;
+		input [31:0] w;
+		input        k;
+		half_of = k ? w[31:16] : w[15:0];
+	endfunction
+
+	function [31:0] sext8;
+		input [7:0] v;
+		sext8 = {{24{v[7]}}, v};
+	endfunction
+
+	function [31:0] sext16;
+		input [15:0] v;
+		sext16 = {{16{v[15]}}, v};
+	endfunction
+
+	// Little-endian unaligned loads, the console's way round.
+	function [31:0] lwl;
+		input [31:0] r, w;
+		input [1:0]  k;
+		case (k)
+		2'd0: lwl = {w[7:0],   r[23:0]};
+		2'd1: lwl = {w[15:0],  r[15:0]};
+		2'd2: lwl = {w[23:0],  r[7:0]};
+		default: lwl = w;
+		endcase
+	endfunction
+
+	function [31:0] lwr;
+		input [31:0] r, w;
+		input [1:0]  k;
+		case (k)
+		2'd0: lwr = w;
+		2'd1: lwr = {r[31:24], w[31:8]};
+		2'd2: lwr = {r[31:16], w[31:16]};
+		default: lwr = {r[31:8], w[31:24]};
+		endcase
+	endfunction
+
+	// SWL/SWR as a masked word write: which bytes, and the word to take them from.
+	function [3:0] swl_be;
+		input [1:0] k;
+		case (k)
+		2'd0: swl_be = 4'b0001;
+		2'd1: swl_be = 4'b0011;
+		2'd2: swl_be = 4'b0111;
+		default: swl_be = 4'b1111;
+		endcase
+	endfunction
+
+	function [31:0] swl_data;
+		input [31:0] v;
+		input [1:0]  k;
+		case (k)
+		2'd0: swl_data = {24'd0, v[31:24]};
+		2'd1: swl_data = {16'd0, v[31:16]};
+		2'd2: swl_data = {8'd0,  v[31:8]};
+		default: swl_data = v;
+		endcase
+	endfunction
+
+	function [3:0] swr_be;
+		input [1:0] k;
+		case (k)
+		2'd0: swr_be = 4'b1111;
+		2'd1: swr_be = 4'b1110;
+		2'd2: swr_be = 4'b1100;
+		default: swr_be = 4'b1000;
+		endcase
+	endfunction
+
+	function [31:0] swr_data;
+		input [31:0] v;
+		input [1:0]  k;
+		case (k)
+		2'd0: swr_data = v;
+		2'd1: swr_data = {v[23:0], 8'd0};
+		2'd2: swr_data = {v[15:0], 16'd0};
+		default: swr_data = {v[7:0], 24'd0};
+		endcase
+	endfunction
+
+endmodule
+
+`default_nettype wire

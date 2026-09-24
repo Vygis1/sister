@@ -1,0 +1,1261 @@
+// console.ino - the front door: Wi-Fi, a web page, and six wires to an FPGA.
+//
+// See esp32/README.md for the wiring and docs/ARCHITECTURE.md for the division
+// of labour. The short version: this picks what the board should BE and what it
+// should run, and carries neither video nor audio -- 256x240 at 60 Hz is 22 MB/s
+// and this chip's Wi-Fi is nowhere near that.
+//
+// --- joining a network -----------------------------------------------------
+//
+// It always brings up its own access point, and additionally joins a network if
+// it has been told about one. Always, not "only if joining fails": an appliance
+// whose control panel disappears when the house Wi-Fi hiccups is worse than
+// useless, and on this chip both can run at once for nothing. Credentials are
+// typed into the page and kept in NVS, so there is no file to edit and no second
+// device involved.
+//
+//   1. Join the access point "console", password "cartridge"
+//   2. Open http://192.168.4.1
+//   3. Tell it your Wi-Fi as well, if you want it on the network
+//
+// --- what it can do --------------------------------------------------------
+//
+// Everything the shell can: say what the board currently is, install a core into
+// the flash slot, and boot it. Cores come off an SD card when one is fitted --
+// and there is no card wired yet, which is exactly why the page can also take a
+// core straight from the browser.
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <SPI.h>
+#include <SD.h>
+#include "link.h"
+#include "sdprobe.h"
+
+// --- wiring ------------------------------------------------------------------
+// ESP32-S3. The bus names differ from the classic ESP32 -- FSPI and HSPI rather
+// than VSPI and HSPI -- and a sketch written for the older part does not compile
+// here. The pins are a choice rather than a constraint, because the S3 routes
+// peripherals through a GPIO matrix: these avoid the strapping pins (0, 3, 45,
+// 46) and the ones wired to the on-board flash and PSRAM (33-37), which on an
+// 8 MB-PSRAM part are genuinely unavailable.
+//
+//   GPIO12 -> esp_sclk   U2 pin 7       GPIO11 -> esp_mosi   U2 pin 8
+//   GPIO13 <- esp_miso   U2 pin 9       GPIO10 -> esp_cs_n   U2 pin 10
+//   3V3 and GND          U2 pins 3, 61  -- NOT 63/64, those are VIN
+static const int PIN_SCK = 12, PIN_MOSI = 11, PIN_MISO = 13, PIN_CS = 10;
+
+// PROGRAM_B is soldered to the non-ground side of SW1, the core board's own
+// program button -- it is not on any header. Pulling it low and releasing it
+// restarts configuration from address 0, which is always the shell, so this is
+// the way back from a core that hangs without reaching for the power lead.
+//
+// Driven LOW or left as an INPUT, never driven high. That is what makes it safe
+// to share the net with a button a person can press: the two can never fight,
+// and a reset of this chip cannot hold the FPGA in configuration.
+//
+// DONE is still -1. It is the FPGA_DONE net at the R1/D1 indicator LED; wiring
+// it replaces a fixed wait with actually knowing configuration finished.
+static const int PIN_PROG_B = 14, PIN_DONE = -1;
+
+// The card, when there is one. Well clear of the flash and PSRAM pins.
+static const int PIN_SD_SCK = 5, PIN_SD_MISO = 6, PIN_SD_MOSI = 4, PIN_SD_CS = 7;
+
+static const char *AP_SSID = "console";
+static const char *AP_PASS = "cartridge";     // WPA2 wants eight characters
+
+SPIClass fpgaBus(FSPI), sdBus(HSPI);
+FpgaLink fpga(fpgaBus, PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_PROG_B, PIN_DONE);
+WebServer server(80);
+Preferences prefs;
+
+bool haveCard = false;
+
+// --- the PlayStation's disc -------------------------------------------------------
+// An image on the card (.bin, raw 2352-byte sectors, one data track), served a
+// sector at a time to the console image's drive (rtl/cd_feed.v): the board says
+// which sector it wants next and how much room it has, this task reads that
+// sector off the card and sends it. "disc /discs/crash.bin" over serial or
+// POST /api/disc?path=... puts the disc in; "eject" takes it out.
+// Two places the bytes can come from: a file on the card, or a URL on the
+// PC's web server (its /api/disc/image, which honours HTTP ranges). The URL
+// path fetches WINDOW sectors at a time into PSRAM ahead of the drive, since
+// one HTTP round trip per sector would not keep up; the card path reads one
+// sector at a time, which it can.
+static File     discFile;
+static String   discPath;                 // a card path, or an http:// URL
+static bool     discHttp = false;
+static volatile bool discIn = false;
+static uint32_t discSectors = 0, discServed = 0, discMisses = 0, discIdle = 0, discFetches = 0;
+static uint8_t *discBuf = nullptr;        // one sector, for the card path
+static const uint32_t WINDOW = 128;       // sectors buffered ahead of the drive (295 kB in PSRAM)
+static uint8_t *discWin = nullptr;        // WINDOW sectors, in PSRAM
+static uint32_t winBase = 0, winCount = 0;
+static HTTPClient discClient;
+static WiFiClient discWifi;
+
+// --- the disc, read the way a file is read ------------------------------------
+//
+// One connection, opened once and read FORWARD, with a window of sectors
+// buffered ahead of the drive in PSRAM; a seek closes it and opens another at
+// the new place. Nothing here waits for long: what has not arrived yet is
+// simply not served this time round, and the drive asks again a moment later.
+//
+// It used to fetch a fixed 64-sector block per miss and insist on all of it
+// inside four seconds, which over Wi-Fi shared with the frame stream failed
+// constantly -- thousands of misses in a session, each one a stall the game
+// saw as a drive that had stopped answering.
+static WiFiClient *discStream = nullptr;
+static uint32_t winBytes = 0;             // how much of the window has arrived
+
+static bool discOpenAt(uint32_t lba) {
+  discClient.end();
+  discStream = nullptr;
+  winBase = lba; winBytes = 0; winCount = 0;
+  if (lba >= discSectors) return false;
+  discClient.begin(discWifi, discPath);
+  discClient.setReuse(true);
+  discClient.addHeader("Range", "bytes=" + String((unsigned long long)lba * 2352) + "-");
+  int code = discClient.GET();
+  if (code != 206 && code != 200) { discClient.end(); return false; }
+  discStream = discClient.getStreamPtr();
+  discFetches++;
+  return true;
+}
+
+// Take whatever has arrived, without waiting for anything.
+static void discPump() {
+  if (!discStream) return;
+  const uint32_t cap = (uint32_t)WINDOW * 2352;
+  for (int guard = 0; guard < 16 && winBytes < cap; guard++) {
+    int avail = discStream->available();
+    if (avail <= 0) break;
+    int r = discStream->read(discWin + winBytes, min<uint32_t>((uint32_t)avail, cap - winBytes));
+    if (r <= 0) break;
+    winBytes += (uint32_t)r;
+  }
+  winCount = winBytes / 2352;
+}
+
+// The sector the drive wants, if it is here yet -- from the network stream...
+static const uint8_t *discSectorAt(uint32_t lba) {
+  // `!discStream` matters: an empty window still LOOKS like it covers sector 0
+  // upwards, so without it nothing ever opened a connection at all
+  if (!discStream || lba < winBase || lba >= winBase + WINDOW) {
+    if (discStream && lba == winBase + winCount && (winBytes % 2352) == 0) {
+      winBase = lba; winBytes = 0; winCount = 0;    // walked past the window: slide it, same connection
+    } else if (!discOpenAt(lba)) {
+      return nullptr;                               // a seek
+    }
+  }
+  discPump();
+  if (lba < winBase + winCount) return discWin + (lba - winBase) * 2352;
+  return nullptr;
+}
+
+// ...or, the way it should be, straight off the card: the file is already open,
+// so a sector the drive walks onto costs no seek at all, and the window is
+// filled a few sectors at a time so nothing blocks for longer than the drive's
+// eight-slot ring can cover.
+static void discPumpCard() {
+  if (!discFile) return;
+  // BYTES, not sectors: a card read can come back short, and counting whole
+  // sectors threw the remainder away while the file position had already moved
+  // past it -- every sector after that was offset by a few bytes, which the
+  // drive sees as a sector whose own header names some other place on the disc.
+  const uint32_t cap = WINDOW * 2352;
+  for (int pass = 0; pass < 4 && winBytes < cap; pass++) {
+    uint32_t want = cap - winBytes; if (want > 8 * 2352) want = 8 * 2352;
+    int r = discFile.read(discWin + winBytes, want);
+    if (r <= 0) break;
+    winBytes += (uint32_t)r;
+  }
+  winCount = winBytes / 2352;
+}
+// A handle that has gone bad -- a card that glitched, a seek that will not
+// take -- used to mean every read from then on failed and the drive simply
+// starved: nine thousand misses and a game frozen on its last picture, with
+// nothing in the logs to say why. So a run of misses reopens the file.
+static uint32_t discSick = 0;
+static void discReopen() {
+  if (discFile) discFile.close();
+  discFile = SD.open(discPath);
+  winBase = 0; winBytes = 0; winCount = 0; discSick = 0;
+  Serial.println(discFile ? "disc: reopened the image" : "disc: the image will not open");
+}
+static const uint8_t *discSectorCard(uint32_t lba) {
+  if (!discFile) { discReopen(); if (!discFile) return nullptr; }
+  if (winCount == 0 || lba < winBase || lba >= winBase + WINDOW) {
+    // slide the window on only when the file is sitting exactly on that sector
+    if (!(winCount > 0 && lba == winBase + winCount && (winBytes % 2352) == 0)) {
+      if (!discFile.seek((uint64_t)lba * 2352)) {
+        if (++discSick > 50) discReopen();
+        return nullptr;
+      }
+    }
+    winBase = lba; winBytes = 0; winCount = 0;
+  }
+  discPumpCard();
+  if (lba < winBase + winCount) { discSick = 0; return discWin + (lba - winBase) * 2352; }
+  if (++discSick > 50) discReopen();
+  return nullptr;
+}
+
+static void discTask(void *) {
+  for (;;) {
+    if (!discIn) { vTaskDelay(20 / portTICK_PERIOD_MS); continue; }
+    CdStatus st = fpga.cdStatus();
+    if (!st.alive || st.core != CORE_PS1_ID) { vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
+    if (!st.disc) { fpga.cdDisc(true); continue; }             // the core was reset: tell it again
+    if (!st.running || st.room == 0 || st.lba >= discSectors) {
+      discIdle++; if (discHttp) discPump(); else discPumpCard(); vTaskDelay(1); continue;   // idle time is read-ahead time
+    }
+    const uint8_t *sec = discHttp ? discSectorAt(st.lba) : discSectorCard(st.lba);
+    if (!sec) { discMisses++; vTaskDelay(1); continue; }
+    fpga.cdSector(st.lba, sec);
+    discServed++;
+  }
+}
+// --- putting a disc image on the card, over the air, once -------------------------
+//
+// 632 MB does not belong on a Wi-Fi link every time the console reads a sector.
+// This fetches the image to the card in one go, resuming where it left off if
+// the connection drops, and after that the disc is a file on the card and the
+// network has nothing to do with the game at all.
+static String   fetchUrl, fetchPath, fetchErr;
+static volatile bool fetchBusy = false;
+static volatile uint64_t fetchDone = 0, fetchTotal = 0;
+static volatile uint32_t fetchStalls = 0;
+
+static void fetchTask(void *) {
+  HTTPClient h; WiFiClient w;
+  h.begin(w, fetchUrl);
+  int code = h.sendRequest("HEAD");
+  fetchTotal = (code == 200) ? (uint64_t)h.getSize() : 0;
+  h.end();
+  if (!fetchTotal) { fetchErr = "the server did not say how big it is"; fetchBusy = false; vTaskDelete(nullptr); return; }
+
+  SD.mkdir("/discs");
+  // what is already there is kept: a transfer this long should not start again
+  // from nothing because the link hiccupped
+  uint64_t have = 0;
+  { File e = SD.open(fetchPath, FILE_READ); if (e) { have = e.size(); e.close(); } }
+  if (have > fetchTotal) have = 0;
+  fetchDone = have;
+  File f = SD.open(fetchPath, have ? FILE_APPEND : FILE_WRITE);
+  if (!f) { fetchErr = "cannot write " + fetchPath; fetchBusy = false; vTaskDelete(nullptr); return; }
+
+  // INTERNAL ram, not PSRAM: the card driver hands the buffer to SPI DMA, which
+  // cannot reach PSRAM, and the write comes back short -- which is exactly how
+  // the first attempt died twelve megabytes in.
+  const size_t bufsz = 8192;
+  uint8_t *buf = (uint8_t *)malloc(bufsz);
+  if (!buf) { fetchErr = "no room for a buffer"; fetchBusy = false; vTaskDelete(nullptr); return; }
+  for (int attempt = 0; attempt < 5000 && fetchDone < fetchTotal && !fetchErr.length(); attempt++) {
+    HTTPClient g; WiFiClient gw;
+    { File e = SD.open(fetchPath, FILE_READ); if (e) { fetchDone = e.size(); e.close(); } }
+    g.begin(gw, fetchUrl);
+    g.addHeader("Range", "bytes=" + String((unsigned long long)fetchDone) + "-");
+    int c = g.GET();
+    if (c != 206 && c != 200) { g.end(); vTaskDelay(500 / portTICK_PERIOD_MS); continue; }
+    WiFiClient *st = g.getStreamPtr();
+    uint32_t idle = millis();
+    while (fetchDone < fetchTotal) {
+      int avail = st->available();
+      if (avail <= 0) {
+        if (millis() - idle > 8000) break;
+        vTaskDelay(1); continue;
+      }
+      int r = st->read(buf, (size_t)avail < bufsz ? (size_t)avail : bufsz);
+      if (r <= 0) break;
+      // A card pauses for its own housekeeping -- erase blocks, wear levelling --
+      // and a pause can last a good fraction of a second. Sixteen milliseconds
+      // of patience called that a dead card and gave up 130 MB in; this waits
+      // two seconds, and if it still will not take the bytes it reopens the
+      // file and carries on from where it got to rather than throwing the
+      // transfer away.
+      size_t put = 0, tries = 0;
+      while (put < (size_t)r && tries < 200) {
+        size_t n = f.write(buf + put, (size_t)r - put);
+        if (n == 0) { tries++; vTaskDelay(10 / portTICK_PERIOD_MS); } else { put += n; tries = 0; }
+      }
+      if (put < (size_t)r) {
+        // How much actually landed is what the FILE says, not what write()
+        // claimed: counting the accepted bytes left the file a few short at
+        // every stall, and six stalls made the image six sectors shy -- every
+        // sector after the first one shifted, so the disc would not read at all.
+        f.close(); vTaskDelay(250 / portTICK_PERIOD_MS);
+        { File e = SD.open(fetchPath, FILE_READ); fetchDone = e ? e.size() : fetchDone; if (e) e.close(); }
+        f = SD.open(fetchPath, FILE_APPEND);
+        if (!f) { fetchErr = "the card stopped answering at " + String((double)fetchDone, 0); }
+        fetchStalls++;
+        break;                        // out to the outer loop: reconnect and resume
+      }
+      fetchDone += (uint64_t)r;
+      if ((fetchDone & 0xFFFFF) < (uint64_t)r) f.flush();
+      idle = millis();
+      // hand the processor back every chunk: this task and the web server sit
+      // on the same core at the same priority, and a tight read-write loop
+      // simply stops the page and every status query with it
+      vTaskDelay(1);
+    }
+    g.end();
+    if (fetchErr.length()) break;
+  }
+  f.close();
+  if (buf) free(buf);
+  // the last word on whether it is whole: the size on the card
+  { File e = SD.open(fetchPath, FILE_READ); if (e) { fetchDone = e.size(); e.close(); } }
+  if (fetchDone != fetchTotal && !fetchErr.length())
+    fetchErr = "short by " + String((double)(fetchTotal - fetchDone), 0) + " bytes";
+  fetchBusy = false;
+  vTaskDelete(nullptr);
+}
+
+// --- checking the copy, block by block, and repairing what is wrong ---------------
+//
+// A byte count proves nothing: a card that pauses mid-write, a link that drops,
+// a resume that starts in the wrong place all produce a file of the right
+// length and the wrong contents, and the first thing that notices is the
+// console failing to read its disc. So the image is checked a megabyte at a
+// time against CRCs from the source, and any block that disagrees is fetched
+// again and checked again.
+static uint32_t crcTab[256];
+static bool     crcReady = false;
+static void crcInit() {
+  for (uint32_t i = 0; i < 256; i++) {
+    uint32_t c = i;
+    for (int k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+    crcTab[i] = c;
+  }
+  crcReady = true;
+}
+static uint32_t crc32_of(const uint8_t *d, size_t n, uint32_t crc = 0) {
+  if (!crcReady) crcInit();
+  crc = ~crc;
+  while (n--) crc = crcTab[(crc ^ *d++) & 0xFF] ^ (crc >> 8);
+  return ~crc;
+}
+
+static String   verifyErr;
+static volatile bool     verifyBusy = false;
+static volatile uint32_t verifyTotal = 0, verifyChecked = 0, verifyBad = 0, verifyFixed = 0;
+
+// one block of the image, straight into the file at its own offset
+static bool refetchBlock(File &f, uint32_t idx, uint32_t block, uint32_t len, uint8_t *buf, size_t bufsz) {
+  uint64_t from = (uint64_t)idx * block;
+  HTTPClient g; WiFiClient gw;
+  g.begin(gw, fetchUrl);
+  g.addHeader("Range", "bytes=" + String((unsigned long long)from) + "-" + String((unsigned long long)(from + len - 1)));
+  int c = g.GET();
+  if (c != 206 && c != 200) { g.end(); return false; }
+  WiFiClient *st = g.getStreamPtr();
+  if (!f.seek(from)) { g.end(); return false; }
+  uint32_t got = 0, idle = millis();
+  while (got < len) {
+    int avail = st->available();
+    if (avail <= 0) { if (millis() - idle > 8000) break; vTaskDelay(1); continue; }
+    int r = st->read(buf, (size_t)avail < bufsz ? (size_t)avail : bufsz);
+    if (r <= 0) break;
+    uint32_t n = (got + (uint32_t)r > len) ? len - got : (uint32_t)r;
+    size_t put = 0, tries = 0;
+    while (put < n && tries < 200) {
+      size_t w = f.write(buf + put, n - put);
+      if (w == 0) { tries++; vTaskDelay(10 / portTICK_PERIOD_MS); } else { put += w; tries = 0; }
+    }
+    if (put < n) { g.end(); return false; }
+    got += n; idle = millis(); vTaskDelay(1);
+  }
+  g.end(); f.flush();
+  return got == len;
+}
+
+static void verifyTask(void *) {
+  verifyErr = ""; verifyChecked = 0; verifyBad = 0; verifyFixed = 0; verifyTotal = 0;
+  // the list of block CRCs from the source
+  String crcUrl = fetchUrl; crcUrl.replace("/image", "/crc32");
+  HTTPClient h; WiFiClient w;
+  h.begin(w, crcUrl);
+  if (h.GET() != 200) { verifyErr = "cannot read the checksums"; h.end(); verifyBusy = false; vTaskDelete(nullptr); return; }
+  String body = h.getString(); h.end();
+  int n1 = body.indexOf('\n'), n2 = body.indexOf('\n', n1 + 1);
+  if (n1 < 0 || n2 < 0) { verifyErr = "the checksums did not parse"; verifyBusy = false; vTaskDelete(nullptr); return; }
+  uint64_t want = strtoull(body.substring(0, n1).c_str(), nullptr, 10);
+  uint32_t block = (uint32_t)strtoul(body.substring(n1 + 1, n2).c_str(), nullptr, 10);
+  String list = body.substring(n2 + 1);
+  uint32_t nblocks = (uint32_t)((want + block - 1) / block);
+  uint32_t *crcs = (uint32_t *)ps_malloc(nblocks * 4);
+  if (!crcs) { verifyErr = "no room for the checksums"; verifyBusy = false; vTaskDelete(nullptr); return; }
+  { int p = 0; for (uint32_t i = 0; i < nblocks; i++) {
+      int c = list.indexOf(',', p);
+      crcs[i] = (uint32_t)strtoul((c < 0 ? list.substring(p) : list.substring(p, c)).c_str(), nullptr, 16);
+      if (c < 0) break; p = c + 1; } }
+  verifyTotal = nblocks;
+
+  File f = SD.open(fetchPath, "r+");
+  if (!f) { verifyErr = "cannot open " + fetchPath; free(crcs); verifyBusy = false; vTaskDelete(nullptr); return; }
+  if (f.size() != want) { verifyErr = "the file is " + String((double)f.size(), 0) + " bytes, not " + String((double)want, 0); }
+
+  const size_t bufsz = 8192;
+  uint8_t *buf = (uint8_t *)malloc(bufsz);
+  for (uint32_t i = 0; i < nblocks && !verifyErr.length(); i++) {
+    uint32_t len = (uint32_t)((i + 1) * (uint64_t)block <= want ? block : want - (uint64_t)i * block);
+    for (int attempt = 0; attempt < 3; attempt++) {
+      if (!f.seek((uint64_t)i * block)) { verifyErr = "seek failed"; break; }
+      uint32_t crc = 0, got = 0;
+      while (got < len) {
+        size_t nread = f.read(buf, (len - got) < bufsz ? (len - got) : bufsz);
+        if (nread == 0) break;
+        crc = crc32_of(buf, nread, crc);
+        got += nread;
+      }
+      vTaskDelay(1);
+      if (got == len && crc == crcs[i]) break;              // this block is good
+      verifyBad++;
+      if (attempt == 2) { verifyErr = "block " + String(i) + " will not come good"; break; }
+      if (!refetchBlock(f, i, block, len, buf, bufsz)) { vTaskDelay(500 / portTICK_PERIOD_MS); continue; }
+      verifyFixed++;
+    }
+    verifyChecked = i + 1;
+  }
+  f.close(); free(buf); free(crcs);
+  verifyBusy = false;
+  vTaskDelete(nullptr);
+}
+
+// The disc outlives a reset. The ESP32 reboots whenever it is reflashed or the
+// FPGA is reloaded, and a console that came back to an empty drive just sat in
+// the BIOS -- which is what "it will not boot any more" looked like.
+static void discRemember(const String &path) {
+  Preferences p;
+  if (p.begin("disc", false)) { p.putString("path", path); p.end(); }
+}
+static String discRecall() {
+  Preferences p; String v = "";
+  if (p.begin("disc", true)) { v = p.getString("path", ""); p.end(); }
+  return v;
+}
+
+static bool discInsert(const String &path) {
+  if (discFile) discFile.close();
+  discIn = false;
+  discHttp = path.startsWith("http://");
+  if (discHttp) {
+    // An http:// image needs the network to be up. Asked for one before it is
+    // -- which is what the boot-time restore below used to do with a remembered
+    // URL -- HTTPClient takes a semaphore the TCP/IP stack has not created yet,
+    // FreeRTOS asserts, and the chip reboots. Forever: the crash happens in
+    // setup(), so loop() never runs and the serial console never appears, which
+    // leaves no way in at all. Refuse instead of reaching for the stack.
+    if (WiFi.status() != WL_CONNECTED) return false;
+    HTTPClient h; WiFiClient w;
+    h.begin(w, path);
+    int code = h.sendRequest("HEAD");
+    if (code != 200) { h.end(); return false; }
+    discSectors = (uint32_t)(h.getSize() / 2352);
+    h.end();
+    if (!discWin) discWin = (uint8_t *)ps_malloc(WINDOW * 2352);
+    if (!discWin) return false;
+    winBase = 0; winCount = 0;
+  } else {
+    discFile = SD.open(path);
+    if (!discFile) return false;
+    discSectors = discFile.size() / 2352;
+    if (!discWin) discWin = (uint8_t *)ps_malloc(WINDOW * 2352);
+    if (!discWin) return false;
+    winBase = 0; winCount = 0; winBytes = 0;
+  }
+  discPath = path;
+  discRemember(path);
+  discServed = 0; discMisses = 0; discIdle = 0; discFetches = 0;
+  fpga.cdDisc(true);
+  discIn = true;
+  return true;
+}
+static void discEject() {
+  discIn = false;
+  fpga.cdDisc(false);
+  if (discFile) discFile.close();
+  discPath = "";
+  discRemember("");
+}
+
+// --- why a join failed ------------------------------------------------------------
+//
+// WiFi.status() only ever says "not connected", which covers a wrong password, a
+// network that was not there, and a router that accepted the password and then
+// timed out the handshake. Those are three different problems and the chip knows
+// which one it hit -- the reason code arrives with the disconnect event, and is
+// thrown away unless somebody catches it.
+volatile int lastWifiReason = 0;
+
+static const char *wifiReasonText(int r) {
+  switch (r) {
+    case 15:  return "four-way handshake timed out -- almost always the wrong password";
+    case 201: return "no access point with that name was found -- check the spelling and the case";
+    case 202: return "authentication failed -- the wrong password";
+    case 203: return "association failed -- the router refused the connection";
+    case 204: return "handshake timed out";
+    case 205: return "connection failed";
+    case 2:   return "authentication expired";
+    case 3:   return "the router deauthenticated us";
+    case 4:   return "association expired";
+    case 8:   return "the router disassociated us (it may have moved us to another band)";
+    case 0:   return "no reason recorded yet";
+    default:  return "see esp_wifi_types.h for this reason code";
+  }
+}
+SdProbe sdInfo;          // what the card itself said, filesystem aside
+String  sdWhy;           // one line explaining the state, for the page
+
+// --- one job at a time, reported while it runs --------------------------------
+// Installing a core is a minute of flash erases and thousands of page writes. An
+// HTTP request that simply blocked for that long would look like a hang and time
+// out in most browsers, so the work reports progress and the page asks.
+struct Job {
+  volatile bool     busy = false;
+  volatile uint32_t done = 0, total = 0;
+  String            stage, error;
+} job;
+
+static String jsonEscape(const String &s) {
+  String o;
+  for (unsigned i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') { o += '\\'; o += c; }
+    else if (c == '\n') o += "\\n";
+    else if ((unsigned char)c >= 0x20) o += c;
+  }
+  return o;
+}
+
+// --- installing a core --------------------------------------------------------
+// Erase only the sectors the image will occupy, write it, then read every page
+// back. The verify is not optional: a core that half wrote and a core that is
+// fine look identical right up until the board tries to configure from it, and
+// at that point the only symptom is a board that does not come back.
+// A running CRC32 of what was sent, so the read-back has something to compare
+// against without needing to rewind the source. That matters: a core from the
+// card is a File and could be seeked, but a core from the browser is an upload
+// that has already gone by. One checksum covers both.
+static uint32_t crc32(uint32_t crc, const uint8_t *p, size_t n) {
+  crc = ~crc;
+  while (n--) {
+    crc ^= *p++;
+    for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1)));
+  }
+  return ~crc;
+}
+
+static bool installFrom(Stream &src, uint32_t length) {
+  static uint8_t page[PAGE], got[PAGE];
+  uint32_t sent = 0, back = 0;
+
+  if (length == 0 || length > SLOT_SIZE) {
+    job.error = "that image is " + String(length) + " bytes; the slot is 6 MB";
+    return false;
+  }
+
+  uint32_t sectors = (length + SECTOR - 1) / SECTOR;
+  job.stage = "erasing"; job.total = sectors; job.done = 0;
+  for (uint32_t i = 0; i < sectors; i++) {
+    if (!fpga.eraseSector(i * SECTOR)) {
+      job.error = "the flash never finished erasing sector " + String(i);
+      return false;
+    }
+    job.done = i + 1;
+  }
+
+  uint32_t pages = (length + PAGE - 1) / PAGE;
+  job.stage = "writing"; job.total = pages; job.done = 0;
+  for (uint32_t i = 0; i < pages; i++) {
+    uint32_t want = (i == pages - 1) ? (length - i * PAGE) : PAGE;
+    uint32_t have = 0, t0 = millis();
+    while (have < want && millis() - t0 < 8000)
+      have += src.readBytes((char *)page + have, want - have);
+    if (have < want) { job.error = "the image ended early"; return false; }
+    for (uint32_t k = want; k < PAGE; k++) page[k] = 0xFF;
+
+    if (!fpga.writePage(i * PAGE, page, PAGE)) {
+      job.error = "the flash never finished writing page " + String(i);
+      return false;
+    }
+    sent = crc32(sent, page, PAGE);
+    job.done = i + 1;
+  }
+
+  // Read it all back. Cheap next to the write, and the only thing standing
+  // between a bad install and a board that will not configure.
+  //
+  // This block used to be the comment above and nothing else -- it set the
+  // stage to "verifying", flushed, and returned true. An install that silently
+  // wrote nothing would have reported success, which is exactly the failure the
+  // comment claims to prevent.
+  //
+  // Reads are ABSOLUTE addresses while writes are slot-relative, so the slot
+  // base goes back on here. Getting that wrong would verify the shell's own
+  // image against the core and fail every time.
+  job.stage = "verifying"; job.total = pages; job.done = 0;
+  for (uint32_t i = 0; i < pages; i++) {
+    if (!fpga.readPage(SLOT_BASE + i * PAGE, got)) {
+      job.error = "could not read page " + String(i) + " back";
+      return false;
+    }
+    back = crc32(back, got, PAGE);
+    job.done = i + 1;
+  }
+  if (sent != back) {
+    job.error = "what came back does not match what was written -- the core is "
+                "NOT installed";
+    return false;
+  }
+  src.flush();
+  return true;
+}
+
+// --- the SD card --------------------------------------------------------------
+// Games live beside the cores. A console that can change which machine it is
+// but cannot hold a single cartridge is only half an appliance, and the card has
+// 238 GB on it.
+static String romListJson() {
+  String j = "[";
+  if (haveCard) {
+    File dir = SD.open("/roms");
+    while (dir) {
+      File e = dir.openNextFile();
+      if (!e) break;
+      String n = String(e.name());
+      int slash = n.lastIndexOf('/');
+      if (slash >= 0) n = n.substring(slash + 1);
+      // Everything except the dotfiles a desktop leaves behind. Which machine a
+      // ROM belongs to is decided by its CONTENTS when it is loaded -- an iNES
+      // header, "SEGA" at $100 -- so the extension is not authority here and
+      // filtering on it would only reject things that work.
+      if (!e.isDirectory() && n.length() && n[0] != '.') {
+        if (j.length() > 1) j += ",";
+        j += "{\"name\":\"" + jsonEscape(n) +
+             "\",\"size\":" + String((uint32_t)e.size()) + "}";
+      }
+      e.close();
+    }
+    if (dir) dir.close();
+  }
+  return j + "]";
+}
+
+static String coreListJson() {
+  String j = "[";
+  if (haveCard) {
+    File dir = SD.open("/cores");
+    while (dir) {
+      File e = dir.openNextFile();
+      if (!e) break;
+      String n = String(e.name());
+      if (!e.isDirectory() && n.endsWith(".bin")) {
+        int slash = n.lastIndexOf('/');
+        if (slash >= 0) n = n.substring(slash + 1);
+        if (j.length() > 1) j += ",";
+        j += "{\"name\":\"" + jsonEscape(n.substring(0, n.length() - 4)) +
+             "\",\"size\":" + String((uint32_t)e.size()) + "}";
+      }
+      e.close();
+    }
+    if (dir) dir.close();
+  }
+  return j + "]";
+}
+
+// --- the API -------------------------------------------------------------------
+static void apiState() {
+  Status s = fpga.status();
+  String j = "{";
+  j += "\"alive\":"    + String(s.alive ? "true" : "false");
+  j += ",\"version\":" + String(s.version);
+  j += ",\"core\":"    + String(s.core);
+  j += ",\"busy\":"    + String(s.busy ? "true" : "false");
+  j += ",\"card\":"    + String(haveCard ? "true" : "false");
+  j += ",\"cardWhy\":\"" + jsonEscape(sdWhy) + "\"";
+  j += ",\"roms\":" + romListJson();
+  j += ",\"ap\":\""    + WiFi.softAPIP().toString() + "\"";
+  j += ",\"sta\":\""   + (WiFi.status() == WL_CONNECTED
+                          ? WiFi.localIP().toString() : String("")) + "\"";
+  j += ",\"ssid\":\""  + jsonEscape(WiFi.SSID()) + "\"";
+  j += ",\"rssi\":"    + String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0);
+  j += ",\"job\":{\"busy\":" + String(job.busy ? "true" : "false");
+  j += ",\"stage\":\"" + jsonEscape(job.stage) + "\"";
+  j += ",\"done\":"    + String(job.done);
+  j += ",\"total\":"   + String(job.total);
+  j += ",\"error\":\"" + jsonEscape(job.error) + "\"}";
+  j += ",\"cores\":"   + coreListJson();
+  j += ",\"disc\":{\"in\":" + String(discIn ? "true" : "false");
+  j += ",\"path\":\"" + jsonEscape(discPath) + "\"";
+  j += ",\"sectors\":" + String(discSectors);
+  j += ",\"served\":"  + String(discServed);
+  j += ",\"misses\":"  + String(discMisses) + "}";
+  j += ",\"fetch\":{\"busy\":" + String(fetchBusy ? "true" : "false")
+     + ",\"done\":" + String((double)fetchDone, 0) + ",\"total\":" + String((double)fetchTotal, 0)
+     + ",\"stalls\":" + String(fetchStalls) + ",\"error\":\"" + fetchErr + "\"}";
+  j += ",\"verify\":{\"busy\":" + String(verifyBusy ? "true" : "false")
+     + ",\"checked\":" + String(verifyChecked) + ",\"blocks\":" + String(verifyTotal)
+     + ",\"bad\":" + String(verifyBad) + ",\"fixed\":" + String(verifyFixed)
+     + ",\"error\":\"" + verifyErr + "\"}";
+  j += "}";
+  server.send(200, "application/json", j);
+}
+
+static void apiScan() {
+  int n = WiFi.scanNetworks();
+  String j = "[";
+  for (int i = 0; i < n && i < 20; i++) {
+    if (j.length() > 1) j += ",";
+    j += "{\"ssid\":\"" + jsonEscape(WiFi.SSID(i)) + "\",\"rssi\":" +
+         String(WiFi.RSSI(i)) + ",\"open\":" +
+         String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "true" : "false") + "}";
+  }
+  WiFi.scanDelete();
+  server.send(200, "application/json", j + "]");
+}
+
+static void apiJoin() {
+  String ssid = server.arg("ssid"), pass = server.arg("pass");
+  if (!ssid.length()) { server.send(400, "text/plain", "no network given"); return; }
+
+  prefs.begin("net", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+
+  // The access point stays up throughout. Losing the control panel while
+  // testing a password would mean losing the way to correct it.
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(200);
+
+  if (WiFi.status() == WL_CONNECTED)
+    server.send(200, "text/plain", WiFi.localIP().toString());
+  else
+    server.send(502, "text/plain", "could not join that network");
+}
+
+static void apiForget() {
+  prefs.begin("net", false);
+  prefs.clear();
+  prefs.end();
+  WiFi.disconnect(false, true);
+  server.send(200, "text/plain", "ok");
+}
+
+static void apiBoot() {
+  fpga.boot(server.arg("core") == "1");
+  server.send(200, "text/plain", "ok");
+}
+
+static void apiShell() {
+  fpga.forceShell();
+  server.send(200, "text/plain",
+              PIN_PROG_B >= 0 ? "ok" : "PROGRAM_B is not wired - power-cycle instead");
+}
+
+// --- installing from the card --------------------------------------------------
+static String cardCore;
+
+static void installTask(void *) {
+  File f = SD.open("/cores/" + cardCore + ".bin");
+  if (!f) job.error = "no such core on the card";
+  else {
+    if (installFrom(f, f.size())) job.stage = "done";
+    f.close();
+  }
+  job.busy = false;
+  vTaskDelete(nullptr);
+}
+
+static void apiInstallCard() {
+  if (job.busy)  { server.send(409, "text/plain", "already busy"); return; }
+  if (!haveCard) { server.send(409, "text/plain", "no card fitted"); return; }
+  cardCore = server.arg("core");
+  job.busy = true; job.error = ""; job.stage = "starting"; job.done = job.total = 0;
+  xTaskCreatePinnedToCore(installTask, "install", 8192, nullptr, 1, nullptr, 1);
+  server.send(200, "text/plain", "ok");
+}
+
+// --- adding a core to the card's library ----------------------------------------
+//
+// Uploading to the FLASH installs one core and replaces whatever was there.
+// Uploading to the CARD adds to the library, so the machine can be changed again
+// later without a computer. They are different operations and the difference is
+// worth a separate endpoint.
+//
+// Without this, every rebuilt core means unplugging the card, carrying it to a
+// PC and carrying it back -- which rather undoes the point of the thing being
+// standalone.
+static File    libFile;
+static bool    libFailed;
+static String  libName;
+static String  libPath;
+static bool    libIsRom;
+
+static void onLibraryUpload() {
+  HTTPUpload &u = server.upload();
+
+  if (u.status == UPLOAD_FILE_START) {
+    libFailed = false;
+    if (!haveCard) { libFailed = true; job.error = "no card fitted"; return; }
+    libName = u.filename;
+    // A core is a bitstream and goes in /cores as <name>.bin, because that is
+    // the one directory and one extension the core listing looks at. A game
+    // keeps whatever name and extension it arrived with, because nothing here
+    // decides what machine it is from its name -- the loader reads the bytes.
+    if (libIsRom) {
+      SD.mkdir("/roms");
+      libPath = "/roms/" + libName;
+    } else {
+      if (libName.endsWith(".bin"))
+        libName = libName.substring(0, libName.length() - 4);
+      SD.mkdir("/cores");
+      libPath = "/cores/" + libName + ".bin";
+    }
+    SD.remove(libPath);
+    libFile = SD.open(libPath, FILE_WRITE);
+    if (!libFile) { libFailed = true; job.error = "could not create " + libPath; }
+    job.stage = libIsRom ? "saving the game to the card" : "saving to the card";
+    job.done = 0; job.total = 0;
+
+  } else if (u.status == UPLOAD_FILE_WRITE && !libFailed) {
+    // A short write is not necessarily a failure. The card disappears into an
+    // internal erase now and then and takes what it can in the meantime, so the
+    // remainder is offered again rather than treated as the end of the world.
+    size_t done = 0;
+    for (int tries = 0; done < u.currentSize && tries < 200; tries++) {
+      size_t n = libFile.write(u.buf + done, u.currentSize - done);
+      done += n;
+      if (n == 0) delay(2);
+    }
+    if (done < u.currentSize) {
+      libFailed = true;
+      job.error = "the card stopped accepting data after " +
+                  String((uint32_t)job.done / 1024) + " kB (" +
+                  String((double)(SD.totalBytes() - SD.usedBytes()) / 1048576.0, 0) +
+                  " MB free, " + String(ESP.getFreeHeap() / 1024) + " kB heap)";
+      libFile.close();
+      SD.remove(libPath);
+      return;
+    }
+    job.done += u.currentSize;
+    // Every 64 kB. FatFs keeps a sector buffer and a dirty FAT; left alone
+    // across a megabyte of streaming those turn into one enormous flush at the
+    // end, and the writes before it start failing short.
+    if ((job.done & 0xFFFF) < u.currentSize) libFile.flush();
+
+  } else if (u.status == UPLOAD_FILE_END) {
+    if (libFile) {
+      libFile.flush();
+      uint32_t wrote = libFile.size();
+      libFile.close();
+      // A core that is short is a core that will not configure, and it looks
+      // exactly like a good one in a directory listing. Delete it rather than
+      // leave something installable that cannot work.
+      if (wrote != job.done) {
+        libFailed = true;
+        job.error = "wrote " + String(wrote) + " of " + String((uint32_t)job.done) +
+                    " bytes - removed the partial file";
+        SD.remove(libPath);
+      }
+    }
+    if (!libFailed) job.stage = "on the card";
+  }
+}
+
+// --- installing from the browser -----------------------------------------------
+// Straight through to the flash as the upload arrives, rather than buffering two
+// megabytes in RAM this chip would rather spend on something else. There is no
+// SD card wired yet, so on day one this is the only way to get a core in.
+static uint32_t upPage, upFill;
+static uint8_t  upBuf[PAGE];
+static bool     upFailed;
+
+static void onUpload() {
+  HTTPUpload &u = server.upload();
+
+  if (u.status == UPLOAD_FILE_START) {
+    job.busy = true; job.error = ""; job.stage = "erasing";
+    job.done = 0; job.total = 0;
+    upPage = upFill = 0;
+    upFailed = false;
+    // The size is not known in advance, so the whole slot's worth of sectors
+    // cannot be erased up front without erasing 6 MB. Erase lazily instead: the
+    // first page of each sector clears that sector, just before it is needed.
+    job.stage = "writing";
+
+  } else if (u.status == UPLOAD_FILE_WRITE && !upFailed) {
+    size_t i = 0;
+    while (i < u.currentSize) {
+      size_t take = PAGE - upFill;
+      if (take > u.currentSize - i) take = u.currentSize - i;
+      memcpy(upBuf + upFill, u.buf + i, take);
+      upFill += take;
+      i += take;
+
+      if (upFill == PAGE) {
+        uint32_t off = upPage * PAGE;
+        if ((off % SECTOR) == 0 && !fpga.eraseSector(off)) {
+          job.error = "the flash never finished erasing at " + String(off);
+          upFailed = true;
+          return;
+        }
+        if (!fpga.writePage(off, upBuf, PAGE)) {
+          job.error = "the flash never finished writing page " + String(upPage);
+          upFailed = true;
+          return;
+        }
+        upPage++;
+        job.done = upPage;
+        upFill = 0;
+      }
+    }
+
+  } else if (u.status == UPLOAD_FILE_END) {
+    if (!upFailed && upFill) {
+      uint32_t off = upPage * PAGE;
+      for (uint32_t k = upFill; k < PAGE; k++) upBuf[k] = 0xFF;
+      if ((off % SECTOR) == 0) fpga.eraseSector(off);
+      if (fpga.writePage(off, upBuf, PAGE)) upPage++;
+    }
+    job.total = upPage;
+
+    // Read it all back before anyone is allowed to boot it.
+    if (!upFailed) {
+      job.stage = "verifying";
+      job.done = 0;
+      // Nothing to compare against any more -- the upload has been consumed --
+      // so check the one thing that must be true of any configuration image:
+      // the sync word is in the first page, and the slot is not simply erased.
+      static uint8_t got[PAGE];
+      if (!fpga.readPage(SLOT_BASE, got)) {
+        job.error = "could not read the slot back";
+      } else {
+        bool sync = false;
+        for (int k = 0; k + 3 < (int)PAGE; k++)
+          if (got[k] == 0xAA && got[k+1] == 0x99 &&
+              got[k+2] == 0x55 && got[k+3] == 0x66) { sync = true; break; }
+        if (!sync)
+          job.error = "no bitstream sync word in the slot after writing";
+        else
+          job.stage = "done";
+      }
+      job.done = job.total;
+    }
+    job.busy = false;
+  }
+}
+
+extern const char PAGE_HTML[] PROGMEM;
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println("\nconsole: ESP32-S3 front door");
+
+  // Before ANY peripheral claims a pin. Once SPI owns them through the GPIO
+  // matrix they read back what the peripheral drives, not what is wired to
+  // them, and the answer becomes confidently wrong.
+  String pinMap = sdScanPins();
+
+  // 5 MHz, not 10.
+  //
+  // esp_link brings the SPI clock into the board's 50 MHz domain through a
+  // synchroniser and finds its edges by comparison, which needs a comfortable
+  // number of system clocks per half-period. At 10 MHz that is two and a half,
+  // and the module's own header admits the ceiling is "near 12 MHz" -- so 10 was
+  // sitting just under a limit rather than well below one.
+  //
+  // It mostly worked, which is the problem. Installing a core is tens of
+  // thousands of transactions, and a missed edge in one of them corrupts a
+  // command rather than announcing itself: the board reports the operation
+  // started and finished, and a page is simply never programmed. Eight blank
+  // pages out of seven thousand, scattered, with every write "successful".
+  //
+  // At 5 MHz there are five system clocks per half-period. The install takes a
+  // few seconds longer and stops losing pages.
+  fpga.begin(5000000);
+
+  sdBus.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+  // Ask the card what it is BEFORE asking the filesystem anything. A failed
+  // mount and a disconnected card are the same bit out of SD.begin(), and they
+  // are a reformat and a soldering iron respectively -- see sdprobe.h.
+  SdDiagnosis sd = sdDiagnose(sdBus, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+  sdInfo = sd.probe;
+  // 20 MHz, not the library's default 4. At 4 MHz the card cannot absorb an
+  // upload as fast as Wi-Fi delivers it, and the write fails partway through a
+  // couple of megabytes -- which presents as "the card is full" on a card with
+  // 238 GB free.
+  // 8 MHz, not 20: the card answers its init at 20 over these jumpers, and then
+  // drops bytes on a sustained write -- a 632 MB disc image died at twelve and
+  // then at seventeen megabytes. Reads for the drive need 300 kB/s; this gives
+  // several times that with margin.
+  haveCard = sdInfo.responded && SD.begin(PIN_SD_CS, sdBus, 8000000);
+  // CORE 0, not 1: reading the card blocks inside the SPI driver, and on the
+  // same core as loop() that starves the web server and the serial console
+  // together -- the board goes completely deaf while the drive is being fed,
+  // which looked exactly like a crash.
+  xTaskCreatePinnedToCore(discTask, "disc", 8192, nullptr, 2, nullptr, 0);
+  // A disc on the CARD can go back in now. One served over http:// cannot:
+  // Wi-Fi is not up until further down, so that one is put back after the join.
+  { String was = discRecall();
+    if (was.length() && !was.startsWith("http://")) {
+      Serial.println("disc: putting " + was + " back in");
+      if (!discInsert(was)) Serial.println("disc: ...but it would not open");
+    } }
+  sdWhy = sdProbeSummary(sdInfo, haveCard);
+  if (haveCard) {
+    // The filesystem's own view, which is NOT the same as the card's. The probe
+    // reads the capacity out of the CSD -- what the silicon says it holds -- and
+    // the driver reads it out of the boot sector. When those disagree, writes
+    // fail partway with "disk full" on a card that is plainly not full, and the
+    // card's own number is the one that misleads you.
+    uint64_t total = SD.totalBytes(), used = SD.usedBytes();
+    sdWhy += ", filesystem sees " + String((double)total / 1073741824.0, 1) +
+             " GB, " + String((double)(total - used) / 1073741824.0, 1) + " GB free";
+  }
+  Serial.println("SD: " + sdWhy);
+  if (sd.verdict) Serial.println("    " + String(sd.verdict));
+  Serial.println(String("    MISO idles ") +
+                 (sd.misoHigh ? "HIGH (module has power)"
+                              : "LOW (no power, or not connected)"));
+  // Only when the CARD did not answer. Gating this on "did it mount" was wrong:
+  // a card that responds perfectly and merely carries a filesystem this chip
+  // cannot read would get a confident lecture about its wiring being wrong.
+  // A diagnostic that fires on the wrong condition is worse than none, because
+  // it sends you to check the thing that is already fine.
+  if (!sdInfo.responded) {
+    Serial.print(pinMap);
+    sdPinReport(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+    if (sdRailFloating(PIN_SD_MOSI, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_CS))
+      Serial.println("    => the module IS wired to these four pins and has NO "
+                     "POWER. Its supply rail is floating, which is why the pins "
+                     "drag each other around. Check VCC and GND at the module.");
+    else
+      Serial.println("    => these pins are genuinely unconnected - the wires "
+                     "are not reaching the module at all.");
+    Serial.println("    cores can still be uploaded from the page");
+  }
+
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+    lastWifiReason = info.wifi_sta_disconnected.reason;
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+
+  // Both at once, always. See the note at the top of this file.
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(AP_SSID, AP_PASS);
+  Serial.printf("access point \"%s\", password \"%s\", at %s\n",
+                AP_SSID, AP_PASS, WiFi.softAPIP().toString().c_str());
+
+  prefs.begin("net", true);
+  String ssid = prefs.getString("ssid", "");
+  String pass = prefs.getString("pass", "");
+  prefs.end();
+  if (ssid.length()) {
+    Serial.printf("joining %s...\n", ssid.c_str());
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    uint32_t t0 = millis();
+    // Fifteen seconds, not ten. A router that is doing band steering or WPA2/WPA3
+    // negotiation can take its time, and a timeout that is merely too short
+    // reports itself as a failure to connect.
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(200);
+    if (WiFi.status() != WL_CONNECTED)
+      Serial.println("  reason: " + String(wifiReasonText(lastWifiReason)) +
+                     " (code " + String(lastWifiReason) + ")");
+    Serial.println(WiFi.status() == WL_CONNECTED
+                   ? "joined, also reachable at " + WiFi.localIP().toString()
+                   : String("could not join - the access point is still up"));
+  }
+
+  // The network exists now, so a remembered http:// image can go back in.
+  { String was = discRecall();
+    if (was.length() && was.startsWith("http://") && !discIn) {
+      Serial.println("disc: putting " + was + " back in");
+      if (!discInsert(was)) Serial.println("disc: ...but it would not open - put it back by hand");
+    } }
+
+  Status s = fpga.status();
+  Serial.printf("FPGA: %s", s.alive ? "answering" : "NOT ANSWERING");
+  if (s.alive) Serial.printf(", protocol %u, core %u", s.version, s.core);
+  Serial.println();
+
+  server.on("/", []{ server.send_P(200, "text/html", PAGE_HTML); });
+  server.on("/api/state",   apiState);
+  server.on("/api/scan",    apiScan);
+  server.on("/api/join",    HTTP_POST, apiJoin);
+  server.on("/api/forget",  HTTP_POST, apiForget);
+  server.on("/api/boot",    HTTP_POST, apiBoot);
+  server.on("/api/shell",   HTTP_POST, apiShell);
+  server.on("/api/install", HTTP_POST, apiInstallCard);
+  server.on("/api/disc",    HTTP_POST, []{
+    String path = server.arg("path");
+    if (!haveCard && !path.startsWith("http://")) { server.send(409, "application/json", "{\"error\":\"no card\"}"); return; }
+    if (!discInsert(path)) { server.send(404, "application/json", "{\"error\":\"no such file\"}"); return; }
+    server.send(200, "application/json", "{\"ok\":true,\"sectors\":" + String(discSectors) + "}");
+  });
+  server.on("/api/disc/fetch", HTTP_POST, []{
+    if (fetchBusy) { server.send(409, "text/plain", "already fetching"); return; }
+    if (!haveCard) { server.send(409, "text/plain", "no card fitted"); return; }
+    fetchUrl  = server.arg("url");
+    fetchPath = server.hasArg("path") ? server.arg("path") : String("/discs/disc.bin");
+    if (!fetchUrl.length()) { server.send(400, "text/plain", "no url"); return; }
+    fetchErr = ""; fetchDone = 0; fetchTotal = 0; fetchStalls = 0; fetchBusy = true;
+    xTaskCreatePinnedToCore(fetchTask, "discfetch", 8192, nullptr, 1, nullptr, 1);
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+  server.on("/api/disc/verify", HTTP_POST, []{
+    if (verifyBusy || fetchBusy) { server.send(409, "text/plain", "busy"); return; }
+    if (server.hasArg("url"))  fetchUrl  = server.arg("url");
+    if (server.hasArg("path")) fetchPath = server.arg("path");
+    if (!fetchUrl.length() || !fetchPath.length()) { server.send(400, "text/plain", "need url and path"); return; }
+    verifyBusy = true;
+    xTaskCreatePinnedToCore(verifyTask, "discverify", 8192, nullptr, 1, nullptr, 1);
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+  server.on("/api/eject",   HTTP_POST, []{ discEject(); server.send(200, "application/json", "{\"ok\":true}"); });
+  server.on("/api/library", HTTP_POST,
+            []{ server.send(libFailed ? 500 : 200, "text/plain",
+                            libFailed ? job.error : "saved"); },
+            []{ libIsRom = false; onLibraryUpload(); });
+  server.on("/api/roms",    HTTP_POST,
+            []{ server.send(libFailed ? 500 : 200, "text/plain",
+                            libFailed ? job.error : "saved"); },
+            []{ libIsRom = true;  onLibraryUpload(); });
+  // Fetching a game back off the card is what lets the Ethernet side load it
+  // into a running console: the card holds it, the register bus delivers it.
+  server.on("/api/rom", HTTP_GET, []{
+    if (!haveCard) { server.send(409, "text/plain", "no card fitted"); return; }
+    String n = server.arg("name");
+    if (n.indexOf("..") >= 0 || n.indexOf('/') >= 0) {
+      server.send(400, "text/plain", "bad name");
+      return;
+    }
+    File f = SD.open("/roms/" + n);
+    if (!f) { server.send(404, "text/plain", "no such game"); return; }
+    server.sendHeader("Content-Length", String((uint32_t)f.size()));
+    server.streamFile(f, "application/octet-stream");
+    f.close();
+  });
+  server.on("/api/upload",  HTTP_POST,
+            []{ server.send(200, "text/plain", job.error.length() ? job.error : "ok"); },
+            onUpload);
+  server.begin();
+  Serial.println("web server up");
+}
+
+// --- the same commands, over USB --------------------------------------------------
+//
+// Everything the page can do, typed into the serial port. Not a toy: the page
+// lives on this chip's own access point, so testing it from a desktop means
+// taking that desktop off its network. This is the way to exercise an install
+// from the card without doing that -- and when something goes wrong at three in
+// the morning it is the interface that still works.
+//
+//   state              what the board is, and what is on the card
+//   cores              the core library on the card
+//   install <name>     write a core from the card into the flash slot
+//   boot / shell       start the installed core / go back to the shell
+//   scan               the networks this chip can see, with their exact spelling
+//   wifi <ssid> <pass> join a network and remember it
+//
+// The password is never printed back. It goes into NVS and stays there; echoing
+// it would put it in every log and scrollback that ever captured this port.
+static void serialCommand(String c) {
+  c.trim();
+  if (c == "state") {
+    Status st = fpga.status();
+    Serial.println("  FPGA " + String(st.alive ? "answering" : "SILENT") +
+                   ", protocol " + st.version + ", core " + st.core +
+                   (st.busy ? ", busy" : ", idle"));
+    Serial.println("  card: " + sdWhy);
+    if (job.busy || job.stage.length())
+      Serial.println("  job: " + job.stage + " " + job.done + "/" + job.total +
+                     (job.error.length() ? ("  ERROR: " + job.error) : ""));
+  } else if (c == "cores") {
+    Serial.println("  " + coreListJson());
+  } else if (c.startsWith("disc ")) {
+    String path = c.substring(5); path.trim();
+    if (!haveCard && !path.startsWith("http://")) { Serial.println("  no card"); return; }
+    if (discInsert(path)) Serial.println("  disc in: " + path + ", " + String(discSectors) + " sectors");
+    else Serial.println("  cannot open " + path);
+  } else if (c == "eject") {
+    discEject(); Serial.println("  ejected");
+  } else if (c == "disc") {
+    CdStatus st = fpga.cdStatus();
+    Serial.println("  drive: " + String(st.alive ? "answering" : "SILENT") + ", core " + String(st.core) +
+                   (st.disc ? ", disc in" : ", no disc") + (st.running ? ", reading" : ", idle") +
+                   ", wants LBA " + String(st.lba) + ", room " + String(st.room));
+    Serial.println("  served " + String(discServed) + " sectors, " + String(discMisses) + " card misses, " +
+                   String(discIdle) + " idle polls, " + String(discFetches) + " fetches; image " + discPath + " (" + String(discSectors) + " sectors)");
+  } else if (c.startsWith("install ")) {
+    if (job.busy)  { Serial.println("  already busy"); return; }
+    if (!haveCard) { Serial.println("  no card"); return; }
+    cardCore = c.substring(8); cardCore.trim();
+    job.busy = true; job.error = ""; job.stage = "starting";
+    xTaskCreate(installTask, "install", 8192, nullptr, 1, nullptr);
+    Serial.println("  installing " + cardCore + " from the card");
+  } else if (c == "wstatus") {
+    int st = WiFi.status();
+    Serial.println("  status " + String(st) +
+                   (st == WL_CONNECTED ? " connected, IP " + WiFi.localIP().toString()
+                                       : " not connected"));
+    Serial.println("  last disconnect: " + String(wifiReasonText(lastWifiReason)) +
+                   " (code " + String(lastWifiReason) + ")");
+  } else if (c == "scan") {
+    int n = WiFi.scanNetworks();
+    if (n <= 0) { Serial.println("  nothing found"); return; }
+    for (int i = 0; i < n; i++)
+      Serial.println("  " + String(WiFi.RSSI(i)) + " dBm  \"" + WiFi.SSID(i) + "\"");
+    WiFi.scanDelete();
+  } else if (c.startsWith("wifi ")) {
+    // Split at the LAST space: a network name is allowed to contain spaces and
+    // a WPA password is not allowed to end with one, so this is the split that
+    // cannot get a legal name wrong.
+    String rest = c.substring(5);
+    int sp = rest.lastIndexOf(' ');
+    if (sp <= 0) { Serial.println("  wifi <ssid> <password>"); return; }
+    String ssid = rest.substring(0, sp), pass = rest.substring(sp + 1);
+    prefs.begin("net", false);
+    prefs.putString("ssid", ssid);
+    prefs.putString("pass", pass);
+    prefs.end();
+    // Stop any attempt already in flight first. A station that is mid-retry
+    // refuses a new configuration outright -- "sta is connecting, cannot set
+    // config" -- so a corrected password would be stored but silently not
+    // applied, and the retry would keep failing with the OLD one. That looks
+    // exactly like the new password being wrong too.
+    WiFi.disconnect();
+    delay(200);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    Serial.println("  joining \"" + ssid + "\" (" + pass.length() +
+                   "-character password stored, not shown)");
+  } else if (c == "boot" || c == "core") {
+    fpga.boot(true);
+    Serial.println("  booting the core");
+  } else if (c == "shell") {
+    fpga.forceShell();
+    Serial.println(PIN_PROG_B >= 0 ? "  pulled PROGRAM_B, back in the shell"
+                                   : "  PROGRAM_B is not wired");
+  } else if (c.length()) {
+    Serial.println("  state | cores | install <name> | boot | shell");
+  }
+}
+
+void loop() {
+  server.handleClient();
+
+  static String line;
+  while (Serial.available()) {
+    char ch = Serial.read();
+    if (ch == char(10) || ch == char(13)) {
+      if (line.length()) { serialCommand(line); line = ""; }
+    } else if (line.length() < 64) {
+      line += ch;
+    }
+  }
+}
