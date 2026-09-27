@@ -138,6 +138,10 @@ module console_top #(
 
 	// sound, for the ring buffer the synth already streams from
 	output wire [15:0] audio,
+	// ...and the PlayStation's, which is stereo at 44.1 kHz and has a ring of its
+	// own (ps1_aring.v): {right, left}, signed, one pulse of audio_lr_we a sample
+	output wire [31:0] audio_lr,
+	output wire        audio_lr_we,
 
 	// pixels for the framebuffer
 	output wire        px_valid,
@@ -335,7 +339,13 @@ module console_top #(
 
 	assign fbr_rdata = fbr_rdata_w;
 	assign fbr_ack   = from_ddr ? 1'b1 : fbr_ack_w;   // the host's slow path yields while streaming
-	assign stream_ready  = (CORE_PS1 == 0) ? 1'b1 : (from_ddr ? !cap_wait : fs_ready);
+	// For the PlayStation, stream_ready means THE WORD IN HAND IS THE FIRST OF A
+	// FRAME: the network core starts a frame only on one, drops stray words until
+	// it sees one, and gives a frame up if one turns up in the middle (a capture
+	// abandoned at a flip, see fb_stream.v). The DDR3 copy's first word is the
+	// one at the start of its first row.
+	assign stream_ready  = (CORE_PS1 == 0) ? 1'b1
+	                     : (from_ddr ? (!cap_wait && sfv && sfa == 18'd0 && sfc == 16'd0) : fs_ready);
 	assign stream_direct = (CORE_PS1 != 0);
 	assign stream_fvalid = from_ddr ? sfv : fs_valid_w;
 	assign stream_fdata  = from_ddr ? sfd : fs_data_w;
@@ -939,9 +949,11 @@ module console_top #(
 			.dbg_node_v(ps1_node_v), .dbg_node_addr(ps1_node_addr), .dbg_node_hdr(ps1_node_hdr),
 			.fb_cap_go(fb_cap_go), .fb_cap_ready(fb_cap_ready), .fb_width(fb_width), .fb_height(fb_height),
 			.fbr_addr(from_ddr ? sfa : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
-			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w)
+			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
+			.spu_out(audio_lr), .spu_out_we(audio_lr_we)
 		);
 	end else begin : g_ps1
+		assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
 		assign ps1_px_valid = 1'b0;
 		assign ps1_px_x = 9'd0; assign ps1_px_y = 9'd0; assign ps1_px_rgb = 8'd0;
 		assign ps1_dbg_pc = 32'd0;

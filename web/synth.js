@@ -283,9 +283,16 @@ async function pumpAudio() {
   }
   if (!d.samples.length) return;
 
-  const buf = actx.createBuffer(1, d.samples.length, d.rate);
-  const ch = buf.getChannelData(0);
-  for (let i = 0; i < d.samples.length; i++) ch[i] = d.samples[i] / 32768;
+  // The PlayStation's ring is stereo (channels: 2, samples interleaved L, R);
+  // the synthesiser's is mono.
+  const nch = d.channels === 2 ? 2 : 1;
+  const frames = Math.floor(d.samples.length / nch);
+  if (!frames) return;
+  const buf = actx.createBuffer(nch, frames, d.rate);
+  for (let c = 0; c < nch; c++) {
+    const ch = buf.getChannelData(c);
+    for (let i = 0; i < frames; i++) ch[i] = d.samples[i * nch + c] / 32768;
+  }
 
   const src = actx.createBufferSource();
   src.buffer = buf;

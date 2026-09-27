@@ -176,7 +176,7 @@ module ps1_top (
 	input  wire        fs_en,      // the network is taking the picture this way
 	input  wire        fs_arm,
 	output wire        fs_empty,
-	output wire        fs_ready,    // a whole frame is buffered and may go out
+	output wire        fs_ready,    // the word at the head of the stream is the first of a capture
 	input  wire        fs_rd,
 	output wire [31:0] fs_data,
 	output wire        fs_valid,
@@ -186,7 +186,10 @@ module ps1_top (
 	input  wire [17:0] fbr_addr,
 	input  wire        fbr_req,
 	output wire [31:0] fbr_rdata,
-	output wire        fbr_ack
+	output wire        fbr_ack,
+	// the sound: one {right, left} sample per spu_out_we, 44.1 kHz
+	output wire [31:0] spu_out,
+	output wire        spu_out_we
 );
 	localparam [23:0] RAM_LINE  = 24'h01_0000;   // 0x100000 >> 4
 	localparam [23:0] BIOS_LINE = 24'h03_0000;   // 0x300000 >> 4
@@ -265,7 +268,7 @@ module ps1_top (
 	wire mem_ctl  = io_hit && (c_addr[15:7] == 9'b0001_0000_0);   // 0x1000..0x107F
 	wire cd_hit   = io_hit && (c_addr[15:4] == 12'h180);
 	wire pad_hit  = io_hit && (c_addr[15:4] == 12'h104);
-	wire spu_hit  = io_hit && (c_addr[15:9] == 7'b0001_110);       // 0x1C00..0x1DFF: the SPU's registers
+	wire spu_hit  = io_hit && (c_addr[15:10] == 6'b0001_11);       // 0x1C00..0x1FFF: the SPU (1E00+ are its current volumes)
 	wire cached   = ram_hit || bios_hit;
 
 	// a cached CPU address, as a DDR3 line
@@ -562,7 +565,7 @@ module ps1_top (
 	// capture abandoned at a display flip leaves no whole frame and never asks
 	// again, and the picture would stop for good at the first flip -- which in
 	// a double-buffered game is immediately.
-	wire        fpx_valid, scan_start, scan_done, scan_busy, fb_hold, fb_want;
+	wire        fpx_valid, scan_start, scan_done, scan_abort, scan_busy, fb_hold, fb_want;
 	// Whole lines go to the frame in DDR3; the network's own path takes pixels,
 	// so the line route is only used when the frame writer is the one reading.
 	wire         gfl_valid;
@@ -588,7 +591,7 @@ module ps1_top (
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
 		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_popword(dbg_gpu_popword), .dbg_disp(dbg_disp), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
-		.scan_start(scan_start), .scan_done(scan_done), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : fb_want), .disp_w(gpu_disp_w),
+		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : fb_want), .disp_w(gpu_disp_w),
 		.scan_lines(fb_want && !fs_en),
 		.fl_valid(gfl_valid), .fl_data(gfl_data), .fl_x(gfl_x), .fl_y(gfl_y)
 	);
@@ -597,17 +600,22 @@ module ps1_top (
 	// through DDR3 cost 42 ms a frame and held the web page to fifteen frames a
 	// second.
 	wire fs_hold, fs_want;
-	// A whole frame of buffer (64K words: a 320-wide frame is 38400, a 512-wide
-	// game's half-width frame 30720), so the scanout reads the buffer at VRAM speed, in one frame, from
-	// the flip, and the network drains the copy at its own pace. With three
-	// packets of buffer the scanout crawled at network speed across several
-	// frames while the game drew into the buffer it was reading: the tear.
-	fb_stream #(.AW(16)) u_fs (
+	// A queue of 2K words, not a frame. It used to be a whole frame (64K words,
+	// 64 block RAMs) so a capture could be read at VRAM speed and finish before
+	// the game flipped: at the time a capture took longer than a frame, and one
+	// read at network pace tore. The capture is three times cheaper now and the
+	// network sends a half-width frame in about 13 ms against 33-50 ms between
+	// the game's flips, so the scanout reads the buffer on screen at the
+	// network's pace, starting at a flip, and a flip in the middle abandons the
+	// frame (every_flip) rather than tearing it. The frame is put together on
+	// the PC, from the id and offset every packet already carries.
+	fb_stream #(.AW(11)) u_fs (
 		.clk(clk), .rst(core_rst),
-		.frame_start(scan_start), .frame_done(scan_done), .px_valid(fpx_valid), .px_x(fpx_x), .px_rgb(fpx_rgb),
+		.frame_start(scan_start), .frame_done(scan_done), .abort(scan_abort),
+		.px_valid(fpx_valid), .px_x(fpx_x), .px_rgb(fpx_rgb),
 		.hold(fs_hold),
-		.rd_en(fs_rd), .rd_data(fs_data), .rd_valid(fs_valid),
-		.arm(fs_arm), .want(fs_want), .empty(fs_empty), .full_frame(fs_ready)
+		.rd_en(fs_rd), .rd_data(fs_data), .rd_valid(fs_valid), .head_sof(fs_ready),
+		.arm(fs_arm), .want(fs_want), .empty(fs_empty)
 	);
 
 	// the display frame in DDR3 (see fb_ddr.v): 640 x 240 x RGB555 at 4 MB
@@ -742,9 +750,9 @@ module ps1_top (
 	// ================================================================================
 	// the arbiter: VRAM port 0, CPU port 1, host-fill (and the sweep) port 2
 	// ================================================================================
-	wire [4:0]   p_ready;
-	wire [639:0] p_rdata;
-	wire [4:0]   p_valid;
+	wire [5:0]   p_ready;
+	wire [767:0] p_rdata;
+	wire [5:0]   p_valid;
 	// the host read shares port 2; it waits its turn behind a fill or the sweep
 	reg          hr_req, hr_go_d;
 	reg  [23:0]  hr_addr;
@@ -765,13 +773,16 @@ module ps1_top (
 	wire         fb_m_ready, fb_m_valid; wire [127:0] fb_m_rdata;
 
 	// 0 the VRAM cache, 1 the engine's block writer, 2 the frame capture,
-	// 3 the processor's cache, 4 the host
-	wire [119:0] p_addr  = {hf_p_addr,  cc_m_addr, fb_m_addr,  bk_m_addr,  vc_m_addr};
-	wire [4:0]   p_req   = {hf_req_r | vz_req | hr_req, cc_m_req, fb_m_req, bk_m_req, vc_m_req};
-	wire [4:0]   p_we    = {!hr_turn,   cc_m_we,   fb_m_we,    bk_m_we,    vc_m_we};
-	wire [639:0] p_wdata = {hf_p_wdata, cc_m_wdata, fb_m_wdata, bk_m_wdata, vc_m_wdata};
+	// 3 the processor's cache, 4 the host, 5 the SPU
+	wire [23:0]  sp_m_addr; wire sp_m_req, sp_m_we, sp_m_ready, sp_m_valid;
+	wire [127:0] sp_m_wdata, sp_m_rdata; wire [15:0] sp_m_wmask;
+	wire [143:0] p_addr  = {sp_m_addr,  hf_p_addr,  cc_m_addr, fb_m_addr,  bk_m_addr,  vc_m_addr};
+	wire [5:0]   p_req   = {sp_m_req,   hf_req_r | vz_req | hr_req, cc_m_req, fb_m_req, bk_m_req, vc_m_req};
+	wire [5:0]   p_we    = {sp_m_we,    !hr_turn,   cc_m_we,   fb_m_we,    bk_m_we,    vc_m_we};
+	wire [767:0] p_wdata = {sp_m_wdata, hf_p_wdata, cc_m_wdata, fb_m_wdata, bk_m_wdata, vc_m_wdata};
 	wire [15:0]  vc_m_wmask, cc_m_wmask;
-	wire [79:0]  p_wmask = {16'hFFFF, cc_m_wmask, 16'hFFFF, bk_m_wmask, vc_m_wmask};
+	wire [95:0]  p_wmask = {sp_m_wmask, 16'hFFFF, cc_m_wmask, 16'hFFFF, bk_m_wmask, vc_m_wmask};
+	assign sp_m_ready = p_ready[5]; assign sp_m_valid = p_valid[5]; assign sp_m_rdata = p_rdata[767:640];
 
 	assign vc_m_ready = p_ready[0]; assign bk_m_ready = p_ready[1]; assign fb_m_ready = p_ready[2]; assign cc_m_ready = p_ready[3]; assign hf_ready = p_ready[4];
 	assign vc_m_valid = p_valid[0]; assign fb_m_valid = p_valid[2]; assign cc_m_valid = p_valid[3];
@@ -782,7 +793,7 @@ module ps1_top (
 	// The arbiter and the DDR3 path are memory infrastructure: they live on the
 	// GLOBAL reset. On the core's reset they sat dead while the host was filling
 	// the BIOS through them, acknowledging every line and issuing none.
-	mem_arb #(.PORTS(5), .AW(24)) arb (
+	mem_arb #(.PORTS(6), .AW(24)) arb (
 		.clk(clk), .rst(rst),
 		.p_addr(p_addr), .p_req(p_req), .p_we(p_we), .p_wdata(p_wdata), .p_wmask(p_wmask),
 		.p_ready(p_ready), .p_rdata(p_rdata), .p_valid(p_valid),
@@ -825,7 +836,10 @@ module ps1_top (
 		.dbg(cd_dbg), .dbg_cmds(cd_dbg_cmds), .dbg_setloc(cd_dbg_setloc), .dbg_seek(cd_dbg_seek), .dbg_hdr(cd_dbg_hdr),
 		.ev_v(cd_dma_go), .ev_data(cd_dma_go_info), .trace_idx(cd_trace_idx), .trace_data(cd_trace_data), .trace_wp(cd_trace_wp)
 	);
-	wire [10:0] irq_src = {3'd0, sio_irq,              // 10:8 lightpen/SPU/SIO1; 7 controller
+	// the SPU's side of DMA channel 4, its memory port and its interrupt
+	wire        spu_dma_wr, spu_dma_ready, spu_dma_rd, spu_dma_rvalid, spu_irq;
+	wire [31:0] spu_dma_wdata, spu_dma_rdata;
+	wire [10:0] irq_src = {1'b0, spu_irq, 1'b0, sio_irq,   // 10 lightpen, 9 SPU, 8 SIO1; 7 controller
 	                       tmr_irq[2], tmr_irq[1], tmr_irq[0],  // 6:4 TMR2..TMR0
 	                       dma_irq,                    // 3 DMA
 	                       cd_irq,                     // 2 CDROM
@@ -856,6 +870,8 @@ module ps1_top (
 		.gp0_wr(gp0_wr), .gp0_data(gp0_data), .gp0_ready(gp0_ready),
 		.gpu_rd(gpu_dma_rd), .gpu_rdata(gpu_dma_rdata), .gpu_rvalid(gpu_dma_rvalid),
 		.cd_rd(cd_dma_rd), .cd_rdata(cd_dma_rdata), .cd_rvalid(cd_dma_rvalid), .cd_go(cd_dma_go), .cd_go_info(cd_dma_go_info), .cd_words(cd_dma_words),
+		.spu_wr(spu_dma_wr), .spu_data(spu_dma_wdata), .spu_ready(spu_dma_ready),
+		.spu_rd(spu_dma_rd), .spu_rdata(spu_dma_rdata), .spu_rvalid(spu_dma_rvalid),
 		.hog(dma_hog), .in_flight(dma_in_flight),
 		.gpu_active(dma_gpu_active),
 		.dbg_node_v(dbg_node_v), .dbg_node_addr(dbg_node_addr), .dbg_node_hdr(dbg_node_hdr),
@@ -869,10 +885,31 @@ module ps1_top (
 	always @(posedge clk) if (mem_ctl && c_req && c_we && cpu_ce)
 		memctl[c_addr[6:2]] <= c_dout;
 
+	// ================================================================================
+	// the SPU: 24 voices, its RAM in DDR3 (arbiter port 5), DMA channel 4, IRQ 9
+	// ================================================================================
+	// One sample every 768 cycles of the console's own 33.8688 MHz, counted on the
+	// same enable the timers use, so the sound keeps the console's time: 44.1 kHz.
+	reg  [9:0]  spu_div;
+	reg         spu_tick;
+	always @(posedge clk) begin
+		spu_tick <= 1'b0;
+		if (core_rst) spu_div <= 10'd0;
+		else if (sys_ce) begin
+			if (spu_div == 10'd767) begin spu_div <= 10'd0; spu_tick <= 1'b1; end
+			else spu_div <= spu_div + 10'd1;
+		end
+	end
 	wire [31:0] spu_rdata;
 	ps1_spu u_spu (
 		.clk(clk), .rst(core_rst),
-		.sel(spu_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[8:0]), .be(c_be), .wdata(c_dout), .rdata(spu_rdata)
+		.sel(spu_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[9:0]), .be(c_be), .wdata(c_dout), .rdata(spu_rdata),
+		.tick(spu_tick), .irq(spu_irq),
+		.dma_wr(spu_dma_wr), .dma_wdata(spu_dma_wdata), .dma_ready(spu_dma_ready),
+		.dma_rd(spu_dma_rd), .dma_rdata(spu_dma_rdata), .dma_rvalid(spu_dma_rvalid),
+		.m_addr(sp_m_addr), .m_req(sp_m_req), .m_we(sp_m_we), .m_wdata(sp_m_wdata), .m_wmask(sp_m_wmask),
+		.m_ready(sp_m_ready), .m_rdata(sp_m_rdata), .m_valid(sp_m_valid),
+		.out_lr(spu_out), .out_we(spu_out_we)
 	);
 	wire [31:0] stub_rdata =
 	      mem_ctl ? memctl[c_addr[6:2]]
@@ -958,9 +995,13 @@ module ps1_top (
 
 	reg [31:0] perf [0:63];
 	integer pk;
+	initial for (pk = 0; pk < 64; pk = pk + 1) perf[pk] = 32'd0;
 	always @(posedge clk) begin
-		if (rst) begin for (pk = 0; pk < 64; pk = pk + 1) perf[pk] <= 32'd0; end
-		else begin
+		// NOT RESET. Every tool reads these as a difference between two samples,
+		// and the reset was 2,048 flip-flops on the global reset net: the worst
+		// path of the build at 0.002 ns of slack, 18.7 ns of pure routing from
+		// the reset register to their reset pins (2026-09-27).
+		begin
 			perf[0] <= perf[0] + 32'd1;
 			if (d_req && d_ready)            perf[1] <= perf[1] + 32'd1;
 			if (c_req && !cpu_ce)            perf[2] <= perf[2] + 32'd1;

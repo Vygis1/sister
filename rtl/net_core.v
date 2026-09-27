@@ -216,6 +216,10 @@ module net_core #(
 	reg [15:0] st_ipck;        // the header checksum, worked out as it is built
 	reg [16:0] st_wait;        // how long the scanout has had nothing to give
 	reg [16:0] st_gap;         // cycles since the last streamed packet went out
+	// After a word is taken, the head of the queue is stale for two clocks (its
+	// read port is registered, and so is stream_frd). Nothing may look at
+	// stream_fvalid / stream_ready again until this has counted down.
+	reg [1:0]  st_hold;
 	localparam [16:0] ST_GAP_PKT = 17'd4;    // the receiver runs on its own now, so barely a pause at all
 	localparam [8:0] ST_PKT = 9'd350;
 	wire [17:0] st_left = stream_words - st_off;
@@ -380,7 +384,7 @@ module net_core #(
 			tx_active <= 1'b0;
 			st_gap <= 0;
 			host_known <= 1'b0; st_off <= 0; st_frame <= 0; st_streaming <= 1'b0; stream_done_tog <= 1'b0;
-			st_ipck <= 16'd0; st_wait <= 0;
+			st_ipck <= 16'd0; st_wait <= 0; st_hold <= 2'd0;
 			st_wa <= 0; st_cx <= 0;
 		end else begin
 			case (state)
@@ -390,6 +394,7 @@ module net_core #(
 				tx_active <= 1'b0;
 				st_streaming <= 1'b0;
 				if (st_gap != 17'h1FFFF) st_gap <= st_gap + 1'b1;
+				if (st_hold != 2'd0) st_hold <= st_hold - 2'd1;
 
 				if (req_tog != req_seen) begin
 					// A request arrived, possibly while a streamed packet was going
@@ -397,8 +402,15 @@ module net_core #(
 					req_seen <= req_tog;
 					rx_frame <= 1'b1;
 					state    <= S_CLASSIFY;
+				end else if (stream_en && stream_direct && host_known && st_off == 0 && st_hold == 2'd0
+				             && stream_fvalid && !stream_ready) begin
+					// Between frames, and the word in hand is not the first of one:
+					// it is what is left of a capture this core gave up on. Throw it
+					// away, so that every frame starts at a capture's first pixel.
+					stream_frd <= 1'b1;
+					st_hold    <= 2'd3;
 				end else if (stream_en && host_known && (st_off != 0 || stream_ready)
-				             && st_gap >= ST_GAP_PKT && !rx_valid) begin
+				             && st_gap >= ST_GAP_PKT && !rx_valid && st_hold == 2'd0) begin
 					// nothing arriving: send the next slice of the frame
 					st_n  <= (st_left > {9'd0, ST_PKT}) ? ST_PKT : st_left[8:0];
 					st_i  <= 0;
@@ -766,7 +778,19 @@ module net_core #(
 			end
 
 			S_ST_RD: if (stream_direct) begin                 // one word from the scanout
-				if (stream_fvalid) begin
+				if (stream_fvalid && stream_ready && (st_off != 0 || st_i != 0)) begin
+					// The first word of a NEW capture, in the middle of this frame:
+					// the game flipped while the old one was being read, and the
+					// scanout gave it up and started on the new picture. Give this
+					// frame up too -- unfinished, it never completes on the host,
+					// so it is never shown -- and start the new one at offset 0
+					// under a new id. The word is left where it is for that.
+					st_wait      <= 0;
+					st_off       <= 0; st_wa <= 0; st_cx <= 0;
+					st_streaming <= 1'b0;
+					st_frame     <= st_frame + 1'b1;
+					state        <= S_RX;
+				end else if (stream_fvalid) begin
 					cur_word   <= stream_fdata;
 					stream_frd <= 1'b1;
 					step       <= 0;

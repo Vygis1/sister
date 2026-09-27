@@ -206,11 +206,12 @@ module regfile #(
 
 	wire [31:0] abuf_rdata;
 	wire [15:0] console_audio;
+	wire [31:0] ps1_audio_lr;
+	wire        ps1_audio_lr_we;
 
-	// NOT IN A PLAYSTATION IMAGE. It is 792 LUTs of a part that is at 96.4% and
-	// would not place at all -- and there is nothing for it to do there: the
-	// PlayStation's sound unit is a 69-LUT stub, so `console_audio` carries
-	// nothing. Every other image keeps it exactly as it was.
+	// NOT IN A PLAYSTATION IMAGE: the PlayStation has its own SPU (ps1_spu.v),
+	// which is stereo at 44.1 kHz and gets its own ring (ps1_aring.v) at the same
+	// addresses. Every other image keeps the synthesiser exactly as it was.
 	generate if (!CORE_PS1) begin : g_syn
 		synth u_synth (
 			.clk(clk), .rst(rst),
@@ -221,9 +222,13 @@ module regfile #(
 			.buf_rdata(abuf_rdata)
 		);
 	end else begin : g_nosyn
-		assign syn_rdata = 32'd0;
-		assign syn_err = 1'b0;
-		assign abuf_rdata = 32'd0;
+		// The PlayStation's own ring: stereo, 44.1 kHz, at the same addresses.
+		ps1_aring u_aring (
+			.clk(clk), .rst(rst),
+			.sample(ps1_audio_lr), .sample_we(ps1_audio_lr_we),
+			.off(off), .rdata(syn_rdata), .err(syn_err),
+			.buf_addr(sel_addr[15:2]), .buf_rdata(abuf_rdata)
+		);
 	end endgenerate
 
 	// --- video ---------------------------------------------------------------
@@ -322,6 +327,7 @@ module regfile #(
 		.char_we(new_req && bus_we && in_chr),
 		.wdata(bus_wdata),
 		.audio(console_audio),
+		.audio_lr(ps1_audio_lr), .audio_lr_we(ps1_audio_lr_we),
 		.ctrl_rdata(nes_ctrl_rdata),
 		.prog_rdata(nes_prg_rdata),
 		.char_rdata(nes_chr_rdata),

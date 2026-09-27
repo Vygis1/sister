@@ -379,19 +379,51 @@ def api_syn_panic():
     return jsonify(ok=True)
 
 
-def ring_words(start, count):
-    """Read `count` words out of the audio ring, following the wrap."""
-    runs = ([(start, count)] if start + count <= ABUF_WORDS
-            else [(start, ABUF_WORDS - start), (0, count - (ABUF_WORDS - start))])
+SYN_SIZE = SYN + 0x18
+SYN_CHANS = SYN + 0x24
+
+
+def ring_shape():
+    """(words in the ring, channels), asked of the board rather than assumed.
+
+    The synthesiser's ring is mono -- two offset-binary samples a word -- and
+    answers 0x24 with a bus error. The PlayStation's (rtl/ps1_aring.v) is stereo:
+    one {right, left} word per sample pair, signed, and says 2 there. The size
+    was a constant here, 16384, while the synthesiser's ring is 8192.
+    """
+    try:
+        words = talk(link.read, SYN_SIZE) or ABUF_WORDS
+    except Exception:
+        words = ABUF_WORDS
+    try:
+        chans = talk(link.read, SYN_CHANS)
+    except Exception:
+        chans = 1
+    return words, (2 if chans == 2 else 1)
+
+
+def ring_words(start, count, words=ABUF_WORDS, chans=1):
+    """Read `count` words out of the audio ring, following the wrap.
+
+    Mono: two samples a word, offset binary. Stereo: one {R, L} word per pair,
+    signed, returned interleaved L, R, L, R.
+    """
+    runs = ([(start, count)] if start + count <= words
+            else [(start, words - start), (0, count - (words - start))])
     out = []
     for base, n in runs:
         for word in talk(link.read_block, ABUF + base * 4, n):
-            out.append((word & 0xFFFF) - 0x8000)
-            out.append(((word >> 16) & 0xFFFF) - 0x8000)
+            lo, hi = word & 0xFFFF, (word >> 16) & 0xFFFF
+            if chans == 2:
+                out.append(lo - 0x10000 if lo & 0x8000 else lo)
+                out.append(hi - 0x10000 if hi & 0x8000 else hi)
+            else:
+                out.append(lo - 0x8000)
+                out.append(hi - 0x8000)
     return out
 
 
-def read_ring(cursor, limit):
+def read_ring(cursor, limit, words=ABUF_WORDS, chans=1):
     """Pull whatever is new since `cursor`.
 
     Returns (new_cursor, samples, resync). `resync` means more than a buffer's
@@ -405,18 +437,21 @@ def read_ring(cursor, limit):
     new = (now - cursor) & 0xFFFFFFFF
     if new == 0:
         return now, [], False
-    if new > ABUF_WORDS:
+    if new > words:
         return now, [], True
     new = min(new, limit)
-    return (cursor + new) & 0xFFFFFFFF, ring_words(cursor % ABUF_WORDS, new), False
+    return (cursor + new) & 0xFFFFFFFF, ring_words(cursor % words, new, words, chans), False
 
 
 @app.route("/api/syn/scope")
 def api_syn_scope():
     n = min(int(request.args.get("n", 1024)), 4096)
+    size, chans = ring_shape()
     words = (n + 1) // 2
     now = talk(link.read, SYN_WCOUNT)
-    out = ring_words((now - words) % ABUF_WORDS, words)
+    out = ring_words((now - words) % size, words, size, chans)
+    if chans == 2:
+        out = [(out[i] + out[i + 1]) // 2 for i in range(0, len(out) - 1, 2)]   # the scope draws one trace
     return jsonify(samples=out[:n], rate=syn_rate())
 
 
@@ -424,8 +459,9 @@ def api_syn_scope():
 def api_syn_stream():
     arg = request.args.get("cursor", "")
     cursor = int(arg) if arg not in ("", "null", "undefined") else None
-    new_cursor, samples, resync = read_ring(cursor, 4096)
-    return jsonify(cursor=new_cursor, samples=samples,
+    words, chans = ring_shape()
+    new_cursor, samples, resync = read_ring(cursor, 4096, words, chans)
+    return jsonify(cursor=new_cursor, samples=samples, channels=chans,
                    resync=resync, rate=syn_rate())
 
 
@@ -433,12 +469,13 @@ def api_syn_stream():
 def api_syn_record():
     seconds = min(float(request.args.get("seconds", 4)), 30.0)
     rate = syn_rate()
-    want = int(seconds * rate)
+    words, chans = ring_shape()
+    want = int(seconds * rate) * chans
     out = []
     cursor = talk(link.read, SYN_WCOUNT)
     t0 = time.monotonic()
     while len(out) < want:
-        cursor, samples, resync = read_ring(cursor, ABUF_WORDS)
+        cursor, samples, resync = read_ring(cursor, words, words, chans)
         if resync:
             return jsonify(error="fell behind the ring buffer; samples were lost"), 500
         if not samples:
@@ -449,7 +486,7 @@ def api_syn_record():
 
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
+        w.setnchannels(chans)
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(struct.pack(

@@ -121,6 +121,14 @@ module ps1_gpu (
 	output reg  [15:0] fpx_rgb,
 	output reg         scan_start,   // the scanout begins a frame
 	output reg         scan_done,    // ...and when it has finished one
+	output reg         scan_abort,   // ...or when it gave one up at a display flip
+	// Capture at EVERY flip, and abandon a capture at every flip. For the
+	// network's paced stream (fb_stream.v): a capture there reads the buffer on
+	// screen while the network sends it, about 13 ms, well inside one of the
+	// game's frames, and a flip in the middle means the game is about to draw
+	// into what is being read. Clear, it is one flip in two, for the paths that
+	// read a whole frame into a buffer first.
+	input  wire        every_flip,
 	output wire        scan_busy,    // a capture is running: it needs the memory more than the engine does
 	input  wire        scan_hold,   // the frame writer is full: do not read more
 	input  wire        scan_enable, // somebody wants the picture; otherwise VRAM is left alone
@@ -1367,6 +1375,22 @@ module ps1_gpu (
 	reg [9:0]  sc_x;
 	reg [8:0]  sc_y;
 	reg [9:0]  sc_w, sc_lines;
+	// ROWS THE GAME NEVER DRAWS ARE SENT BLACK. They keep whatever VRAM held
+	// before them, and the two buffers of a double-buffered game hold different
+	// leftovers there -- so, captured at every flip, those rows flash between two
+	// pictures. Crash draws y 12..227 of a 240-line display: rows 0..11 (a strip
+	// of garbled glyphs) and 228..239 (a LOADING bar left from an earlier screen)
+	// alternated on the board 2026-09-27, everything else was steady. A TV's
+	// overscan hides them; a capture must blank them. (This existed on 2026-09-25
+	// and came out when the design stopped fitting.)
+	// The bound is the rows the engine actually WROTE since the last flip -- the
+	// drawing area was tried then and is not tight enough, the game sets a
+	// full-screen clip at some point in a frame. Rows at or past 240 are left out,
+	// so uploading a texture below the framebuffers cannot widen it. Applied only
+	// to a capture started by a flip: the BIOS draws in place and is left alone.
+	reg [8:0]  wr_lo, wr_hi;        // rows the engine wrote since the last flip
+	reg [8:0]  sc_ylo, sc_yhi;      // ...as they stood for the buffer on screen
+	reg        sc_crop;             // this capture blanks outside them
 	reg        sc_lmode;      // this frame is being taken a line at a time
 	reg        sc_ldec;       // ...and every other pixel is dropped, so two make one
 	reg [63:0] fl_half;       // the first of a pair, already thinned
@@ -1396,6 +1420,12 @@ module ps1_gpu (
 	// where the next pixel pair lives
 	reg         sc_field;     // the field this capture reads (480i: the one on screen)
 	wire [28:0] s_next = vaddr(sc_x + sx, sc_v480 ? (sc_y + {sy[7:0], sc_field}) : (sc_y + sy));
+	wire [8:0]  src_y   = sc_v480 ? (sc_y + {sy[7:0], sc_field}) : (sc_y + sy);
+	wire        row_lit = disp_on && ({1'b0, sy} < sc_lines)
+	                      && (!sc_crop || (src_y >= sc_ylo && src_y <= sc_yhi));
+	// every write the engine makes, and the picture row it lands on
+	wire [8:0]  wr_y    = v_addr[19:11];
+	wire        wr_go   = v_req && v_we && v_ack && (wr_y < 9'd240);
 	// A wide picture is captured at half width -- every other column -- so the
 	// odd columns were being walked one at a time to emit nothing at all: 256
 	// clocks a row, 61,440 a capture, 23% of it, spent stepping past pixels the
@@ -1407,8 +1437,9 @@ module ps1_gpu (
 	                            sc_v480 ? (sc_y + {sy[7:0], sc_field}) : (sc_y + sy));
 
 	always @(posedge clk) begin
-		if (rst) begin sc <= SC_IDLE; s_req <= 1'b0; px_valid <= 1'b0; sx <= 0; sy <= 0; ox <= 0; fpx_valid <= 1'b0; scan_start <= 1'b0; scan_done <= 1'b0; arm_ticks <= 2'd0; want_scan <= 1'b1; flip_pend <= 1'b0; flip_alt <= 1'b0; flips_recent <= 2'd0; disp_x_d <= 0; disp_y_d <= 0; sc_abort <= 1'b0; fl_valid <= 1'b0; sc_lmode <= 1'b0; sc_ldec <= 1'b0; fl_half_v <= 1'b0;
+		if (rst) begin sc <= SC_IDLE; s_req <= 1'b0; px_valid <= 1'b0; sx <= 0; sy <= 0; ox <= 0; fpx_valid <= 1'b0; scan_start <= 1'b0; scan_done <= 1'b0; scan_abort <= 1'b0; arm_ticks <= 2'd0; want_scan <= 1'b1; flip_pend <= 1'b0; flip_alt <= 1'b0; flips_recent <= 2'd0; disp_x_d <= 0; disp_y_d <= 0; sc_abort <= 1'b0; fl_valid <= 1'b0; sc_lmode <= 1'b0; sc_ldec <= 1'b0; fl_half_v <= 1'b0;
 		               sc_x <= 0; sc_y <= 0; sc_w <= 10'd320; sc_lines <= 10'd240; sc_v480 <= 1'b0; sc_field <= 1'b0;
+		               wr_lo <= 9'd511; wr_hi <= 9'd0; sc_ylo <= 9'd0; sc_yhi <= 9'd511; sc_crop <= 1'b0;
 		               sline_v <= 1'b0; sline_tag <= 25'd0; sline <= 128'd0; end
 		else begin
 			if (!scan_enable || sc != SC_IDLE) arm_ticks <= 2'd0;
@@ -1434,15 +1465,24 @@ module ps1_gpu (
 				// page cannot show more than it already receives anyway.
 				flip_alt <= ~flip_alt;
 				flips_recent <= 2'd3;
-				if (flip_alt) begin
+				// the buffer just flipped to was drawn over the interval that has
+				// just ended, so the rows written over it are exactly its bound
+				sc_ylo <= wr_lo; sc_yhi <= wr_hi;
+				wr_lo  <= 9'd511; wr_hi <= 9'd0;
+				if (flip_alt || every_flip) begin
 					flip_pend <= 1'b1;
 					if (sc != SC_IDLE) sc_abort <= 1'b1;
 				end
+			end
+			if (!(disp_x != disp_x_d || disp_y != disp_y_d) && wr_go) begin
+				if (wr_y < wr_lo) wr_lo <= wr_y;
+				if (wr_y > wr_hi) wr_hi <= wr_y;
 			end
 			fpx_valid  <= 1'b0;
 			fl_valid   <= 1'b0;
 			scan_start <= 1'b0;
 			scan_done  <= 1'b0;
+			scan_abort <= 1'b0;
 			// s_req is held, not pulsed, for the same reason v_req is: the cache
 			// only takes a request while idle, and while the draw engine has it
 			// a one-cycle pulse is simply missed -- the scanout then waits in
@@ -1474,6 +1514,7 @@ module ps1_gpu (
 			              || !il_skip && (frame_len != 20'd0 && post_vsync >= late_at
 			                  && (arm_ticks == 2'd3 || cap_every_vsync))))) begin
 					sc_field <= 1'b0; sc_abort <= 1'b0;
+					sc_crop  <= flip_pend && (sc_ylo <= sc_yhi);   // a flipping game, and it drew something
 					sx <= 0; sy <= 0; ox <= 0; substep <= 0;
 					step <= (hres == 2'd0) ? 2'd1 : (hres == 2'd1) ? 2'd1 : 2'd2;   // 256/320 -> 1:1, 512/640 -> 2:1
 					sc_x <= disp_x; sc_y <= disp_y; sc_w <= disp_w;
@@ -1488,7 +1529,7 @@ module ps1_gpu (
 					scan_start <= 1'b1;
 					sc <= SC_RD;
 				end
-			SC_RD: if (sc_abort) begin sc <= SC_IDLE; sc_abort <= 1'b0; want_scan <= 1'b1; sline_v <= 1'b0; fl_half_v <= 1'b0; end
+			SC_RD: if (sc_abort) begin sc <= SC_IDLE; sc_abort <= 1'b0; scan_abort <= 1'b1; want_scan <= 1'b1; sline_v <= 1'b0; fl_half_v <= 1'b0; end
 				else if (!scan_hold) begin
 					// a 480-line picture is captured one field at a time: every other row
 					// (a whole-line frame moves eight pixels at a time, so the line it
@@ -1511,17 +1552,17 @@ module ps1_gpu (
 						if (!sc_ldec) begin
 							// eight pixels, straight out, in the bytes they arrived in
 							fl_valid <= 1'b1;
-							fl_data  <= (disp_on && ({1'b0, sy} < sc_lines)) ? s_line : 128'd0;
+							fl_data  <= row_lit ? s_line : 128'd0;
 							fl_x     <= sx;
 							fl_y     <= sy;
 						end else if (!fl_half_v) begin
 							// first of a pair: thinned and held
-							fl_half   <= (disp_on && ({1'b0, sy} < sc_lines)) ? thin4(s_line) : 64'd0;
+							fl_half   <= row_lit ? thin4(s_line) : 64'd0;
 							fl_half_v <= 1'b1;
 						end else begin
 							// second of the pair completes one output line
 							fl_valid  <= 1'b1;
-							fl_data   <= {(disp_on && ({1'b0, sy} < sc_lines)) ? thin4(s_line) : 64'd0,
+							fl_data   <= {row_lit ? thin4(s_line) : 64'd0,
 							              fl_half};
 							fl_x      <= (sx - 10'd8) >> 1;
 							fl_y      <= sy;
@@ -1538,7 +1579,7 @@ module ps1_gpu (
 					end else
 						sc <= SC_EMIT;
 				end
-			SC_EMIT: if (sc_abort) begin sc <= SC_IDLE; sc_abort <= 1'b0; want_scan <= 1'b1; sline_v <= 1'b0; fl_half_v <= 1'b0; end
+			SC_EMIT: if (sc_abort) begin sc <= SC_IDLE; sc_abort <= 1'b0; scan_abort <= 1'b1; want_scan <= 1'b1; sline_v <= 1'b0; fl_half_v <= 1'b0; end
 				else begin
 					// every pixel, full width, to the frame in DDR3
 					// a 512/640-wide picture is captured at half width (every other
@@ -1550,7 +1591,7 @@ module ps1_gpu (
 						// what a blanked display shows anyway.
 						fpx_valid <= 1'b1;
 						fpx_x <= (sc_w > 10'd320) ? {1'b0, sx[9:1]} : sx; fpx_y <= sy;
-						fpx_rgb <= (disp_on && ({1'b0, sy} < sc_lines)) ? half(sword, (sc_x + sx) & 1) : 16'd0;
+						fpx_rgb <= row_lit ? half(sword, (sc_x + sx) & 1) : 16'd0;
 					end
 					// two pixels per word; emit those that land on output columns
 					// (with the step skipping the odd columns, every pixel the

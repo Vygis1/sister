@@ -68,7 +68,7 @@ module tb_ps1_clut;
 	wire        vblank, hblank, dot_ce, irq;
 
 	wire v_lin_w, g_lin_w;
-	ps1_gpu gpu ( .v_lin(v_lin_w),
+	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w),
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .a4(a4), .dma_active(1'b0), .cap_every_vsync(1'b0), .gpu_fast(1'b1),
 		.no_tcache(no_tcache_r), .no_ccache(1'b0), .no_trun(1'b0), .wdata(wdata), .rdata(rdata),

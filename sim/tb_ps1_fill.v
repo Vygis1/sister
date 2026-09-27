@@ -9,7 +9,7 @@ module tb_ps1_fill;
 	wire [127:0] v_line;
 	wire px_valid; wire [8:0] px_x,px_y; wire [7:0] px_rgb; wire vblank,hblank,dot_ce,irq;
 	wire v_lin_w, g_lin_w;
-	ps1_gpu gpu( .v_lin(v_lin_w),.clk(clk),.rst(rst),.sel(sel),.we(we),.a4(a4),.dma_active(1'b0),.cap_every_vsync(1'b0), .gpu_fast(1'b1),.wdata(wdata),.rdata(rdata),
+	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w),.clk(clk),.rst(rst),.sel(sel),.we(we),.a4(a4),.dma_active(1'b0),.cap_every_vsync(1'b0), .gpu_fast(1'b1),.wdata(wdata),.rdata(rdata),
 		.dma_wr(1'b0),.dma_data(32'd0),.dma_ready(),.dma_rd(1'b0),.dma_rdata(),.dma_rvalid(),
 		.v_addr(v_addr),.v_req(v_req),.v_we(v_we),.v_be(v_be),.v_wdata(v_wdata),.v_rdata(v_rdata),.v_line(v_line),.v_ack(v_ack),
 		.v_lwe(v_lwe),.v_wdata128(v_wdata128),

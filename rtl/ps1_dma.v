@@ -67,6 +67,14 @@ module ps1_dma (
 	output reg  [31:0] cd_go_info,
 	output reg  [15:0] cd_words,      // words channel 3 has written
 	input  wire        gpu_rvalid,
+	// the SPU's transfer FIFO (channel 4): RAM -> SPU a word at a time when it
+	// can take one, and SPU -> RAM for the rare game that reads sound RAM back
+	output reg         spu_wr,
+	output wire [31:0] spu_data,
+	input  wire        spu_ready,
+	output reg         spu_rd,
+	input  wire [31:0] spu_rdata,
+	input  wire        spu_rvalid,
 
 	output wire        irq,
 	// The chip's DMA owns the bus for a block transfer (sync mode 0, and the
@@ -118,6 +126,11 @@ module ps1_dma (
 	// which channels are asking: enabled in DPCR, started, and (in mode 0)
 	// triggered
 	reg [6:0] want;
+	// the device behind the block paths: the GPU's, or on channel 4 the SPU's
+	wire        dev_ready  = (cur == 3'd4) ? spu_ready  : gp0_ready;
+	wire        dev_rvalid = (cur == 3'd4) ? spu_rvalid : gpu_rvalid;
+	wire [31:0] dev_rdata  = (cur == 3'd4) ? spu_rdata  : gpu_rdata;
+	assign      spu_data   = gp0_data;
 	integer k;
 	always @(*) begin
 		for (k = 0; k < 7; k = k + 1)
@@ -133,12 +146,14 @@ module ps1_dma (
 			end
 			dpcr <= 32'h0765_4321; dicr <= 32'd0;
 			st <= S_IDLE; cur <= 3'd0;
-			r_req <= 1'b0; r_we <= 1'b0; gp0_wr <= 1'b0; gpu_rd <= 1'b0; dbg_node_v <= 1'b0;
+			r_req <= 1'b0; r_we <= 1'b0; gp0_wr <= 1'b0; gpu_rd <= 1'b0; dbg_node_v <= 1'b0; spu_wr <= 1'b0; spu_rd <= 1'b0;
 			cd_rd <= 1'b0; cd_go <= 1'b0; cd_go_info <= 32'd0; cd_words <= 16'd0;
 		end else begin
 			r_req  <= 1'b0;
 			gp0_wr <= 1'b0;
 			gpu_rd <= 1'b0;
+			spu_wr <= 1'b0;
+			spu_rd <= 1'b0;
 			cd_rd <= 1'b0;
 			cd_go <= 1'b0;
 			dbg_node_v <= 1'b0;
@@ -184,6 +199,15 @@ module ps1_dma (
 						blocks <= (chcr[3][10:9] == 2'd0) ? 16'd1 : bcr[3][31:16];
 						st <= S_CRD;
 					end
+					// Channel 4, the SPU: the same two block paths as the GPU's,
+					// with the SPU's FIFO behind them instead of GP0 / GPUREAD. It
+					// used to finish the moment it started, and every sample bank
+					// a game uploaded went nowhere.
+					3'd4: begin
+						words  <= {16'd0, bcr[4][15:0]};
+						blocks <= (chcr[4][10:9] == 2'd0) ? 16'd1 : bcr[4][31:16];
+						st <= chcr[4][0] ? S_RD : S_GRD;
+					end
 					3'd6: begin                                     // OTC
 						words <= {16'd0, bcr[6][15:0]};
 						st <= S_OTC;
@@ -197,9 +221,9 @@ module ps1_dma (
 					if (blocks <= 16'd1) st <= S_DONE;
 					else begin
 						blocks <= blocks - 16'd1;
-						words  <= {16'd0, bcr[2][15:0]};
+						words  <= {16'd0, bcr[cur][15:0]};
 					end
-				end else if (gp0_ready) begin
+				end else if (dev_ready) begin
 					r_addr <= {5'd0, addr};
 					r_we   <= 1'b0;
 					r_req  <= 1'b1;
@@ -215,9 +239,9 @@ module ps1_dma (
 					gp0_data <= r_rdata;
 					st <= S_GP0;
 				end else r_req <= 1'b1;   // hold until the cache takes it
-			S_GP0: if (gp0_ready) begin
-					gp0_wr   <= 1'b1;
-					addr     <= chcr[2][1] ? addr - 24'd4 : addr + 24'd4;
+			S_GP0: if (dev_ready) begin
+					if (cur == 3'd4) spu_wr <= 1'b1; else gp0_wr <= 1'b1;
+					addr     <= chcr[cur][1] ? addr - 24'd4 : addr + 24'd4;
 					words    <= words - 32'd1;
 					st <= S_RD;
 				end
@@ -268,20 +292,20 @@ module ps1_dma (
 			// --- GPU -> RAM (VRAM read-back) ---------------------------------------------------
 			S_GRD: if (words == 32'd0) begin
 					if (blocks <= 16'd1) st <= S_DONE;
-					else begin blocks <= blocks - 16'd1; words <= {16'd0, bcr[2][15:0]}; end
+					else begin blocks <= blocks - 16'd1; words <= {16'd0, bcr[cur][15:0]}; end
 				end else begin
-					gpu_rd <= 1'b1;
+					if (cur == 3'd4) spu_rd <= 1'b1; else gpu_rd <= 1'b1;
 					st <= S_GWR;
 				end
 			// gpu_rd is held until the word arrives: a one-cycle pulse while the
 			// GPU had nothing ready yet was simply missed, and this waited forever
-			S_GWR: if (gpu_rvalid) begin
+			S_GWR: if (dev_rvalid) begin
 					r_addr  <= {5'd0, addr};
 					r_we    <= 1'b1;
-					r_wdata <= gpu_rdata;
+					r_wdata <= dev_rdata;
 					r_req   <= 1'b1;
 					st <= S_GWRW;
-				end else gpu_rd <= 1'b1;
+				end else if (cur == 3'd4) spu_rd <= 1'b1; else gpu_rd <= 1'b1;
 			S_GWRW: if (r_ack) begin
 					addr  <= addr + 24'd4;
 					words <= words - 32'd1;
