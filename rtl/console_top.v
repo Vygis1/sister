@@ -211,9 +211,23 @@ module console_top #(
 	wire [15:0]  ps1_d_wmask;
 	assign d_wmask = (CORE_PS1 != 0) ? ps1_d_wmask : 16'hFFFF;
 	reg  [5:0]   perf_sel;   // 64 now: the drawing engine, and where in a frame it is busy
-	reg          no_icache, no_ibuf, ic_verify, no_overlap;   // ctrl 0xEC bits 8..11
-	reg          no_tcache, no_ccache, no_trun, no_capfirst;  // ctrl 0xEC bits 14..17
-	reg  [3:0]   gte_old;    // ctrl 0xEC bits 20..23: put back the GTE as it was, one fix per bit
+	// --- the debug switches, TIED OFF ----------------------------------------
+	// Each of these kept a second implementation alive so the two could be
+	// compared on the board: the instruction cache, the instruction buffer, the
+	// cache self-check, the non-overlapped fetch, the texture and palette
+	// caches, the texture run, the capture's cache priority, and four separate
+	// GTE behaviours. Every one of those questions is settled -- the GTE matches
+	// real hardware on 2,000 fuzz cases, and the caches are all worth keeping --
+	// and the duplicates are not free: the gte_old pair alone muxes 44- and
+	// 64-bit arithmetic, and the part is at 100.00% of its slices, which is why
+	// the instruction-fetch run misses timing by 0.342 ns on a path that is 76%
+	// ROUTING. Constants here, so synthesis deletes the halves nobody uses.
+	//
+	// To bring one back for a measurement: make it a reg again and restore its
+	// bit in the ctrl 0xEC write below. Bits 8..11, 14..17 and 20..23 are free.
+	wire         no_icache = 1'b0, no_ibuf = 1'b0, ic_verify = 1'b0, no_overlap = 1'b0;
+	wire         no_tcache = 1'b0, no_ccache = 1'b0, no_trun = 1'b0, no_capfirst = 1'b0;
+	wire [3:0]   gte_old   = 4'd0;
 	reg          cpu_fast = 1'b0, gpu_fast = 1'b0;             // ctrl 0xEC bits 12, 13: run past the console's pace (off: the console's)
 	wire [31:0]  ps1_icv_pc, ps1_icv_got, ps1_icv_want, ps1_icv_n;
 	wire         ps1_dbg_exec;
@@ -403,6 +417,7 @@ module console_top #(
 
 	// --- control registers ----------------------------------------------------
 	reg        run;
+	reg        cpu_halt;    // ctrl 0x04 bit 2: stop the processor where it stands
 	reg        mirror_v;
 	reg [3:0]  mapper_id;
 	reg        chr_is_ram;      // the cartridge has tile RAM, not tile ROM
@@ -426,19 +441,19 @@ module console_top #(
 
 	always @(posedge clk) begin
 		if (rst) begin
-			run <= 1'b0; mirror_v <= 1'b0; joy1 <= 16'd0; joy2 <= 16'd0;
+			run <= 1'b0; cpu_halt <= 1'b0; mirror_v <= 1'b0; joy1 <= 16'd0; joy2 <= 16'd0;
 			mapper_id <= 4'd0; prg_last <= 6'd3; console_sel <= CONSOLE_FIRST;
 			chr_is_ram <= 1'b0;
 			test_mode <= 1'b0;
 		end else if (ctrl_we) begin
 			case (off)
-			16'h0004: begin run <= wdata[0]; mirror_v <= wdata[1]; end
+			16'h0004: begin run <= wdata[0]; mirror_v <= wdata[1]; cpu_halt <= wdata[2]; end
 		16'h0064: pct_idx <= wdata[3:0];        // which PC-trace entry 0x64 reads back
 			16'h007C: hr_line <= wdata[23:0];       // read one DDR3 line (hr_go fires with the write)
 			16'h0090: nt_idx <= wdata[3:0];         // which DMA node-trace entry 0x90/0x94 read back
 			16'h009C: ps1_rsel <= wdata[5:0];
 			16'h0110: cd_trace_idx <= wdata[5:0];
-			16'h00EC: begin perf_sel <= wdata[5:0]; no_icache <= wdata[8]; no_ibuf <= wdata[9]; ic_verify <= wdata[10]; no_overlap <= wdata[11]; no_tcache <= wdata[14]; no_ccache <= wdata[15]; no_trun <= wdata[16]; no_capfirst <= wdata[17]; gte_old <= wdata[23:20];
+			16'h00EC: begin perf_sel <= wdata[5:0];
 			                cpu_fast <= wdata[12]; gpu_fast <= wdata[13]; end
 			16'h00F0: stream_ctl <= wdata;
 			16'h00F4: stream_base_r <= wdata;
@@ -472,7 +487,7 @@ module console_top #(
 	always @* begin
 		case (off)
 		16'h0000: ctrl_rdata = 32'h4E45_0001;      // "NE"
-		16'h0004: ctrl_rdata = {30'd0, mirror_v, run};
+		16'h0004: ctrl_rdata = {29'd0, cpu_halt, mirror_v, run};
 		16'h0008: ctrl_rdata = {16'd0, joy1};
 		16'h000C: ctrl_rdata = {16'd0, joy2};
 		16'h0010: ctrl_rdata = frame_count;
@@ -711,23 +726,41 @@ module console_top #(
 	// reports its results as text has somewhere to report them to. This is the
 	// same idea as the blargg ROMs writing to $6000: let the program say whether
 	// it passed rather than reading it off a waveform.
-	reg [7:0]  con_mem [0:4095];
-	reg [31:0] con_q;
+	// The Z80's console text, four kilobytes of it. ONLY BUILT FOR A CORE THAT
+	// HAS A Z80. In a PlayStation image nothing ever writes it, so it has no
+	// write port, so it cannot be a block RAM -- and it cannot be optimised away
+	// either, because the register bus reads it. Synthesis built 32,768
+	// flip-flops and a 1024-to-1 multiplexer of dead storage into every image:
+	// "RAM 'con_mem_reg' ... dissolved into (32768) registers bits". On a part
+	// already at 93% that is what stopped the design fitting at all, and it had
+	// nothing to do with the core being built.
+	generate if (CORE_NES || CORE_SMS || CORE_MD) begin : g_con
+		(* ram_style = "block" *) reg [31:0] con_mem [0:1023];
+		reg [31:0] con_q;
+		wire       con_we = z80_io_we && (con_count < 32'd4096);
+		wire [9:0] con_wa = con_count[11:2];
+		wire [1:0] con_wb = con_count[1:0];
 
-	always @(posedge clk) begin
-		if (z80_rst) con_count <= 32'd0;
-		else if (z80_io_we && con_count < 32'd4096) begin
-			con_mem[con_count[11:0]] <= z80_dout;
-			con_count <= con_count + 32'd1;
+		always @(posedge clk) begin
+			if (z80_rst)     con_count <= 32'd0;
+			else if (con_we) con_count <= con_count + 32'd1;
 		end
-	end
 
-	// Read back four bytes at a time: the buffer holds a couple of kilobytes of
-	// text and one round trip per byte would take seconds.
-	always @(posedge clk)
-		con_q <= {con_mem[{con_index, 2'd3}], con_mem[{con_index, 2'd2}],
-		          con_mem[{con_index, 2'd1}], con_mem[{con_index, 2'd0}]};
-	assign con_rdata = con_q;
+		// one write port with byte enables, one read port: a block RAM's shape
+		always @(posedge clk) begin
+			if (con_we) begin
+				if (con_wb == 2'd0) con_mem[con_wa][7:0]   <= z80_dout;
+				if (con_wb == 2'd1) con_mem[con_wa][15:8]  <= z80_dout;
+				if (con_wb == 2'd2) con_mem[con_wa][23:16] <= z80_dout;
+				if (con_wb == 2'd3) con_mem[con_wa][31:24] <= z80_dout;
+			end
+			con_q <= con_mem[con_index];
+		end
+		assign con_rdata = con_q;
+	end else begin : g_nocon
+		always @(posedge clk) con_count <= 32'd0;
+		assign con_rdata = 32'd0;
+	end endgenerate
 
 	// --- the Mega Drive -----------------------------------------------------------
 	// Its own cartridge memory, because it reads through cart_cache in 128-bit
@@ -879,7 +912,7 @@ module console_top #(
 			.clk(clk), .rst(rst),
 			// The CPU runs when the PlayStation is selected AND the host has
 			// released it (run=1), which the host sets after the BIOS is loaded.
-			.cpu_run(ps1_sel && run),
+			.cpu_run(ps1_sel && run), .cpu_halt(cpu_halt),
 			// The BIOS is host-loaded the same way a cartridge is: 32-bit words
 			// through the program-fill path, here a byte offset into the BIOS.
 			.host_windex({md_windex_full[16:0], 2'b00}),

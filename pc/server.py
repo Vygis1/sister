@@ -595,7 +595,7 @@ class FrameStream:
         self.count = 0
         # diagnostics: slices that did not follow the one before (by offset)
         self.diag = {"seq_break": 0, "backward": 0, "dup_complete": 0, "pkts": 0,
-                     "held_incomplete": 0}
+                     "held_incomplete": 0, "restarted": 0}
         self._seq = {}
         self.last_rx = 0.0
         self.last_want = 0.0
@@ -636,7 +636,60 @@ class FrameStream:
         # bit 27 = stream from the DDR3 copy (a capture at full speed, then the
         # network at its own pace); clear = straight off the scanout, paced by
         # the network, which tears a double-buffered game. STREAM_DDR selects.
-        talk(link.write, STREAM_CTL, (0xC800_0000 if STREAM_DDR else 0xC000_0000) | STREAM_PORT)
+        # WHICH PATH, decided per video mode rather than once and for all,
+        # because each one fails where the other works. Measured on Crash:
+        #
+        #   direct (bit 27 clear)  ~18 new pictures a second in the game, and
+        #                          NOTHING at all during the boot -- the BIOS
+        #                          runs 640x480 interlaced and the direct path
+        #                          delivers black until the game switches mode.
+        #   DDR3 copy (bit 27)     the boot animation appears, and the game
+        #                          crawls: 13 distinct frames in 144 requests,
+        #                          1.6 a second, which on screen is a character
+        #                          frozen for four frames and then snapping to
+        #                          a new pose.
+        #
+        # The direct path splices in SOME scenes -- standing still in a level it
+        # put the top of one picture and the bottom of another on the wire in
+        # 40-46% of frames, split at row 60 of 240, and the DDR3 copy had none
+        # of that. But the copy's speed depends on a whole capture finishing,
+        # and in a heavy scene it collapses. Measured in the attract cycle's
+        # temple level, alternating between the two, 2026-09-25:
+        #
+        #   direct off the scanout   28.8 and 26.1 frames a second
+        #   from the DDR3 copy        6.4 and 15.1
+        #
+        # Six frames a second of a moving camera is far worse to watch than an
+        # occasional splice, so the direct path stays and the splicing has to be
+        # fixed where it happens instead of avoided here.
+        # 2026-09-26, MEASURED ON THE BOARD, twice each way, Crash in a level:
+        #
+        #   path        frames a second   frames jumping vertically   with a band
+        #   direct           16.7                   75%                   37%
+        #   from DDR3         9.3                    0%                    0%
+        #
+        # The direct path's picture restarts part way down -- the top is the
+        # frame just captured, the bottom is the NEXT capture starting again
+        # from its first row -- because a capture may begin while the network
+        # core is still sending. That is fixed in fb_stream.v (`want` clears
+        # when a capture FINISHES, not when it starts) and gated by
+        # sim/tb_fbstream.v, but until that image is on the board the copy is
+        # the only clean picture. Half the frame rate and no glitching beats
+        # twice the frame rate with three quarters of the frames broken.
+        #
+        # When the fixed image is flashed, put this back to the direct path and
+        # re-measure with the same test before believing it.
+        # The fbhandshake image (2026-09-27) fixes the direct path, so take it
+        # again: it is clean AND fast. If the jumping ever comes back, flip this
+        # to True and re-measure both ways before changing anything else.
+        ddr = False
+        try:
+            d = talk(link.read, PS1_DISP)
+            ddr = bool((d >> 28) & 3)      # interlaced: the direct path shows it black
+        except Exception:
+            pass
+        self.from_ddr = ddr
+        talk(link.write, STREAM_CTL, (0xC800_0000 if ddr else 0xC000_0000) | STREAM_PORT)
         talk(link.write, FB_CAP, 1)         # the first capture; the streamer re-arms after each frame
         self.mismatch = 0
         self.enabled = True
@@ -703,12 +756,29 @@ class FrameStream:
             self.mismatch = 0
             self.diag["pkts"] += 1
             exp = self._seq.get(fid)
+            restart = False
             if exp is not None and off != exp:
                 self.diag["seq_break"] += 1
-                if off < exp: self.diag["backward"] += 1
+                if off < exp:
+                    self.diag["backward"] += 1
+                    restart = True
             self._seq[fid] = off + n
             with self.lock:
                 entry = self.frames.get(fid)
+                # The board starts the capture again from the top under the SAME
+                # frame id, and what it sent before the restart is a picture of
+                # the console one frame earlier. Keeping it and letting the new
+                # words fill in around it hands the page a frame that is the top
+                # of one picture and the bottom of another -- measured
+                # 2026-09-25 on Crash: the split was at row 60 of 240 in 42 of
+                # the 71 spliced pairs, and about half of all delivered frames
+                # differed from the one before by 70% or more while the pad was
+                # not being touched. That is the "everything wiggles". So a
+                # restart throws away what came before it.
+                if restart and entry is not None:
+                    entry = None
+                    del self.frames[fid]
+                    self.diag["restarted"] = self.diag.get("restarted", 0) + 1
                 if entry is None:
                     if len(self.frames) > 4:      # forget stale partial frames
                         for k in sorted(self.frames)[:-2]:

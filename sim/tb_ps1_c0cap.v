@@ -21,6 +21,7 @@ module tb_ps1_c0cap;
 	reg d_valid = 0; reg [127:0] d_rdata_r = 0; assign d_rdata = d_rdata_r;
 	wire px_valid; wire [8:0] px_x, px_y; wire [7:0] px_rgb; wire [31:0] pc;
 	ps1_top dut (
+		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),
 		.host_windex(host_windex), .host_we(host_we), .host_wdata(host_wdata),

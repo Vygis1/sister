@@ -18,6 +18,7 @@ module tb_ps1_fb;
 	reg fb_cap_go = 0; wire fb_cap_ready; wire [9:0] fb_width; wire [8:0] fb_height;
 	reg [17:0] fbr_addr = 0; reg fbr_req = 0; wire [31:0] fbr_rdata; wire fbr_ack;
 	ps1_top dut (
+		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),
 		.host_windex(host_windex), .host_we(host_we), .host_wdata(host_wdata),

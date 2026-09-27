@@ -207,14 +207,24 @@ module regfile #(
 	wire [31:0] abuf_rdata;
 	wire [15:0] console_audio;
 
-	synth u_synth (
-		.clk(clk), .rst(rst),
-		.off(off), .we(syn_we), .wdata(bus_wdata),
-		.rdata(syn_rdata), .err(syn_err),
-		.ext_sample(console_audio),
-		.buf_addr(sel_addr[14:2]),
-		.buf_rdata(abuf_rdata)
-	);
+	// NOT IN A PLAYSTATION IMAGE. It is 792 LUTs of a part that is at 96.4% and
+	// would not place at all -- and there is nothing for it to do there: the
+	// PlayStation's sound unit is a 69-LUT stub, so `console_audio` carries
+	// nothing. Every other image keeps it exactly as it was.
+	generate if (!CORE_PS1) begin : g_syn
+		synth u_synth (
+			.clk(clk), .rst(rst),
+			.off(off), .we(syn_we), .wdata(bus_wdata),
+			.rdata(syn_rdata), .err(syn_err),
+			.ext_sample(console_audio),
+			.buf_addr(sel_addr[14:2]),
+			.buf_rdata(abuf_rdata)
+		);
+	end else begin : g_nosyn
+		assign syn_rdata = 32'd0;
+		assign syn_err = 1'b0;
+		assign abuf_rdata = 32'd0;
+	end endgenerate
 
 	// --- video ---------------------------------------------------------------
 	wire [31:0] vid_rdata, fb_rdata;

@@ -1396,6 +1396,15 @@ module ps1_gpu (
 	// where the next pixel pair lives
 	reg         sc_field;     // the field this capture reads (480i: the one on screen)
 	wire [28:0] s_next = vaddr(sc_x + sx, sc_v480 ? (sc_y + {sy[7:0], sc_field}) : (sc_y + sy));
+	// A wide picture is captured at half width -- every other column -- so the
+	// odd columns were being walked one at a time to emit nothing at all: 256
+	// clocks a row, 61,440 a capture, 23% of it, spent stepping past pixels the
+	// capture does not want. The step skips them.
+	wire [9:0]  sx_step = (sc_w > 10'd320) ? 10'd2 : 10'd1;
+	// ...and where the one after that lives, so SC_EMIT can tell whether it is
+	// inside the line already in hand.
+	wire [28:0] s_after = vaddr(sc_x + sx + sx_step,
+	                            sc_v480 ? (sc_y + {sy[7:0], sc_field}) : (sc_y + sy));
 
 	always @(posedge clk) begin
 		if (rst) begin sc <= SC_IDLE; s_req <= 1'b0; px_valid <= 1'b0; sx <= 0; sy <= 0; ox <= 0; fpx_valid <= 1'b0; scan_start <= 1'b0; scan_done <= 1'b0; arm_ticks <= 2'd0; want_scan <= 1'b1; flip_pend <= 1'b0; flip_alt <= 1'b0; flips_recent <= 2'd0; disp_x_d <= 0; disp_y_d <= 0; sc_abort <= 1'b0; fl_valid <= 1'b0; sc_lmode <= 1'b0; sc_ldec <= 1'b0; fl_half_v <= 1'b0;
@@ -1544,20 +1553,42 @@ module ps1_gpu (
 						fpx_rgb <= (disp_on && ({1'b0, sy} < sc_lines)) ? half(sword, (sc_x + sx) & 1) : 16'd0;
 					end
 					// two pixels per word; emit those that land on output columns
-					if (ox < 9'd320 && substep == 0) begin
+					// (with the step skipping the odd columns, every pixel the
+					// capture takes is one output column)
+					if (ox < 9'd320 && (sx_step == 10'd2 || substep == 2'd0)) begin
 						px_valid <= disp_on;
 						px_x <= ox; px_y <= sy;
 						px_rgb <= ({1'b0, sy} < sc_lines) ? rgb332(half(sword, (sc_x + sx) & 1)) : 8'd0;
 						ox <= ox + 9'd1;
 					end
 					substep <= (substep + 2'd1 == step) ? 2'd0 : substep + 2'd1;
-					sx <= sx + 10'd1;
-					if ((ox >= 9'd320 && sx + 10'd1 >= sc_w) || sx >= 10'd640 + 10'd2) begin
+					sx <= sx + sx_step;
+					// The row ends where the PICTURE ends. It used to run on until
+					// the low-resolution preview had 320 columns, which for a
+					// 512-wide game meant reading 640 VRAM columns for a 512-wide
+					// display: 80 lines a row instead of 64, a quarter of the
+					// capture spent on columns outside the window -- and for a
+					// double-buffered game those columns are the OTHER buffer.
+					// The capture has to fit inside one of the machine's frames or
+					// it reads a buffer the game has started drawing into again,
+					// and measured on the board 2026-09-26 it does not: 18.67 ms
+					// against a frame of 16.62. This is a quarter of that, free.
+					// The preview a 512-wide game leaves in the register-bus
+					// framebuffer is 256 columns wide now instead of 320; the page
+					// takes the picture off the network and never reads it.
+					if (sx + sx_step >= sc_w || sx >= 10'd640 + 10'd2) begin
 						// next row
 						ox <= 0; sx <= 0; substep <= 0;
 						if (sy == 9'd239) begin sc <= SC_IDLE; scan_done <= 1'b1; end else begin sy <= sy + 9'd1; sc <= SC_RD; end
-					end else if (((sc_x + sx) & 1) == 1)
-						sc <= SC_RD;          // this word is spent
+					// The line in hand is EIGHT pixels. Going back through SC_RD
+					// between them spent a clock a pixel asking a question already
+					// answered -- the tag is the one just read. Take the next word
+					// straight out of it and stay here. SC_RD is then entered once
+					// a line instead of once a word.
+					end else if (!sc_lmode && !scan_hold && sline_v && (s_after[28:4] == sline_tag))
+						sword <= sline[s_after[3:2]*32 +: 32];
+					else
+						sc <= SC_RD;
 				end
 			endcase
 		end

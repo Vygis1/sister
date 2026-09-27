@@ -407,6 +407,17 @@ module ps1_gte (
 	// dropped. A game's square root wrote LZCS there, read a stale LZCR, and
 	// overflowed.
 	assign busy = run || cmd;
+	// A command is taken on the EDGE of `cmd`, never on the level, so nothing can
+	// ever make the sequencer run the same one twice (see r3000.v). The register
+	// WRITE line stays level-sensitive: the processor asserts it on consecutive
+	// clocks for back-to-back MTC2/CTC2, which is how a game loads a matrix, and
+	// an edge there drops the second of every pair -- tried, and it put objects
+	// warping across the whole screen.
+	reg cmd_d;
+	always @(posedge clk) begin
+		if (rst) cmd_d <= 1'b0; else cmd_d <= cmd;
+	end
+	wire cmd_go = cmd && !cmd_d;
 	wire [4:0] shamt = sf ? 5'd12 : 5'd0;
 
 	reg signed [63:0] macw0, macw1, macw2;     // unshifted accumulators between steps
@@ -738,7 +749,7 @@ module ps1_gte (
 				5'd30: begin d[30] <= wdata; d[31] <= {26'd0, leadcount(wdata)}; end
 				default: d[reg_i] <= wdata;
 			endcase
-		end else if (cmd && !run) begin
+		end else if (cmd_go && !run) begin
 			op <= word[5:0]; sf <= word[19]; lm <= word[10];
 			mx <= word[18:17]; vx <= word[16:15]; cv <= word[14:13];
 			step <= 0; vi <= 0; c[31] <= 32'd0; ir3q <= 1'b0; run <= 1'b1;

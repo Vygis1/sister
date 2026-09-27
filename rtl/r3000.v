@@ -112,7 +112,49 @@ module r3000 (
 );
 
 	// --- registers ------------------------------------------------------------------
-	reg [31:0] R [0:31];
+	// THE REGISTER FILE IS DISTRIBUTED RAM, NOT FLIP-FLOPS.
+	// It was `reg [31:0] R [0:31]`, cleared by a reset loop and written from
+	// three places that can fire on the same clock (the queued result, the load
+	// commit, and an exception's pending load). Either of those alone stops
+	// synthesis using LUT-RAM, so it built 1,024 flip-flops with a write mux on
+	// each and a 32-to-1 read mux per read port: 8,310 LUTs drove R, and about
+	// 11,000 of the processor's 16,800 were the register file -- measured
+	// 2026-09-27 by naming every LUT in the synthesised netlist after the signal
+	// it drives. The part is at 100% of its slices; this was the biggest single
+	// thing on it.
+	//
+	// Now: one bank of LUT-RAM per write port, and a live-value table that says
+	// which bank last wrote each register. A read looks in all three and takes
+	// the live one. `rf_live` stands in for the old reset: a register not
+	// written since reset reads zero, exactly as before. Write priority is the
+	// old statement order: the queued result, then the load commit, then the
+	// exception's pending load, the later winning.
+	(* ram_style = "distributed" *) reg [31:0] rf0 [0:31];   // the queued result (wb_*)
+	(* ram_style = "distributed" *) reg [31:0] rf1 [0:31];   // the load commit (ld_creg / ld_cval)
+	(* ram_style = "distributed" *) reg [31:0] rf2 [0:31];   // an exception's pending load (ld_reg / ld_val)
+	reg [31:0] rf_lo, rf_hi;        // the live-value table: 00 bank 0, 01 bank 1, 1x bank 2
+	reg [31:0] rf_live;             // written since reset
+	reg        rf_w0, rf_w1, rf_w2; // this enable's writes (blocking, decided below)
+	reg [31:0] s_a0, s_a1, s_ra, s_sp;   // copies of four registers for the debugger
+	integer k;
+	initial for (k = 0; k < 32; k = k + 1) begin rf0[k] = 32'd0; rf1[k] = 32'd0; rf2[k] = 32'd0; end
+
+	// A register read, written as a macro rather than a function: a continuous
+	// assignment is only sensitive to what appears in its own expression, and a
+	// function's body is not part of that, so `assign b = `RF_RD(rt)` never saw
+	// the register being written and simulated stale values (tb_r3000 case
+	// 2184). Hardware would have been right; the benches would have lied.
+	`define RF_RD(n) (!rf_live[n] ? 32'd0 : rf_hi[n] ? rf2[n] : rf_lo[n] ? rf1[n] : rf0[n])
+`ifndef SYNTHESIS
+	// For testbenches that look at `cpu.R[n]`: the register file as the
+	// processor sees it, read out of the banks (not a copy kept alongside).
+	wire [31:0] R [0:31];
+	genvar rg;
+	generate for (rg = 0; rg < 32; rg = rg + 1) begin : g_rview
+		assign R[rg] = `RF_RD(rg);
+	end endgenerate
+`endif
+
 	reg [31:0] PC;                  // of the instruction being executed
 	reg [31:0] HI, LO;
 
@@ -162,7 +204,7 @@ module r3000 (
 	assign dbg_ir     = ir;
 	assign dbg_exec   = ce && (st == S_EXEC);
 	assign dbg_rval   = dbg_rsel[5] ? (dbg_rsel[1:0] == 2'd0 ? SR : dbg_rsel[1:0] == 2'd1 ? CAUSE : EPC)
-	                                : (dbg_rsel[4:0] == 5'd0 ? 32'd0 : R[dbg_rsel[4:0]]);
+	                                : (dbg_rsel[4:0] == 5'd0 ? 32'd0 : `RF_RD(dbg_rsel[4:0]));
 	assign dbg_halted = halted;
 
 	// the instruction being executed: the one taken from the held line, or the
@@ -187,8 +229,8 @@ module r3000 (
 	reg [4:0]  wb_reg;
 	reg [31:0] wb_val;
 
-	wire [31:0] a = (rs == 5'd0) ? 32'd0 : R[rs];
-	wire [31:0] b = (rt == 5'd0) ? 32'd0 : R[rt];
+	wire [31:0] a = (rs == 5'd0) ? 32'd0 : `RF_RD(rs);
+	wire [31:0] b = (rt == 5'd0) ? 32'd0 : `RF_RD(rt);
 	// rt with a load to it that has landed but not yet been written back (see LWL/LWR)
 	wire [31:0] b_ld = (rt != 5'd0 && ld_commit && ld_creg == rt) ? ld_cval
 	                 : (rt != 5'd0 && ld_pend   && ld_reg  == rt) ? ld_val
@@ -205,7 +247,7 @@ module r3000 (
 		begin
 			if (n == 5'd0)                 operand = 32'd0;
 			else if (wb_en && wb_reg == n) operand = wb_val;
-			else                           operand = R[n];
+			else                           operand = `RF_RD(n);
 		end
 	endfunction
 
@@ -303,7 +345,7 @@ module r3000 (
 	end
 
 	// --- the register file write --------------------------------------------------------------
-	assign dbg_a0 = R[4]; assign dbg_a1 = R[5]; assign dbg_ra = R[31]; assign dbg_sp = R[29];
+	assign dbg_a0 = s_a0; assign dbg_a1 = s_a1; assign dbg_ra = s_ra; assign dbg_sp = s_sp;
 	// (the write-trace ports, after everything they look at is declared)
 	assign dbg_wa_en  = ce && wb_en && (wb_reg != 5'd0);
 	assign dbg_wa_reg = wb_reg;
@@ -314,8 +356,26 @@ module r3000 (
 
 	integer i;
 	always @(posedge clk) begin
+		// THE GTE LINES ARE ONE CLOCK, WHATEVER THE CLOCK ENABLE DOES.
+		// They used to be cleared inside `if (ce)` with everything else, so when
+		// the processor lost its enable on the clock after issuing a GTE command
+		// -- a cache miss, a DMA owning the bus, anything -- `c2_cmd` stayed
+		// high. The GTE starts a command on `cmd && !run`, so as soon as the one
+		// it was running finished it started the SAME ONE AGAIN, for as long as
+		// the enable stayed low. Each extra RTPS pushes another entry through
+		// the screen-coordinate FIFO, so a game that projects three vertices and
+		// reads SXY0/1/2 gets one corner carrying another vertex's position: the
+		// polygon is drawn sheared, with a corner pulled towards the camera.
+		// Measured on the board 2026-09-25 with the camera provably static (a
+		// distant rock bit-identical across 60 frames): one crate was drawn in
+		// four distinct shapes, two upright and two leaning, split 15/16/16/13 --
+		// a coin toss every frame, which is what a race on the enable looks like.
+		c2_we  <= 1'b0;
+		c2_cmd <= 1'b0;
+		rf_w0 = 1'b0; rf_w1 = 1'b0; rf_w2 = 1'b0;
 		if (rst) begin
-			for (i = 0; i < 32; i = i + 1) R[i] <= 32'd0;
+			rf_live <= 32'd0; rf_lo <= 32'd0; rf_hi <= 32'd0;
+			s_a0 <= 32'd0; s_a1 <= 32'd0; s_ra <= 32'd0; s_sp <= 32'd0;
 			PC       <= 32'hBFC0_0000;
 			HI <= 32'd0; LO <= 32'd0;
 			SR       <= 32'h0040_0000;     // BEV set, interrupts off, kernel
@@ -340,8 +400,6 @@ module r3000 (
 			req <= 1'b0;
 			we  <= 1'b0;
 			isc_inv <= 1'b0;
-			c2_we  <= 1'b0;
-			c2_cmd <= 1'b0;
 
 			// The external lines are level-sensitive and always visible.
 			CAUSE[15:10] <= irq;
@@ -349,7 +407,7 @@ module r3000 (
 			// A pending register write from the previous instruction lands now,
 			// before this one's operands are read -- unless it was a load, in
 			// which case it waited one instruction already and lands now too.
-			if (wb_en && wb_reg != 5'd0) R[wb_reg] <= wb_val;
+			if (wb_en && wb_reg != 5'd0) rf_w0 = 1'b1;
 			wb_en <= 1'b0;
 
 			// the multiplier runs on its own: 33 x 33 signed covers MULTU too
@@ -407,7 +465,7 @@ module r3000 (
 						// stack restore was skipped.
 						if (!(wb_en && wb_reg == ld_creg)) begin
 							if (fast_go) begin
-								if (ld_creg != 5'd0) R[ld_creg] <= ld_cval;
+								if (ld_creg != 5'd0) rf_w1 = 1'b1;
 							end else begin
 								wb_en  <= 1'b1;
 								wb_reg <= ld_creg;
@@ -476,7 +534,7 @@ module r3000 (
 					    && (npc[1:0] == 2'b00) && fetch_hit) begin
 						if (ld_commit) begin
 							if (!(wb_en && wb_reg == ld_creg) && ld_creg != 5'd0)
-								R[ld_creg] <= ld_cval;
+								rf_w1 = 1'b1;
 							ld_commit <= 1'b0;
 						end
 						if (ld_pend) begin
@@ -499,7 +557,7 @@ module r3000 (
 					if (mem_go) begin
 						if (ld_commit) begin
 							if (!(wb_en && wb_reg == ld_creg) && ld_creg != 5'd0)
-								R[ld_creg] <= ld_cval;
+								rf_w1 = 1'b1;
 							ld_commit <= 1'b0;
 						end
 						if (ld_pend) begin
@@ -543,7 +601,7 @@ module r3000 (
 						// instruction after it.
 						if (ld_commit) begin
 							if (!(wb_en && wb_reg == ld_creg) && ld_creg != 5'd0)
-								R[ld_creg] <= ld_cval;
+								rf_w1 = 1'b1;
 						end
 						ld_commit <= 1'b1; ld_creg <= rt; ld_cval <= lv;
 						ld_pend   <= 1'b0;
@@ -591,16 +649,37 @@ module r3000 (
 					// sees the loaded register. Dropping it here left the BIOS's
 					// `lw ra` unwritten whenever VBlank landed on the next fetch,
 					// and the function returned through a stale ra.
-					if (ld_commit && ld_creg != 5'd0) R[ld_creg] <= ld_cval;
-					if (ld_pend   && ld_reg  != 5'd0) R[ld_reg]  <= ld_val;
+					if (ld_commit && ld_creg != 5'd0) rf_w1 = 1'b1;
+					if (ld_pend   && ld_reg  != 5'd0) rf_w2 = 1'b1;
 					ld_pend <= 1'b0;
 					ld_commit <= 1'b0;
 					st <= S_FETCH;
 				end
 			default: st <= S_FETCH;
 			endcase
+
+			// The register file's writes, decided above, in the old statement order
+			// so that the later one wins where two land on the same register.
+			if (rf_w0) begin rf0[wb_reg]  <= wb_val;  rf_lo[wb_reg]  <= 1'b0; rf_hi[wb_reg]  <= 1'b0; rf_live[wb_reg]  <= 1'b1; end
+			if (rf_w1) begin rf1[ld_creg] <= ld_cval; rf_lo[ld_creg] <= 1'b1; rf_hi[ld_creg] <= 1'b0; rf_live[ld_creg] <= 1'b1; end
+			if (rf_w2) begin rf2[ld_reg]  <= ld_val;  rf_hi[ld_reg]  <= 1'b1; rf_live[ld_reg]  <= 1'b1; end
+			if (rf_w0) shadow(wb_reg, wb_val);
+			if (rf_w1) shadow(ld_creg, ld_cval);
+			if (rf_w2) shadow(ld_reg, ld_val);
 		end
 	end
+
+	// the debugger's copies of a0, a1, sp and ra
+	task shadow;
+		input [4:0]  n;
+		input [31:0] v;
+		begin
+			if (n == 5'd4)  s_a0 <= v;
+			if (n == 5'd5)  s_a1 <= v;
+			if (n == 5'd29) s_sp <= v;
+			if (n == 5'd31) s_ra <= v;
+		end
+	endtask
 
 	// --- executing one instruction ---------------------------------------------------------
 	// A task, so that the decode reads the word on the bus rather than a
@@ -994,6 +1073,7 @@ module r3000 (
 		endcase
 	endfunction
 
+`undef RF_RD
 endmodule
 
 `default_nettype wire

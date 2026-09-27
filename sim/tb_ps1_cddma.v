@@ -21,6 +21,7 @@ module tb_ps1_cddma;
 	wire [23:0] fill_lba; wire [3:0] fill_room; wire fill_run;
 	reg  sb_we = 0; reg [11:0] sb_addr = 0; reg [7:0] sb_data = 0; reg sb_done = 0; reg [23:0] sb_lba = 0;
 	ps1_top dut (
+		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),
 		.host_windex(host_windex), .host_we(host_we), .host_wdata(host_wdata),

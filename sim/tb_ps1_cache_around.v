@@ -170,19 +170,24 @@ module tb_ps1_cache_around;
 		check(m1 - m0 == 16, "port A keeps every line while port B sweeps past it");
 
 		// --- 2. a run is fetched once and reused ------------------------------------
-		// A run is a TILE now, not a strip: the line asked for, the one next to
-		// it, and the two directly below them (a VRAM row is 128 lines of 16
-		// bytes). A game walks its texture diagonally, so the row below is what
-		// it wants next far more often than the next line along.
-		$display("--- a run is a tile, and costs one trip ---");
+		// Port B's run is a STRIP: four lines straight along the row. It used to
+		// be the tile that port A wants for textures -- two lines here and two on
+		// the row below -- and for port B that is simply wrong. Port B is the
+		// scanout, and the scanout walks one row from end to end eight pixels at
+		// a time; the row below is 128 lines away and it will not be there for
+		// another sixty-four reads. Half of every run it paid for was thrown
+		// away, so it went back to memory twice as often as it needed to.
+		// Measured in tb_ps1_scan: 2.0 lines a run against 4.0, and 7,680 round
+		// trips for a capture against 3,840.
+		$display("--- port B's run is a strip along the row, and costs one trip ---");
 		read_b(29'h9000, got_b);          // starts a run at line 0x900
 		r0 = m_reads;
 		read_b(29'h9004, got_b);          // rest of the line asked for
-		read_b(29'h9010, got_b);          // the line beside it
-		read_b(29'h9800, got_b);          // the line below (0x900 + 128 lines)
-		read_b(29'h9810, got_b);          // and the one beside that
-		$display("  4 further reads inside the tile cost %0d memory reads", m_reads - r0);
-		check(m_reads == r0, "the rest of the tile is answered without going out");
+		read_b(29'h9010, got_b);          // the next line along
+		read_b(29'h9020, got_b);          // and the next
+		read_b(29'h9030, got_b);          // and the last of the four
+		$display("  4 further reads inside the strip cost %0d memory reads", m_reads - r0);
+		check(m_reads == r0, "the rest of the strip is answered without going out");
 
 		// --- 3. port B never sees a word port A has moved on from -------------------
 		// Port A writes all over the range port B is walking, which is exactly the

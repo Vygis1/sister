@@ -58,7 +58,11 @@ LOG="build/core_$NAME.log"
 # a fresh image from the one the previous run left behind.
 STAMP="build/.core_$NAME.start"
 mkdir -p build && : > "$STAMP"
-tools/vivado.sh build -top "$TOP" -xdc "$XDC" $GEN $EXTRA 2>&1 | tee "$LOG" | \
+# EFFORT=1 asks for the timing-driven place and route directives. They cost
+# about twice the runtime and are worth it for a design that is close, which the
+# PlayStation now is: at 99.99% of the part's slices its critical path is 75%
+# ROUTING, and the default directives left 0.003 ns -- too thin to flash.
+tools/vivado.sh build -top "$TOP" -xdc "$XDC" $GEN $EXTRA ${EFFORT:+-effort} 2>&1 | tee "$LOG" | \
   grep -E "^ *(ERROR|CRITICAL)|TIMING:|raw image:|generics:" || true
 
 bad=0

@@ -132,8 +132,41 @@ module ps1_cache #(
 
 	reg [127:0] data  [0:LINES-1];
 	reg [TAGW-1:0] tag [0:LINES-1];
-	reg         valid [0:LINES-1];
-	reg         dirty [0:LINES-1];
+	// VALID IS TWO BANKS OF LUT-RAM, XORED. A line is valid when va ^ vb is 1.
+	// It has two writers that can land on the same clock -- the state machine
+	// setting a line it has just filled, and the invalidation port clearing a
+	// line the block writer has just overwritten in memory -- and it had to clear
+	// all 512 in one clock at reset. That made it flip-flops with two decoders and
+	// two 512-to-1 read muxes: with the invalidation logic, about 1,600 LUTs in the
+	// VRAM cache alone (netlist, 2026-09-27). Each writer now owns a bank and
+	// writes its value XOR the other bank's, so either can land without the other
+	// (the "XOR multi-port memory"); a reset starts a sweep that zeroes both banks
+	// a line a clock, LINES clocks, while the machine holds the ports off.
+	(* ram_style = "distributed" *) reg va [0:LINES-1];   // the state machine's bank
+	(* ram_style = "distributed" *) reg vb [0:LINES-1];   // the invalidation's bank
+	reg               clr;         // the reset sweep is running: nothing is valid
+	reg [IDXBITS-1:0] clr_i;
+	reg               va_we, vb_we; // this clock's writes (blocking, decided below)
+	integer vi;
+	initial for (vi = 0; vi < LINES; vi = vi + 1) begin va[vi] = 1'b0; vb[vi] = 1'b0; end
+	`define CV(n) (va[n] ^ vb[n])
+`ifndef SYNTHESIS
+	// for testbenches that look at `valid[i]`: read out of the two banks
+	wire valid [0:LINES-1];
+	genvar vg;
+	generate for (vg = 0; vg < LINES; vg = vg + 1) begin : g_vview
+		assign valid[vg] = !clr && `CV(vg);
+	end endgenerate
+`endif
+	// NOT RESET, so that it is LUT-RAM. Every reader asks `valid_q && dirty_q`,
+	// and every write that sets a line valid writes its dirty bit too, so a
+	// dirty bit left over from before a reset is never looked at. Clearing all
+	// 512 of them in the reset loop made them flip-flops with a decoder and a
+	// 512-to-1 read mux each: about 1,100 LUTs per cache instance, measured by
+	// name in the synthesised netlist on 2026-09-27.
+	(* ram_style = "distributed" *) reg dirty [0:LINES-1];
+	integer di;
+	initial for (di = 0; di < LINES; di = di + 1) dirty[di] = 1'b0;
 
 	// --- the state machine's states, declared here because the port arbitration
 	// below has to know whether a look-up is starting this cycle
@@ -340,8 +373,9 @@ module ps1_cache #(
 	wire [TAGW-1:0]    inv_tg  = inv_line[24:IDXBITS];
 	integer i;
 	always @(posedge clk) begin
+		va_we = 1'b0; vb_we = 1'b0;
 		if (!rst && inv_v) begin
-			if (valid[inv_idx] && tag[inv_idx] == inv_tg) valid[inv_idx] <= 1'b0;
+			if (!clr && `CV(inv_idx) && tag[inv_idx] == inv_tg) vb_we = 1'b1;
 			if (pf_valid && (((inv_line - pf_base) < 25'd2)
 			    || in_run(inv_line - pf_base))) pf_valid <= 1'b0;
 		end
@@ -354,7 +388,7 @@ module ps1_cache #(
 			xs_on <= 1'b0; xs_i <= 0; x_valid <= 1'b0; x_addr <= 25'd0; x_line <= 128'd0; pf_lin <= 1'b0;
 			pf_want <= 0; pf_base <= 25'd0; pf_early <= 1'b0;
 			dbg_hits <= 32'd0; dbg_misses <= 32'd0;
-			for (i = 0; i < LINES; i = i + 1) begin valid[i] <= 1'b0; dirty[i] <= 1'b0; end
+			clr <= 1'b1; clr_i <= {IDXBITS{1'b0}};   // every line invalid (dirty: see its declaration)
 		end else begin
 			a_ack_r <= 1'b0;
 			b_ack <= 1'b0;
@@ -390,7 +424,8 @@ module ps1_cache #(
 			// here served every held access twice, and the second, stale ack
 			// landed on whatever the port asked for next. A port being acked
 			// this cycle has nothing new to say.
-			S_IDLE: if (flush) begin flushing <= 1'b1; fidx <= {IDXBITS{1'b0}}; end
+			S_IDLE: if (clr) ;   // the reset sweep: hold every port off until it is done
+				else if (flush) begin flushing <= 1'b1; fidx <= {IDXBITS{1'b0}}; end
 				else if (flushing) begin fl_serve <= 1'b1; st <= S_FLOOK; end
 				else if (a_go || b_go) begin
 					// Take turns. Port B of the VRAM cache is the frame capture's
@@ -406,7 +441,7 @@ module ps1_cache #(
 					ar_q      <= nxt_b ? (B_NOALLOC != 0) : ((A_AROUND != 0) && a_around);
 					line_q  <= data[idx];
 					tag_q   <= tag[idx];
-					valid_q <= valid[idx];
+					valid_q <= `CV(idx);
 					dirty_q <= dirty[idx];
 					st <= S_ANS;
 				end
@@ -416,7 +451,7 @@ module ps1_cache #(
 			S_LOOK: begin
 					line_q  <= data[idx];
 					tag_q   <= tag[idx];
-					valid_q <= valid[idx];
+					valid_q <= `CV(idx);
 					dirty_q <= dirty[idx];
 					st <= S_ANS;
 				end
@@ -449,7 +484,20 @@ module ps1_cache #(
 						st <= S_IDLE;
 					end else begin
 						pf_valid <= 1'b0;
-						pf_lin   <= serving_b ? 1'b0 : a_lin;
+						// Port B is the scanout, and the scanout is the most
+						// perfectly sequential reader in the machine: it walks
+						// straight along a row, eight pixels at a time. Its run
+						// has to be the LINEAR one. It was taking the 2D tile
+						// layout the drawing engine wants for textures -- two
+						// lines along the row and two on the row below -- so half
+						// of every run it paid for was thrown away and it went
+						// back to memory twice as often as it needed to. Measured
+						// on the board 2026-09-26: 76% of the capture was spent
+						// waiting for video memory, 54 clocks for every line, and
+						// a capture outlasting one of the machine's frames is why
+						// the bottom of the picture comes back as whatever the
+						// game cleared the buffer to.
+						pf_lin   <= serving_b ? 1'b1 : a_lin;
 						pf_base  <= rq_line;
 						pf_want  <= {PFLB{1'b0}};   // the run starts at the wanted line
 						pf_i     <= 0;
@@ -520,7 +568,7 @@ module ps1_cache #(
 					if (pf_hit) pf_valid <= 1'b0;
 					data[idx]  <= a_wdata128;
 					tag[idx]   <= tg;
-					valid[idx] <= 1'b1;
+					va_we = 1'b1;
 					dirty[idx] <= 1'b1;
 					a_ack_r <= 1'b1;
 					st <= S_IDLE;
@@ -538,7 +586,7 @@ module ps1_cache #(
 					if (m_valid) begin
 						data[idx]  <= m_rdata;
 						tag[idx]   <= tg;
-						valid[idx] <= 1'b1;
+						va_we = 1'b1;
 						dirty[idx] <= 1'b0;
 						line_q  <= m_rdata;
 						tag_q   <= tg;
@@ -607,7 +655,7 @@ module ps1_cache #(
 				end
 
 			S_FLOOK: begin
-					line_q <= data[idx]; tag_q <= tag[idx]; valid_q <= valid[idx]; dirty_q <= dirty[idx];
+					line_q <= data[idx]; tag_q <= tag[idx]; valid_q <= `CV(idx); dirty_q <= dirty[idx];
 					st <= S_FANS;
 				end
 			S_FANS: if (valid_q && dirty_q) begin
@@ -626,8 +674,26 @@ module ps1_cache #(
 				end
 			default: st <= S_IDLE;
 			endcase
+
+			if (clr) begin
+				clr_i <= clr_i + 1'b1;
+				if (&clr_i) clr <= 1'b0;
+			end
+		end
+
+		// The valid banks, written in one place each. The sweep zeroes both. A
+		// fill and an invalidation of the SAME line on the same clock: the fill
+		// won in the old code (it was the later statement), so the invalidation
+		// is dropped then -- with both, the XOR would flip the line instead.
+		if (!rst && clr) begin
+			va[clr_i] <= 1'b0;
+			vb[clr_i] <= 1'b0;
+		end else if (!rst) begin
+			if (vb_we && !(va_we && inv_idx == idx)) vb[inv_idx] <= va[inv_idx];
+			if (va_we) va[idx] <= !vb[idx];
 		end
 	end
+`undef CV
 endmodule
 
 `default_nettype wire

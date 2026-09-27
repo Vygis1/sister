@@ -172,6 +172,119 @@ class Gen:
             a.nop()
 
 
+    # --- the depth FIFO across a SEQUENCE of commands ------------------------------
+    #
+    # A PlayStation has no depth buffer. Polygons are painted back to front in
+    # the order the ordering table holds them, and the bucket a polygon goes in
+    # is OTZ, which AVSZ3 works out from the SZ depth FIFO that RTPS pushes.
+    # Get the FIFO wrong and a box paints its far face over its near one --
+    # which on screen is the sides of every box and character swapping which is
+    # closer to the camera, and flipping again the next frame.
+    #
+    # tb_gte cannot catch that: it loads the registers and runs ONE command, so
+    # the FIFO's shifting from one RTPS to the next is never exercised. This
+    # runs real sequences -- three RTPS then AVSZ3, four then AVSZ4, and RTPT
+    # which pushes three at once -- and checks OTZ and the whole FIFO against
+    # the model in tools/gte.py.
+    def gte_fifo(self):
+        a = self.a
+        for case in range(6):
+            rnd = random.Random(7000 + case)
+            g = GTE()
+            d = [0] * 32
+            c = [0] * 32
+            for n in range(3):
+                d[2*n]     = (rnd.randint(-0x400, 0x400) & 0xFFFF) | ((rnd.randint(-0x400, 0x400) & 0xFFFF) << 16)
+                d[2*n + 1] = rnd.randint(-0x800, 0x800) & 0xFFFF
+            for i in range(9):
+                c[i] = (rnd.randint(-0x1800, 0x1800) & 0xFFFF) | ((rnd.randint(-0x1800, 0x1800) & 0xFFFF) << 16)
+            for i in (5, 6, 7):
+                c[i] = rnd.randint(-0x10000, 0x10000) & 0xFFFFFFFF
+            c[24] = rnd.randint(-0x100000, 0x100000) & 0xFFFFFFFF
+            c[25] = rnd.randint(-0x100000, 0x100000) & 0xFFFFFFFF
+            c[26] = rnd.randint(0x100, 0x400)
+            c[27] = rnd.randint(-0x100, 0x100) & 0xFFFF
+            c[28] = rnd.randint(-0x100000, 0x100000) & 0xFFFFFFFF
+            c[29] = 0x0155                      # ZSF3 = 1/3
+            c[30] = 0x0100                      # ZSF4 = 1/4
+            seq = [0x0180001, 0x0180001, 0x0180001, 0x0158002D] if case % 2 == 0                   else [0x0280030, 0x0180001, 0x015A002E]
+            for i in range(32):
+                if i not in self.GTE_SKIP:
+                    g.write_data(i, d[i])
+            for i in range(32):
+                g.write_ctrl(i, c[i])
+            for wrd in seq:
+                g.op(wrd)
+            self._gte_load(d, c)
+            for wrd in seq:
+                a.cop2(wrd)
+                a.nop(); a.nop()
+            for r in (16, 17, 18, 19, 7):        # SZ0..SZ3 and OTZ
+                a.mfc2(T2, r); a.nop()
+                self.check(T2, g.read_data(r))
+
+    # --- the depth FIFO across a SEQUENCE of commands ------------------------------
+    #
+    # A PlayStation has no depth buffer. Polygons are painted back to front in
+    # the order the ordering table holds them, and which bucket a polygon goes
+    # into is OTZ -- which AVSZ3 works out from the SZ depth FIFO that RTPS
+    # pushes. Get that FIFO wrong and a box paints its far face over its near
+    # one, so the sides of boxes and characters swap which is closer to the
+    # camera.
+    #
+    # tb_gte cannot catch it: it loads the registers and runs ONE command, so
+    # the FIFO shifting from one RTPS to the next is never exercised. This runs
+    # real sequences and checks SZ0..SZ3 and OTZ against tools/gte.py.
+    def gte_fifo(self):
+        a = self.a
+        done = 0
+        seed = 7000
+        while done < 5 and seed < 7200:
+            seed += 1
+            rnd = random.Random(seed)
+            d = [0] * 32; c = [0] * 32
+            for n in range(3):
+                d[2*n]     = (rnd.randint(-0x400, 0x400) & 0xFFFF) | ((rnd.randint(-0x400, 0x400) & 0xFFFF) << 16)
+                d[2*n + 1] = rnd.randint(-0x800, 0x800) & 0xFFFF
+            for i in range(9):
+                c[i] = (rnd.randint(-0x1800, 0x1800) & 0xFFFF) | ((rnd.randint(-0x1800, 0x1800) & 0xFFFF) << 16)
+            for i in (5, 6, 7):
+                c[i] = rnd.randint(-0x10000, 0x10000) & 0xFFFFFFFF
+            c[26] = rnd.randint(0x100, 0x400)
+            c[29] = 0x0155; c[30] = 0x0100
+            seq = ([0x0180001, 0x0180001, 0x0180001, 0x0158002D] if done % 2 == 0
+                   else [0x0280030, 0x0180001, 0x015A002E])
+            g = GTE()
+            for i in range(32):
+                if i not in self.GTE_SKIP:
+                    g.write_data(i, d[i])
+            for i in range(32):
+                g.write_ctrl(i, c[i])
+            for wrd in seq:
+                g.op(wrd)
+            if g.read_data(7) == 0:
+                continue                      # a case that proves nothing
+            done += 1
+            self._gte_load(d, c)
+            for wrd in seq:
+                a.cop2(wrd); a.nop(); a.nop()
+            # SXY0..SXY2 are the SAME kind of FIFO and carry the projected
+            # CORNERS: a game runs RTPS three times and reads these three back
+            # as its triangle. Off by one here and vertices take each other's
+            # positions, which mirrors a face -- the right side of a box drawn
+            # where the left should be.
+            for r in (12, 13, 14, 16, 17, 18, 19, 7):   # SXY0..2, SZ0..3, OTZ
+                a.mfc2(T2, r); a.nop()
+                self.check(T2, g.read_data(r))
+            # NCLIP on what that sequence left in the SXY FIFO. Its SIGN is how
+            # a game decides whether a face points at the camera; get it wrong
+            # and the back faces of a box are drawn instead of the front ones,
+            # so the far side appears to be the near one.
+            g.op(0x0140006)
+            a.cop2(0x0140006); a.nop(); a.nop()
+            a.mfc2(T2, 24); a.nop()                 # MAC0 = the cross product
+            self.check(T2, g.read_data(24))
+
     # --- reading a GTE result the instruction after the command --------------------
     #
     # A game builds its display list straight out of the GTE: RTPS, then the
@@ -635,6 +748,8 @@ class Gen:
         self.load_delay()
         self.branches()
         self.gte_timing()
+        self.gte_fifo()
+        self.gte_fifo()
         self.exceptions()
         self.interrupt()
         # all passed

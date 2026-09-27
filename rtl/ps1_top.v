@@ -41,6 +41,15 @@ module ps1_top (
 	input  wire        clk,
 	input  wire        rst,        // resets the memory infrastructure
 	input  wire        cpu_run,    // 0 holds the CPU and GPU (while the BIOS loads)
+	// STOP the processor where it stands, without resetting it. cpu_run is a
+	// RESET line (core_rst = rst || !cpu_run), so clearing it to 'pause' the
+	// machine puts the CPU back at bfc00000 and throws away everything worth
+	// looking at -- which is what every tool that claimed to freeze the machine
+	// was actually doing. This holds the clock enable instead: the picture stays
+	// on the screen, video memory stops moving, and the display list, the
+	// palettes and the textures can all be read at leisure and be CONSISTENT
+	// with each other and with the frame on the page.
+	input  wire        cpu_halt,
 
 	// host fill of the BIOS into DDR3: byte offset within the 512 kB BIOS region
 	input  wire [18:0] host_windex,
@@ -211,6 +220,7 @@ module ps1_top (
 	// I/O accesses (a GPUSTAT poll) still go through.
 	wire        dma_ram_wait = dma_in_flight && c_req && (c_addr[28:21] == 8'h00 || c_addr[28:19] == 10'b11_1111_1000);   // RAM or BIOS (= `cached`, declared below)
 	wire        cpu_ce = d_calibrated && cpu_ready && !vz_active_w && !dma_hog && !dma_ram_wait   // a DMA owns the bus
+	                     && !cpu_halt
 	                     && (cpu_fast || sys_ce);
 	wire        core_rst = rst || !cpu_run;
 
@@ -462,6 +472,25 @@ module ps1_top (
 	                    || (c_we ? !sb_v : (!sb_v && (served || ib_hit || cc_take))))
 	                   && !gp0_wait && !gpuread_wait;
 
+	// --- the instruction-fetch run: TRIED, AND IT MADE THE GAME SLOWER ------
+	// A miss fetched the whole aligned run of four lines instead of one, and
+	// the three the processor had not asked for went into the instruction
+	// cache. It did exactly what it was meant to: instruction-cache misses fell
+	// from 11.6% of all clocks to 5.9%, load-miss stalls from 20.3% to 14.6%,
+	// and the processor retired 15.5 M instructions a second against 14.1.
+	//
+	// And the GAME HALVED: one frame every 5.45 vertical syncs against 3.00,
+	// measured over twenty seconds on the same scene, 11.0 flips a second
+	// against 20.0. The memory was never saturated (2.99 M transactions a
+	// second, and it refused a request 0.0% of the time) -- what changed is
+	// LATENCY. A run puts four reads back to back into the arbiter, and every
+	// other client's reads queue behind them; the drawing engine spent 1.8x the
+	// clocks on the same scene. The processor got faster by making everything
+	// else wait, and the frame is what the everything-else builds.
+	//
+	// If this is tried again: give the run its own arbiter port, or let it be
+	// preempted, so it cannot push the engine's reads back. Do not simply turn
+	// it on again.
 	ps1_cache #(.IDXBITS(9), .FAST_ACK(1)) ccache (
 		.flush(cc_flush), .flush_busy(cc_flush_busy), .inv_v(1'b0), .inv_line(25'd0),
 		.clk(clk), .rst(core_rst),   // a program is loaded under the cache's feet: forget every line
@@ -559,7 +588,7 @@ module ps1_top (
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
 		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_popword(dbg_gpu_popword), .dbg_disp(dbg_disp), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
-		.scan_start(scan_start), .scan_done(scan_done), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? (fs_want || !fs_ready) : fb_want), .disp_w(gpu_disp_w),
+		.scan_start(scan_start), .scan_done(scan_done), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : fb_want), .disp_w(gpu_disp_w),
 		.scan_lines(fb_want && !fs_en),
 		.fl_valid(gfl_valid), .fl_data(gfl_data), .fl_x(gfl_x), .fl_y(gfl_y)
 	);
