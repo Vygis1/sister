@@ -16,8 +16,8 @@ being read. Two things decide whether that is fixable and how:
 import sys, time
 sys.path.insert(0, r"C:/fpga/pc")
 import fpgalink as fl
-FLAGS = 0x3000 if 'fast' in sys.argv[1:] else 0
-sys.argv = [a for a in sys.argv if a != 'fast']
+FLAGS = (0x1000 if 'pace' in sys.argv[1:] else 0) | (0x2000 if 'fast' in sys.argv[1:] else 0)   # ctrl 0xEC: see ps1pace.py
+sys.argv = [a for a in sys.argv if a not in ('fast', 'pace')]
 
 N = 0x0008_0000
 BOARD = "192.168.178.50"

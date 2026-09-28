@@ -24,7 +24,7 @@ def entry(e):
     if c == 0x5e: s = "FRAME REFUSED: header says LBA %d (not the one wanted)" % (e & 0xFFFFFF)
     return s
 def main():
-    pace = {"original": 0, "fast": 0x3000, "cpu-fast": 0x1000, "gpu-fast": 0x2000}[sys.argv[1] if len(sys.argv) > 1 else "original"]
+    pace = {"original": 0x1000, "fast": 0x2000, "cpu-fast": 0, "gpu-fast": 0x3000}[sys.argv[1] if len(sys.argv) > 1 else "cpu-fast"]   # see ps1pace.py
     secs = int(sys.argv[2]) if len(sys.argv) > 2 else 60
     link = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
     ctrl = link.read(N + 4)

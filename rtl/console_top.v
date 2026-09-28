@@ -232,7 +232,17 @@ module console_top #(
 	wire         no_icache = 1'b0, no_ibuf = 1'b0, ic_verify = 1'b0, no_overlap = 1'b0;
 	wire         no_tcache = 1'b0, no_ccache = 1'b0, no_trun = 1'b0, no_capfirst = 1'b0;
 	wire [3:0]   gte_old   = 4'd0;
-	reg          cpu_fast = 1'b0, gpu_fast = 1'b0;             // ctrl 0xEC bits 12, 13: run past the console's pace (off: the console's)
+	// ctrl 0xEC bit 12 holds the CPU to the console's 33.8688 MHz; clear (the
+	// default) it runs on every 50 MHz clock. The console's timers, video and
+	// sound keep the console's clock either way. The default is the board's
+	// clock because this CPU is slower than the R3000 per clock -- a load takes
+	// three where the chip's takes one -- and at the console's clock Crash's
+	// levels ran at 20 fps where the console's run at 30 (measured 2026-09-28:
+	// 35 ms of work a frame against a 33.3 ms frame). Inverted so that the many
+	// tools that write this register with only a counter number in it leave
+	// the pace alone. Bit 13 lets the drawing engine past the chip's fill rate.
+	reg          cpu_pace = 1'b0, gpu_fast = 1'b0;
+	wire         cpu_fast = !cpu_pace;
 	reg          dma_relax = 1'b0;                              // ctrl 0xEC bit 14: see ps1_top
 	reg  [5:0]   ev_idx = 6'd0;
 	wire [31:0]  ps1_ev_data; wire [5:0] ps1_ev_wp;             // the frame event log (ctrl 0x120/0x124)
@@ -492,7 +502,7 @@ module console_top #(
 			16'h009C: ps1_rsel <= wdata[5:0];
 			16'h0110: cd_trace_idx <= wdata[5:0];
 			16'h00EC: begin perf_sel <= wdata[5:0];
-			                cpu_fast <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14]; end
+			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14]; end
 			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
 			16'h00F0: stream_ctl <= wdata;
 			16'h00F4: stream_base_r <= wdata;

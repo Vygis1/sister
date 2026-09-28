@@ -54,7 +54,21 @@ module ps1_cache #(
 	// registered acknowledgement they had. Off by default: this is the handshake
 	// every video bug in this tree has come from, and it is turned on only for
 	// the cache the processor talks to, which is the only one that waits.
-	parameter FAST_ACK = 0
+	parameter FAST_ACK = 0,
+
+	// --- the lines in block RAM ----------------------------------------------
+	// The processor's cache is the one that wants to be big: in a level, Crash
+	// spends ~86% of each frame running, and giving the processor a third more
+	// clocks bought only 5% of that back -- it is waiting on memory, 35,000 DDR3
+	// round trips a frame out of 8 kB. The lines and tags then live in block RAM
+	// (64 kB is 16 tiles) and are read on the same clock edges the LUT-RAM
+	// arrays were read on, so the look-up still takes one clock. The one thing
+	// that differs: a fill does not load the line register from the memory
+	// reply -- block RAM has only its own output register -- so after a fill the
+	// line is read back out of the array in S_LOOK, one more clock per miss.
+	// Invalidation (inv_v) is not supported in this mode: its tag read would
+	// need a second port.
+	parameter BRAM = 0
 )(
 	input  wire        flush,        // a pulse: write every dirty line back
 	output wire        flush_busy,
@@ -130,8 +144,10 @@ module ps1_cache #(
 	localparam LINES = 1 << IDXBITS;
 	localparam TAGW  = 25 - IDXBITS;          // 29-bit byte address, 4 bits in the line
 
-	reg [127:0] data  [0:LINES-1];
-	reg [TAGW-1:0] tag [0:LINES-1];
+	localparam DL    = (BRAM != 0) ? 1 : LINES;  // the LUT-RAM arrays, unused when BRAM is set
+	reg [127:0] data  [0:DL-1];
+	reg [TAGW-1:0] tag [0:DL-1];
+	wire [IDXBITS-1:0] didx;       // their index: 0 when they are one-entry stubs
 	// VALID IS TWO BANKS OF LUT-RAM, XORED. A line is valid when va ^ vb is 1.
 	// It has two writers that can land on the same clock -- the state machine
 	// setting a line it has just filled, and the invalidation port clearing a
@@ -202,6 +218,7 @@ module ps1_cache #(
 	reg [IDXBITS-1:0] fidx;
 	assign flush_busy = flushing;
 	wire [IDXBITS-1:0] idx = fl_serve ? fidx : addr[IDXBITS+3:4];
+	assign didx = (BRAM != 0) ? {IDXBITS{1'b0}} : idx;
 	wire [TAGW-1:0]    tg  = addr[28:IDXBITS+4];
 	wire [1:0]         wsel = addr[3:2];
 
@@ -277,8 +294,14 @@ module ps1_cache #(
 	// the lines come back in order, so the wanted one is here once the count passes it
 	wire         pf_ans = !pf_early && (pf_n > {1'b0, pf_want});
 
-	reg [127:0] line_q;
-	reg [TAGW-1:0] tag_q;
+	// the line and tag being looked at: registers loaded from the LUT-RAM arrays,
+	// or the block RAM's own output register (see BRAM above)
+	reg [127:0] line_r;
+	reg [TAGW-1:0] tag_r;
+	wire [127:0] bq_line;
+	wire [TAGW-1:0] bq_tag;
+	wire [127:0] line_q = (BRAM != 0) ? bq_line : line_r;
+	wire [TAGW-1:0] tag_q = (BRAM != 0) ? bq_tag : tag_r;
 	reg valid_q, dirty_q;
 	reg refilled;                   // this S_ANS follows a fill: not a hit
 
@@ -375,7 +398,7 @@ module ps1_cache #(
 	always @(posedge clk) begin
 		va_we = 1'b0; vb_we = 1'b0;
 		if (!rst && inv_v) begin
-			if (!clr && `CV(inv_idx) && tag[inv_idx] == inv_tg) vb_we = 1'b1;
+			if (BRAM == 0 && !clr && `CV(inv_idx) && tag[(BRAM != 0) ? {IDXBITS{1'b0}} : inv_idx] == inv_tg) vb_we = 1'b1;
 			if (pf_valid && (((inv_line - pf_base) < 25'd2)
 			    || in_run(inv_line - pf_base))) pf_valid <= 1'b0;
 		end
@@ -439,8 +462,8 @@ module ps1_cache #(
 					// the frame writer holds it back anyway.
 					serving_b <= nxt_b;
 					ar_q      <= nxt_b ? (B_NOALLOC != 0) : ((A_AROUND != 0) && a_around);
-					line_q  <= data[idx];
-					tag_q   <= tag[idx];
+					line_r  <= data[didx];
+					tag_r   <= tag[didx];
 					valid_q <= `CV(idx);
 					dirty_q <= dirty[idx];
 					st <= S_ANS;
@@ -449,8 +472,8 @@ module ps1_cache #(
 			// Kept for the flush walk's sake and as a safe landing state; the
 			// ordinary path looks up in S_IDLE now.
 			S_LOOK: begin
-					line_q  <= data[idx];
-					tag_q   <= tag[idx];
+					line_r  <= data[didx];
+					tag_r   <= tag[didx];
 					valid_q <= `CV(idx);
 					dirty_q <= dirty[idx];
 					st <= S_ANS;
@@ -460,7 +483,7 @@ module ps1_cache #(
 					if (!refilled) dbg_hits <= dbg_hits + 32'd1;
 					refilled <= 1'b0;
 					if (we) begin
-						data[idx]  <= line_mode ? merge16(line_q, a_be16, a_wdata128) : merge(line_q, wsel, be, wdata);
+						if (BRAM == 0) data[didx] <= line_mode ? merge16(line_q, a_be16, a_wdata128) : merge(line_q, wsel, be, wdata);
 						dirty[idx] <= 1'b1;
 						// this write makes any copy of the same run stale
 						if (pf_hit) pf_valid <= 1'b0;
@@ -566,8 +589,7 @@ module ps1_cache #(
 
 			S_ALLOC: begin
 					if (pf_hit) pf_valid <= 1'b0;
-					data[idx]  <= a_wdata128;
-					tag[idx]   <= tg;
+					if (BRAM == 0) begin data[didx] <= a_wdata128; tag[didx] <= tg; end
 					va_we = 1'b1;
 					dirty[idx] <= 1'b1;
 					a_ack_r <= 1'b1;
@@ -584,16 +606,16 @@ module ps1_cache #(
 			S_FILLWAIT: begin
 					if (m_req && m_ready) m_req <= 1'b0;
 					if (m_valid) begin
-						data[idx]  <= m_rdata;
-						tag[idx]   <= tg;
+						if (BRAM == 0) begin data[didx] <= m_rdata; tag[didx] <= tg; end
 						va_we = 1'b1;
 						dirty[idx] <= 1'b0;
-						line_q  <= m_rdata;
-						tag_q   <= tg;
+						line_r  <= m_rdata;
+						tag_r   <= tg;
 						valid_q <= 1'b1;
 						dirty_q <= 1'b0;
 						refilled <= 1'b1;
-						st <= S_ANS;          // now it hits
+						// now it hits; out of block RAM, once it has been read back
+						st <= (BRAM != 0) ? S_LOOK : S_ANS;
 					end
 				end
 
@@ -655,7 +677,7 @@ module ps1_cache #(
 				end
 
 			S_FLOOK: begin
-					line_q <= data[idx]; tag_q <= tag[idx]; valid_q <= `CV(idx); dirty_q <= dirty[idx];
+					line_r <= data[didx]; tag_r <= tag[didx]; valid_q <= `CV(idx); dirty_q <= dirty[idx];
 					st <= S_FANS;
 				end
 			S_FANS: if (valid_q && dirty_q) begin
@@ -693,6 +715,38 @@ module ps1_cache #(
 			if (va_we) va[idx] <= !vb[idx];
 		end
 	end
+
+	// --- the block RAM (BRAM mode) --------------------------------------------------
+	// One port. Written where the LUT-RAM arrays are written above, read where
+	// they are read; the two never fall on the same clock.
+	generate if (BRAM != 0) begin : g_bram
+		(* ram_style = "block" *) reg [127:0]    bdata [0:LINES-1];
+		(* ram_style = "block" *) reg [TAGW-1:0] btag  [0:LINES-1];
+		reg [127:0]    q_line;
+		reg [TAGW-1:0] q_tag;
+		wire br  = !rst && (((st == S_IDLE) && !clr && !flush && !flushing && (a_go || b_go))
+		                    || (st == S_LOOK) || (st == S_FLOOK));
+		wire bwn = !rst && ((st == S_ALLOC) || ((st == S_FILLWAIT) && m_valid));  // a new line: data and tag
+		wire bw  = bwn || (!rst && (st == S_ANS) && hit && we);                  // or a store into one
+		wire [127:0] bwd = (st == S_ALLOC)    ? a_wdata128
+		                 : (st == S_FILLWAIT) ? m_rdata
+		                 : line_mode ? merge16(line_q, a_be16, a_wdata128) : merge(line_q, wsel, be, wdata);
+		integer bi;
+		initial for (bi = 0; bi < LINES; bi = bi + 1) begin bdata[bi] = 128'd0; btag[bi] = {TAGW{1'b0}}; end
+		always @(posedge clk) begin
+			if (bw)  bdata[idx] <= bwd;
+			if (br)  q_line <= bdata[idx];
+		end
+		always @(posedge clk) begin
+			if (bwn) btag[idx] <= tg;
+			if (br)  q_tag <= btag[idx];
+		end
+		assign bq_line = q_line;
+		assign bq_tag  = q_tag;
+	end else begin : g_nobram
+		assign bq_line = 128'd0;
+		assign bq_tag  = {TAGW{1'b0}};
+	end endgenerate
 `undef CV
 endmodule
 

@@ -15,7 +15,12 @@
 `default_nettype none
 `timescale 1ns/1ps
 
+`ifdef TB_CACHE_BRAM
+// the processor's cache as built: lines in block RAM, answers in the same clock
+module tb_ps1_cache_bram;
+`else
 module tb_ps1_cache;
+`endif
 	reg clk = 0, rst = 1;
 	always #10 clk = ~clk;
 
@@ -36,7 +41,11 @@ module tb_ps1_cache;
 
 	reg         a_lwe = 0; reg [15:0] a_be16 = 0; reg [127:0] a_wdata128 = 0;
 	reg flush = 0; wire flush_busy;
-	ps1_cache #(.IDXBITS(4)) dut ( .a_lin(1'b0),        // 16 lines: conflicts happen constantly
+	ps1_cache #(.IDXBITS(4)
+`ifdef TB_CACHE_BRAM
+		, .BRAM(1), .FAST_ACK(1)
+`endif
+	) dut ( .a_lin(1'b0),        // 16 lines: conflicts happen constantly
 		.flush(flush), .flush_busy(flush_busy), .inv_v(1'b0), .inv_line(25'd0),
 		.clk(clk),
 		.b_first(1'b0), .rst(rst),

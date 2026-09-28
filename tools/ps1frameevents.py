@@ -1,6 +1,6 @@
 """Where a frame goes: the board's frame event log, read and laid out per frame.
 
-    python tools/ps1frameevents.py [seconds] [0xEC bits]
+    python tools/ps1frameevents.py [seconds] [0xEC bits]   (0x1000: CPU at the console's clock)
 
 ps1_top keeps the last 64 of these, each {type, 29-bit 50 MHz clock stamp}:
     0 flip (the displayed buffer changed)   1 display-list DMA start

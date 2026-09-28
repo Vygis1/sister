@@ -510,7 +510,7 @@ module ps1_top (
 	// If this is tried again: give the run its own arbiter port, or let it be
 	// preempted, so it cannot push the engine's reads back. Do not simply turn
 	// it on again.
-	ps1_cache #(.IDXBITS(9), .FAST_ACK(1)) ccache (
+	ps1_cache #(.IDXBITS(12), .FAST_ACK(1), .BRAM(1)) ccache (
 		.flush(cc_flush), .flush_busy(cc_flush_busy), .inv_v(1'b0), .inv_line(25'd0),
 		.clk(clk), .rst(core_rst),   // a program is loaded under the cache's feet: forget every line
 		// the buffered store first; the processor's reads only once it is gone

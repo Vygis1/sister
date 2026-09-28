@@ -16,9 +16,10 @@ stall the real machine has too.
 import sys, time
 sys.path.insert(0, r"C:/fpga/pc")
 import fpgalink as fl
-# 'fast' on the command line: run the CPU and GPU past the console's pace (ctrl 0xEC bits 12, 13)
-FLAGS = 0x3000 if 'fast' in sys.argv[1:] else 0
-sys.argv = [a for a in sys.argv if a != 'fast']
+# ctrl 0xEC: 'pace' on the command line holds the CPU to the console's clock
+# (bit 12; the default is the board's), 'fast' lets the GPU past its fill rate (bit 13)
+FLAGS = (0x1000 if 'pace' in sys.argv[1:] else 0) | (0x2000 if 'fast' in sys.argv[1:] else 0)
+sys.argv = [a for a in sys.argv if a not in ('fast', 'pace')]
 
 N = 0x0008_0000
 BOARD = "192.168.178.50"
