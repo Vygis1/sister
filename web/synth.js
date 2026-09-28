@@ -262,9 +262,12 @@ refreshVoices();
 let actx = null, again = null, cursor = "", playhead = 0, streaming = false;
 let inFlight = false;   // setInterval does not wait for an async callback
 
-const POLL_MS = 60;
-const LEAD = 0.18;          // seconds of scheduling margin
-const MAX_LEAD = 0.45;      // ...and the most that may ever be queued
+// The server keeps the board's ring drained into memory (AudioPump), so a
+// poll is answered at once from there and a lost network packet no longer
+// stalls it: the margin can be small, and the margin is the delay you hear.
+const POLL_MS = 20;
+const LEAD = 0.07;          // seconds of scheduling margin
+const MAX_LEAD = 0.16;      // ...and the most that may ever be queued
 
 async function pumpAudio() {
   if (!streaming || !actx || inFlight) return;

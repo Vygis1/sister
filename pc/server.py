@@ -466,20 +466,120 @@ def api_syn_scope():
     return jsonify(samples=out[:n], rate=syn_rate())
 
 
+class AudioPump:
+    """Keeps the board's audio ring drained into memory, for the page to take.
+
+    The page used to read the ring over the register link itself, on every poll,
+    under the one bus lock -- so its latency was a poll interval plus a network
+    round trip plus whatever else held the bus, and a single lost UDP packet cost
+    a 0.25 s timeout, three times, which is longer than the margin the player
+    keeps. The only cure for that was a big margin, and the margin IS the delay.
+
+    So a thread reads the ring every few milliseconds on a socket of its own,
+    with a timeout short enough that a lost packet costs a few ms, and keeps the
+    last couple of seconds here. A page's request is answered from memory, at
+    once. It runs only while somebody has asked for audio in the last few
+    seconds, so a closed page costs the link nothing.
+    """
+
+    KEEP = 2 * 44100            # frames kept (two seconds)
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.frames = []        # interleaved samples, per `chans`
+        self.base = 0           # absolute frame number of self.frames[0]
+        self.chans = 1
+        self.rate = 44100
+        self.wanted = 0.0
+        self.thread = None
+        self.link = None
+
+    def want(self):
+        self.wanted = time.time()
+        if self.thread is None or not self.thread.is_alive():
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def _run(self):
+        if self.link is None:
+            self.link = fl.Link(link.addr[0], link.addr[1], timeout=0.02, retries=6)
+        L = self.link
+        cursor = None; words = ABUF_WORDS; shape_at = 0.0
+        while time.time() - self.wanted < 5.0:
+            try:
+                if time.time() - shape_at > 2.0:
+                    try: words = L.read(SYN_SIZE) or ABUF_WORDS
+                    except fl.LinkError: pass
+                    try: chans = 2 if L.read(SYN_CHANS) == 2 else 1
+                    except fl.LinkError: chans = 1
+                    try: self.rate = L.read(SYN_RATE) or 44100
+                    except fl.LinkError: pass
+                    if chans != self.chans:
+                        with self.lock: self.frames = []; self.chans = chans
+                    shape_at = time.time()
+                now = L.read(SYN_WCOUNT)
+                if cursor is None: cursor = now
+                new = (now - cursor) & 0xFFFFFFFF
+                if new > words:             # fell behind the ring: start again from here
+                    cursor = now; new = 0
+                    with self.lock: self.base += len(self.frames) // self.chans + 1; self.frames = []
+                if new:
+                    start = cursor % words
+                    runs = ([(start, new)] if start + new <= words
+                            else [(start, words - start), (0, new - (words - start))])
+                    out = []
+                    for b, n in runs:
+                        for w in L.read_block(ABUF + b * 4, n):
+                            lo, hi = w & 0xFFFF, (w >> 16) & 0xFFFF
+                            if self.chans == 2:
+                                out.append(lo - 0x10000 if lo & 0x8000 else lo)
+                                out.append(hi - 0x10000 if hi & 0x8000 else hi)
+                            else:
+                                out.append(lo - 0x8000); out.append(hi - 0x8000)
+                    cursor = (cursor + new) & 0xFFFFFFFF
+                    with self.lock:
+                        self.frames.extend(out)
+                        per = self.chans if self.chans == 2 else 1
+                        extra = len(self.frames) // per - self.KEEP
+                        if extra > 0:
+                            del self.frames[:extra * per]; self.base += extra
+            except fl.LinkError:
+                pass
+            time.sleep(0.005)
+
+    def take(self, cursor, stereo, limit=4096):
+        """Frames after `cursor` (an absolute frame number), as the page wants them."""
+        self.want()
+        with self.lock:
+            per = self.chans if self.chans == 2 else 1
+            end = self.base + len(self.frames) // per
+            if cursor is None or cursor > end:
+                return end, [], False, self.chans
+            resync = cursor < self.base
+            if resync: cursor = end - min(end - self.base, 2205)   # rejoin 50 ms back
+            n = min(end - cursor, limit)
+            i = (cursor - self.base) * per
+            out = self.frames[i:i + n * per]
+            chans = self.chans
+        # Stereo only to a page that asks for it: a page from before the
+        # PlayStation had sound treats every sample as mono, and handed L, R, L, R
+        # it plays at half speed and falls further behind every second.
+        if chans == 2 and not stereo:
+            out = [(out[k] + out[k + 1]) // 2 for k in range(0, len(out) - 1, 2)]
+            chans = 1
+        return cursor + n, out, resync, chans
+
+
+audio_pump = AudioPump()
+
+
 @app.route("/api/syn/stream")
 def api_syn_stream():
     arg = request.args.get("cursor", "")
     cursor = int(arg) if arg not in ("", "null", "undefined") else None
-    words, chans = ring_shape()
-    new_cursor, samples, resync = read_ring(cursor, 4096, words, chans)
-    # Stereo only to a page that asks for it. A page from before the PlayStation
-    # had sound treats every sample as mono; handed L, R, L, R it plays the music
-    # at half speed and falls further behind every second. It gets a mono mix.
-    if chans == 2 and request.args.get("stereo") != "1":
-        samples = [(samples[i] + samples[i + 1]) // 2 for i in range(0, len(samples) - 1, 2)]
-        chans = 1
+    new_cursor, samples, resync, chans = audio_pump.take(cursor, request.args.get("stereo") == "1")
     return jsonify(cursor=new_cursor, samples=samples, channels=chans,
-                   resync=resync, rate=syn_rate())
+                   resync=resync, rate=audio_pump.rate)
 
 
 @app.route("/api/syn/record")
