@@ -264,13 +264,14 @@ let inFlight = false;   // setInterval does not wait for an async callback
 
 const POLL_MS = 60;
 const LEAD = 0.18;          // seconds of scheduling margin
+const MAX_LEAD = 0.45;      // ...and the most that may ever be queued
 
 async function pumpAudio() {
   if (!streaming || !actx || inFlight) return;
   inFlight = true;
 
   let d;
-  try { d = await api('/api/syn/stream?cursor=' + cursor); }
+  try { d = await api('/api/syn/stream?stereo=1&cursor=' + cursor); }
   catch (err) { inFlight = false; return; }
   finally { inFlight = false; }
 
@@ -302,6 +303,10 @@ async function pumpAudio() {
   // ahead of now instead of scheduling into a time that has already gone.
   const now = actx.currentTime;
   if (playhead < now + 0.01) playhead = now + LEAD;
+  // Never let the delay build up: if more than MAX_LEAD is queued (the tab was
+  // in the background, or the stream arrived faster than it plays), drop this
+  // batch and let the queue drain back to the normal margin.
+  if (playhead - now > MAX_LEAD) return;
   src.start(playhead);
   playhead += buf.duration;
 

@@ -91,6 +91,17 @@ def static_file(path):
     return send_from_directory(WEB_DIR, path)
 
 
+@app.after_request
+def no_stale_page(resp):
+    # The page's scripts change with the cores. A browser that kept an old
+    # synth.js played the PlayStation's stereo stream as mono -- half speed, and
+    # twenty seconds behind after a minute -- because nothing told it to ask
+    # again. Always revalidate the page's own files.
+    if not request.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 # --- raw register access ------------------------------------------------
 
 @app.route("/api/ident")
@@ -461,6 +472,12 @@ def api_syn_stream():
     cursor = int(arg) if arg not in ("", "null", "undefined") else None
     words, chans = ring_shape()
     new_cursor, samples, resync = read_ring(cursor, 4096, words, chans)
+    # Stereo only to a page that asks for it. A page from before the PlayStation
+    # had sound treats every sample as mono; handed L, R, L, R it plays the music
+    # at half speed and falls further behind every second. It gets a mono mix.
+    if chans == 2 and request.args.get("stereo") != "1":
+        samples = [(samples[i] + samples[i + 1]) // 2 for i in range(0, len(samples) - 1, 2)]
+        chans = 1
     return jsonify(cursor=new_cursor, samples=samples, channels=chans,
                    resync=resync, rate=syn_rate())
 
