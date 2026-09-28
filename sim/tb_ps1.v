@@ -44,7 +44,7 @@ module tb_ps1;
 	wire [7:0]  px_rgb;
 	wire [31:0] pc;
 
-	ps1_top #(.BOOT_HEX("../../sim/roms/ps1/boot.hex")) dut (
+	ps1_top #(.BOOT_HEX("../../sim/roms/ps1/boot.hex")) dut ( .dma_relax(1'b0), .ev_idx(6'd0),
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		// the two fast answer paths, both on. These are PORTS, not parameters: they
 		// sat in the parameter list, so this bench had not elaborated at all.

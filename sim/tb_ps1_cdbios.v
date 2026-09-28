@@ -20,7 +20,7 @@ module tb_ps1_cdbios;
 	// the drive's transport
 	wire [23:0] fill_lba; wire [3:0] fill_room; wire fill_run;
 	reg  sb_we = 0; reg [11:0] sb_addr = 0; reg [7:0] sb_data = 0; reg sb_done = 0; reg [23:0] sb_lba = 0;
-	ps1_top dut (
+	ps1_top dut ( .dma_relax(1'b0), .ev_idx(6'd0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),

@@ -1184,9 +1184,92 @@ def api_disc_select():
         pass
     return jsonify(ok=True, path=path, size=DISC["size"], sectors=DISC["size"] // 2352)
 
+class HostDisc:
+    """The PlayStation's disc straight from this PC, over the wired link.
+
+    rtl/host_cd.v: ctrl 0x128 says what the drive wants {running, room, LBA},
+    a 2352-byte raw sector goes into the window at ctrl 0x4000 by block write,
+    and ctrl 0x12C commits it with its LBA. ctrl 0x130 = 3 hands the drive to
+    the PC with a disc in. For when the ESP32 cannot: its SD card stopped
+    answering on 2026-09-28, and its Wi-Fi disc path is known to lose a sector.
+
+    A thread of its own, on a socket of its own, so the page and the tools do
+    not wait behind it. It takes the drive back after the console is reset
+    (a reset clears 0x130), and the choice survives a server restart.
+    """
+
+    CTRL = 0x0008_0000
+
+    def __init__(self):
+        self.on = False
+        self.thread = None
+        self.served = 0
+        self.last_lba = None
+        self.error = ""
+
+    def start(self):
+        self.on = True
+        if self.thread is None or not self.thread.is_alive():
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.on = False
+
+    def _run(self):
+        L = fl.Link(link.addr[0], link.addr[1], timeout=0.03, retries=10)
+        f = None; fpath = None; owned_at = 0.0
+        while self.on:
+            try:
+                if DISC["path"] != fpath:
+                    if f: f.close()
+                    fpath = DISC["path"]; f = open(fpath, "rb") if fpath else None
+                if time.time() - owned_at > 0.5:
+                    if L.read(self.CTRL + 0x130) & 3 != 3:
+                        L.write(self.CTRL + 0x130, 3 if f else 1)
+                    owned_at = time.time()
+                st = L.read(self.CTRL + 0x128)
+                run, room, lba = st >> 31, (st >> 28) & 7, st & 0xFFFFFF
+                if not (run and room and f):
+                    time.sleep(0.001)
+                    continue
+                f.seek(lba * 2352)
+                sec = f.read(2352)
+                if len(sec) < 2352:
+                    sec = sec.ljust(2352, bytes(1))
+                L.write_block(self.CTRL + 0x4000, list(struct.unpack("<588I", sec)))
+                L.write(self.CTRL + 0x12C, lba)
+                self.served += 1; self.last_lba = lba; self.error = ""
+            except fl.LinkError as e:
+                self.error = str(e)
+                time.sleep(0.01)
+        try:
+            L.write(self.CTRL + 0x130, 0)
+        except fl.LinkError:
+            pass
+
+
+host_disc = HostDisc()
+
+
+@app.route("/api/disc/host", methods=["POST"])
+def api_disc_host():
+    on = bool((request.get_json(silent=True) or {}).get("on", request.args.get("on", "1") == "1"))
+    if on: host_disc.start()
+    else: host_disc.stop()
+    try:
+        d = json.load(open(DISC_FILE)) if os.path.isfile(DISC_FILE) else {}
+        d["host"] = on
+        json.dump(d, open(DISC_FILE, "w"))
+    except (OSError, ValueError):
+        pass
+    return jsonify(ok=True, on=on)
+
+
 @app.route("/api/disc/state")
 def api_disc_state():
-    return jsonify(path=DISC["path"], size=DISC["size"], sectors=DISC["size"] // 2352 if DISC["size"] else 0)
+    return jsonify(path=DISC["path"], size=DISC["size"], sectors=DISC["size"] // 2352 if DISC["size"] else 0,
+                   host=host_disc.on, served=host_disc.served, last_lba=host_disc.last_lba, error=host_disc.error)
 
 @app.route("/api/disc/crc32")
 def api_disc_crc32():
@@ -2211,6 +2294,11 @@ def main():
     # A board on the far end of a switch answers in well under a millisecond.
     # Four one-second retries only made an absent board four seconds expensive.
     link = fl.Link(args.target, args.target_port, timeout=0.25, retries=3)
+    try:
+        if json.load(open(DISC_FILE)).get("host"):
+            host_disc.start()
+    except (OSError, ValueError):
+        pass
 
     # Look for the ESP in the background: it is a convenience, and the page has
     # to come up whether or not it is there.

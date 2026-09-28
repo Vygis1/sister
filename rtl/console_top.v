@@ -233,6 +233,9 @@ module console_top #(
 	wire         no_tcache = 1'b0, no_ccache = 1'b0, no_trun = 1'b0, no_capfirst = 1'b0;
 	wire [3:0]   gte_old   = 4'd0;
 	reg          cpu_fast = 1'b0, gpu_fast = 1'b0;             // ctrl 0xEC bits 12, 13: run past the console's pace (off: the console's)
+	reg          dma_relax = 1'b0;                              // ctrl 0xEC bit 14: see ps1_top
+	reg  [5:0]   ev_idx = 6'd0;
+	wire [31:0]  ps1_ev_data; wire [5:0] ps1_ev_wp;             // the frame event log (ctrl 0x120/0x124)
 	wire [31:0]  ps1_icv_pc, ps1_icv_got, ps1_icv_want, ps1_icv_n;
 	wire         ps1_dbg_exec;
 	reg  [5:0]   ps1_rsel;          // CPU register peek: write the index to ctrl 0x9C, read it back
@@ -285,21 +288,46 @@ module console_top #(
 	// the CD-ROM's sector transport: the ESP32 over SPI (cd_feed.v) into the drive
 	wire        cd_disc_in, cd_sb_we, cd_sb_done, cd_fill_run;
 	wire [11:0] cd_sb_addr; wire [7:0] cd_sb_data; wire [23:0] cd_sb_lba, cd_fill_lba; wire [3:0] cd_fill_room;
+	// the ESP32's feed (cd_feed.v), and the PC's (below): the drive takes one of them
+	wire        esp_disc_in, esp_sb_we, esp_sb_done;
+	wire [11:0] esp_sb_addr; wire [7:0] esp_sb_data; wire [23:0] esp_sb_lba;
 	wire [31:0] cd_dbg, cd_dbg_cmds, cd_dbg_setloc, cd_dbg_seek, cd_dbg_hdr, cd_sectors_in, cd_trace_data; wire [5:0] cd_trace_wp; reg [5:0] cd_trace_idx = 6'd0; wire [15:0] cd_dma_words; wire [15:0] cd_frames_short;
 	wire cc_flush = ctrl_we && (off == 16'h0118); wire cc_flush_busy;   // a write to 0x118 flushes the CPU's write-back cache to DDR3 (read: busy)
 	generate if (CORE_PS1) begin : g_cdfeed
 		cd_feed u_cdfeed (
 			.clk(clk), .rst(rst),
 			.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(esp_miso), .spi_cs_n(esp_cs_n),
-			.fill_lba(cd_fill_lba), .fill_room(cd_fill_room), .fill_run(cd_fill_run), .disc_in(cd_disc_in),
-			.sb_we(cd_sb_we), .sb_addr(cd_sb_addr), .sb_data(cd_sb_data), .sb_done(cd_sb_done), .sb_lba(cd_sb_lba),
+			.fill_lba(cd_fill_lba), .fill_room(cd_fill_room), .fill_run(cd_fill_run), .disc_in(esp_disc_in),
+			.sb_we(esp_sb_we), .sb_addr(esp_sb_addr), .sb_data(esp_sb_data), .sb_done(esp_sb_done), .sb_lba(esp_sb_lba),
 			.sectors_in(cd_sectors_in), .frames_short(cd_frames_short)
 		);
 	end else begin : g_nocdfeed
-		assign esp_miso = 1'b0; assign cd_disc_in = 1'b0; assign cd_sb_we = 1'b0; assign cd_sb_done = 1'b0;
-		assign cd_sb_addr = 12'd0; assign cd_sb_data = 8'd0; assign cd_sb_lba = 24'd0;
+		assign esp_miso = 1'b0; assign esp_disc_in = 1'b0; assign esp_sb_we = 1'b0; assign esp_sb_done = 1'b0;
+		assign esp_sb_addr = 12'd0; assign esp_sb_data = 8'd0; assign esp_sb_lba = 24'd0;
 		assign cd_sectors_in = 32'd0; assign cd_frames_short = 16'd0;
 	end endgenerate
+
+	// --- the disc from the PC, over Ethernet ----------------------------------------
+	// The same job cd_feed.v does for the ESP32, for when the ESP32 cannot: the PC
+	// reads what the drive wants (ctrl 0x128), writes the 2352-byte raw sector into
+	// a window at ctrl 0x4000..0x492F with block writes, and commits it with its LBA
+	// (ctrl 0x12C), which the drive takes only if it is the sector it asked for.
+	// ctrl 0x130 bit 0 hands the drive to the PC, bit 1 says a disc is in.
+	// Wired Ethernet, no SD card, no Wi-Fi: the ESP32's card stopped answering on
+	// 2026-09-28 and its Wi-Fi disc path is known to lose a sector.
+	wire        hcd_own, hcd_disc, hcd_we, hcd_done;
+	wire [11:0] hcd_addr; wire [7:0] hcd_data; wire [23:0] hcd_lba;
+	host_cd u_hcd (
+		.clk(clk), .rst(rst), .we(ctrl_we), .off(off), .wdata(wdata),
+		.own(hcd_own), .disc(hcd_disc),
+		.sb_we(hcd_we), .sb_addr(hcd_addr), .sb_data(hcd_data), .sb_done(hcd_done), .sb_lba(hcd_lba)
+	);
+	assign cd_disc_in = hcd_own ? hcd_disc : esp_disc_in;
+	assign cd_sb_we   = hcd_own ? hcd_we   : esp_sb_we;
+	assign cd_sb_addr = hcd_own ? hcd_addr : esp_sb_addr;
+	assign cd_sb_data = hcd_own ? hcd_data : esp_sb_data;
+	assign cd_sb_done = hcd_own ? hcd_done : esp_sb_done;
+	assign cd_sb_lba  = hcd_own ? hcd_lba  : esp_sb_lba;
 	// fb_ddr's read port: the streamer takes it while it is the one using the
 	// DDR3 copy, otherwise it belongs to the register bus as before.
 	wire [31:0]  fbr_rdata_w; wire fbr_ack_w;
@@ -464,7 +492,8 @@ module console_top #(
 			16'h009C: ps1_rsel <= wdata[5:0];
 			16'h0110: cd_trace_idx <= wdata[5:0];
 			16'h00EC: begin perf_sel <= wdata[5:0];
-			                cpu_fast <= wdata[12]; gpu_fast <= wdata[13]; end
+			                cpu_fast <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14]; end
+			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
 			16'h00F0: stream_ctl <= wdata;
 			16'h00F4: stream_base_r <= wdata;
 			16'h00F8: stream_words_r <= wdata;
@@ -553,6 +582,10 @@ module console_top #(
 		16'h0110: ctrl_rdata = {cd_dma_words, 10'd0, cd_trace_wp};              // DMA ch3 words written; the trace's write pointer (index on write)
 		16'h0114: ctrl_rdata = cd_trace_data;                                  // the entry at the index: {cmd, p0, p1, p2}
 		16'h0118: ctrl_rdata = {31'd0, cc_flush_busy};                        // the CPU cache flush: 1 while it is writing back
+		16'h0128: ctrl_rdata = {cd_fill_run, cd_fill_room[2:0], 4'd0, cd_fill_lba};   // the drive: running, room, the LBA it wants next
+		16'h0130: ctrl_rdata = {30'd0, hcd_disc, hcd_own};                    // the PC has the drive / a disc is in
+		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
+		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
 		16'h00E8: ctrl_rdata = ps1_dbg_c0;    // the last read-back's width and height
 		16'h00EC: ctrl_rdata = ps1_dbg_perf;  // the counter perf_sel selects (see ps1_top)
@@ -950,10 +983,12 @@ module console_top #(
 			.fb_cap_go(fb_cap_go), .fb_cap_ready(fb_cap_ready), .fb_width(fb_width), .fb_height(fb_height),
 			.fbr_addr(from_ddr ? sfa : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
 			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
-			.spu_out(audio_lr), .spu_out_we(audio_lr_we)
+			.spu_out(audio_lr), .spu_out_we(audio_lr_we),
+			.dma_relax(dma_relax), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp)
 		);
 	end else begin : g_ps1
 		assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
+		assign ps1_ev_data = 32'd0; assign ps1_ev_wp = 6'd0;
 		assign ps1_px_valid = 1'b0;
 		assign ps1_px_x = 9'd0; assign ps1_px_y = 9'd0; assign ps1_px_rgb = 8'd0;
 		assign ps1_dbg_pc = 32'd0;

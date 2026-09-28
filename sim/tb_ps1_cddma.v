@@ -20,7 +20,7 @@ module tb_ps1_cddma;
 	// the drive's transport
 	wire [23:0] fill_lba; wire [3:0] fill_room; wire fill_run;
 	reg  sb_we = 0; reg [11:0] sb_addr = 0; reg [7:0] sb_data = 0; reg sb_done = 0; reg [23:0] sb_lba = 0;
-	ps1_top dut (
+	ps1_top dut ( .dma_relax(1'b0), .ev_idx(6'd0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),
@@ -125,8 +125,10 @@ module tb_ps1_cddma;
 		end
 		$display("  the drive's trace (oldest first):");
 		for (i = 0; i < 64; i = i + 1) begin l = dut.u_cd.trace[(dut.u_cd.trace_w + i) & 6'h3F]; if (l[31:0] != 32'd0) $display("    %08h", l[31:0]); end
-		if (markC == 32'h0020 && mark10 == 32'h1234) $display("  ok   SPU registers: SPUSTAT mirrors SPUCNT's transfer mode, a register reads back");
-		else begin errors = errors + 1; $display("  FAIL SPU registers: SPUSTAT %08h (want 0020), readback %08h (want 1234)", markC, mark10); end
+		// The real SPU (not the old stub): in DMA-write mode with its FIFO empty it
+		// also raises the DMA request bits, 9 and 7 -- as DuckStation and MiSTer do.
+		if (markC[5:0] == 6'h20 && markC[9] && markC[7] && mark10 == 32'h1234) $display("  ok   SPU registers: SPUSTAT mirrors SPUCNT's transfer mode and asks for DMA, a register reads back");
+		else begin errors = errors + 1; $display("  FAIL SPU registers: SPUSTAT %08h (want 02A0), readback %08h (want 1234)", markC, mark10); end
 		if (mark4 == 32'd8) $display("  ok   the SPU DMA (channel 4) raised the DMA interrupt (I_STAT bit 3), DICR %08h", mark8);
 		else begin errors = errors + 1; $display("  FAIL no DMA interrupt after a channel 4 transfer: I_STAT&8 = %08h, DICR %08h", mark4, mark8); end
 		if (errors == 0) $display("tb_ps1_cddma: all checks passed"); else $display("tb_ps1_cddma: %0d FAIL(s)", errors);

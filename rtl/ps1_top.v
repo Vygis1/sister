@@ -189,7 +189,15 @@ module ps1_top (
 	output wire        fbr_ack,
 	// the sound: one {right, left} sample per spu_out_we, 44.1 kHz
 	output wire [31:0] spu_out,
-	output wire        spu_out_we
+	output wire        spu_out_we,
+	// Let the processor run on through a DMA as long as it does not need the bus
+	// (instruction-cache hits, the scratchpad, registers). Off: it stops dead the
+	// moment any DMA starts, as it always has.
+	input  wire        dma_relax,
+	// the frame event log (see "where a frame goes" below)
+	input  wire [5:0]  ev_idx,
+	output wire [31:0] ev_data,
+	output wire [5:0]  ev_wp
 );
 	localparam [23:0] RAM_LINE  = 24'h01_0000;   // 0x100000 >> 4
 	localparam [23:0] BIOS_LINE = 24'h03_0000;   // 0x300000 >> 4
@@ -222,7 +230,8 @@ module ps1_top (
 	// one word of a triangle, and the engine waited for the rest for ever.
 	// I/O accesses (a GPUSTAT poll) still go through.
 	wire        dma_ram_wait = dma_in_flight && c_req && (c_addr[28:21] == 8'h00 || c_addr[28:19] == 10'b11_1111_1000);   // RAM or BIOS (= `cached`, declared below)
-	wire        cpu_ce = d_calibrated && cpu_ready && !vz_active_w && !dma_hog && !dma_ram_wait   // a DMA owns the bus
+	wire        dma_block;              // a DMA holds the processor (see below, after the decode)
+	wire        cpu_ce = d_calibrated && cpu_ready && !vz_active_w && !dma_block && !dma_ram_wait   // a DMA owns the bus
 	                     && !cpu_halt
 	                     && (cpu_fast || sys_ce);
 	wire        core_rst = rst || !cpu_run;
@@ -260,6 +269,13 @@ module ps1_top (
 	wire ram_hit  = (c_addr[28:21] == 8'h00);
 	wire bios_hit = (c_addr[28:19] == 10'b11_1111_1000);   // 0x1FC00000, incl. bit 28
 	wire spad_hit = (c_addr[28:10] == {13'h1F80, 6'd0});
+	// The chip's CPU keeps executing during a DMA until it needs the bus: its
+	// instruction cache and scratchpad are on the CPU's side. Ours stopped dead
+	// the moment a transfer was even asked for -- measured 2026-09-28 in N. Sanity
+	// Beach, 8.4% of all program-counter samples sat on the `jr ra` straight after
+	// the game's DrawOTag kicked the display-list DMA. With dma_relax it waits only
+	// for an access that goes to the bus (anything but the scratchpad).
+	assign dma_block = dma_hog && (!dma_relax || (c_req && !spad_hit));
 	wire io_hit   = (c_addr[28:16] == 13'h1F80) && !spad_hit;
 	wire gpu_hit  = io_hit && (c_addr[15:4] == 12'h181);
 	wire irq_hit  = io_hit && (c_addr[15:4] == 12'h107);
@@ -992,6 +1008,34 @@ module ps1_top (
 
 	reg pfb_d;
 	always @(posedge clk) pfb_d <= vcache.pf_busy;
+
+	// --- where a frame goes: a log of timestamped events ------------------------------
+	// The counters above say how busy each part is on average; they cannot say
+	// whether the processor and the drawing engine work at the same time or take
+	// turns, which is the whole question for a frame rate that is quantised to
+	// vertical syncs. So: the last 64 of these, each {type, 29-bit clock stamp}:
+	//   0 the displayed buffer changed (the game flipped)
+	//   1 the display-list DMA started    2 ...and finished (the list is sent)
+	//   3 the drawing engine went idle with nothing queued (the frame is drawn)
+	//   4 a vertical sync
+	reg  [28:0] ev_clk;
+	reg  [31:0] ev_ring [0:63];
+	reg  [5:0]  ev_p;
+	reg  [31:0] ev_disp_d;
+	reg         ev_dma_d, ev_draw_d;
+	wire        ev_draw = gpu.busy || !gpu.f_empty || dma_gpu_active;
+	assign ev_wp   = ev_p;
+	assign ev_data = ev_ring[ev_idx];
+	always @(posedge clk) begin
+		ev_clk <= ev_clk + 29'd1;
+		ev_disp_d <= dbg_disp; ev_dma_d <= dma_gpu_active; ev_draw_d <= ev_draw;
+		if (rst) ev_p <= 6'd0;
+		else if (dbg_disp[18:0] != ev_disp_d[18:0]) begin ev_ring[ev_p] <= {3'd0, ev_clk}; ev_p <= ev_p + 6'd1; end
+		else if (ev_draw_d && !ev_draw)             begin ev_ring[ev_p] <= {3'd3, ev_clk}; ev_p <= ev_p + 6'd1; end
+		else if (dma_gpu_active && !ev_dma_d)       begin ev_ring[ev_p] <= {3'd1, ev_clk}; ev_p <= ev_p + 6'd1; end
+		else if (!dma_gpu_active && ev_dma_d)       begin ev_ring[ev_p] <= {3'd2, ev_clk}; ev_p <= ev_p + 6'd1; end
+		else if (gpu_vblank_edge)                   begin ev_ring[ev_p] <= {3'd4, ev_clk}; ev_p <= ev_p + 6'd1; end
+	end
 
 	reg [31:0] perf [0:63];
 	integer pk;

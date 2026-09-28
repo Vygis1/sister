@@ -21,7 +21,7 @@ module tb_ps1_c0fast;
 	wire [127:0] d_bm = {{8{d_wmask[15]}}, {8{d_wmask[14]}}, {8{d_wmask[13]}}, {8{d_wmask[12]}}, {8{d_wmask[11]}}, {8{d_wmask[10]}}, {8{d_wmask[9]}}, {8{d_wmask[8]}}, {8{d_wmask[7]}}, {8{d_wmask[6]}}, {8{d_wmask[5]}}, {8{d_wmask[4]}}, {8{d_wmask[3]}}, {8{d_wmask[2]}}, {8{d_wmask[1]}}, {8{d_wmask[0]}}}; wire d_ready;
 	reg d_valid = 0; reg [127:0] d_rdata_r = 0; assign d_rdata = d_rdata_r;
 	wire px_valid; wire [8:0] px_x, px_y; wire [7:0] px_rgb; wire [31:0] pc;
-	ps1_top dut (
+	ps1_top dut ( .dma_relax(1'b0), .ev_idx(6'd0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),

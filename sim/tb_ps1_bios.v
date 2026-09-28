@@ -37,7 +37,7 @@ module tb_ps1_bios;
 	wire [7:0]  px_rgb;
 	wire [31:0] pc;
 
-	ps1_top dut (
+	ps1_top dut ( .dma_relax(1'b0), .ev_idx(6'd0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),
