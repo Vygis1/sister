@@ -93,7 +93,7 @@ def draw(samples, which):
 
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else "esp"
-    link = fl.Link("192.168.178.50", timeout=1.0, retries=6)
+    link = fl.Link(fl.DEFAULT_HOST, timeout=1.0, retries=6)
 
     if link.read(0) != 0x5348454C:
         print("the board is not running the shell")

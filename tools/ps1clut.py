@@ -21,13 +21,13 @@ the palette and the picture on the page are all the same moment. Do not use
 bit 0 for this: bit 0 is the core's RESET (`core_rst = rst || !run`), and a tool
 that "stops the processor" with it is reading a machine that has been reset.
 """
-import sys, collections
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, collections
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
 RAM_LINE = 0x10000
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 
 # command -> (words, index of the first UV word, index of the second UV word)
 # A shaded textured polygon carries its PALETTE in the top half of the first UV

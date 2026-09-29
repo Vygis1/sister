@@ -10,8 +10,9 @@ turns "the textures look like noise" into a number.
     python tools/ps1texcheck.py build      write sim/roms/ps1/texcheck.bin
     python tools/ps1texcheck.py run        load it on the board and check
 """
-import sys, time, urllib.request
-sys.path.insert(0, "tools"); sys.path.insert(0, "pc")
+import os, sys, time, urllib.request
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "pc"))
 from mipsasm import *
 
 GP0, GP1 = 0x1F801810, 0x1F801814
@@ -311,9 +312,9 @@ def run_dma(flags=None):
     print("load:", urllib.request.urlopen(req, timeout=60).read()[:40].decode())
     time.sleep(3)
     if flags is not None:
-        sys.path.insert(0, "pc")
+        sys.path.insert(0, os.path.join(HERE, "..", "pc"))
         import fpgalink as fl
-        fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4).write(0x0008_0000 + 0xEC, flags)
+        fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4).write(0x0008_0000 + 0xEC, flags)
         print("ctrl 0xEC = 0x%05x" % flags)
     time.sleep(3)
     for attempt in range(8):

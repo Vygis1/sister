@@ -5,9 +5,9 @@
 The web UI does the same thing, so when a game misbehaves this says whether the
 fault is in the console or in the page in front of it.
 """
-import sys, struct, time
-sys.path.insert(0, "pc")
-from fpgalink import Link
+import os, sys, struct, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
+from fpgalink import Link, DEFAULT_HOST
 
 NES_CTRL, NES_JOY1 = 0x0008_0004, 0x0008_0008
 NES_FRAME, NES_PC, NES_NMI = 0x0008_0010, 0x0008_0014, 0x0008_0018
@@ -16,7 +16,7 @@ NES_MAPPER, NES_CONSOLE = 0x0008_001C, 0x0008_0020
 VID_CTRL, VID_FB = 0x0006_0004, 0x0010_0000
 FB_WORDS = 320 * 240 // 4
 
-link = Link("192.168.178.50", timeout=1.0, retries=6)
+link = Link(DEFAULT_HOST, timeout=1.0, retries=6)
 
 rom = open(sys.argv[1], "rb").read()
 assert rom[:4] == b"NES\x1a", "not an iNES file"

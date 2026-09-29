@@ -15,13 +15,13 @@ Reports, for each setting:
   lit pixels           so blanking something that should have been drawn shows
                        up as the picture losing content
 """
-import sys, time, urllib.request, numpy as np
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time, urllib.request, numpy as np
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
 S = "http://127.0.0.1:8080"
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 
 
 def grab(n, link=None, ctl=None):

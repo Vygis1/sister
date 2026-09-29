@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start the web server, and make sure it is the ONLY one.
 #
-#   ./tools/serve.sh [target-ip]
+#   ./tools/serve.sh [target-ip]        default $FPGA_HOST, else 192.168.178.50
 #
 # This exists because `pkill -f` does not match Windows processes from Git Bash:
 # it reports success, kills nothing, and the old server keeps port 8080. The
@@ -9,7 +9,7 @@
 # exactly like your edit not working. Twice was enough.
 set -e
 cd "$(dirname "$0")/.."
-TARGET="${1:-192.168.178.50}"
+TARGET="${1:-${FPGA_HOST:-192.168.178.50}}"
 
 powershell.exe -NoProfile -Command "
   Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" |

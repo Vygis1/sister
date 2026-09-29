@@ -1,6 +1,9 @@
 """Compare the game's executable in RAM against the bytes on the disc.
 
-    python tools/ps1exeverify.py [lines-to-sample]   (0 = every line)
+    python tools/ps1exeverify.py [lines-to-sample] [disc.bin]   (0 = every line)
+
+The disc image is the argument, or PS1_DISC. HDR_LBA below is where
+Crash Bandicoot (USA) keeps its PS-X EXE.
 
 The BIOS reads the PS-X EXE off the disc and DMAs it into RAM. If any of it
 does not arrive, the game runs off a corrupted copy of itself: a jump table
@@ -13,18 +16,18 @@ processor's write-back cache, and prints WHERE the differences are, because
 the shape of them names the cause: whole 2048-byte sectors missing is the
 drive, 16-byte lines is the cache, scattered words is a race.
 """
-import sys, time, struct, random
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time, struct, random
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
 RAM_LINE = 0x10000
-IMG = r"C:/Users/vyga/Downloads/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin"
+IMG = os.environ.get("PS1_DISC", "")      # your own image of the disc, raw 2352-byte sectors
 HDR_LBA = 112018
 
 
-def disc_text():
-    f = open(IMG, "rb")
+def disc_text(img):
+    f = open(img, "rb")
     def user(lba):
         f.seek(lba * 2352); return f.read(2352)[24:24 + 2048]
     h = user(HDR_LBA)
@@ -36,12 +39,16 @@ def disc_text():
 
 
 def main():
-    nsample = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
-    taddr, tsize, text = disc_text()
+    nums = [a for a in sys.argv[1:] if a.isdigit()]
+    img = next((a for a in sys.argv[1:] if not a.isdigit()), IMG)
+    if not img:
+        sys.exit("give the disc image as an argument or set PS1_DISC to your own dump")
+    nsample = int(nums[0]) if nums else 3000
+    taddr, tsize, text = disc_text(img)
     print("disc: %s loads at %08x, %d bytes (%d lines of 16)"
           % ("PS-X EXE", taddr, tsize, tsize // 16))
 
-    l = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
+    l = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
     l.write(N + 0x118, 1)
     for _ in range(400):
         if not (l.read(N + 0x118) & 1):

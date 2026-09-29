@@ -15,8 +15,9 @@ This exists because the same question could not be settled inside the game: the
 character keeps animating even with the game paused, so a frame that differs
 might legitimately differ. Here nothing can.
 """
-import sys, time, urllib.request
-sys.path.insert(0, "tools"); sys.path.insert(0, "pc")
+import os, sys, time, urllib.request
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "pc"))
 from mipsasm import *
 
 GP0, GP1 = 0x1F801810, 0x1F801814
@@ -121,9 +122,9 @@ def run():
     # The image goes into the boot slot; the console has to be RESET to run it.
     # Without this the game carries on and the test measures the game, which is
     # exactly what it exists to avoid.
-    sys.path.insert(0, "pc")
+    sys.path.insert(0, os.path.join(HERE, "..", "pc"))
     import fpgalink as fl
-    l = fl.Link("192.168.178.50")
+    l = fl.Link(fl.DEFAULT_HOST)
     r = l.read(0x0008_0000 + 0x04)
     l.write(0x0008_0000 + 0x04, r & ~1); time.sleep(0.3)
     l.write(0x0008_0000 + 0x04, r | 1)

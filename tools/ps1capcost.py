@@ -12,12 +12,12 @@ happens to be in:
   capture read waiting  counter 53, clocks it asked for a line and had not got it
   clocks a line         the same, divided by the lines it actually read
 """
-import sys, time, threading, urllib.request
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time, threading, urllib.request
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 SEL = {"clocks": 0, "engine busy": 7, "raster busy": 17, "CPU held": 2,
        "instructions": 3, "capture running": 29, "capture held": 30,
        "capture read waiting": 53, "capture line reads": 56,

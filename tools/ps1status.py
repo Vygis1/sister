@@ -19,14 +19,14 @@ import os, re, sys, time, json, threading, subprocess
 import tkinter as tk
 import urllib.request
 
-sys.path.insert(0, r"C:/fpga/pc")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 try:
     import fpgalink as fl
 except Exception:
     fl = None
 
-LOG    = r"C:/fpga/build/core_ps1.log"
-BOARD  = "192.168.178.50"
+LOG    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "core_ps1.log")
+BOARD  = fl.DEFAULT_HOST if fl else ""
 SERVER = "http://127.0.0.1:8080"
 N      = 0x0008_0000
 

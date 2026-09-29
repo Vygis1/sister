@@ -1,124 +1,137 @@
-# QMTECH XC7A100T — board support
+# fpga-console
 
-Scaffold for the QMTECH Artix-7 core board. Board facts, constraints and the
-Vivado flow are lifted from `C:\ps2shit\ps2net`, where they were derived from the
-vendor schematic and proven on real hardware.
+Four game consoles in Verilog on an inexpensive Artix-7 board: **NES**, **Sega Master
+System**, **Sega Mega Drive** and **Sony PlayStation**. One console per
+bitstream, switched from a web page; the picture, the sound and the controller
+travel over Ethernet to a browser on your PC.
 
-| | |
-|---|---|
-| Board | QMTECH Artix-7 XC7A100T core board (PCB shared with the 200T) |
-| Part | **xc7a100tfgg676-1** — slowest speed grade |
-| Fabric | 63,400 LUT · 126,800 FF · 135 × BRAM36 · 240 DSP48 |
-| Clock | 50 MHz onboard oscillator, ball **U22** |
-| LEDs | **T23**, **R23** |
-| I/O | 108 pins on headers U2/U4 — see [`boards/qmtech_a100t/HEADERS.md`](boards/qmtech_a100t/HEADERS.md) |
-| Also on board | 256 MB DDR3, QSPI config flash, 2 push-buttons |
-| Toolchain | Vivado 2026.1 at `C:\AMDDesignTools\2026.1` — no licence needed for this part |
+Every CPU, video chip and sound chip here was written for this project, and
+each is checked against a reference: Klaus Dormann's 6502 functional test and
+the nestest log, ZEXDOC/ZEXALL for the Z80, instruction sweeps for the 68000
+and the R3000, and the SPU bit-exact against a model built from DuckStation and
+psx-spx.
+
+| Console | CPU | What works |
+|---|---|---|
+| NES | cycle-accurate 6502 | PPU, APU, mappers 0 (NROM) and 4 (MMC3) |
+| Master System | Z80 | VDP, SN76489, Sega mapper |
+| Mega Drive | 68000 + Z80 | VDP with DMA, YM2612, SN76489; cartridges in DDR3 |
+| PlayStation | R3000A + GTE | GPU, SPU (24 voices, reverb), CD-ROM, DMA, timers, pad, memory card |
+
+The PlayStation boots the real BIOS and runs Crash Bandicoot at 30 fps in its
+levels. Its CPU runs on every 50 MHz clock by default, to make up for taking
+more clocks per load than the real chip. The timers, video and sound keep the
+console's own 33.8688 MHz, so games keep their pace. Not done yet: CD audio
+(CD-DA and XA) and the SPU's capture buffers. [docs/PLAYSTATION.md](docs/PLAYSTATION.md)
+has the details.
+
+## What you need
+
+- **QMTECH Artix-7 XC7A100T core board** (xc7a100tfgg676-1, 256 MB DDR3).
+  [docs/BOARD.md](docs/BOARD.md) covers board facts, the flash part and the
+  JTAG programmer.
+- **A LAN8720 RMII Ethernet module** on header U4. The pinout, and the power pins
+  not to use, are in [boards/qmtech_a100t/lan8720.xdc](boards/qmtech_a100t/lan8720.xdc).
+- **A JTAG cable** for the first load: Xilinx Platform Cable, Digilent, or an
+  FT2232H with openFPGALoader.
+- **Vivado 2026.1**, the free edition; no licence is needed for this part.
+- **Python 3.10+** with Flask (`pip install -r requirements.txt`).
+- Optional: an **ESP32-S3** with a microSD card as a stand-alone front door
+  ([esp32/README.md](esp32/README.md)).
+
+**Games and BIOS are not included and never will be.** Use dumps of cartridges
+and discs you own, and for the PlayStation a dump of your own console's BIOS
+(e.g. SCPH-1001).
+
+## Quick start
+
+Run everything from Git Bash on Windows, or from a shell on Linux, at the
+repository root.
+
+```sh
+./tools/vivado.sh check          # is the toolchain usable for this part?
+./tools/vivado.sh mig            # once: generate the DDR3 controller (Mega Drive, PlayStation)
+EFFORT=1 ./tools/core.sh ps1     # or nes / sms / md / shell; ~35 min for ps1 -> cores/ps1.bin
+./tools/core.sh shell            # the golden image: it installs and switches cores
+```
+
+Put the shell in the board's configuration flash once over JTAG. The
+[docs/BOARD.md](docs/BOARD.md) section on flashing has the exact part name to
+use. From then on, cores are installed from the web page.
+
+```sh
+pip install -r requirements.txt
+cp local.env.example local.env   # this machine's settings: board address, BIOS path, card file
+python pc/server.py --target 192.168.178.50
+# then open http://127.0.0.1:8080
+```
+
+The board's address is set in the bitstream, in `rtl/eth_top.v` (`IP_ADDR`,
+192.168.178.50 by default). If you change it there to suit your network, set
+`FPGA_HOST` in `local.env` to match, for the server and the tools in `tools/`.
+Any setting in `local.env` can also be given as an environment variable.
+
+### PlayStation specifics
+
+- **BIOS:** upload it on the page, or set `PS1_BIOS` in `local.env` so the
+  server puts it back whenever the console is reset.
+- **Disc:** a raw MODE2/2352 `.bin`. The server feeds it to the board over
+  Ethernet (`/api/disc/select`, then `/api/disc/host`), or the ESP32 reads it
+  from its SD card.
+- **Memory card:** `saves/card1.mcr` (or `PS1_CARD`). It is a raw 128 kB card,
+  the format DuckStation uses, created blank if it does not exist. It is loaded
+  with the BIOS, and every sector the game writes is copied back to the file
+  within a fraction of a second. A `.bak` of the file as it was is kept at the
+  first load of each session.
+
+## How it fits together
+
+    browser  <--HTTP-->  pc/server.py  <--UDP (fpgalink)-->  FPGA  <--SPI-->  ESP32 (optional)
+                                        <--UDP frames/audio--
+
+- **fpgalink** is a register bus over UDP with no CPU in the path
+  ([docs/PROTOCOL.md](docs/PROTOCOL.md)). Everything the page does is register
+  reads and writes.
+- **The shell** is the golden image at flash address 0. It writes cores into the
+  slot and reboots into them, and a power cycle always brings it back, so a bad
+  core cannot brick the board ([docs/SHELL.md](docs/SHELL.md)).
+- **The video** is pushed by the board as UDP packets, one captured frame at a
+  time, and the page draws it on a canvas. **The sound** is a ring buffer the
+  server drains.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) covers where everything lives.
+  [docs/MEGADRIVE.md](docs/MEGADRIVE.md),
+  [docs/Z80-DESIGN.md](docs/Z80-DESIGN.md) and
+  [docs/ROADMAP.md](docs/ROADMAP.md) record how each part was built and what
+  went wrong on the way.
 
 ## Layout
 
-    boards/qmtech_a100t/
-      qmtech_a100t.xdc      base constraints: clock, LEDs, config settings
-      HEADERS.md            full U2/U4 pin -> ball map, JTAG J1 pinout, wiring warnings
-      reference-ps2net.xdc  ps2net's pinout, kept as a worked example of using the headers
-    rtl/blink.v             bring-up blinky
-    tools/vivado.sh         wrapper: check / build / prog / flash / gui
-    tools/check.tcl         is the install usable for this part?
-    tools/build.tcl         non-project RTL -> bitstream
-    tools/program.tcl       JTAG load, or burn to QSPI
-    prebuilt/smoke-a100t.bit  known-good blinky bitstream, built 2026-08-28
+    rtl/        the consoles and the board infrastructure (Ethernet, DDR3, shell)
+    sim/        testbenches; ./tools/sim.sh <bench> runs one under Vivado's xsim
+    pc/         server.py (web UI backend), fpgalink.py (the bus), mock_fpga.py
+    web/        the page
+    tools/      build, flash, simulation and board-debugging scripts
+    boards/     constraints for the QMTECH board and its add-ons
+    esp32/      the ESP32-S3 front door (Arduino sketch)
+    docs/       design notes
 
-## Use
+## Tests
 
-Run these from **Git Bash**, not msys2's `sh` — msys2's `sh` cannot launch
-`vivado.bat` and returns success having run nothing.
+```sh
+./tools/simps1.sh     # the PlayStation gate: caches, SPU, pad and memory card, GPU, CPU, BIOS boot
+./tools/simall.sh     # the other cores
+```
 
-    ./tools/vivado.sh check                      # toolchain sanity, ~1 min
-    ./tools/vivado.sh build                      # rtl/ + base xdc -> build/blink/blink.bit
-    ./tools/vivado.sh prog build/blink/blink.bit # load over JTAG (volatile)
+Several benches need files that cannot be redistributed, or that come from
+other projects, placed in `sim/roms/`:
+- a PlayStation BIOS, and commercial cartridges for the game-level benches;
+- Klaus Dormann's 6502 functional test (GPL-3), ZEXDOC/ZEXALL (GPL-2),
+  nestest and blargg's NES tests.
 
-A different design:
+Each bench says which file it wants and where.
 
-    ./tools/vivado.sh build -top mydesign -xdc boards/qmtech_a100t/mydesign.xdc
+## Security
 
-Persist it to the config flash so the board boots standalone:
-
-    ./tools/vivado.sh flash build/blink/blink.bit -mem <cfgmem-part>
-
-The flash part on this board is **identified**: a Micron **N25Q064A** at U3
-(marking `25Q064A` / `13E40`; the chip's own JEDEC ID reads `20 BA 17`). So:
-
-    ./tools/vivado.sh flash build/eth_top/eth_top.bit -mem n25q64-3.3v-spi-x1_x2_x4
-
-Note the `-spi-x1_x2_x4` suffix. The `n25q64-3.3v-qspi-*` parts also exist and
-look like the obvious choice, but they are UltraScale only and Vivado rejects
-them for artix7 with a message that reads like the part name is wrong.
-
-## Bring-up order
-
-1. **Power and JTAG only.** Load `prebuilt/smoke-a100t.bit`, or build `blink`
-   yourself. Both LEDs blinking at visibly different rates means the board, the
-   3.3 V rail, the oscillator, JTAG, the Vivado install and the constraint flow
-   are all good. That is every variable eliminated at once.
-2. Then UART on a header pin, so hardware can talk back.
-3. Then DDR3 via MIG, which is the gate on anything large.
-
-## Programmer
-
-The J1 header is 6 pins: **3V3, TCK, TDO, TDI, TMS, GND** — full table and the
-caveat about pins 1/6 in `HEADERS.md`. **VREF (pin 1) is not optional**: without
-it a level-shifting cable drives nothing and reports no error that points at the
-cause.
-
-Vivado's hardware manager only sees cables it has drivers for — Xilinx Platform
-Cable and Digilent. A bare FT2232H breakout will not show up; use
-[openFPGALoader](https://github.com/trabucayre/openFPGALoader) for those:
-
-    openFPGALoader -c ft2232 build/blink/blink.bit
-
-## 6502
-
-`rtl/cpu6502.v` is a cycle-accurate NMOS 6502 — 921 LUTs, 174 flip-flops, no
-block RAM, no DSP. It passes Klaus Dormann's functional test in full:
-
-    ./tools/sim.sh tb_cpu6502     # ~4 minutes, 96M cycles, 30.6M instructions
-
-Cycle accuracy is the point, not instruction accuracy: NES games time raster
-effects by counting CPU cycles, so every bus cycle a real 6502 performs is
-performed here, dummy reads included. The NMOS quirks are deliberate — the
-`JMP ($xxFF)` page-wrap bug, zero-page index wrapping, B existing only in the
-pushed status byte, and decimal ADC/SBC with NMOS flag behaviour.
-
-It also matches **nestest.nes against its published reference log, all 8991
-instructions**, official and undocumented opcodes alike:
-
-    ./tools/sim.sh tb_nestest     # then compare build/sim/nestest_out.txt
-
-That is a stronger test than Klaus in one respect: it runs the real NES memory
-map, with RAM mirrored four times across $0000-$1FFF and a 16 KB PRG ROM
-appearing at both $8000 and $C000. Mirrors are exactly where an address decode
-goes wrong.
-
-Three things the two tests between them caught:
-
-- **The NES has no decimal mode.** The 2A03 keeps the D flag but ADC and SBC are
-  always binary. `DECIMAL` defaults to 0 for that; Klaus's test instantiates the
-  core with `DECIMAL=1` because it exercises real-6502 decimal arithmetic.
-- **76 undocumented opcodes** are implemented (LAX, SAX, SLO, RLA, SRE, RRA,
-  DCP, ISC and the NOP variants that still perform their read). Real games use
-  them, and nestest diverges at exactly the instruction where they begin.
-- **RRA is ROR then ADC, and the ADC must see the carry the ROR just made.**
-  Reading the flag register gives the value from before the shift, because the
-  non-blocking assignment has not landed yet. That one bug accounted for every
-  remaining mismatch from 94% onward.
-
-Two things about Klaus's test that cost time:
-
-- **Success is `0x3469`, not the highest self-jump in the image.** Klaus ends
-  with `lda #$f0 / sta test_case / jmp *`. The higher trap at `0x382F` belongs
-  to the interrupt test, which needs host support the functional test does not
-  use. `tb_cpu6502` also checks `test_case == 0xF0` so the pass does not rest on
-  a magic address alone.
-- **`$0200` is the test-case counter**, not an I/O trigger. Every stage reads
-  it, checks it, and stores the next number, which is why a failure address
-  tells you which test you were in.
+`pc/server.py` listens on 127.0.0.1 by default, and it should stay that way. It
+can read any file the disc and card routes are pointed at, and it has no
+authentication. Do not expose it beyond a network you trust.

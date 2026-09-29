@@ -10,9 +10,9 @@
 The web interface is the usual way in; this is the one that still works when
 the chip has fallen off the network, which is exactly when you need it.
 """
-import sys, time, serial
+import os, sys, time, serial
 
-PORT = "COM6"
+PORT = os.environ.get("ESP_PORT", "COM6")    # ESP_PORT: the ESP32's USB serial port
 BAUD = 115200
 
 

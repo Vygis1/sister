@@ -15,8 +15,8 @@ the flip that started the frame.
 What it answers: does a slow frame wait for the PROCESSOR (the kick comes late)
 or for the DRAWING ENGINE (the kick comes early, the drawing finishes late)?
 """
-import sys, time, statistics
-sys.path.insert(0, "pc")
+import os, sys, time, statistics
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
@@ -27,7 +27,7 @@ NAMES = {0: "flip", 1: "dma+", 2: "dma-", 3: "idle", 4: "vsync"}
 def main():
     secs = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
     knob = int(sys.argv[2], 0) if len(sys.argv) > 2 else None
-    l = fl.Link("192.168.178.50", 5005, timeout=0.05, retries=10)
+    l = fl.Link(fl.DEFAULT_HOST, 5005, timeout=0.05, retries=10)
     if knob is not None:
         l.write(N + 0xEC, knob)
     ev = []

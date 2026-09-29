@@ -17,19 +17,23 @@ if [ "$1" = "--also" ]; then ALSO="$2"; shift 2; fi
 TITLE="$1"; shift
 SLUG=$(printf '%s' "$TITLE" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/-$//' | cut -c1-40)
 
-mkdir -p build/console
+# The repo is wherever this script is; WROOT is the same place spelled for
+# Windows programs (C:/...), which is what pythonw and start want.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+WROOT=$(cygpath -m "$ROOT" 2>/dev/null || echo "$ROOT")
+mkdir -p "$ROOT/build/console"
 SCRIPT="build/console/$SLUG.cmd.sh"
 # PYTHONUNBUFFERED, or a python command writing to a pipe buffers its output
 # and the window sits empty until the command ends -- which is exactly the
 # stretch you wanted to watch.
-{ echo '#!/bin/sh'; echo 'cd /c/fpga || exit 1'; echo 'export PYTHONUNBUFFERED=1'
-  echo "exec $*"; } > "$SCRIPT"
-chmod +x "$SCRIPT"
+{ echo '#!/bin/sh'; echo "cd '$ROOT' || exit 1"; echo 'export PYTHONUNBUFFERED=1'
+  echo "exec $*"; } > "$ROOT/$SCRIPT"
+chmod +x "$ROOT/$SCRIPT"
 
 BASH_EXE=$(cygpath -w "$(command -v bash)" 2>/dev/null || command -v bash)
 if [ -n "$ALSO" ]; then
-	start //B pythonw C:/fpga/tools/console.py "$TITLE" --also "$ALSO" -- "$BASH_EXE" "C:/fpga/$SCRIPT"
+	start //B pythonw "$WROOT/tools/console.py" "$TITLE" --also "$ALSO" -- "$BASH_EXE" "$WROOT/$SCRIPT"
 else
-	start //B pythonw C:/fpga/tools/console.py "$TITLE" -- "$BASH_EXE" "C:/fpga/$SCRIPT"
+	start //B pythonw "$WROOT/tools/console.py" "$TITLE" -- "$BASH_EXE" "$WROOT/$SCRIPT"
 fi
-echo "C:/fpga/build/console/$SLUG.log"
+echo "$WROOT/build/console/$SLUG.log"

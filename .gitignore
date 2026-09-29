@@ -35,3 +35,18 @@ tools/arduino/
 # --- python --------------------------------------------------------------
 __pycache__/
 *.pyc
+
+# --- things a session leaves lying around ----------------------------------
+# Java crash dumps from Vivado, screenshots dropped in the root
+hs_err_pid*
+*.dmp
+/*.png
+
+# --- your own data -----------------------------------------------------------
+# memory card images (pc/server.py saves the console's card here) and backups
+saves/
+*.mcr
+*.mcr.bak
+
+# settings for one machine (see local.env.example)
+local.env

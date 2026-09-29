@@ -17,10 +17,10 @@ about four seconds at thirty a second -- and reports:
 
 Writes build/console/sheet.png and build/console/steady.png.
 """
-import sys, time, zlib, struct, urllib.request
+import os, sys, time, zlib, struct, urllib.request
 
 S = "http://127.0.0.1:8080"
-OUT = r"C:/fpga/build/console"
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "console")
 
 
 def chunk(tag, data):

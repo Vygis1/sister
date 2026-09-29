@@ -10,12 +10,12 @@ which do not compare (see [[ps1-palette-is-the-speed-cap]]).
 The number that matters is CLOCKS AN INSTRUCTION -- it does not depend on which
 level the game happens to be in, which a frame rate very much does.
 """
-import sys, time, threading, urllib.request
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time, threading, urllib.request
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 NO_IRUN = 1 << 18
 SEL = {"clocks": 0, "instructions": 3, "waiting for an instruction": 9,
        "loads": 10, "collecting loads": 12, "stores": 11, "on stores": 13,

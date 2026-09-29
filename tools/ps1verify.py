@@ -7,11 +7,11 @@ the ESP32's card and watches what the game actually does. Prints a line per
 check and ends with a verdict, so a build can be accepted or rejected without
 squinting at a picture.
 """
-import json, subprocess, sys, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 
 SERVER = "http://127.0.0.1:8080"
-ESP = "http://192.168.178.94"
-BIOS = r"C:/Users/vyga/Downloads/SCPH1001.BIN"
+ESP = "http://" + os.environ.get("ESP_HOST", "192.168.178.94")    # ESP_HOST: the ESP32 on your network
+BIOS = os.environ.get("PS1_BIOS", "")                            # your own BIOS dump, e.g. SCPH1001.BIN
 DISC = "/discs/crash2.bin"
 fails = []
 
@@ -46,6 +46,8 @@ for build, run, what in [("build", "run", "a 15-bit texture"),
     check(not bad, what, tail[-110:])
 
 print("--- the game, from the disc on the card ---")
+if not BIOS:
+    sys.exit("set PS1_BIOS to your own BIOS dump (e.g. SCPH1001.BIN)")
 rom = open(BIOS, "rb").read()
 urllib.request.urlopen(urllib.request.Request(
     SERVER + "/api/nes/load", data=rom,
@@ -75,9 +77,9 @@ check(moving >= 10, "the picture is moving", "%d of 19 frames differed" % moving
 check(d1["dup_complete"] - d0["dup_complete"] == 0, "no frame was merged with another",
       "merged %d" % (d1["dup_complete"] - d0["dup_complete"]))
 
-sys.path.insert(0, "pc")                                 # the GPU must not be stuck
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))  # the GPU must not be stuck
 import fpgalink as fl
-link = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
+link = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
 N = 0x0008_0000
 st = [link.read(N + 0x50) for _ in range(6)]
 stuck = all(x == st[0] for x in st) and ((st[0] >> 30) & 1)

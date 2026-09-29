@@ -13,14 +13,14 @@ being read. Two things decide whether that is fixable and how:
                      many of those it spends stopped because whoever is taking
                      the pixels is full. Those want opposite fixes.
 """
-import sys, time
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 FLAGS = (0x1000 if 'pace' in sys.argv[1:] else 0) | (0x2000 if 'fast' in sys.argv[1:] else 0)   # ctrl 0xEC: see ps1pace.py
 sys.argv = [a for a in sys.argv if a not in ('fast', 'pace')]
 
 N = 0x0008_0000
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 HZ = 50e6
 
 

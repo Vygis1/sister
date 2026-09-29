@@ -4,13 +4,34 @@ Nothing here knows what a logic analyzer is. It reads and writes registers;
 the peripherals are just addresses.
 """
 
+import os
 import socket
 import struct
 import threading
 
+def _load_local_env():
+    """KEY=VALUE lines from local.env at the top of the repository, for the
+    settings that belong to one machine (PS1_BIOS, FPGA_HOST, PS1_CARD, ...).
+    The real environment wins. The file is not in git: see local.env.example."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "local.env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+    except OSError:
+        pass
+
+
+_load_local_env()
+
 MAGIC = 0x4641
 VERSION = 1
 DEFAULT_PORT = 5005
+# The address baked into the bitstream (rtl/eth_top.v, rtl/net_core.v); FPGA_HOST overrides it.
+DEFAULT_HOST = os.environ.get("FPGA_HOST", "192.168.178.50")
 
 OP_READ = 0x01
 OP_WRITE = 0x02

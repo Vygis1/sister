@@ -12,8 +12,8 @@ screen, not the title card -- then reports:
 
 No best-case numbers. If it did not run, it says so.
 """
-import sys, time, urllib.request
-sys.path.insert(0, "pc")
+import os, sys, time, urllib.request
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
@@ -43,7 +43,7 @@ def corner_red(f, w):
 
 def main():
     secs = int(sys.argv[1]) if len(sys.argv) > 1 else 60
-    l = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=6)
+    l = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=6)
 
     t0 = time.time()
     while time.time() - t0 < 240:

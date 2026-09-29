@@ -9,8 +9,8 @@ drops to ~47% busy, and a two-second sample landing in one reports a number that
 looks like a fix and is not. It happened twice in one day. Five seconds, and
 believe nothing unless `busy` is near where it was before.
 """
-import sys, time
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 # ctrl 0xEC: 'pace' on the command line holds the CPU to the console's clock
 # (bit 12; the default is the board's), 'fast' lets the GPU past its fill rate (bit 13)
@@ -24,7 +24,7 @@ SEL = {"clk": 0, "ins": 3, "busy": 7, "px": 16, "scan": 17, "texelw": 18,
 
 def main():
     secs = float(sys.argv[1]) if len(sys.argv) > 1 else 5.0
-    link = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
+    link = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
 
     def snap():
         o = {}

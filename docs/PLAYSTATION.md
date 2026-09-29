@@ -19,14 +19,13 @@ PlayStation, and because everything a game then needs sits on top of it.
 ## What is needed from outside
 
 **A BIOS image.** SCPH-1001 or any of its siblings, 512 kB. There is no
-PlayStation without it -- the logo screen *is* the BIOS -- and there is not
-one on this machine. Until there is, every part below is built against its own
+PlayStation without it -- the logo screen *is* the BIOS. Without one, every part below is built against its own
 test program, the way the other three CPUs were; the BIOS boot is the
 integration test that runs the moment the file exists.
 
-**Crash Bandicoot** is in `Downloads/Crash Bandicoot (USA)/`, a clean
-MODE2/2352 image: 268,743 sectors, valid sync, ISO descriptor at sector 16.
-It is the game for after the menu.
+**A game disc image**, raw MODE2/2352 (.bin). Development used a retail copy
+of Crash Bandicoot (USA) dumped by its owner. Neither a BIOS nor any game is
+part of this repository; bring your own.
 
 ## Done
 
@@ -133,3 +132,32 @@ does not appear because its 3D vertices come from the GTE, still a stub. Getting
 logo and then the memory-card/CD menu on screen is the GTE step (docs above), built
 the same way the CPUs were: a Python model and a generated self-checking sweep.
 Debug registers for continued work are exposed via console_top ctrl reads 0x38-0x50.
+
+## Status 2026-09-29: games, sound, memory card
+
+Everything above is history; this is where the machine stands.
+
+* **It plays.** The BIOS boots from reset to its menu or to a disc, and Crash
+  Bandicoot runs at 30 fps in its levels. The GTE is done, and so are the GPU
+  (a 2-pixel-a-clock rasteriser with a tiled texture cache), the SPU (24 voices,
+  ADSR, reverb, bit-exact against `tools/spu_ref.py`), DMA, the timers, and the
+  CD-ROM controller.
+* **The CPU runs on every 50 MHz clock** by default (ctrl 0xEC bit 12 holds it
+  to 33.8688 MHz instead). It takes three clocks for a load where the R3000
+  takes one, and at the console's clock the levels ran at 20 fps. Timers, video
+  and sound keep the console's clock either way. Its cache is 64 kB of block RAM
+  (`ps1_cache` BRAM mode).
+* **The disc** comes from the PC over Ethernet (`rtl/host_cd.v`, the server's
+  HostDisc), or from the ESP32's SD card (`rtl/cd_feed.v`). With no disc in, the
+  drive reports its lid open and motor off (status 10h), as DuckStation's does,
+  and the BIOS shows its menu.
+* **The memory card** is in slot 1 (`rtl/ps1_sio.v`). It answers the read,
+  write and get-ID commands byte for byte as DuckStation's does, and it is
+  checked by `sim/tb_ps1_mcard.v`. Its 128 kB are in DDR3 at 9 MB. The server
+  loads a `.mcr` file there with the BIOS and copies every sector the console
+  writes back into the file (a queue at ctrl 0x138). On the board: Crash's
+  LOAD GAME lists a save from the file, and deleting that save in the BIOS
+  card manager changes exactly its directory frame in the file on the PC.
+* **Not done:** CD audio (CD-DA and XA ADPCM), the SPU's capture buffers, a
+  second pad and card slot, and video out of the board itself (the picture
+  goes to the browser).

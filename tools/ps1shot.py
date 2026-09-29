@@ -6,7 +6,7 @@ The frame comes over as RGB555, two bytes a pixel, little endian, which is what
 the console's VRAM holds. No image library needed: a PNG is a zlib stream of
 rows, each with a filter byte, and four CRC'd chunks around it.
 """
-import sys, zlib, struct, urllib.request
+import os, sys, zlib, struct, urllib.request
 
 SERVER = "http://127.0.0.1:8080"
 
@@ -17,7 +17,7 @@ def chunk(tag, data):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else r"C:/fpga/build/console/screen.png"
+    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "console", "screen.png")
     r = urllib.request.urlopen(SERVER + "/api/vid/frame", timeout=10)
     b = r.read()
     w = int(r.headers.get("X-Width", 320))

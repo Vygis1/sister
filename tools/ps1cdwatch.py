@@ -3,8 +3,8 @@ happen (decoded), where the CPU is, and whether it fell into the BIOS's
 unresolved-exception loop.
     python tools/ps1cdwatch.py [original|fast] [seconds]
 """
-import sys, time, collections
-sys.path.insert(0, "pc")
+import os, sys, time, collections
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 N = 0x0008_0000
 NAMES = {0x01:"GetStat",0x02:"Setloc",0x06:"ReadN",0x07:"MotorOn",0x08:"Stop",0x09:"Pause",0x0a:"Init",0x0b:"Mute",0x0c:"Demute",
@@ -26,7 +26,7 @@ def entry(e):
 def main():
     pace = {"original": 0x1000, "fast": 0x2000, "cpu-fast": 0, "gpu-fast": 0x3000}[sys.argv[1] if len(sys.argv) > 1 else "cpu-fast"]   # see ps1pace.py
     secs = int(sys.argv[2]) if len(sys.argv) > 2 else 60
-    link = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
+    link = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
     ctrl = link.read(N + 4)
     link.write(N + 4, ctrl & ~1); time.sleep(0.05); link.write(N + 4, ctrl | 1); link.write(N + 0xEC, pace)
     t0 = time.time(); seen = 0; cls_last = None

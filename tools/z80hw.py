@@ -13,11 +13,11 @@ low memory. Console output leaves through an I/O port into a buffer that the
 register bus reads back.
 """
 
-import sys, struct, time
+import os, sys, struct, time
 
-sys.path.insert(0, "pc")
-sys.path.insert(0, "tools")
-from fpgalink import Link
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fpgalink import Link, DEFAULT_HOST
 from z80shim import apply_to, HALT_AT
 
 NES_CTRL, NES_CONSOLE = 0x0008_0004, 0x0008_0020
@@ -28,7 +28,7 @@ CON_MAX = 4096
 
 def main():
     rom = open(sys.argv[1], "rb").read()
-    link = Link("192.168.178.50", timeout=1.0, retries=6)
+    link = Link(DEFAULT_HOST, timeout=1.0, retries=6)
 
     mem = bytearray(64 * 1024)
     mem[0x0100:0x0100 + len(rom)] = rom

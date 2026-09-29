@@ -6,9 +6,9 @@ The cartridge shares the same block RAM the NES uses, and which machine is
 running is a register write -- so this and a .nes file are the same operation
 with a different core selected.
 """
-import sys, struct, time
-sys.path.insert(0, "pc")
-from fpgalink import Link
+import os, sys, struct, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
+from fpgalink import Link, DEFAULT_HOST
 
 NES_CTRL, NES_CONSOLE = 0x0008_0004, 0x0008_0020
 NES_FRAME, NES_PC = 0x0008_0010, 0x0008_0028
@@ -16,7 +16,7 @@ NES_PRG, VID_CTRL, VID_FB = 0x0009_0000, 0x0006_0004, 0x0010_0000
 FB_WORDS = 320 * 240 // 4
 
 rom = open(sys.argv[1], "rb").read()
-link = Link("192.168.178.50", timeout=1.0, retries=6)
+link = Link(DEFAULT_HOST, timeout=1.0, retries=6)
 print(f"{sys.argv[1]}: {len(rom) // 1024} kB")
 
 rom = rom.ljust((len(rom) + 3) // 4 * 4, bytes(1))

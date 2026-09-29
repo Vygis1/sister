@@ -14,9 +14,11 @@ second. Identical counts, to the pixel, mean the game's state is not advancing
 and then keeps watching, so a stall that ends is reported as a stall that
 ended rather than as a freeze.
 """
-import sys, time, collections
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time, collections
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
+
+OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "console")
 
 N = 0x0008_0000
 A40 = {0x5c4,0x5c8,0x5cc,0x5d0,0x5d4,0x5d8,0x5dc,0xa0,0xa4,0xa8,0xac,
@@ -37,7 +39,7 @@ class Board:
     # like the board having crashed. So every access retries here too, and the
     # drops are counted and reported rather than hidden.
     def __init__(self):
-        self.l = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
+        self.l = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
         self.drops = 0
 
     def _try(self, fn, *a):
@@ -229,7 +231,7 @@ def main():
         # the change was supposed to be judged against -- and with no version
         # control in this tree there was no getting it back.
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        out = r"C:/fpga/build/console/ps1watch-%s.csv" % stamp
+        out = os.path.join(OUTDIR, "ps1watch-%s.csv" % stamp)
         with open(out, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["t", "mean_frame_ms", "flips", "engine_busy_pct", "cpu_held_pct",
@@ -242,7 +244,7 @@ def main():
                             "%.1f" % row[11]])
         try:
             import shutil
-            shutil.copyfile(out, r"C:/fpga/build/console/ps1watch.csv")
+            shutil.copyfile(out, os.path.join(OUTDIR, "ps1watch.csv"))
         except Exception:
             pass
         print("  per-second detail written to %s" % out)

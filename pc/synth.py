@@ -143,7 +143,7 @@ def main():
     ap = argparse.ArgumentParser(description="Drive and record the FPGA synth")
     ap.add_argument("command", choices=["demo", "tone", "silence"], nargs="?", default="demo")
     ap.add_argument("arg", nargs="?", default="440")
-    ap.add_argument("--target", default="192.168.178.50")
+    ap.add_argument("--target", default=fl.DEFAULT_HOST)
     ap.add_argument("--out", default="synth.wav")
     args = ap.parse_args()
 

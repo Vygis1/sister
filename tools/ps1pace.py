@@ -21,8 +21,8 @@ The measuring tools (ps1gpu.py, ps1cpu.py, ...) rewrite this register on every
 sample; give them 'pace' (CPU at the console's clock) and/or 'fast' (GPU past
 its fill rate) on their command line to keep those while they measure.
 """
-import sys
-sys.path.insert(0, "pc")
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
@@ -30,7 +30,7 @@ CPU_PACE, GPU_FAST = 1 << 12, 1 << 13
 
 
 def main():
-    link = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
+    link = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
     # the register reads back as the selected performance counter, not as
     # itself, so the flag bits are kept here and written whole
     want = {"original": CPU_PACE, "fast": GPU_FAST, "cpu-fast": 0, "gpu-fast": CPU_PACE | GPU_FAST}

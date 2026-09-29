@@ -12,13 +12,13 @@ judged by a number instead of by squinting at the picture.
 Runs against the board through the DDR3 line window (ctrl 0x7C/0x80), after
 flushing the processor's write-back cache (ctrl 0x118) so RAM is current.
 """
-import sys, time, collections
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time, collections
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
 RAM_LINE = 0x10000
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 
 # command -> (words, vertex word indices within the packet)
 #   flat tri 0x20: colour, v0, v1, v2

@@ -2,8 +2,8 @@
     python tools/ps1vram.py out.png [y0 y1]     rows y0..y1-1 (default all 512)
 Flushes the VRAM cache first (ctrl 0xE0) so the dump is what the GPU sees.
 """
-import sys, time, zlib, struct
-sys.path.insert(0, "pc")
+import os, sys, time, zlib, struct
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 N = 0x0008_0000
 def read_line(link, line):
@@ -13,7 +13,7 @@ def read_line(link, line):
     return b"".join(link.read(N + 0x80 + 4 * k).to_bytes(4, "little") for k in range(4))
 def main():
     out = sys.argv[1]; y0 = int(sys.argv[2]) if len(sys.argv) > 2 else 0; y1 = int(sys.argv[3]) if len(sys.argv) > 3 else 512
-    link = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
+    link = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
     link.write(N + 0xE0, 1)
     for _ in range(200):
         if not (link.read(N + 0xE0) >> 31): break

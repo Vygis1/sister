@@ -3,8 +3,8 @@ show it as words or as MIPS instructions.
     python tools/ps1ram.py ADDR [N]        N words (default 16) from RAM address ADDR (hex, 0x80xxxxxx or 0x00xxxxxx)
     python tools/ps1ram.py ADDR N dis      ...disassembled
 """
-import sys, time
-sys.path.insert(0, "pc")
+import os, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 N = 0x0008_0000
 RAM_LINE = 0x10000
@@ -57,7 +57,7 @@ def dis(pc, w):
 
 if __name__ == "__main__":
     addr = int(sys.argv[1], 16); n = int(sys.argv[2]) if len(sys.argv) > 2 else 16
-    link = fl.Link("192.168.178.50", 5005, timeout=1.0, retries=4)
+    link = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
     ws = read_words(link, addr, n)
     for k, w in enumerate(ws):
         a = (addr & ~3) + 4 * k

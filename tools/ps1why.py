@@ -22,7 +22,7 @@ def main():
     if len(sys.argv) > 1:
         path = sys.argv[1]
     else:
-        runs = sorted(glob.glob(r"C:/fpga/build/console/ps1watch-*.csv"), key=os.path.getmtime)
+        runs = sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "console", "ps1watch-*.csv")), key=os.path.getmtime)
         if not runs:
             print("no ps1watch run found"); return 1
         path = runs[-1]

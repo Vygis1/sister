@@ -12,13 +12,13 @@ the write-back cache, walks the ordering table out of RAM and decodes every
 primitive's vertices. Coordinates are as the game sent them, BEFORE the drawing
 offset, which is what the GTE produced.
 """
-import sys, time
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
 RAM_LINE = 0x10000
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 
 SHAPES = {
     0x20:(4,[1,2,3]),      0x22:(4,[1,2,3]),

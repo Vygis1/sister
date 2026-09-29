@@ -11,8 +11,9 @@ not working. That happened; this is the guard.
 import sys, os, time, json, glob, urllib.request
 
 SERVER = "http://127.0.0.1:8080"
-BIOS = r"C:/Users/vyga/Downloads/SCPH1001.BIN"
-IMAGE = r"C:/fpga/cores/ps1.bin"
+BIOS = os.environ.get("PS1_BIOS", "")         # your own BIOS dump, e.g. SCPH1001.BIN
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+IMAGE = os.path.join(ROOT, "cores", "ps1.bin")
 
 
 def get(path, timeout=60):
@@ -29,7 +30,7 @@ def post(path, body=None, raw=None):
 
 def check_fresh():
     bin_t = os.path.getmtime(IMAGE)
-    newest = max((os.path.getmtime(f), f) for f in glob.glob(r"C:/fpga/rtl/*.v"))
+    newest = max((os.path.getmtime(f), f) for f in glob.glob(os.path.join(ROOT, "rtl", "*.v")))
     if newest[0] > bin_t:
         sys.exit("cores/ps1.bin is older than %s -- the build did not finish"
                  % os.path.basename(newest[1]))
@@ -57,4 +58,6 @@ if __name__ == "__main__":
     print("boot:", post("/api/shell/boot", {"core": 1}))
     time.sleep(8)
     print("running:", get("/api/shell/state")["running"])
+    if not BIOS:
+        sys.exit("set PS1_BIOS to your own BIOS dump (e.g. SCPH1001.BIN)")
     print("BIOS:", post("/api/nes/load", raw=open(BIOS, "rb").read())["ok"])

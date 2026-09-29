@@ -16,8 +16,9 @@ LZCR) are not loaded: their state is derived, and skipping them keeps the
 initial state identical on both sides.
 """
 import random
+import os
 import sys
-sys.path.insert(0, "tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gte import GTE
 
 SKIP_DATA = {29, 31}   # read-only; everything else is written, side effects and all

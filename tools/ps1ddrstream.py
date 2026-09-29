@@ -15,8 +15,8 @@ Bit 27 of the stream control register (console ctrl 0xF0). The bit is a switch
 rather than a rewrite because the direct path works, and getting this wrong has
 stopped the machine before.
 """
-import sys
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
@@ -25,7 +25,7 @@ BIT = 1 << 27
 
 
 def main():
-    link = fl.Link("192.168.178.50", 5005, timeout=0.6, retries=3)
+    link = fl.Link(fl.DEFAULT_HOST, 5005, timeout=0.6, retries=3)
     ctl = link.read(CTL)
     if len(sys.argv) > 1:
         want = sys.argv[1].lower() in ("on", "1", "ddr", "yes")

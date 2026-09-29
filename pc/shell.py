@@ -56,7 +56,7 @@ def ctrl(op, offset=0):
 
 
 class Shell:
-    def __init__(self, target="192.168.178.50"):
+    def __init__(self, target=fl.DEFAULT_HOST):
         self.link = fl.Link(target, timeout=1.0, retries=6)
 
     def present(self):
@@ -220,7 +220,7 @@ def check_bitstream(data, path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--target", default="192.168.178.50")
+    ap.add_argument("--target", default=fl.DEFAULT_HOST)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status")

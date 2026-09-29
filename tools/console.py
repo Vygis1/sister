@@ -34,7 +34,8 @@ from tkinter import font as tkfont
 
 BG, FG, DIM, OK, BAD, WARN = "#11131a", "#e6e9f0", "#7b8194", "#6ee7a8", "#ff7a7a", "#ffd166"
 MAXLINES = 4000
-LOGDIR = r"C:/fpga/build/console"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOGDIR = os.path.join(ROOT, "build", "console")
 
 # Lines worth colouring. The build talks a lot; these are the parts that decide
 # whether it worked.
@@ -101,7 +102,7 @@ class Console:
         try:
             self.proc = subprocess.Popen(
                 self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=1, text=True, errors="replace", cwd=r"C:/fpga",
+                bufsize=1, text=True, errors="replace", cwd=ROOT,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except Exception as e:
             self.q.put("could not start: %s\n" % e)

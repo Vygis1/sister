@@ -10,12 +10,12 @@ path respectively. Switching a thing off and measuring again at the same point
 in the BIOS is the only honest way to say what it was worth -- every time this
 session guessed instead, the guess was wrong.
 """
-import sys, time
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 
 N = 0x0008_0000
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 
 # 32..35 are the rasteriser's own: pixel pairs out, clocks busy, waiting for the
 # pixel underneath, loading a palette. Read them with: python tools/ps1perf.py raster

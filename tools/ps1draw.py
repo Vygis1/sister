@@ -8,8 +8,8 @@ is not the picture arrives in instalments -- which is what flicker looks like.
 walk and the four things it waits for, and divide by the pixels it actually put
 down. Counters 16..23 in rtl/ps1_top.v.
 """
-import sys, time
-sys.path.insert(0, r"C:/fpga/pc")
+import os, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pc"))
 import fpgalink as fl
 # ctrl 0xEC: 'pace' on the command line holds the CPU to the console's clock
 # (bit 12; the default is the board's), 'fast' lets the GPU past its fill rate (bit 13)
@@ -17,7 +17,7 @@ FLAGS = (0x1000 if 'pace' in sys.argv[1:] else 0) | (0x2000 if 'fast' in sys.arg
 sys.argv = [a for a in sys.argv if a not in ('fast', 'pace')]
 
 N = 0x0008_0000
-BOARD = "192.168.178.50"
+BOARD = fl.DEFAULT_HOST
 
 SEL = {
     "clocks":        0,
