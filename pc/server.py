@@ -693,8 +693,30 @@ FB_DDR   = 0x0010_0000
 FB_DDR_STRIDE = 320          # words per row: 640 pixels, two to a word
 
 
+_ddr_frame = {"v": None, "at": 0.0}
+
+
 def frame_is_ddr():
-    return bool(cores_built() & 0b1000)
+    """Is the running image a PlayStation (frame streamed from DDR3)?
+
+    Remembered, not asked per frame. It was a register read on every picture
+    request, and one lost reply anywhere in the server latches the board as
+    "gone" for a moment (see board_is_gone): cores_built() then said 0, the
+    request fell through to the old RGB332 path, and that failed with a 503.
+    Measured 2026-09-29 with the game at a steady 30: the page got 15 pictures
+    a second, with 250-550 ms holes. The answer only changes when a different
+    image is booted, so it is refreshed every two seconds and a failed refresh
+    keeps what was known.
+    """
+    now = time.time()
+    if _ddr_frame["v"] is None or now - _ddr_frame["at"] > 2.0:
+        try:
+            _ddr_frame.update(v=bool((talk(link.read, NES_CONSOLE) >> 16) & 0b1000), at=now)
+        except (fl.LinkError, TimeoutError):
+            if _ddr_frame["v"] is None:
+                return False
+            _ddr_frame["at"] = now - 1.5      # try again soon; keep what we knew
+    return _ddr_frame["v"]
 
 
 STREAM_PORT = 5006
