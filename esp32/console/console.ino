@@ -155,52 +155,103 @@ static const uint8_t *discSectorAt(uint32_t lba) {
   return nullptr;
 }
 
-// ...or, the way it should be, straight off the card: the file is already open,
-// so a sector the drive walks onto costs no seek at all, and the window is
-// filled a few sectors at a time so nothing blocks for longer than the drive's
-// eight-slot ring can cover.
-static void discPumpCard() {
-  if (!discFile) return;
-  // BYTES, not sectors: a card read can come back short, and counting whole
-  // sectors threw the remainder away while the file position had already moved
-  // past it -- every sector after that was offset by a few bytes, which the
-  // drive sees as a sector whose own header names some other place on the disc.
-  const uint32_t cap = WINDOW * 2352;
-  for (int pass = 0; pass < 4 && winBytes < cap; pass++) {
-    uint32_t want = cap - winBytes; if (want > 8 * 2352) want = 8 * 2352;
-    int r = discFile.read(discWin + winBytes, want);
-    if (r <= 0) break;
-    winBytes += (uint32_t)r;
-  }
-  winCount = winBytes / 2352;
+// ...or straight off the card, by a task of its own.
+//
+// Reading the card and sending a sector to the FPGA used to happen one after the
+// other in the drive task: about 4 ms to read a sector at 8 MHz and 3.8 ms to
+// clock it out at 5 MHz, so 128 sectors a second -- SLOWER than the real drive's
+// 150 at double speed. No real game ever sees a drive that slow, and Crash did
+// not survive it: with the processor on every clock (ps1_top cpu_fast, the
+// default since 2026-09-28) it crashed into the BIOS's exception loop in its
+// intro, every time, while the same boot fed from the PC went straight through.
+//
+// The card and the FPGA are on different SPI buses, so the two can overlap. This
+// task keeps a ring of WINDOW sectors ahead of the sector the drive wants, and
+// the drive task only sends. Measured: 260-odd sectors a second, bounded by the
+// FPGA link, not the card.
+//
+// The ring: sector L lives in slot L % WINDOW, and ringLba[slot] says which
+// sector is in it. The reader never runs more than WINDOW past rdWant, so a slot
+// it overwrites always holds a sector the drive has already moved beyond.
+static volatile uint32_t rdWant = 0;          // the sector the drive wants next (set by the drive task)
+static volatile bool     rdBusy = false;      // the reader is inside a card read
+static uint32_t          rdNext = 0;          // the next sector the reader will read
+static int64_t           rdFilePos = -1;      // where the file position is, in sectors (-1: unknown)
+static uint32_t          ringLba[WINDOW];
+static uint32_t          discSick = 0;
+
+static void ringClear() {
+  for (uint32_t i = 0; i < WINDOW; i++) ringLba[i] = 0xFFFFFFFF;
+  rdNext = 0; rdFilePos = -1; rdWant = 0; discSick = 0;
 }
-// A handle that has gone bad -- a card that glitched, a seek that will not
-// take -- used to mean every read from then on failed and the drive simply
-// starved: nine thousand misses and a game frozen on its last picture, with
-// nothing in the logs to say why. So a run of misses reopens the file.
-static uint32_t discSick = 0;
+
 static void discReopen() {
   if (discFile) discFile.close();
   discFile = SD.open(discPath);
-  winBase = 0; winBytes = 0; winCount = 0; discSick = 0;
+  rdFilePos = -1; discSick = 0;
   Serial.println(discFile ? "disc: reopened the image" : "disc: the image will not open");
 }
-static const uint8_t *discSectorCard(uint32_t lba) {
-  if (!discFile) { discReopen(); if (!discFile) return nullptr; }
-  if (winCount == 0 || lba < winBase || lba >= winBase + WINDOW) {
-    // slide the window on only when the file is sitting exactly on that sector
-    if (!(winCount > 0 && lba == winBase + winCount && (winBytes % 2352) == 0)) {
-      if (!discFile.seek((uint64_t)lba * 2352)) {
-        if (++discSick > 50) discReopen();
-        return nullptr;
-      }
+
+static void cardReaderTask(void *) {
+  for (;;) {
+    if (!discIn || discHttp || !discWin) { vTaskDelay(10 / portTICK_PERIOD_MS); continue; }
+    uint32_t want = rdWant;
+    // the drive went somewhere the ring does not hold: start reading there
+    if (ringLba[want % WINDOW] != want && rdNext != want) rdNext = want;
+    if (rdNext >= want + WINDOW || rdNext >= discSectors) { vTaskDelay(1); continue; }
+    // up to 8 sectors in one read, contiguous in the ring and not past the limit
+    uint32_t slot = rdNext % WINDOW;
+    uint32_t n = 8;
+    if (n > WINDOW - slot) n = WINDOW - slot;
+    if (n > want + WINDOW - rdNext) n = want + WINDOW - rdNext;
+    if (n > discSectors - rdNext) n = discSectors - rdNext;
+    for (uint32_t k = 0; k < n; k++) ringLba[slot + k] = 0xFFFFFFFF;   // about to change under the drive
+    rdBusy = true;
+    if (!discIn) { rdBusy = false; continue; }                         // ejected in between
+    if (!discFile) discReopen();
+    bool ok = discFile;
+    if (ok && rdFilePos != (int64_t)rdNext) {
+      ok = discFile.seek((uint64_t)rdNext * 2352);
+      rdFilePos = ok ? rdNext : -1;
     }
-    winBase = lba; winBytes = 0; winCount = 0;
+    uint32_t got = 0;
+    if (ok) {
+      // bytes, not sectors: a read can come back short (see the note that used to
+      // be here -- a lost remainder offset every sector after it by a few bytes)
+      uint8_t *dst = discWin + (size_t)slot * 2352;
+      uint32_t want_bytes = n * 2352;
+      for (int tries = 0; tries < 8 && got < want_bytes; tries++) {
+        int r = discFile.read(dst + got, want_bytes - got);
+        if (r <= 0) break;
+        got += (uint32_t)r;
+      }
+      rdFilePos = (got == want_bytes) ? (int64_t)(rdNext + n) : -1;
+    }
+    rdBusy = false;
+    uint32_t whole = got / 2352;
+    if (whole == 0) {
+      if (++discSick > 50) discReopen();
+      vTaskDelay(1);
+      continue;
+    }
+    discSick = 0;
+    __sync_synchronize();                                              // the data before the label
+    for (uint32_t k = 0; k < whole; k++) ringLba[slot + k] = rdNext + k;
+    rdNext += whole;
   }
-  discPumpCard();
-  if (lba < winBase + winCount) { discSick = 0; return discWin + (lba - winBase) * 2352; }
-  if (++discSick > 50) discReopen();
-  return nullptr;
+}
+
+// Stop the reader touching the card (before closing, reopening or re-mounting).
+static void readerPause() {
+  discIn = false;
+  for (int i = 0; i < 200 && rdBusy; i++) delay(1);
+}
+
+static const uint8_t *discSectorCard(uint32_t lba) {
+  rdWant = lba;
+  if (ringLba[lba % WINDOW] != lba) return nullptr;
+  __sync_synchronize();
+  return discWin + (size_t)(lba % WINDOW) * 2352;
 }
 
 static void discTask(void *) {
@@ -208,14 +259,22 @@ static void discTask(void *) {
     if (!discIn) { vTaskDelay(20 / portTICK_PERIOD_MS); continue; }
     CdStatus st = fpga.cdStatus();
     if (!st.alive || st.core != CORE_PS1_ID) { vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
-    if (!st.disc) { fpga.cdDisc(true); continue; }             // the core was reset: tell it again
+    if (!st.disc) { fpga.cdDisc(true); vTaskDelay(1); continue; }   // the core was reset: tell it again
     if (!st.running || st.room == 0 || st.lba >= discSectors) {
-      discIdle++; if (discHttp) discPump(); else discPumpCard(); vTaskDelay(1); continue;   // idle time is read-ahead time
+      discIdle++;
+      if (discHttp) discPump(); else rdWant = st.lba;                  // idle time is read-ahead time
+      vTaskDelay(1); continue;
     }
     const uint8_t *sec = discHttp ? discSectorAt(st.lba) : discSectorCard(st.lba);
     if (!sec) { discMisses++; vTaskDelay(1); continue; }
     fpga.cdSector(st.lba, sec);
     discServed++;
+    // The link to the FPGA is polled, not interrupt-driven, so a drive that
+    // wants sector after sector would keep this core busy for ever now that the
+    // card is read elsewhere -- the idle task starves and the task watchdog
+    // restarts the chip (it did, every eight seconds). A tick every eight
+    // sectors costs a millisecond in thirty.
+    if ((discServed & 7) == 0) vTaskDelay(1);
   }
 }
 // --- putting a disc image on the card, over the air, once -------------------------
@@ -439,8 +498,8 @@ static String discRecall() {
 }
 
 static bool discInsert(const String &path) {
+  readerPause();
   if (discFile) discFile.close();
-  discIn = false;
   discHttp = path.startsWith("http://");
   if (discHttp) {
     // An http:// image needs the network to be up. Asked for one before it is
@@ -466,6 +525,7 @@ static bool discInsert(const String &path) {
     if (!discWin) discWin = (uint8_t *)ps_malloc(WINDOW * 2352);
     if (!discWin) return false;
     winBase = 0; winCount = 0; winBytes = 0;
+    ringClear();
   }
   discPath = path;
   discRemember(path);
@@ -475,7 +535,7 @@ static bool discInsert(const String &path) {
   return true;
 }
 static void discEject() {
-  discIn = false;
+  readerPause();
   fpga.cdDisc(false);
   if (discFile) discFile.close();
   discPath = "";
@@ -1001,6 +1061,10 @@ void setup() {
   // together -- the board goes completely deaf while the drive is being fed,
   // which looked exactly like a crash.
   xTaskCreatePinnedToCore(discTask, "disc", 8192, nullptr, 2, nullptr, 0);
+  // the card reader on the OTHER core: the two buses then work at once (see
+  // cardReaderTask). It spends its waits blocked in the SD driver, not spinning,
+  // so loop() on this core still gets its turn.
+  xTaskCreatePinnedToCore(cardReaderTask, "cardread", 8192, nullptr, 1, nullptr, 1);
   // A disc on the CARD can go back in now. One served over http:// cannot:
   // Wi-Fi is not up until further down, so that one is put back after the join.
   { String was = discRecall();
@@ -1192,6 +1256,44 @@ static void serialCommand(String c) {
                    ", wants LBA " + String(st.lba) + ", room " + String(st.room));
     Serial.println("  served " + String(discServed) + " sectors, " + String(discMisses) + " card misses, " +
                    String(discIdle) + " idle polls, " + String(discFetches) + " fetches; image " + discPath + " (" + String(discSectors) + " sectors)");
+  } else if (c.startsWith("cardtest")) {
+    // cardtest <lba> <count> [MHz]: read that stretch of the disc image straight
+    // off the card and report what came back, to tell a card or wiring that drops
+    // data from one that is merely slow. Ejects the disc for the duration (the
+    // drive task must not read the card at the same time), re-mounts the card at
+    // the clock asked for, and puts the disc back after. The CRC32 is of the
+    // whole stretch, for comparing with the same bytes of the image on the PC.
+    uint32_t lba = 0, n = 256, mhz = 0;
+    sscanf(c.c_str(), "cardtest %u %u %u", &lba, &n, &mhz);
+    String was = discPath;
+    readerPause();
+    if (discFile) discFile.close();
+    if (mhz) { SD.end(); haveCard = SD.begin(PIN_SD_CS, sdBus, mhz * 1000000); }
+    File f = haveCard ? SD.open(was.length() ? was : String("/discs/crash2.bin")) : File();
+    if (!f) { Serial.println("  cannot open the image" + String(haveCard ? "" : " (the card did not mount)")); }
+    else {
+      static uint8_t buf[8 * 2352];
+      uint32_t crc = 0xFFFFFFFF, got = 0, shorts = 0, fails = 0, t0 = millis();
+      bool seekOk = f.seek((uint64_t)lba * 2352);
+      uint32_t left = n * 2352;
+      while (seekOk && left) {
+        uint32_t want = left > sizeof(buf) ? sizeof(buf) : left;
+        int r = f.read(buf, want);
+        if (r <= 0) { if (++fails > 20) break; continue; }
+        if ((uint32_t)r < want) shorts++;
+        for (int i = 0; i < r; i++) {
+          crc ^= buf[i];
+          for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320 & (0u - (crc & 1)));
+        }
+        got += r; left -= r;
+      }
+      uint32_t ms = millis() - t0;
+      Serial.printf("  %s: %u of %u bytes from LBA %u, %u short reads, %u failed reads, %u ms (%u kB/s), crc32 %08x\n",
+                    seekOk ? "read" : "SEEK FAILED", got, n * 2352, lba, shorts, fails, ms,
+                    ms ? got / ms : 0, ~crc);
+      f.close();
+    }
+    if (was.length()) discInsert(was);
   } else if (c.startsWith("install ")) {
     if (job.busy)  { Serial.println("  already busy"); return; }
     if (!haveCard) { Serial.println("  no card"); return; }

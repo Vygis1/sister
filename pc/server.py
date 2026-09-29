@@ -885,6 +885,20 @@ class FrameStream:
             pass
 
     def _run(self):
+        # Nothing one packet does may end this thread: when it died, the page
+        # froze on its last picture with nothing in the log but a traceback.
+        while True:
+            try:
+                return self._receive()
+            except Exception as e:
+                self.diag["crashed"] = self.diag.get("crashed", 0) + 1
+                self.diag["last_error"] = repr(e)[:200]
+                with self.lock:
+                    self.frames.clear()
+                self._seq.clear()
+                time.sleep(0.01)
+
+    def _receive(self):
         last_punch = 0.0
         while True:
             if time.time() - last_punch > 5.0:
@@ -955,6 +969,14 @@ class FrameStream:
                     entry = None
                     del self.frames[fid]
                     self.diag["restarted"] = self.diag.get("restarted", 0) + 1
+                # The frame changed size under this id -- the video mode changed
+                # while it was on the wire (a console reset does that). Its buffer
+                # was sized for the old one, and writing the new words into it
+                # raised and killed this thread: the page froze on its last
+                # picture until the server was restarted (2026-09-30).
+                if entry is not None and len(entry[0]) != total * 4:
+                    del self.frames[fid]
+                    entry = None
                 if entry is None:
                     if len(self.frames) > 4:      # forget stale partial frames
                         for k in sorted(self.frames)[:-2]:
