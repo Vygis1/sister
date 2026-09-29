@@ -368,6 +368,8 @@ module ps1_cdrom #(
 					case (cmd)
 					8'h01, 8'h0B, 8'h0C, 8'h0D: begin                        // Getstat / Mute / Demute / Setfilter
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
+							// the lid bit is reported once after a disc goes in, then cleared
+							if (cmd == 8'h01 && disc_in) stat <= stat & 8'hEF;
 						end
 					8'h02: begin                                             // Setloc(mm, ss, ff)
 							loc <= (bcd2bin(prm[0]) * 24'd60 + bcd2bin(prm[1])) * 24'd75 + bcd2bin(prm[2]) - 24'd150;
@@ -452,22 +454,20 @@ module ps1_cdrom #(
 							second_pend <= 1'b1; second_int <= 3'd2; second_b[0] <= 8'h00; second_len <= 4'd1;
 						end
 					8'h0A: begin                                             // Init: INT3(stat), INT2(stat)
-							stat <= 8'h02; mode <= 8'h00;
+							stat <= disc_in ? 8'h02 : 8'h10; mode <= 8'h00;
 							reading <= 1'b0; seeking <= 1'b0; seek_then_read <= 1'b0; loc_v <= 1'b0;
-							rsp[0] <= 8'h02; rsp_wr <= 5'd1; int_flag <= 3'd3;
-							second_pend <= 1'b1; second_int <= 3'd2; second_b[0] <= 8'h02; second_len <= 4'd1;
+							rsp[0] <= disc_in ? 8'h02 : 8'h10; rsp_wr <= 5'd1; int_flag <= 3'd3;
+							second_pend <= 1'b1; second_int <= 3'd2; second_b[0] <= disc_in ? 8'h02 : 8'h10; second_len <= 4'd1;
 						end
-					8'h1A: begin                                             // GetID: INT3(stat), then INT2(02 00 20 00 'S' 'C' 'E' 'A') or INT5(08 40 ..) with no disc
+					8'h1A: if (!disc_in) begin                               // GetID with no disc: INT5(stat|error, 80h not ready)
+							rsp[0] <= stat | 8'h01; rsp[1] <= 8'h80; rsp_wr <= 5'd2; int_flag <= 3'd5;
+						end else begin                                       // GetID: INT3(stat), then INT2(02 00 20 00 'S' 'C' 'E' 'A')
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 							second_pend <= 1'b1; second_len <= 4'd8;
 							if (disc_in) begin
 								second_int <= 3'd2;
 								second_b[0] <= 8'h02; second_b[1] <= 8'h00; second_b[2] <= 8'h20; second_b[3] <= 8'h00;
 								second_b[4] <= 8'h53; second_b[5] <= 8'h43; second_b[6] <= 8'h45; second_b[7] <= 8'h41;
-							end else begin
-								second_int <= 3'd5;
-								second_b[0] <= 8'h08; second_b[1] <= 8'h40; second_b[2] <= 8'h00; second_b[3] <= 8'h00;
-								second_b[4] <= 8'h00; second_b[5] <= 8'h00; second_b[6] <= 8'h00; second_b[7] <= 8'h00;
 							end
 						end
 					8'h1E, 8'h12: if (!disc_in) begin
@@ -549,6 +549,11 @@ module ps1_cdrom #(
 					end
 				end
 			end
+			// While no disc is in, the drive says so: lid open, motor off --
+			// DuckStation's motor_on = CanReadMedia(), shell_open = !CanReadMedia().
+			// Reported spinning, the BIOS waited for ever for a disc to come up to
+			// speed and never showed its menu.
+			if (!disc_in) stat <= 8'h10;
 		end
 	end
 

@@ -44,7 +44,8 @@ module tb_ps1;
 	wire [7:0]  px_rgb;
 	wire [31:0] pc;
 
-	ps1_top #(.BOOT_HEX("../../sim/roms/ps1/boot.hex")) dut ( .dma_relax(1'b0), .ev_idx(6'd0),
+	ps1_top #(.BOOT_HEX("../../sim/roms/ps1/boot.hex")) dut ( // inputs this bench does not drive, tied: an open input simulates as X
+		.cap_every_vsync(0), .cc_flush(0), .cd_trace_idx(0), .cpu_run(1), .dbg_perf_sel(0), .dbg_rsel(0), .dbg_watch(0), .fb_cap_go(0), .fbr_addr(0), .fbr_req(0), .gte_old(0), .hr_go(0), .hr_line(0), .joy1(0), .vram_flush(0), .dma_relax(1'b0), .ev_idx(6'd0), .card_in(1'b0), .card_fill(1'b0), .card_wq_pop(1'b0), .card_wq_clr(1'b0),
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		// the two fast answer paths, both on. These are PORTS, not parameters: they
 		// sat in the parameter list, so this bench had not elaborated at all.

@@ -37,7 +37,8 @@ module tb_ps1_bios;
 	wire [7:0]  px_rgb;
 	wire [31:0] pc;
 
-	ps1_top dut ( .dma_relax(1'b0), .ev_idx(6'd0), 
+	ps1_top dut ( // inputs this bench does not drive, tied: an open input simulates as X
+		.cap_every_vsync(0), .cc_flush(0), .cd_trace_idx(0), .dbg_perf_sel(0), .dbg_rsel(0), .dbg_watch(0), .fb_cap_go(0), .fbr_addr(0), .fbr_req(0), .hr_go(0), .hr_line(0), .joy1(0), .vram_flush(0), .dma_relax(1'b0), .ev_idx(6'd0), .card_in(1'b0), .card_fill(1'b0), .card_wq_pop(1'b0), .card_wq_clr(1'b0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),
@@ -80,7 +81,7 @@ module tb_ps1_bios;
 
 	// load the BIOS into its DDR3 region (line 0x30000), four words per line
 	reg [31:0] bios [0:131071];
-	integer i, cycles, gpu_writes;
+	integer i, cycles, gpu_writes, max_cycles, trace_fd;
 	reg [31:0] last_pc, lo_pc, hi_pc;
 	integer distinct, rp, di;
 	reg derailed;
@@ -286,10 +287,14 @@ module tb_ps1_bios;
 
 		lo_pc = 32'hFFFFFFFF; hi_pc = 0; distinct = 0; last_pc = 0;
 		derailed = 0;
-		for (cycles = 0; cycles < 2_100_000_000; cycles = cycles + 1) begin
+		// +CYCLESn stops the run early: ./tools/sim.sh tb_ps1_bios CYCLES100000 (no "=": xsim.bat splits on it)
+		if (!$value$plusargs("CYCLES%d", max_cycles)) max_cycles = 2_100_000_000;
+		trace_fd = $test$plusargs("TRACE") ? $fopen("trace.txt", "w") : 0;
+		for (cycles = 0; cycles < max_cycles; cycles = cycles + 1) begin
 			@(posedge clk);
 			if (cycles % 50_000_000 == 49_999_999) dump_frame(cycles / 50_000_000);
 			if (pc != last_pc) begin
+				if (trace_fd) $fwrite(trace_fd, "%08h %08h %0d\n", pc, dut.cpu.ir, cycles);   // +TRACE: every new pc, to diff two runs
 				distinct = distinct + 1;
 				if (pc < lo_pc) lo_pc = pc;
 				// announce the moment it climbs past the RAM-clear loop (bfc00324)

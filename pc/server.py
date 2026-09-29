@@ -1274,6 +1274,205 @@ class HostDisc:
 host_disc = HostDisc()
 
 
+# --- the PlayStation's memory card -----------------------------------------------
+CARD_LINE = 0x09_0000        # DDR3 line of the card's byte 0 (rtl/ps1_top.v)
+CARD_BYTES = 128 * 1024
+CARD_CTL = 0x0008_0000 + 0x134   # {fill aimed at the card, card in slot 1}
+CARD_Q = 0x0008_0000 + 0x138     # {overflow, count[20:16], sector[9:0]}; write bit0 pops, bit31 clears overflow
+CARD_FILE = os.environ.get("PS1_CARD", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                     "..", "saves", "card1.mcr"))
+
+
+def blank_card():
+    """A formatted, empty card, the way DuckStation formats one
+    (MemoryCardImage::Format): the "MC" header frame, fifteen free directory
+    frames, twenty empty broken-sector entries, and the header again in frame 63.
+    Each of those frames ends in the XOR of its first 127 bytes."""
+    d = bytearray(b"\xff" * CARD_BYTES)
+    def frame(n, head=b"", chk=True):
+        f = bytearray(128)
+        f[:len(head)] = head
+        if chk:
+            c = 0
+            for b in f[:127]:
+                c ^= b
+            f[127] = c
+        d[n * 128:(n + 1) * 128] = f
+    frame(0, b"MC")
+    for n in range(1, 16):
+        frame(n, b"\xa0\0\0\0\0\0\0\0\xff\xff")
+    for n in range(16, 36):
+        frame(n, b"\xff\xff\xff\xff\0\0\0\0\xff\xff")
+    for n in range(36, 63):
+        frame(n, chk=False)
+    d[63 * 128:64 * 128] = d[0:128]
+    return bytes(d)
+
+
+class MemCard:
+    """Memory card 1: a .mcr file here (raw 128 kB, the format DuckStation and
+    most tools read), in DDR3 on the board while the console runs.
+
+    The file goes into DDR3 whenever the BIOS does (ps1_load_bios), before the
+    processor is let go. Every sector the console stores is queued on the board
+    (ps1_sio.v); a thread of its own, on a socket of its own, reads each one back
+    out of DDR3 and writes it into the file, so a save is on this disk within a
+    fraction of a second of the game writing it. The first load of a session
+    keeps a copy of the file as it was (.bak), in case something goes wrong.
+    """
+
+    def __init__(self):
+        self.path = CARD_FILE
+        self.lock = threading.Lock()        # the file, and loads against saves
+        self.thread = None
+        self.saved = 0
+        self.error = ""
+        self.backed_up = False
+
+    def image(self):
+        try:
+            with open(self.path, "rb") as f:
+                d = f.read()
+            if len(d) == CARD_BYTES:
+                return d
+            self.error = "%s is %d bytes, not a 128 kB card image" % (self.path, len(d))
+            return None
+        except FileNotFoundError:
+            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+            d = blank_card()
+            with open(self.path, "wb") as f:
+                f.write(d)
+            return d
+
+    def load(self):
+        """Put the file into DDR3 and the card in the slot, over the main link."""
+        with self.lock:
+            d = self.image()
+            if d is None:
+                talk(link.write, CARD_CTL, 0)
+                return False
+            if not self.backed_up:
+                try:
+                    with open(self.path + ".bak", "wb") as f:
+                        f.write(d)
+                    self.backed_up = True
+                except OSError:
+                    pass
+            talk(link.write, CARD_CTL, 0b10)          # fill to the card, card out while it changes
+            talk(link.write, NES_CART_BANK, 0)
+            write_pages(NES_PRG, list(struct.unpack("<%dI" % (CARD_BYTES // 4), d)))
+            talk(link.write, CARD_Q, 1 << 31)         # a fresh card owes the file nothing
+            for _ in range(32):                       # nor does the one it replaces
+                if not (talk(link.read, CARD_Q) >> 16) & 0x1F:
+                    break
+                talk(link.write, CARD_Q, 1)
+            talk(link.write, CARD_CTL, 0b01)
+            self.error = ""
+        self.start()
+        return True
+
+    def start(self):
+        if self.thread is None or not self.thread.is_alive():
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def _line(self, L, line):
+        L.write(NES + 0x7C, line)
+        for _ in range(200):
+            if L.read(NES + 0x7C) >> 31:
+                return b"".join(struct.pack("<I", L.read(NES + 0x80 + 4 * k)) for k in range(4))
+        raise fl.LinkError("DDR3 line %06x never came back" % line)
+
+    def _run(self):
+        L = fl.Link(link.addr[0], link.addr[1], timeout=0.05, retries=10)
+        while True:
+            time.sleep(0.05)
+            try:
+                q = L.read(CARD_Q)
+                ovf, n, sec = q >> 31, (q >> 16) & 0x1F, q & 0x3FF
+                if not (ovf or n):
+                    continue
+                with self.lock, hr_lock:
+                    if ovf:
+                        # more stored than the queue could hold: copy the whole card
+                        d = b"".join(self._line(L, CARD_LINE + i) for i in range(CARD_BYTES // 16))
+                        tmp = self.path + ".tmp"
+                        with open(tmp, "wb") as f:
+                            f.write(d)
+                        os.replace(tmp, self.path)
+                        L.write(CARD_Q, 1 << 31)
+                        while (L.read(CARD_Q) >> 16) & 0x1F:
+                            L.write(CARD_Q, 1)
+                    else:
+                        d = b"".join(self._line(L, CARD_LINE + sec * 8 + k) for k in range(8))
+                        with open(self.path, "r+b") as f:
+                            f.seek(sec * 128)
+                            f.write(d)
+                        L.write(CARD_Q, 1)
+                    self.saved += 1
+                    self.error = ""
+            except (fl.LinkError, OSError) as e:
+                self.error = str(e)
+                time.sleep(0.5)
+
+
+hr_lock = threading.Lock()       # ctrl 0x7C..0x8C, the one DDR3 line window
+memcard = MemCard()
+
+
+def ps1_load_bios(rom):
+    """The BIOS into DDR3 and the console started, with the memory card in.
+    The one way both the upload and the keepalive do it."""
+    talk(link.write, NES_CTRL, 0)
+    talk(link.write, NES_CONSOLE, 3)
+    prg = rom.ljust((len(rom) + 3) // 4 * 4, b"\x00")
+    talk(link.write, CARD_CTL, 0)               # the fill below is the BIOS's
+    for bank, base in enumerate(range(0, len(prg), CART_BANK_BYTES)):
+        chunk = prg[base:base + CART_BANK_BYTES]
+        talk(link.write, NES_CART_BANK, bank)
+        write_pages(NES_PRG, list(struct.unpack(f"<{len(chunk)//4}I", chunk)))
+    talk(link.write, NES_FILL_END, 1)
+    try:
+        memcard.load()
+    except (fl.LinkError, TimeoutError, OSError) as e:
+        memcard.error = "card not loaded: %s" % e
+    talk(link.write, VID_CTRL, 0b11)
+    talk(link.write, NES_CTRL, 1)          # release the CPU from the reset vector
+
+
+@app.route("/api/card/state")
+def api_card_state():
+    try:
+        ctl = talk(link.read, CARD_CTL)
+        q = talk(link.read, CARD_Q)
+    except (fl.LinkError, TimeoutError):
+        ctl = q = None
+    return jsonify(path=os.path.abspath(memcard.path), exists=os.path.isfile(memcard.path),
+                   inserted=None if ctl is None else bool(ctl & 1),
+                   pending=None if q is None else (q >> 16) & 0x1F,
+                   saved=memcard.saved, error=memcard.error)
+
+
+@app.route("/api/card/select", methods=["POST"])
+def api_card_select():
+    """Use another card file (created blank if it does not exist). It goes in at
+    the next BIOS load; {"now": true} swaps it in straight away, like pulling
+    one card and pushing in another -- only safe while the game is not saving."""
+    body = request.get_json(silent=True) or {}
+    path = body.get("path", "")
+    if not path.lower().endswith(".mcr"):
+        return jsonify(error="a card file ends in .mcr"), 400
+    with memcard.lock:
+        memcard.path = path
+        memcard.backed_up = False
+    if body.get("now"):
+        try:
+            memcard.load()
+        except (fl.LinkError, TimeoutError, OSError) as e:
+            return jsonify(error=str(e)), 503
+    return jsonify(ok=True, path=os.path.abspath(path))
+
+
 @app.route("/api/disc/host", methods=["POST"])
 def api_disc_host():
     on = bool((request.get_json(silent=True) or {}).get("on", request.args.get("on", "1") == "1"))
@@ -1516,16 +1715,9 @@ def api_nes_load():
                                  f"{CART_LIMIT[3]//1024} kB."), 413
         # The BIOS loads into DDR3 the same way a Mega Drive cartridge does:
         # 256 kB banks through the fill window, then the end strobe, then run.
-        talk(link.write, NES_CTRL, 0)
-        talk(link.write, NES_CONSOLE, 3)
+        # The memory card goes in with it.
+        ps1_load_bios(rom)
         prg = rom.ljust((len(rom) + 3) // 4 * 4, b"\x00")
-        for bank, base in enumerate(range(0, len(prg), CART_BANK_BYTES)):
-            chunk = prg[base:base + CART_BANK_BYTES]
-            talk(link.write, NES_CART_BANK, bank)
-            write_pages(NES_PRG, list(struct.unpack(f"<{len(chunk)//4}I", chunk)))
-        talk(link.write, NES_FILL_END, 1)
-        talk(link.write, VID_CTRL, 0b11)
-        talk(link.write, NES_CTRL, 1)          # release the CPU from the reset vector
         return jsonify(ok=True, console="PlayStation", prg=len(prg), chr=0,
                        mapper=0, mapper_name="BIOS", mirror="n/a", signed=True)
 
@@ -2241,15 +2433,18 @@ def api_esp_rom():
 # nothing, which from the outside looks like the console has died. This notices
 # that the console is up without its BIOS and puts it back, then asks the ESP32
 # to put the disc back in. It never touches a machine that is running.
-PS1_BIOS = r"C:/Users/vyga/Downloads/SCPH1001.BIN"
+# your own dump of a PlayStation BIOS (e.g. SCPH1001.BIN); the keepalive below
+# puts it back after a console reset. Unset: no keepalive.
+PS1_BIOS = os.environ.get("PS1_BIOS", "")
 BIOS_LINE = 0x30000                      # where the BIOS sits in DDR3, in 16-byte lines
 
 def _ddr_word(line):
-    talk(link.write, NES + 0x7C, line)
-    for _ in range(60):
-        if talk(link.read, NES + 0x7C) >> 31:
-            break
-    return talk(link.read, NES + 0x80)
+    with hr_lock:
+        talk(link.write, NES + 0x7C, line)
+        for _ in range(60):
+            if talk(link.read, NES + 0x7C) >> 31:
+                break
+        return talk(link.read, NES + 0x80)
 
 def _bios_is_there(first_word):
     try:
@@ -2276,18 +2471,8 @@ def _keepalive():
             if _bios_is_there(first):
                 continue
             app.logger.info("PlayStation has no BIOS (a reset emptied it): putting it back")
-            # the same path /api/nes/load takes: banks through the fill window,
-            # the end strobe, then let the processor go
-            talk(link.write, NES_CTRL, 0)
-            talk(link.write, NES_CONSOLE, 3)
-            prg = rom.ljust((len(rom) + 3) // 4 * 4, bytes(1))
-            for bank, base in enumerate(range(0, len(prg), CART_BANK_BYTES)):
-                chunk = prg[base:base + CART_BANK_BYTES]
-                talk(link.write, NES_CART_BANK, bank)
-                write_pages(NES_PRG, list(struct.unpack(f"<{len(chunk)//4}I", chunk)))
-            talk(link.write, NES_FILL_END, 1)
-            talk(link.write, VID_CTRL, 0b11)
-            talk(link.write, NES_CTRL, 1)
+            # the same path /api/nes/load takes, card and all
+            ps1_load_bios(rom)
             if ESP_HOST:
                 try:
                     urllib.request.urlopen(urllib.request.Request(
@@ -2298,7 +2483,7 @@ def _keepalive():
             app.logger.info("keepalive: %s", e)
 
 ESP_HOST = os.environ.get("ESP_HOST", "192.168.178.94")
-DISC_ON_CARD = os.environ.get("DISC_ON_CARD", "/discs/crash2.bin")
+DISC_ON_CARD = os.environ.get("DISC_ON_CARD", "/discs/disc.bin")   # the image on the ESP32's SD card
 
 
 def main():

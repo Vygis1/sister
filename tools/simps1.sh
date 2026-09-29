@@ -6,7 +6,7 @@
 # simall.sh covers the other cores; the PS1 ones are here because they are the
 # set that has to pass before a PS1 bitstream is worth building.
 cd "$(dirname "$0")/.."
-TESTS="tb_ps1_cache tb_ps1_cache_bram tb_ps1_cache_around tb_ps1_cache_conc tb_ps1_cache_conc_bram tb_ps1_cache_equiv tb_ps1_spu tb_ps1_fill tb_ps1_gpu tb_ps1_gtece
+TESTS="tb_ps1_cache tb_ps1_cache_bram tb_ps1_cache_around tb_ps1_cache_conc tb_ps1_cache_conc_bram tb_ps1_cache_equiv tb_ps1_spu tb_ps1_sio tb_ps1_mcard tb_ps1_cdrom tb_ps1_fill tb_ps1_gpu tb_ps1_gtece
        tb_ps1_scan tb_fbstream tb_net_stream tb_ps1_fb tb_ps1_c0 tb_ps1_c0fast tb_r3000 tb_ps1_bios tb_console tb_net"
 bad=""
 for tb in $TESTS; do

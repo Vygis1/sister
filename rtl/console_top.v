@@ -245,6 +245,12 @@ module console_top #(
 	wire         cpu_fast = !cpu_pace;
 	reg          dma_relax = 1'b0;                              // ctrl 0xEC bit 14: see ps1_top
 	reg  [5:0]   ev_idx = 6'd0;
+	// the PlayStation's memory card: ctrl 0x134 {fill aimed at the card, card in},
+	// 0x138 the queue of sectors it has stored (see ps1_sio.v / pc/server.py)
+	reg          card_in = 1'b0, card_fill = 1'b0;
+	wire [9:0]   card_wq_sector; wire [4:0] card_wq_count; wire card_wq_ovf;
+	wire         card_wq_pop = ctrl_we && (off == 16'h0138) && wdata[0];
+	wire         card_wq_clr = ctrl_we && (off == 16'h0138) && wdata[31];
 	wire [31:0]  ps1_ev_data; wire [5:0] ps1_ev_wp;             // the frame event log (ctrl 0x120/0x124)
 	wire [31:0]  ps1_icv_pc, ps1_icv_got, ps1_icv_want, ps1_icv_n;
 	wire         ps1_dbg_exec;
@@ -504,6 +510,7 @@ module console_top #(
 			16'h00EC: begin perf_sel <= wdata[5:0];
 			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14]; end
 			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
+			16'h0134: begin card_in <= wdata[0]; card_fill <= wdata[1]; end
 			16'h00F0: stream_ctl <= wdata;
 			16'h00F4: stream_base_r <= wdata;
 			16'h00F8: stream_words_r <= wdata;
@@ -594,6 +601,12 @@ module console_top #(
 		16'h0118: ctrl_rdata = {31'd0, cc_flush_busy};                        // the CPU cache flush: 1 while it is writing back
 		16'h0128: ctrl_rdata = {cd_fill_run, cd_fill_room[2:0], 4'd0, cd_fill_lba};   // the drive: running, room, the LBA it wants next
 		16'h0130: ctrl_rdata = {30'd0, hcd_disc, hcd_own};                    // the PC has the drive / a disc is in
+		16'h0134: ctrl_rdata = {30'd0, card_fill, card_in};                   // the memory card: fill aimed at it / in the slot
+		// the oldest sector the card stored that the PC has not copied: {overflow, 10'd0,
+		// how many are waiting[4:0], 6'd0, sector[9:0]}. Reading takes nothing; writing
+		// bit 0 pops it, bit 31 clears the overflow -- a read that is retried over UDP
+		// must not lose a save.
+		16'h0138: ctrl_rdata = {card_wq_ovf, 10'd0, card_wq_count, 6'd0, card_wq_sector};
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -994,7 +1007,9 @@ module console_top #(
 			.fbr_addr(from_ddr ? sfa : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
 			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
 			.spu_out(audio_lr), .spu_out_we(audio_lr_we),
-			.dma_relax(dma_relax), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp)
+			.dma_relax(dma_relax), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
+			.card_in(card_in), .card_fill(card_fill), .card_wq_sector(card_wq_sector), .card_wq_count(card_wq_count),
+			.card_wq_ovf(card_wq_ovf), .card_wq_pop(card_wq_pop), .card_wq_clr(card_wq_clr)
 		);
 	end else begin : g_ps1
 		assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
@@ -1015,6 +1030,7 @@ module console_top #(
 		assign ps1_wa_en = 1'b0; assign ps1_wb_en = 1'b0; assign ps1_wa_reg = 5'd0; assign ps1_wb_reg = 5'd0; assign ps1_wa_val = 32'd0; assign ps1_wb_val = 32'd0;
 		assign ps1_dbg_fill = 32'd0;
 		assign hr_done = 1'b0; assign hr_data = 128'd0;
+		assign card_wq_sector = 10'd0; assign card_wq_count = 5'd0; assign card_wq_ovf = 1'b0;
 		assign ps1_node_v = 1'b0; assign ps1_node_addr = 24'd0; assign ps1_node_hdr = 32'd0;
 		assign fb_cap_ready = 1'b0; assign fb_width = 10'd0; assign fb_height = 9'd0;
 		assign fbr_rdata_w = 32'd0; assign fbr_ack_w = fbr_req;   // no frame here: answer at once

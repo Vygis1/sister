@@ -5,7 +5,9 @@ module tb_ps1_sio;
 	reg clk = 0; always #5 clk = ~clk;
 	reg rst = 1; reg sel = 0, we = 0; reg [3:0] addr = 0, be = 0; reg [31:0] wdata = 0;
 	wire [31:0] rdata; wire irq; reg [15:0] buttons = 16'h0000;
-	ps1_sio #(.SHIFT_CYCLES(100), .ACK_DELAY(10), .ACK_LOW(20)) dut (.clk(clk), .rst(rst), .sel(sel), .we(we), .addr(addr), .be(be), .wdata(wdata), .rdata(rdata), .buttons(buttons), .irq(irq));
+	ps1_sio #(.SHIFT_CYCLES(100), .ACK_DELAY(10), .ACK_LOW(20)) dut (.clk(clk), .rst(rst), .sel(sel), .we(we), .addr(addr), .be(be), .wdata(wdata), .rdata(rdata), .buttons(buttons), .irq(irq),
+		.rst_q(rst), .card_in(1'b0), .m_line(), .m_req(), .m_we(), .m_wdata(), .m_ready(1'b0), .m_valid(1'b0), .m_rdata(128'd0),
+		.wq_sector(), .wq_count(), .wq_ovf(), .wq_pop(1'b0), .wq_clr_ovf(1'b0));
 	integer errors = 0, n;
 	task wr16; input [3:0] a; input [15:0] v; begin
 		@(negedge clk); sel = 1; we = 1; addr = a; be = (a[1] ? 4'b1100 : 4'b0011); wdata = a[1] ? {v, 16'd0} : {16'd0, v}; @(negedge clk); sel = 0; we = 0; end endtask

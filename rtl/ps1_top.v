@@ -56,6 +56,18 @@ module ps1_top (
 	input  wire        host_we,
 	input  wire [31:0] host_wdata,
 
+	// the memory card in slot 1 (ps1_sio.v). Its 128 kB are in DDR3 at CARD_LINE;
+	// with card_fill set the host's fill above lands there instead of in the
+	// BIOS. The queue says which sectors the console has stored since the PC
+	// last looked, so the PC can copy them into the card's file.
+	input  wire        card_in,
+	input  wire        card_fill,
+	output wire [9:0]  card_wq_sector,
+	output wire [4:0]  card_wq_count,
+	output wire        card_wq_ovf,
+	input  wire        card_wq_pop,
+	input  wire        card_wq_clr,
+
 	// --- DDR3 line interface -------------------------------------------------------
 	output wire [23:0]  d_addr,
 	output wire         d_req,
@@ -201,6 +213,7 @@ module ps1_top (
 );
 	localparam [23:0] RAM_LINE  = 24'h01_0000;   // 0x100000 >> 4
 	localparam [23:0] BIOS_LINE = 24'h03_0000;   // 0x300000 >> 4
+	localparam [23:0] CARD_LINE = 24'h09_0000;   // 9 MB: the memory card's 128 kB, after SPU RAM (8 MB)
 
 	// ================================================================================
 	// the CPU
@@ -731,7 +744,8 @@ module ps1_top (
 				hf_line[host_windex[3:2]*32 +: 32] <= host_wdata;
 				if (host_windex[3:2] == 2'd3) begin
 					hf_req_r  <= 1'b1;
-					hf_addr_r <= BIOS_LINE + {5'd0, host_windex[18:4]};
+					hf_addr_r <= card_fill ? CARD_LINE + {11'd0, host_windex[16:4]}
+					                       : BIOS_LINE + {5'd0, host_windex[18:4]};
 				end
 			end
 			if (hf_req_r && hf_ready && !vz_active) hf_req_r <= 1'b0;   // the sweep owns the port first
@@ -773,17 +787,30 @@ module ps1_top (
 	reg          hr_req, hr_go_d;
 	reg  [23:0]  hr_addr;
 	always @(posedge clk) hr_go_d <= hr_go;
-	wire         hr_turn = hr_req && !hf_req_r && !vz_active;
+	// The memory card shares it too, last in line. Replies come back in order
+	// but carry no owner, so only ONE read is out on this port at a time (p4_rd),
+	// and it remembers whose it is (p4_mc).
+	wire [12:0]  mc_line; wire mc_req, mc_we; wire [127:0] mc_wdata;
+	reg          p4_rd, p4_mc;
+	wire         hr_turn = hr_req && !hf_req_r && !vz_active && !p4_rd;
+	wire         mc_turn = mc_req && !hf_req_r && !vz_active && !hr_req && (mc_we || !p4_rd);
+	wire         mc_ready = mc_turn && hf_ready;
+	wire         mc_valid = p_valid[4] && p4_mc;
 	always @(posedge clk) begin
-		if (rst) begin hr_req <= 1'b0; hr_done <= 1'b0; hr_addr <= 24'd0; hr_data <= 128'd0; end
+		if (rst) begin hr_req <= 1'b0; hr_done <= 1'b0; hr_addr <= 24'd0; hr_data <= 128'd0; p4_rd <= 1'b0; p4_mc <= 1'b0; end
 		else begin
 			if (hr_go_d) begin hr_req <= 1'b1; hr_addr <= hr_line; hr_done <= 1'b0; end   // hr_line is stable a cycle after hr_go
-			if (hr_turn && hf_ready) hr_req <= 1'b0;
-			if (p_valid[4]) begin hr_data <= p_rdata[639:512]; hr_done <= 1'b1; end
+			if (hr_turn && hf_ready) begin hr_req <= 1'b0; p4_rd <= 1'b1; p4_mc <= 1'b0; end
+			if (mc_turn && !mc_we && hf_ready) begin p4_rd <= 1'b1; p4_mc <= 1'b1; end
+			if (p_valid[4]) begin
+				p4_rd <= 1'b0;
+				if (!p4_mc) begin hr_data <= p_rdata[639:512]; hr_done <= 1'b1; end
+			end
 		end
 	end
-	wire [23:0]  hf_p_addr  = vz_active ? {8'd0, vz_line[15:0]} : hr_turn ? hr_addr : hf_addr_r;
-	wire [127:0] hf_p_wdata = vz_active ? 128'd0 : hf_line;
+	wire [23:0]  hf_p_addr  = vz_active ? {8'd0, vz_line[15:0]} : hr_turn ? hr_addr : mc_turn ? CARD_LINE + {11'd0, mc_line} : hf_addr_r;
+	wire [127:0] hf_p_wdata = vz_active ? 128'd0 : mc_turn ? mc_wdata : hf_line;
+	wire         hf_p_we    = hr_turn ? 1'b0 : mc_turn ? mc_we : 1'b1;
 	// port 3: the display frame
 	wire [23:0]  fb_m_addr; wire fb_m_req, fb_m_we; wire [127:0] fb_m_wdata;
 	wire         fb_m_ready, fb_m_valid; wire [127:0] fb_m_rdata;
@@ -793,8 +820,8 @@ module ps1_top (
 	wire [23:0]  sp_m_addr; wire sp_m_req, sp_m_we, sp_m_ready, sp_m_valid;
 	wire [127:0] sp_m_wdata, sp_m_rdata; wire [15:0] sp_m_wmask;
 	wire [143:0] p_addr  = {sp_m_addr,  hf_p_addr,  cc_m_addr, fb_m_addr,  bk_m_addr,  vc_m_addr};
-	wire [5:0]   p_req   = {sp_m_req,   hf_req_r | vz_req | hr_req, cc_m_req, fb_m_req, bk_m_req, vc_m_req};
-	wire [5:0]   p_we    = {sp_m_we,    !hr_turn,   cc_m_we,   fb_m_we,    bk_m_we,    vc_m_we};
+	wire [5:0]   p_req   = {sp_m_req,   hf_req_r | vz_req | hr_turn | mc_turn, cc_m_req, fb_m_req, bk_m_req, vc_m_req};
+	wire [5:0]   p_we    = {sp_m_we,    hf_p_we,    cc_m_we,   fb_m_we,    bk_m_we,    vc_m_we};
 	wire [767:0] p_wdata = {sp_m_wdata, hf_p_wdata, cc_m_wdata, fb_m_wdata, bk_m_wdata, vc_m_wdata};
 	wire [15:0]  vc_m_wmask, cc_m_wmask;
 	wire [95:0]  p_wmask = {sp_m_wmask, 16'hFFFF, cc_m_wmask, 16'hFFFF, bk_m_wmask, vc_m_wmask};
@@ -834,7 +861,12 @@ module ps1_top (
 	ps1_sio u_sio (
 		.clk(clk), .rst(core_rst),
 		.sel(pad_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[3:0]), .be(c_be), .wdata(c_dout), .rdata(sio_rdata),
-		.buttons(joy1), .irq(sio_irq)
+		.buttons(joy1), .irq(sio_irq),
+		.rst_q(rst), .card_in(card_in),
+		.m_line(mc_line), .m_req(mc_req), .m_we(mc_we), .m_wdata(mc_wdata),
+		.m_ready(mc_ready), .m_valid(mc_valid), .m_rdata(p_rdata[639:512]),
+		.wq_sector(card_wq_sector), .wq_count(card_wq_count), .wq_ovf(card_wq_ovf),
+		.wq_pop(card_wq_pop), .wq_clr_ovf(card_wq_clr)
 	);
 	// the CD-ROM controller: registers, FIFOs and the response protocol, no disc
 	wire [31:0] cd_rdata;
