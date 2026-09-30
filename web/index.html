@@ -89,6 +89,8 @@
      that built all this is one toggle away rather than the front door. */
   body.play nav { display:none; }
   body.play main { padding:0; }
+  /* the developer tabs belong to the developer view only */
+  body.play section { display:none !important; }
   body:not(.play) #console-stage { display:none; }
   
 
@@ -131,9 +133,10 @@
   /* A d-pad and four buttons, lit live from whatever is actually being read
      back. It doubles as the answer to "is my controller even connected". */
   .padview { display:flex; gap:10px; align-items:center; }
-  .padview i { width:13px; height:13px; border-radius:3px; background:var(--line2);
+  .padview { flex-wrap:wrap; }
+  .padview i { min-width:13px; height:13px; border-radius:3px; background:var(--line2);
                display:inline-block; font-style:normal; font-size:9px; color:var(--bg);
-               text-align:center; line-height:13px; }
+               text-align:center; line-height:13px; padding:0 2px; }
   .padview i.on { background:var(--accent); }
   .padview .dpad { display:grid; grid-template-columns:repeat(3,13px);
                    grid-template-rows:repeat(3,13px); gap:2px; }
@@ -237,6 +240,15 @@
   .mono { font-family:ui-monospace, Consolas, monospace; font-size:11px;
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .sys-core button { margin-top: 4px; }
+  .media-row { display:flex; justify-content:space-between; align-items:flex-start; gap:10px;
+               padding:9px 0; border-top:1px solid var(--line); }
+  .media-row:first-of-type { border-top:0; padding-top:2px; }
+  .media-row .k { color:var(--dim); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+                  font-weight:700; min-width:72px; padding-top:2px; }
+  .media-row .v { flex:1; min-width:0; text-align:right; }
+  .media-row .v b { display:block; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .media-row .v .meta { font-size:11.5px; }
+  .media-row .v button { margin-top:6px; padding:4px 10px; font-size:12px; }
 </style>
 </head>
 <body>
@@ -296,7 +308,7 @@
         <!-- The slot. One visible file input; drop works anywhere on the page.
              What it wants follows the machine: a cartridge for the classics, the
              BIOS for the PlayStation. -->
-        <div class="panel">
+        <div class="panel" id="slot-panel">
           <h2>Slot</h2>
           <input type="file" id="media-file" accept=".nes,.sms,.gg,.bin,.gen,.md"
                  style="width:100%">
@@ -309,12 +321,24 @@
           <table style="margin-top:8px"><tbody id="con-stats"></tbody></table>
         </div>
 
+        <!-- The PlayStation takes a BIOS, a disc and a memory card rather than a
+             cartridge, and the server looks after all three. -->
+        <div class="panel" id="ps1-panel" style="display:none">
+          <h2>PlayStation</h2>
+          <div class="media-row"><span class="k">BIOS</span>
+            <span class="v" id="ps1-bios"></span></div>
+          <div class="media-row"><span class="k">Disc</span>
+            <span class="v" id="ps1-disc"></span></div>
+          <div class="media-row"><span class="k">Memory card</span>
+            <span class="v" id="ps1-card"></span></div>
+          <div class="msg" id="ps1-msg"></div>
+        </div>
+
         <div class="panel">
           <h2>Controls</h2>
           <span class="padview" id="padview">
             <span class="dpad"><i></i><i></i><i></i><i></i></span>
-            <i data-b="select" id="pad-sel">s</i><i data-b="start">t</i>
-            <i data-b="b">B</i><i data-b="a">A</i>
+            <span id="padbuttons"></span>
           </span>
           <div class="meta" id="pad-src" style="margin-top:8px">keyboard</div>
           <div class="row">

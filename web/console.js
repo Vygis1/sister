@@ -93,6 +93,7 @@ async function pullFrame() {
       }
       if (bytes.length >= STRIDE * screenH) tvPaint(bytes);
     }
+    $('stage-screen').classList.remove('empty');   // a picture came: nothing to drop here
     const now = performance.now();
     if (lastFrame) { const inst = 1000 / (now - lastFrame); fps = fps ? fps * 0.85 + inst * 0.15 : inst; }
     lastFrame = now;
@@ -103,30 +104,57 @@ async function pullFrame() {
 // ---------------------------------------------------------------------------
 // the controller
 // ---------------------------------------------------------------------------
-const BUTTONS = ['a', 'b', 'select', 'start', 'up', 'down', 'left', 'right'];
-const BIT = Object.fromEntries(BUTTONS.map((b, i) => [b, 1 << i]));
+// The bit order the server expects (pc/server.py _NES_BITS): the NES's eight,
+// then the rest of a modern pad, which only the PlayStation has buttons for.
+const BUTTONS = ['a', 'b', 'x', 'y', 'l1', 'r1', 'l2', 'r2', 'select', 'start', 'up', 'down', 'left', 'right'];
+const BIT = { a: 1, b: 2, select: 4, start: 8, up: 16, down: 32, left: 64, right: 128,
+              x: 256, y: 512, l1: 1024, r1: 2048, l2: 4096, r2: 8192 };
 const DEFAULT_KEYS = {
   up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
-  a: 'KeyZ', b: 'KeyX', select: 'ShiftLeft', start: 'Enter',
+  a: 'KeyZ', b: 'KeyX', x: 'KeyA', y: 'KeyS',
+  l1: 'KeyQ', r1: 'KeyW', l2: 'Digit1', r2: 'Digit2',
+  select: 'ShiftLeft', start: 'Enter',
 };
-const DEFAULT_PADS = { a: 0, b: 2, select: 8, start: 9, up: 12, down: 13, left: 14, right: 15 };
+// the standard gamepad layout: 0-3 face (bottom, right, left, top), 4-7 shoulders
+const DEFAULT_PADS = { a: 0, b: 1, x: 2, y: 3, l1: 4, r1: 5, l2: 6, r2: 7,
+                       select: 8, start: 9, up: 12, down: 13, left: 14, right: 15 };
+// What each machine calls them, and which it has at all.
+const PAD_LABELS = {
+  0: { a: 'A', b: 'B', select: 'Select', start: 'Start' },
+  1: { a: '1', b: '2', select: 'Pause', start: 'Start' },
+  2: { a: 'A', b: 'B', select: 'C', start: 'Start' },
+  3: { a: '\u2715', b: '\u25CB', x: '\u25A1', y: '\u25B3', l1: 'L1', r1: 'R1', l2: 'L2', r2: 'R2',
+       select: 'Select', start: 'Start' },
+};
+const padLabels = () => PAD_LABELS[curConsole] || PAD_LABELS[0];
 let keyMap = { ...DEFAULT_KEYS }, padMap = { ...DEFAULT_PADS };
 
 function loadBindings() {
   try {
-    const saved = JSON.parse(localStorage.getItem('bindings') || '{}');
+    // 'bindings2': the layout grew (and B moved to the right face button), so
+    // bindings saved by the older page are not carried over
+    const saved = JSON.parse(localStorage.getItem('bindings2') || '{}');
     if (saved.keys) keyMap = { ...DEFAULT_KEYS, ...saved.keys };
     if (saved.pads) padMap = { ...DEFAULT_PADS, ...saved.pads };
   } catch (err) { /* defaults are fine */ }
 }
 function saveBindings() {
-  try { localStorage.setItem('bindings', JSON.stringify({ keys: keyMap, pads: padMap })); }
+  try { localStorage.setItem('bindings2', JSON.stringify({ keys: keyMap, pads: padMap })); }
   catch (err) { /* not worth losing the session over */ }
 }
 loadBindings();
 
 let keyState = 0, padState = 0, sentState = -1;
 
+// the buttons this machine has, in the order a pad shows them
+function padButtons() {
+  const L = padLabels();
+  return ['l2', 'l1', 'select', 'start', 'r1', 'r2', 'x', 'y', 'b', 'a'].filter(b => L[b]);
+}
+function renderPadView() {
+  const L = padLabels();
+  $('padbuttons').innerHTML = padButtons().map(b => `<i data-b="${b}">${L[b]}</i>`).join(' ');
+}
 function drawPad(v) {
   const dpad = $('padview').querySelector('.dpad').children;
   [['up', 0], ['left', 1], ['right', 2], ['down', 3]].forEach(([b, i]) =>
@@ -188,8 +216,10 @@ const KEY_LABEL = code => code.replace(/^Key/, '').replace(/^Digit/, '')
   .replace(/^Arrow/, '').replace(/^Shift(Left|Right)$/, 'Shift');
 
 function renderBindings() {
-  $('bindlist').innerHTML = BUTTONS.map(b => `
-    <div class="bindrow"><span>${b}</span>
+  const L = padLabels();
+  const shown = ['up', 'down', 'left', 'right', ...padButtons()];
+  $('bindlist').innerHTML = shown.map(b => `
+    <div class="bindrow"><span>${L[b] || b}</span>
       <button data-bind="${b}"><span class="keycap">${KEY_LABEL(keyMap[b])}</span> / pad ${padMap[b]}</button>
     </div>`).join('');
   $('bindlist').querySelectorAll('button[data-bind]').forEach(el => {
@@ -200,6 +230,7 @@ function renderBindings() {
   });
 }
 renderBindings();
+renderPadView();
 $('bind-reset').onclick = () => { keyMap = { ...DEFAULT_KEYS }; padMap = { ...DEFAULT_PADS }; saveBindings(); renderBindings(); };
 $('bindbtn').onclick = () => { const p = $('bindpanel'); p.style.display = p.style.display === 'none' ? 'block' : 'none'; };
 
@@ -247,6 +278,7 @@ window.addEventListener('drop', e => { const f = e.dataTransfer && e.dataTransfe
 const CORE_LABEL = { nes: 'NES', sms: 'Master System', md: 'Mega Drive', ps1: 'PlayStation' };
 const BUILT_NAME = { 0: 'nes', 1: 'sms', 2: 'md', 3: 'ps1' };
 let switching = false, booting = false, cachedCores = [];
+let padConsole = -1;      // the machine the pad view was last drawn for
 
 function setNoConsole(on) { document.body.classList.toggle('no-console', on); }
 
@@ -284,7 +316,13 @@ async function refreshConsole() {
       '<button class="ghost" id="sys-back">Back to the shell</button>';
     $('sys-back').onclick = backToShell;
     $('sys-cores-label').textContent = 'switch machine';
-    const sel = $('pad-sel'); if (sel) sel.textContent = (c.console === 2) ? 'C' : 's';
+    // (only when the machine changes: redrawing mid-remap would cancel it)
+    if (c.console !== padConsole) { padConsole = c.console; renderPadView(); renderBindings(); }
+    // the PlayStation's BIOS, disc and card have a panel of their own
+    const ps1 = c.console === 3;
+    $('slot-panel').style.display = ps1 ? 'none' : '';
+    $('ps1-panel').style.display = ps1 ? '' : 'none';
+    if (ps1) refreshPs1Media();
     $('media-file').setAttribute('accept', info.accept);
     $('media-slot-label').textContent = info.slot;
     renderCoreChips(BUILT_NAME[c.console]);
@@ -491,7 +529,7 @@ async function refreshStats() {
   try {
     const st = await api('/api/nes/state');
     const wide = st.console === 2 || st.console === 3;
-    $('stage-stats').textContent = `${fps.toFixed(0)} fps · ${screenW}×${screenH}` + (frameFormat === 'rgb555' ? ' · 15-bit' : '') + ` · frame ${st.frame}` + (st.running ? '' : ' · stopped');
+    $('stage-stats').textContent = `${fps.toFixed(0)} fps · ${screenW}×${screenH}` + (st.running ? '' : ' · paused');
     $('con-stats').innerHTML =
       `<tr><td>machine</td><td class="num">${st.console_name || CONSOLES[st.console]?.name || st.console}</td></tr>` +
       `<tr><td>running</td><td class="num">${st.running ? 'yes' : 'no'}</td></tr>` +
@@ -502,6 +540,40 @@ async function refreshStats() {
   } catch (err) { /* the board may have just changed under us; refreshSystem sorts it */ }
 }
 setInterval(refreshStats, 1000);
+
+// ---------------------------------------------------------------------------
+// the PlayStation: BIOS, disc and memory card, all kept by the server
+// ---------------------------------------------------------------------------
+const esc = t => String(t).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+let ps1Busy = false;
+async function refreshPs1Media() {
+  if (curConsole !== 3 || ps1Busy) return;
+  let m;
+  try { m = await api('/api/ps1/media'); } catch (err) { return; }
+  $('ps1-bios').innerHTML = m.bios
+    ? `<b>${esc(m.bios)}</b><span class="meta">loaded after every reset</span>`
+    : `<b>none set</b><span class="meta">drop your BIOS file on the page, or set PS1_BIOS in local.env</span>`;
+  const d = m.disc;
+  const from = d.source === 'pc' ? 'from this PC' : 'from the SD card';
+  const other = d.source === 'pc' ? 'Use the SD card' : 'Use this PC';
+  $('ps1-disc').innerHTML =
+    (d.name ? `<b>${esc(d.name)}</b>` : '<b>no disc</b>') +
+    `<span class="meta">${from}${d.name ? ' · ' + d.served + ' sectors read' : ''}</span>` +
+    (d.error ? `<span class="meta" style="color:var(--warn)"> · ${esc(d.error)}</span>` : '') +
+    `<br><button class="ghost" id="ps1-disc-swap">${other}</button>`;
+  $('ps1-disc-swap').onclick = async () => {
+    ps1Busy = true;
+    try { await post('/api/disc/host', { on: d.source !== 'pc' }); say($('ps1-msg'), 'disc now ' + (d.source === 'pc' ? 'from the SD card' : 'from this PC'), 'ok'); }
+    catch (err) { say($('ps1-msg'), err.message, 'err'); }
+    finally { ps1Busy = false; refreshPs1Media(); }
+  };
+  const c = m.card;
+  $('ps1-card').innerHTML =
+    `<b>${esc(c.name)}</b>` +
+    `<span class="meta">${c.inserted ? 'in slot 1' : 'not in the slot'} · ${c.saved} sectors saved this session</span>` +
+    (c.error ? `<span class="meta" style="color:var(--warn)"> · ${esc(c.error)}</span>` : '');
+}
+setInterval(refreshPs1Media, 3000);
 // The board can change what it is at any moment -- a boot, an install, a reset
 // -- so re-check which of shell/console/nothing it is on a slow beat, not just
 // once at load. This is what makes the page notice a core starting.

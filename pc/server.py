@@ -1343,8 +1343,16 @@ class MemCard:
     keeps a copy of the file as it was (.bak), in case something goes wrong.
     """
 
+    # which card file was last put in, so a restarted server copies the board's
+    # sectors into THAT file and not the default one
+    STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "card.json")
+
     def __init__(self):
         self.path = CARD_FILE
+        try:
+            self.path = json.load(open(self.STATE)).get("path") or CARD_FILE
+        except (OSError, ValueError):
+            pass
         self.lock = threading.Lock()        # the file, and loads against saves
         self.thread = None
         self.saved = 0
@@ -1390,6 +1398,11 @@ class MemCard:
                 talk(link.write, CARD_Q, 1)
             talk(link.write, CARD_CTL, 0b01)
             self.error = ""
+            try:
+                os.makedirs(os.path.dirname(self.STATE), exist_ok=True)
+                json.dump({"path": self.path}, open(self.STATE, "w"))
+            except OSError:
+                pass
         self.start()
         return True
 
@@ -1509,6 +1522,37 @@ def api_disc_host():
     return jsonify(ok=True, on=on)
 
 
+@app.route("/api/ps1/media")
+def api_ps1_media():
+    """The PlayStation's BIOS, disc and memory card in one answer, for the
+    page's panel. The disc comes from this PC (HostDisc) or from the ESP32's SD
+    card, whichever owns the drive; the ESP32 is asked what it holds only when
+    it is the one serving."""
+    bios = os.path.basename(PS1_BIOS) if PS1_BIOS else ""
+    disc = dict(source="pc" if host_disc.on else "sd",
+                name=os.path.basename(DISC["path"]) if DISC["path"] else "",
+                sectors=DISC["size"] // 2352 if DISC["size"] else 0,
+                served=host_disc.served, error=host_disc.error)
+    if not host_disc.on:
+        try:
+            code, body = esp_call("/api/state", timeout=2.0)
+            d = json.loads(body).get("disc", {})
+            disc.update(name=os.path.basename(d.get("path", "")) if d.get("in") else "",
+                        sectors=d.get("sectors", 0), served=d.get("served", 0), error="")
+        except Exception as e:
+            disc.update(name="", error="the ESP32 did not answer (%s)" % e)
+    try:
+        ctl = talk(link.read, CARD_CTL)
+        q = talk(link.read, CARD_Q)
+    except (fl.LinkError, TimeoutError):
+        ctl = q = None
+    card = dict(name=os.path.basename(memcard.path), path=os.path.abspath(memcard.path),
+                inserted=None if ctl is None else bool(ctl & 1),
+                pending=None if q is None else (q >> 16) & 0x1F,
+                saved=memcard.saved, error=memcard.error)
+    return jsonify(bios=bios, disc=disc, card=card)
+
+
 @app.route("/api/disc/state")
 def api_disc_state():
     return jsonify(path=DISC["path"], size=DISC["size"], sectors=DISC["size"] // 2352 if DISC["size"] else 0,
@@ -1611,7 +1655,9 @@ def api_nes_config():
 # Translating here rather than in the page keeps one bit order in the browser
 # and gives every client the fix, including tools/playtest.py.
 _NES_BITS = {"a": 0, "b": 1, "select": 2, "start": 3,
-             "up": 4, "down": 5, "left": 6, "right": 7}
+             "up": 4, "down": 5, "left": 6, "right": 7,
+             # the rest of a modern pad, which only the PlayStation has buttons for
+             "x": 8, "y": 9, "l1": 10, "r1": 11, "l2": 12, "r2": 13}
 # a -> A and b -> B, with select standing in for the third face button.
 _MD_BITS = {"up": 0, "down": 1, "left": 2, "right": 3,
             "b": 4, "select": 5, "a": 6, "start": 7}
@@ -1622,7 +1668,8 @@ _MD_BITS = {"up": 0, "down": 1, "left": 2, "right": 3,
 # 12 triangle, 13 circle, 14 cross, 15 square. The page's A is Cross (confirm)
 # and B is Circle (back), as on the console's own menus.
 _PS1_BITS = {"select": 0, "start": 3, "up": 4, "right": 5, "down": 6, "left": 7,
-             "b": 13, "a": 14}
+             "l2": 8, "r2": 9, "l1": 10, "r1": 11,
+             "y": 12, "b": 13, "a": 14, "x": 15}    # triangle, circle, cross, square
 
 
 def pad_for_console(v, which):
@@ -1635,7 +1682,7 @@ def pad_for_console(v, which):
         return v & 0xFF
     out = 0
     for name, src in _NES_BITS.items():
-        if v & (1 << src):
+        if v & (1 << src) and name in table:     # a machine without the button ignores it
             out |= 1 << table[name]
     return out
 
@@ -2528,6 +2575,11 @@ def main():
             host_disc.start()
     except (OSError, ValueError):
         pass
+    # The card's sectors are copied to its file by a thread that used to start
+    # only with a BIOS load -- so after a server restart a save made then sat on
+    # the board uncollected. It polls the board's queue and does nothing while
+    # it is empty (or while the core running is not a PlayStation).
+    memcard.start()
 
     # Look for the ESP in the background: it is a convenience, and the page has
     # to come up whether or not it is there.
