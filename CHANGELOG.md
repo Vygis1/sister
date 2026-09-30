@@ -39,6 +39,19 @@ cartridges in DDR3.
 - Behind the Developer toggle are a logic analyser, a synth, the PHY and a
   register view.
 
+**Known issues**
+- **Mega Drive: no sound on the board.**
+  - The picture and games run, but the core's audio output holds one level.
+  - The FM chip passes its simulation checks and has not yet been heard on
+    hardware. The fault is in the sound driver or the FM keying on the board.
+- **PlayStation:**
+  - While running, about one frame in ten can take 50 ms instead of 33 ms: the
+    drawing engine is late on busy scenes.
+  - On the title screen, one frame shows a strip of junk in the top rows as the
+    sign drops in.
+- **Slot panel:** a cartridge loaded by anything other than the page (the API,
+  the tools) shows as "nothing loaded".
+
 **The ESP32-S3 front door** (`esp32/console`) is a phone-sized page. It shows
 what the board is running and which disc is in the drive, installs cores from
 its SD card, and joins Wi-Fi.
