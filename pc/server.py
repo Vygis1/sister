@@ -104,10 +104,18 @@ def no_stale_page(resp):
 
 # --- raw register access ------------------------------------------------
 
+# the release this checkout is (VERSION at the top of the repository)
+try:
+    RELEASE = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")).read().strip()
+except OSError:
+    RELEASE = ""
+
+
 @app.route("/api/ident")
 def api_ident():
     info = talk(link.ident)
     info["target"] = f"{link.addr[0]}:{link.addr[1]}"
+    info["release"] = RELEASE
     return jsonify(info)
 
 

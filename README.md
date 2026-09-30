@@ -71,6 +71,14 @@ The board's address is set in the bitstream, in `rtl/eth_top.v` (`IP_ADDR`,
 `FPGA_HOST` in `local.env` to match, for the server and the tools in `tools/`.
 Any setting in `local.env` can also be given as an environment variable.
 
+### Playing
+
+Drop a game on the page, or pick one with the Slot panel. The keyboard
+defaults are the arrow keys, Z / X (A and B, or Cross and Circle), A / S
+(Square and Triangle), Q / W (L1 and R1), 1 / 2 (L2 and R2), Shift for Select
+and Enter for Start. Any gamepad works as well. **Remap…** in the Controls
+panel changes any binding, and the choice is kept in the browser.
+
 ### PlayStation specifics
 
 - **BIOS:** upload it on the page, or set `PS1_BIOS` in `local.env` so the
@@ -129,6 +137,13 @@ other projects, placed in `sim/roms/`:
   nestest and blargg's NES tests.
 
 Each bench says which file it wants and where.
+
+## Releases
+
+`VERSION` holds the release number and `CHANGELOG.md` says what is in it.
+`./tools/release.sh` packages a release into `dist/`: the five core images, the
+ESP32 firmware, the source of the commit, and SHA-256 checksums. It refuses to
+run with uncommitted changes, or with an image older than the RTL.
 
 ## Security
 

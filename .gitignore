@@ -50,3 +50,7 @@ saves/
 
 # settings for one machine (see local.env.example)
 local.env
+
+# --- releases -----------------------------------------------------------------
+# tools/release.sh builds these from cores/ and the commit
+dist/

@@ -67,7 +67,7 @@ async function refreshIdent() {
     // while the System panel correctly said "Shell", which reads as the page
     // contradicting itself. The panel says what is running; this says the link
     // is up.
-    $('ident').textContent = `link v${info.version >>> 16}.${info.version & 0xffff}`;
+    $('ident').textContent = (info.release ? `v${info.release} · ` : '') + `link v${info.version >>> 16}.${info.version & 0xffff}`;
     $('target').textContent = info.target;
     const s = Math.floor(info.uptime_ms / 1000);
     $('uptime').textContent =
