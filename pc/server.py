@@ -347,11 +347,26 @@ def api_syn_state():
     )
 
 
+def syn_source(console):
+    """What the audio ring records: the console's own sound, or the synth's
+    voices -- SYN_CTRL bit 1 (rtl/synth.v ext_src), bit 0 is on/off.
+
+    Nothing ever set that bit, and it resets to the synth, so the NES, Master
+    System and Mega Drive played silence on the page (found 2026-09-30, the
+    sound ring all 0x8000 under Super Mario Bros.). A cartridge now switches it
+    to the console, and playing the synth's keyboard switches it back."""
+    try:
+        talk(link.write, SYN_CTRL, 0b11 if console else 0b01)
+    except (fl.LinkError, TimeoutError):
+        pass
+
+
 @app.route("/api/syn/config", methods=["POST"])
 def api_syn_config():
     body = request.json or {}
     if "enable" in body:
-        talk(link.write, SYN_CTRL, 1 if body["enable"] else 0)
+        # keep the source (bit 1) as it is
+        talk(link.write, SYN_CTRL, (talk(link.read, SYN_CTRL) & 0b10) | (1 if body["enable"] else 0))
     if "master" in body:
         talk(link.write, SYN_MASTER, int(body["master"]) & 0xFFFF)
     if "attack" in body:
@@ -365,6 +380,8 @@ def api_syn_config():
 def api_syn_noteon():
     body = request.json or {}
     midi = int(body["midi"])
+    if talk(link.read, SYN_CTRL) & 0b10:
+        syn_source(False)
     wave_sel = int(body.get("wave", 2)) & 7
     if midi in voice_note:
         return jsonify(ok=True, voice=voice_note.index(midi))
@@ -1773,6 +1790,7 @@ def api_nes_load():
         talk(link.write, NES_FILL_END, 1)
 
         talk(link.write, VID_CTRL, 0b11)
+        syn_source(True)
         talk(link.write, NES_CTRL, 1)
         name = rom[0x120:0x150].decode("ascii", "replace").strip()
         return jsonify(ok=True, console="Mega Drive", prg=len(prg), chr=0,
@@ -1850,6 +1868,7 @@ def api_nes_load():
              (mapper & 0xF) | (prg_last << 8) | (0x4000 if chr_is_ram else 0))
         talk(link.write, NES_CONSOLE, 0)
         talk(link.write, VID_CTRL, 0b11)
+        syn_source(True)
         talk(link.write, NES_CTRL, 1 | (2 if mirror_v else 0))
 
         return jsonify(ok=True, console="NES", prg=len(prg), chr=len(chr_),
@@ -1867,6 +1886,7 @@ def api_nes_load():
     write_pages(NES_PRG, list(struct.unpack(f"<{len(prg)//4}I", prg)))
     talk(link.write, NES_CONSOLE, 1)
     talk(link.write, VID_CTRL, 0b11)
+    syn_source(True)
     talk(link.write, NES_CTRL, 1)
     return jsonify(ok=True, console="Master System", prg=len(prg), chr=0,
                    mapper=0, mapper_name="Sega", mirror="n/a", signed=True)
@@ -2550,17 +2570,28 @@ def _keepalive():
             app.logger.info("PlayStation has no BIOS (a reset emptied it): putting it back")
             # the same path /api/nes/load takes, card and all
             ps1_load_bios(rom)
-            if ESP_HOST:
+            # The ESP32 serves the disc when this PC does not: tell it to put
+            # its disc back in, so the reset console sees one. Which disc: the
+            # one it already has (DISC_ON_CARD only overrides that). A fixed
+            # default here named a file that was not on the card, the insert
+            # failed, and the drive was left empty with the BIOS at its logo.
+            if ESP_HOST and not host_disc.on:
                 try:
-                    urllib.request.urlopen(urllib.request.Request(
-                        "http://%s/api/disc?path=%s" % (ESP_HOST, DISC_ON_CARD), method="POST"), timeout=8).read()
+                    path = DISC_ON_CARD
+                    if not path:
+                        code, body = esp_call("/api/state", timeout=4.0)
+                        path = json.loads(body).get("disc", {}).get("path", "")
+                    if path:
+                        urllib.request.urlopen(urllib.request.Request(
+                            "http://%s/api/disc?path=%s" % (ESP_HOST, urllib.parse.quote(path)),
+                            method="POST"), timeout=8).read()
                 except Exception:
                     pass
         except Exception as e:
             app.logger.info("keepalive: %s", e)
 
 ESP_HOST = os.environ.get("ESP_HOST", "192.168.178.94")
-DISC_ON_CARD = os.environ.get("DISC_ON_CARD", "/discs/disc.bin")   # the image on the ESP32's SD card
+DISC_ON_CARD = os.environ.get("DISC_ON_CARD", "")   # force this image on the ESP32's card (default: whatever it has in)
 
 
 def main():

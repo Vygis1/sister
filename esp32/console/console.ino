@@ -500,6 +500,14 @@ static String discRecall() {
 }
 
 static bool discInsert(const String &path) {
+  // Open the new image BEFORE letting go of the one in the drive. The old order
+  // stopped the drive first, so a path that was not on the card left the console
+  // with no disc at all -- the BIOS sat at its logo (2026-09-30).
+  File nf;
+  if (!path.startsWith("http://")) {
+    nf = SD.open(path);
+    if (!nf) return false;
+  }
   readerPause();
   if (discFile) discFile.close();
   discHttp = path.startsWith("http://");
@@ -521,8 +529,7 @@ static bool discInsert(const String &path) {
     if (!discWin) return false;
     winBase = 0; winCount = 0;
   } else {
-    discFile = SD.open(path);
-    if (!discFile) return false;
+    discFile = nf;
     discSectors = discFile.size() / 2352;
     if (!discWin) discWin = (uint8_t *)ps_malloc(WINDOW * 2352);
     if (!discWin) return false;
