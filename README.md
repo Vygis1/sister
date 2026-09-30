@@ -317,9 +317,8 @@ They also carry the developer tools, available to every core:
 - an eight-voice test synthesiser;
 - MDIO access to the PHY.
 
-**`shell_top.v`, `spi_flash.v`, `esp_link.v`:** the golden image. It carries
-the network link too, so the page can reach the board in the shell (about
-19,000 LUTs in the current build).
+**`shell_top.v`, `spi_flash.v`, `esp_link.v`:** the golden image: about 5,700
+LUTs and 3.5 block RAMs, 9% of the chip.
 - It erases and programs the configuration flash, and restarts the FPGA into a
   core slot through ICAPE2 (WBSTAR and IPROG).
 - It cannot overwrite itself, because a slot address and an offset are
