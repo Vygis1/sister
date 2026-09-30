@@ -285,6 +285,7 @@ static void discTask(void *) {
 // network has nothing to do with the game at all.
 static String   fetchUrl, fetchPath, fetchErr;
 static volatile bool fetchBusy = false;
+static volatile bool listsStale = true;   // the card's listings need reading again (see refreshLists)
 static volatile uint64_t fetchDone = 0, fetchTotal = 0;
 static volatile uint32_t fetchStalls = 0;
 
@@ -370,6 +371,7 @@ static void fetchTask(void *) {
   if (fetchDone != fetchTotal && !fetchErr.length())
     fetchErr = "short by " + String((double)(fetchTotal - fetchDone), 0) + " bytes";
   fetchBusy = false;
+  listsStale = true;                                     // a new image in /discs
   vTaskDelete(nullptr);
 }
 
@@ -679,7 +681,7 @@ static bool installFrom(Stream &src, uint32_t length) {
 // Games live beside the cores. A console that can change which machine it is
 // but cannot hold a single cartridge is only half an appliance, and the card has
 // 238 GB on it.
-static String romListJson() {
+static String romListScan() {
   String j = "[";
   if (haveCard) {
     File dir = SD.open("/roms");
@@ -705,7 +707,7 @@ static String romListJson() {
   return j + "]";
 }
 
-static String coreListJson() {
+static String coreListScan() {
   String j = "[";
   if (haveCard) {
     File dir = SD.open("/cores");
@@ -726,6 +728,50 @@ static String coreListJson() {
   }
   return j + "]";
 }
+
+// The two listings, kept. Reading them off the card is one openNextFile() per
+// file, and with 272 games in /roms that took 8.5 seconds -- on every call to
+// /api/state, which the page makes all the time, so the page looked hung.
+// They only change when something is uploaded, which marks them stale.
+static String romCache, coreCache, discCache;
+// Disc images in /discs: the ones the drive can take (raw 2352-byte sectors).
+static String discListScan() {
+  String j = "[";
+  if (haveCard) {
+    File dir = SD.open("/discs");
+    while (dir) {
+      File e = dir.openNextFile();
+      if (!e) break;
+      String n = String(e.name());
+      int slash = n.lastIndexOf('/');
+      if (slash >= 0) n = n.substring(slash + 1);
+      String low = n; low.toLowerCase();
+      if (!e.isDirectory() && n[0] != '.' && low.endsWith(".bin")) {
+        if (j.length() > 1) j += ",";
+        j += "{\"name\":\"" + jsonEscape(n) + "\",\"size\":" + String((double)e.size(), 0) + "}";
+      }
+      e.close();
+    }
+    if (dir) dir.close();
+  }
+  return j + "]";
+}
+// One scan at a time: the boot-time scan below and a page asking for /api/state
+// must not both walk the card and both write the caches. Whoever loses just
+// uses what is cached (empty at first) and the page asks again.
+static SemaphoreHandle_t listsLock = nullptr;
+static void refreshLists() {
+  if (!listsStale || !listsLock || xSemaphoreTake(listsLock, 0) != pdTRUE) return;
+  listsStale = false;
+  String r = romListScan(), c = coreListScan(), d = discListScan();
+  romCache = r; coreCache = c; discCache = d;
+  xSemaphoreGive(listsLock);
+}
+// At boot, off the web server's back: the first scan takes seconds on a card
+// full of games, and the first page load should not be the one that waits.
+static void listTask(void *) { refreshLists(); vTaskDelete(nullptr); }
+static String romListJson()  { refreshLists(); return romCache; }
+static String coreListJson() { refreshLists(); return coreCache; }
 
 // --- the API -------------------------------------------------------------------
 static void apiState() {
@@ -749,6 +795,8 @@ static void apiState() {
   j += ",\"total\":"   + String(job.total);
   j += ",\"error\":\"" + jsonEscape(job.error) + "\"}";
   j += ",\"cores\":"   + coreListJson();
+  refreshLists();
+  j += ",\"discs\":" + discCache;
   j += ",\"disc\":{\"in\":" + String(discIn ? "true" : "false");
   j += ",\"path\":\"" + jsonEscape(discPath) + "\"";
   j += ",\"sectors\":" + String(discSectors);
@@ -910,6 +958,7 @@ static void onLibraryUpload() {
     if ((job.done & 0xFFFF) < u.currentSize) libFile.flush();
 
   } else if (u.status == UPLOAD_FILE_END) {
+    listsStale = true;                                   // a file came or went
     if (libFile) {
       libFile.flush();
       uint32_t wrote = libFile.size();
@@ -1065,6 +1114,8 @@ void setup() {
   // cardReaderTask). It spends its waits blocked in the SD driver, not spinning,
   // so loop() on this core still gets its turn.
   xTaskCreatePinnedToCore(cardReaderTask, "cardread", 8192, nullptr, 1, nullptr, 1);
+  listsLock = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(listTask, "lists", 8192, nullptr, 1, nullptr, 1);
   // A disc on the CARD can go back in now. One served over http:// cannot:
   // Wi-Fi is not up until further down, so that one is put back after the join.
   { String was = discRecall();
@@ -1268,7 +1319,7 @@ static void serialCommand(String c) {
     String was = discPath;
     readerPause();
     if (discFile) discFile.close();
-    if (mhz) { SD.end(); haveCard = SD.begin(PIN_SD_CS, sdBus, mhz * 1000000); }
+    if (mhz) { SD.end(); haveCard = SD.begin(PIN_SD_CS, sdBus, mhz * 1000000); listsStale = true; }
     File f = haveCard ? SD.open(was.length() ? was : String("/discs/crash2.bin")) : File();
     if (!f) { Serial.println("  cannot open the image" + String(haveCard ? "" : " (the card did not mount)")); }
     else {

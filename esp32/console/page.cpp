@@ -47,7 +47,11 @@ extern const char PAGE_HTML[] PROGMEM = R"HTML(<!doctype html>
          margin-top:.6rem; }
   .bar > i { display:block; height:100%; background:#6ee7a0; width:0; }
   .msg { margin-top:.6rem; font-size:.85rem; min-height:1.2em; color:#b6b6c0; }
+  .msg:empty { margin:0; min-height:0; }
   .msg.err { color:#ff9c9c; }
+  input[type=file]::file-selector-button { font:inherit; padding:.45rem .8rem; margin-right:.7rem;
+         border:1px solid #33333c; border-radius:.5rem; background:#1b1b21; color:#e8e8ea; cursor:pointer; }
+  li button.here { border-color:#6ee7a0; }
   .msg.ok  { color:#6ee7a0; }
   .dot { display:inline-block; width:.55rem; height:.55rem; border-radius:50%;
          background:#ff9c9c; margin-right:.45rem; vertical-align:middle; }
@@ -68,6 +72,19 @@ extern const char PAGE_HTML[] PROGMEM = R"HTML(<!doctype html>
 <h2>Machine</h2>
 <div id="machine"></div>
 <div class="msg" id="m-msg"></div>
+
+<div id="disc-wrap" style="display:none">
+<h2>Disc</h2>
+<div class="card">
+  <div class="big" id="disc-now">—</div>
+  <div class="meta" id="disc-sub"></div>
+  <ul id="discs"></ul>
+  <div class="row" style="margin-top:.5rem">
+    <button id="eject" style="flex:0 0 auto">Eject</button>
+  </div>
+  <div class="msg" id="d-msg"></div>
+</div>
+</div>
 
 <h2>Install a core</h2>
 <div class="card">
@@ -121,8 +138,11 @@ async function refresh() {
   catch { $('what').textContent = 'no answer from the ESP32'; return; }
 
   $('dot').className = 'dot' + (s.alive ? ' on' : '');
+  // 0 is the shell; a console image answers with its own byte (the PlayStation
+  // is 'P'). The other machines do not speak this link at all.
+  const CORES = { 0: 'Shell', 0x50: 'PlayStation' };
   $('what').textContent = !s.alive ? 'FPGA not answering'
-                        : s.core === 0 ? 'Shell' : 'Console core ' + s.core;
+                        : CORES[s.core] || ('Console (core ' + s.core + ')');
   $('detail').textContent = !s.alive
     ? 'check the four SPI wires and that the board has power'
     : 'protocol v' + s.version + (s.busy ? ' · flash busy' : ' · idle')
@@ -133,8 +153,8 @@ async function refresh() {
   $('machine').innerHTML = !s.alive ? ''
     : s.core === 0
       ? '<button class="act" id="boot">&#9654; Start the installed core</button>'
-      : '<div class="card meta">A console core is running. Power-cycle the board '
-        + 'to return to the shell — a core cannot reconfigure the chip itself.</div>';
+      : '<div class="card meta">' + (CORES[s.core] || 'A console') + ' is running. '
+        + '<b>Back to the shell</b>, below, restarts the board into the shell.</div>';
   if ($('boot')) $('boot').onclick = async () => {
     say($('m-msg'), 'starting…');
     try { await post('/api/boot', 'core=1');
@@ -155,16 +175,39 @@ async function refresh() {
     say($('i-msg'), 'installed and verified', 'ok');
   }
 
+  // The PlayStation's drive, when it is the one reading this card.
+  const d = s.disc || {};
+  $('disc-wrap').style.display = (s.core === 0x50 || d.in) ? '' : 'none';
+  $('disc-now').textContent = d.in ? d.path.replace(/^.*\//, '') : 'No disc';
+  $('disc-sub').textContent = d.in
+    ? Math.round(d.sectors * 2352 / 1048576) + ' MB · ' + d.served + ' sectors read this session'
+    : (s.card ? 'Pick an image from /discs on the card.' : 'No SD card.');
+  const discs = s.discs || [];
+  $('discs').innerHTML = discs.length
+    ? discs.map(x => { const here = d.in && d.path === '/discs/' + x.name;
+        return `<li><button class="disc${here ? ' here' : ''}" data-p="/discs/${x.name}" ${here ? 'disabled' : ''}>` +
+          `${x.name}<span class="meta"> · ${Math.round(x.size / 1048576)} MB${here ? ' · in the drive' : ''}</span></button></li>`; }).join('')
+    : (s.card ? '<li class="meta">Nothing in /discs on the card.</li>' : '');
+  for (const b of document.querySelectorAll('.disc'))
+    b.onclick = () => post('/api/disc', 'path=' + encodeURIComponent(b.dataset.p))
+                        .then(() => say($('d-msg'), 'disc in', 'ok'))
+                        .catch(e => say($('d-msg'), e.message, 'err'));
+
+  const NAMES = { nes: 'NES', sms: 'Master System', md: 'Mega Drive', ps1: 'PlayStation', shell: 'Shell' };
   $('cores').innerHTML = (s.cores || []).length
     ? '<ul>' + s.cores.map(c =>
-        `<li><button class="fromcard" data-n="${c.name}">${c.name}` +
+        `<li><button class="fromcard" data-n="${c.name}">${NAMES[c.name] || c.name}` +
         `<span class="meta"> · ${Math.round(c.size/1024)} kB</span></button></li>`
       ).join('') + '</ul>'
     : '<div class="meta">' + (s.card ? 'Nothing in /cores on the card.'
                                      : 'No SD card — upload a core below.') + '</div>';
+  // One tap here rewrites the board's flash and restarts it, whatever is running.
   for (const b of document.querySelectorAll('.fromcard'))
-    b.onclick = () => post('/api/install', 'core=' + encodeURIComponent(b.dataset.n))
-                        .catch(e => say($('i-msg'), e.message, 'err'));
+    b.onclick = () => {
+      if (!confirm('Install ' + (NAMES[b.dataset.n] || b.dataset.n) + '? The board is rewritten and restarts into it.')) return;
+      post('/api/install', 'core=' + encodeURIComponent(b.dataset.n))
+        .catch(e => say($('i-msg'), e.message, 'err'));
+    };
 
   $('net').innerHTML = 'Access point <b>console</b> at <code>' + s.ap + '</code>'
     + (s.sta ? '<br>Also on <b>' + s.ssid + '</b> at <code>' + s.sta + '</code>'
@@ -196,6 +239,10 @@ $('join').onclick = async () => {
 
 $('forget').onclick = () => post('/api/forget')
   .then(() => { say($('n-msg'), 'forgotten', 'ok'); refresh(); });
+
+$('eject').onclick = () => post('/api/eject')
+  .then(() => { say($('d-msg'), 'ejected', 'ok'); refresh(); })
+  .catch(e => say($('d-msg'), e.message, 'err'));
 
 $('toshell').onclick = () => post('/api/shell')
   .then(t => say($('s-msg'), t, t === 'ok' ? 'ok' : 'err'))
