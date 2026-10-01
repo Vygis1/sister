@@ -158,6 +158,61 @@ Everything above is history; this is where the machine stands.
   writes back into the file (a queue at ctrl 0x138). On the board: Crash's
   LOAD GAME lists a save from the file, and deleting that save in the BIOS
   card manager changes exactly its directory frame in the file on the PC.
-* **Not done:** CD audio (CD-DA and XA ADPCM), the SPU's capture buffers, a
-  second pad and card slot, and video out of the board itself (the picture
-  goes to the browser).
+* **Not done:** video out of the board itself (the picture goes to the
+  browser).
+
+## Status 2026-10-01: CD audio, XA, capture buffers, port 2
+
+* **The table of contents** is two LUT-RAM tables in `ps1_cdrom.v`: {audio,
+  start LBA} and {mm, ss} per track, with the lead-out in entry 0. The PC
+  writes them at ctrl 0x5000 + 4*entry; entry 0xFF is {first, last}. They have
+  exactly two read ports: the track finder's scan, and the command in hand
+  (Play's track, GetTD's track). A constant-index read once made Vivado build
+  them as 128 x 25 flip-flops with a 128-way multiplexer per read, 2,800 LUTs,
+  and the image no longer routed. Its warning was "not inferred as ram due to
+  incorrect usage".
+* **CD audio** uses the data ring. Play pops a sector when the player has
+  played the last one, and the player reads 4 bytes a 44.1 kHz tick. Audio
+  sectors skip the header check, since they have none. They are told apart by
+  their missing sync pattern. A data read that meets one passes over it with no
+  INT1, as DuckStation's drive does. Before that fix, the BIOS sat at its logo
+  with an audio CD in. A read that reaches the lead-out ends with INT4 a sector
+  later.
+* **The output** goes through the volume matrix, saturated. The game writes
+  the four volumes at index 2 and 3, and they take effect on Apply (index 3,
+  1F801803 bit 5). The SPU mixes it at the CD volume
+  when SPUCNT bit 0 is set, and into the reverb with bit 2.
+* **XA.** Setmode bit 6 routes real-time audio sectors away from the CPU. With
+  bit 3, only the Setfilter file and channel are kept. Each kept sector's LBA
+  goes into a 16-entry queue (ctrl 0x13C). `pc/server.py`'s XaPump reads the
+  sector from the disc and decodes it with `pc/cdaudio.py`. That is
+  DuckStation's ADPCM, its 7-phase zigzag resampler for 37.8 kHz, and
+  Mednafen's table for 18.9 kHz. The pump pushes {R, L} words into a
+  4096-sample FIFO (ctrl 0x6000). ctrl 0x140 counts the drive's flushes, and a
+  new count resets the decoder. With no filter, the PC follows DuckStation's
+  "current file" rule.
+* **Capture buffers.** Each tick the SPU writes CD left, CD right, voice 1 and
+  voice 3 at 000h/400h/800h/C00h + 2*position, as single masked halfwords at
+  the lowest memory priority. CD audio is captured raw, before the CD volume,
+  and always, as psx-spx and DuckStation say. A write on the IRQ address raises
+  the IRQ. SPUSTAT bit 11 is the half-buffer flag. `tb_ps1_spu` checks every
+  capture write and the IRQ.
+* **Port 2.** JOY_CTRL bit 13 selects the second pad and card. Card 2 is at
+  DDR3 9 MB + 128 kB. The save queue (ctrl 0x138) carries the slot in sector
+  bit 10.
+* **On the board:**
+  * `tools/ps1cdtest.py` plays channel 3 of eight interleaved XA channels at
+    700 Hz, and none of the others. It then plays an MP3 track at 880 Hz.
+  * The real BIOS opens its CD player for an MP3+WAV audio CD
+    (`tools/mktestdisc.py audio`), and one press of Play gives both tracks in
+    full: 440/660 Hz, then 330 Hz, then a stop at the lead-out.
+  * `tools/ps1slot2test.py` passes.
+  * Crash still runs its levels at 30 fps (`tools/ps1frameevents.py`: 298
+    frames in 10 s, every one two vsyncs).
+  * Area: 55.8k LUTs (88%), 99.4% of slices, slack 0.077 ns. The worst path
+    is the CPU's address into an SPU register's write enable, 21 levels and
+    76% routing. A register stage on the SPU's register writes is the next
+    step if it gets thinner.
+* **`tools/ps1bench.py` undercounts.** It takes flips from ctrl 0x6C, the
+  GPU's display area, and keeps only the X start. Crash's two buffers are
+  stacked in Y, so X never changes. Use `tools/ps1frameevents.py`.

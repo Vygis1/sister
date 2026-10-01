@@ -190,25 +190,43 @@ window.addEventListener('keydown', onKey(true));
 window.addEventListener('keyup', onKey(false));
 window.addEventListener('blur', () => { keyState = 0; pushPad(); });
 
-function pollPad() {
-  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-  const gp = [...pads].find(p => p && p.connected);
-  if (!gp) {
-    if (padState) { padState = 0; pushPad(); }
-    $('pad-src').textContent = 'keyboard';
-    return;
-  }
-  $('pad-src').textContent = gp.id.slice(0, 40);
-  if (listeningFor) {
-    const pressed = gp.buttons.findIndex(b => b.pressed);
-    if (pressed >= 0) { padMap[listeningFor] = pressed; saveBindings(); renderBindings(); listeningFor = null; }
-    return;
-  }
+// one gamepad's buttons, through the bindings, as the bits the server takes
+function readPad(gp) {
   let v = 0;
   for (const b of BUTTONS) { const i = padMap[b]; if (gp.buttons[i] && gp.buttons[i].pressed) v |= BIT[b]; }
   const [ax, ay] = [gp.axes[0] || 0, gp.axes[1] || 0];
   if (ax < -0.5) v |= BIT.left; if (ax > 0.5) v |= BIT.right;
   if (ay < -0.5) v |= BIT.up; if (ay > 0.5) v |= BIT.down;
+  return v;
+}
+
+// A second gamepad is player 2: the PlayStation's slot 2 (the other machines
+// take it too, where the core has a second pad). The keyboard stays player 1.
+let pad2State = 0, sent2 = -1;
+async function pushPad2() {
+  if (pad2State === sent2) return;
+  sent2 = pad2State;
+  try { await post('/api/nes/input', { joy2: pad2State }); } catch (err) {}
+}
+
+function pollPad() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  const connected = [...pads].filter(p => p && p.connected);
+  const gp = connected[0], gp2 = connected[1];
+  const v2 = (gp2 && !listeningFor) ? readPad(gp2) : 0;
+  if (v2 !== pad2State) { pad2State = v2; pushPad2(); }
+  if (!gp) {
+    if (padState) { padState = 0; pushPad(); }
+    $('pad-src').textContent = 'keyboard';
+    return;
+  }
+  $('pad-src').textContent = gp.id.slice(0, 40) + (gp2 ? ' · player 2: ' + gp2.id.slice(0, 24) : '');
+  if (listeningFor) {
+    const pressed = gp.buttons.findIndex(b => b.pressed);
+    if (pressed >= 0) { padMap[listeningFor] = pressed; saveBindings(); renderBindings(); listeningFor = null; }
+    return;
+  }
+  const v = readPad(gp);
   if (v !== padState) { padState = v; pushPad(); }
 }
 
@@ -567,11 +585,16 @@ async function refreshPs1Media() {
     catch (err) { say($('ps1-msg'), err.message, 'err'); }
     finally { ps1Busy = false; refreshPs1Media(); }
   };
-  const c = m.card;
-  $('ps1-card').innerHTML =
+  $('ps1-card').innerHTML = (m.cards || []).map(c =>
     `<b>${esc(c.name)}</b>` +
-    `<span class="meta">${c.inserted ? 'in slot 1' : 'not in the slot'} · ${c.saved} sectors saved this session</span>` +
-    (c.error ? `<span class="meta" style="color:var(--warn)"> · ${esc(c.error)}</span>` : '');
+    `<span class="meta">slot ${c.slot}${c.inserted ? '' : ', not in'} · ${c.saved} sectors saved this session</span>`
+  ).join('<br>') +
+    (m.card_error ? `<span class="meta" style="color:var(--warn)"> · ${esc(m.card_error)}</span>` : '');
+  if (d.audio_tracks) {
+    $('ps1-disc').insertAdjacentHTML('beforeend',
+      `<span class="meta" style="display:block">${d.tracks} tracks, ${d.audio_tracks} audio` +
+      (m.xa && m.xa.decoded ? ` · ${m.xa.decoded} XA sectors played` : '') + `</span>`);
+  }
 }
 setInterval(refreshPs1Media, 3000);
 // The board can change what it is at any moment -- a boot, an install, a reset

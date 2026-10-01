@@ -17,23 +17,24 @@ module tb_ps1_mcard;
 
 	reg sel = 0, we = 0; reg [3:0] addr = 0, be = 4'hF; reg [31:0] wdata = 0; wire [31:0] rdata;
 	reg [15:0] buttons = 16'h0000; wire irq;
-	reg card_in = 0;
-	wire [12:0] m_line; wire m_req, m_we; wire [127:0] m_wdata;
+	reg card_in = 0, card2_in = 0;
+	reg [15:0] buttons2 = 16'h0000;
+	wire [13:0] m_line; wire m_req, m_we; wire [127:0] m_wdata;
 	reg m_ready = 0, m_valid = 0; reg [127:0] m_rdata = 0;
-	wire [9:0] wq_sector; wire [4:0] wq_count; wire wq_ovf;
+	wire [10:0] wq_sector; wire [4:0] wq_count; wire wq_ovf;
 	reg wq_pop = 0;
 
 	ps1_sio #(.SHIFT_CYCLES(100), .ACK_DELAY(10), .ACK_LOW(20)) dut (
 		.clk(clk), .rst(rst), .rst_q(rst), .sel(sel), .we(we), .addr(addr), .be(be), .wdata(wdata), .rdata(rdata),
-		.buttons(buttons), .irq(irq), .card_in(card_in),
+		.buttons(buttons), .buttons2(buttons2), .irq(irq), .card_in(card_in), .card2_in(card2_in),
 		.m_line(m_line), .m_req(m_req), .m_we(m_we), .m_wdata(m_wdata),
 		.m_ready(m_ready), .m_valid(m_valid), .m_rdata(m_rdata),
 		.wq_sector(wq_sector), .wq_count(wq_count), .wq_ovf(wq_ovf), .wq_pop(wq_pop), .wq_clr_ovf(1'b0));
 
 	// --- the card's memory: lines, refusing at random, answering reads late -----------
-	reg [127:0] mem [0:8191];
+	reg [127:0] mem [0:16383];          // card 1, then card 2
 	reg [31:0] rnd = 32'h2468_ACE1;
-	integer lat = -1; reg [12:0] lat_line;
+	integer lat = -1; reg [13:0] lat_line;
 	always @(posedge clk) begin
 		rnd <= rnd * 1664525 + 1013904223;
 		m_valid <= 1'b0;
@@ -68,7 +69,8 @@ module tb_ps1_mcard;
 		repeat (40) @(posedge clk);
 		rd(4'h0, r); i = r[7:0]; ack = ack_seen;
 	end endtask
-	task select; begin wr(4'h8, 32'h0003_0000, 4'b0100); end endtask     // TXEN | /JOY, slot 1
+	reg slot2 = 0;                       // which slot select() picks
+	task select; begin wr(4'h8, slot2 ? 32'h2003_0000 : 32'h0003_0000, 4'b1100); end endtask   // TXEN | /JOY, CTRL bit 13 the slot
 	task deselect; begin wr(4'h8, 32'h0000_0000, 4'b0100); repeat (5) @(negedge clk); end endtask
 
 	reg [7:0] got; reg ack; integer k, s;
@@ -96,8 +98,8 @@ module tb_ps1_mcard;
 		ex(8'h00, sec[7:0], 1, "read: confirmed LSB");
 		chk = {6'd0, sec[9:8]} ^ sec[7:0];
 		for (k = 0; k < 128; k = k + 1) begin
-			ex(8'h00, mem[{sec, 3'd0} + k / 16][(k % 16) * 8 +: 8], 1, "read: data");
-			chk = chk ^ mem[{sec, 3'd0} + k / 16][(k % 16) * 8 +: 8];
+			ex(8'h00, mem[{slot2, sec, 3'd0} + k / 16][(k % 16) * 8 +: 8], 1, "read: data");
+			chk = chk ^ mem[{slot2, sec, 3'd0} + k / 16][(k % 16) * 8 +: 8];
 		end
 		ex(8'h00, chk,   1, "read: checksum");
 		ex(8'h00, 8'h47, 0, "read: end");
@@ -127,7 +129,7 @@ module tb_ps1_mcard;
 
 	reg [127:0] before [0:7];
 	initial begin
-		for (k = 0; k < 8192; k = k + 1) begin rnd = rnd * 1664525 + 1013904223; mem[k] = {4{rnd}} ^ {k, k, k, k}; end
+		for (k = 0; k < 16384; k = k + 1) begin rnd = rnd * 1664525 + 1013904223; mem[k] = {4{rnd}} ^ {k, k, k, k}; end
 		repeat (5) @(negedge clk); rst = 0;
 
 		// no card: its address is not answered, and the pad is unaffected
@@ -179,7 +181,26 @@ module tb_ps1_mcard;
 		// an unknown command ends the exchange
 		select; ex(8'h81, 8'hFF, 1, "bad cmd: address"); ex(8'h99, 8'h00, 0, "bad cmd: FLAG, no ACK"); deselect;
 
-		if (errors == 0) $display("tb_ps1_mcard: all checks passed -- read, write, get ID, bad checksum, queue, pad");
+		// ---- slot 2: its own pad, its own card -------------------------------------------
+		slot2 = 1;
+		select; ex(8'h81, 8'hFF, 0, "slot 2, no card: address"); deselect;
+		buttons2 = 16'h0010;                          // up, on the second pad only
+		select;
+		ex(8'h01, 8'hFF, 1, "pad 2: address"); ex(8'h42, 8'h41, 1, "pad 2: 42h"); ex(8'h00, 8'h5A, 1, "pad 2: 5Ah");
+		ex(8'h00, 8'hEF, 1, "pad 2: low buttons"); ex(8'h00, 8'hFF, 0, "pad 2: high buttons");
+		deselect;
+		card2_in = 1; repeat (3) @(negedge clk);
+		read_sector(10'h007, 8'h08);                  // card 2 is fresh, whatever card 1 has been through
+		@(negedge clk); while (wq_count != 5'd0) begin wq_pop = 1; @(negedge clk); wq_pop = 0; @(negedge clk); end
+		write_sector(10'h055, 0, 8'h08);
+		for (k = 0; k < 128; k = k + 1) check(mem[{1'b1, 10'h055, 3'd0} + k / 16][(k % 16) * 8 +: 8] === data[k], "slot 2 write: stored in card 2");
+		check(wq_count == 5'd1 && wq_sector == {1'b1, 10'h055}, "slot 2 write: queued with its slot");
+		read_sector(10'h055, 8'h00);
+		slot2 = 0;
+		read_sector(10'h055, 8'h00);                  // card 1's sector 55h is card 1's, untouched by that
+		for (k = 0; k < 8; k = k + 1) check(mem[{1'b0, 10'h055, 3'd0} + k] !== mem[{1'b1, 10'h055, 3'd0} + k], "slot 1 and 2 differ");
+
+		if (errors == 0) $display("tb_ps1_mcard: all checks passed -- read, write, get ID, bad checksum, queue, both pads, both cards");
 		else             $display("tb_ps1_mcard: FAIL -- %0d errors", errors);
 		$finish;
 	end

@@ -16,8 +16,8 @@ reference:
 - **PlayStation SPU:** a bit-exact model built from DuckStation and psx-spx.
 
 The PlayStation boots the real BIOS, plays Crash Bandicoot at 30 frames a
-second, saves to a memory card, and reads its disc from the PC or from an SD
-card.
+second, saves to two memory cards, and reads its disc from the PC or from an SD
+card. It plays CD audio and XA, and a disc's audio tracks can be MP3 files.
 
 - [What it is](#what-it-is)
 - [Hardware](#hardware)
@@ -188,7 +188,7 @@ The PlayStation's memories all live in DDR3, behind a six-port arbiter
 | 3 MB | BIOS, 512 kB (loaded by the PC) |
 | 4 MB | the frame capture area |
 | 8 MB | SPU RAM, 512 kB (the top 128 kB is mirrored in block RAM, for reverb) |
-| 9 MB | the memory card, 128 kB |
+| 9 MB | the memory cards, 128 kB each (card 2 at +128 kB) |
 
 DDR3 answers in tens of clocks, so everything that runs often has a cache in
 front of it. Most of the performance work in this project went into those
@@ -251,7 +251,10 @@ the network whenever the game flips buffers.
 The whole sound processor:
 - 24 ADPCM voices with Gaussian interpolation, the full ADSR envelope, pitch
   modulation and the noise generator;
-- the 39-tap reverb, SPU RAM transfers, and the IRQ.
+- the 39-tap reverb, SPU RAM transfers, and the IRQ;
+- CD audio into the mix and the reverb, at the CD volume;
+- the four capture buffers (CD left and right, voices 1 and 3), which raise
+  the IRQ like any other SPU RAM address.
 
 `tools/spu_ref.py` is a Python model built from DuckStation and psx-spx. The
 testbench checks the hardware against it bit for bit. On the board, the boot
@@ -264,32 +267,48 @@ chime and Crash's music match DuckStation's output (a spectral correlation of
 - the command set with its INT1–INT5 responses;
 - seeking, and reading at single and double speed, with the right timing;
 - raw 2352-byte sectors into an 8-sector ring;
-- DMA channel 3.
+- DMA channel 3;
+- a table of contents (up to 99 tracks), loaded by the PC;
+- CD audio: Play, report mode, auto-pause, GetTN, GetTD, GetlocP, Mute and the
+  volume matrix;
+- XA-ADPCM: the filter, and the interleaved channels.
+
+**CD audio** goes through the same ring as data. An audio sector is 588 stereo
+samples, and the drive plays them at 44.1 kHz. An audio CD answers GetID as one,
+and the BIOS opens its CD player.
+
+**XA** is decoded on the PC. The drive queues each XA sector that passes the
+game's filter. The server reads it from the disc and decodes and resamples it,
+exactly as DuckStation does (`pc/cdaudio.py`). It sends the samples back into a
+4096-sample buffer on the board. So XA plays only from a disc served by the PC.
 
 With no disc it reports lid open and motor off, as DuckStation's drive does,
 and the BIOS shows its menu.
 
 **The sectors** come from one of two places:
-- **The PC over Ethernet** (`host_cd.v`). The server reads the `.bin` image and
-  writes each sector into a window, with its block number.
+- **The PC over Ethernet** (`host_cd.v`). The server reads the disc and writes
+  each sector into a window, with its block number. The disc can be a `.bin`,
+  or a `.cue` whose tracks are `.bin`, WAV, MP3, FLAC or OGG files. An audio
+  file is decoded once to CD audio and kept in `build/cdda_cache/`.
 - **The ESP32's SD card** (`cd_feed.v`, over SPI). The ESP32 reads ahead on one
   core and sends on the other, so it delivers sectors faster than a real
   double-speed drive. When it read and sent one after the other, it was slower
   than a real drive, and Crash crashed in its intro with the fast CPU.
 
-### The memory card — `ps1_sio.v`
+### The memory cards and pads — `ps1_sio.v`
 
-Slot 1 holds a memory card that answers the read, write and get-ID commands
-byte for byte as DuckStation's does, next to a digital pad with all sixteen
-buttons.
+Each of the two slots holds a memory card and a digital pad with all sixteen
+buttons. The cards answer the read, write and get-ID commands byte for byte as
+DuckStation's do.
 - **Storage:** the card's 128 kB live in DDR3.
-- **Loading:** the server loads a `.mcr` file there along with the BIOS. This
-  is the raw format DuckStation and most card tools use.
+- **Loading:** the server loads two `.mcr` files there along with the BIOS.
+  This is the raw format DuckStation and most card tools use.
 - **Saving:** every sector a game writes is queued on the board, and the server
   copies it back into the file within a fraction of a second. The file stays
   current even if the power goes.
 - **Checked:** in simulation, and on the board with Crash's load screen and the
-  BIOS's own card manager.
+  BIOS's own card manager. Slot 2's pad and card are checked on the board by
+  `tools/ps1slot2test.py`.
 
 ### The rest
 
@@ -398,7 +417,8 @@ and set `FPGA_HOST` in `local.env`.
 |---|---|
 | `FPGA_HOST` | the board's address, for the server and every tool |
 | `PS1_BIOS` | your PlayStation BIOS dump; the server restores it after every console reset |
-| `PS1_CARD` | the memory card file (default `saves/card1.mcr`, created blank if missing) |
+| `PS1_CARD` | memory card 1 (default `saves/card1.mcr`, created blank if missing) |
+| `PS1_CARD2` | memory card 2 (default `saves/card2.mcr`) |
 | `ESP_HOST` | the ESP32's address, if you have one |
 
 ---
@@ -417,10 +437,29 @@ PlayStation, a headerless 512 kB file is taken as the BIOS.
 **The PlayStation's panel** shows:
 - the BIOS;
 - the disc, which you can switch between this PC and the SD card;
-- the memory card, and how many sectors it has saved.
+- both memory cards, and how many sectors each has saved.
 
-The disc is a raw MODE2/2352 `.bin`. Select one on the PC with
-`/api/disc/select`, or pick one on the ESP32's page.
+The disc is a raw MODE2/2352 `.bin`, or a `.cue` sheet. Select one on the PC
+with `/api/disc/select`, or pick one on the ESP32's page. A `.bin` with a
+`.cue` of the same name beside it is opened through the cue, so its audio
+tracks come with it. The ESP32 serves a single `.bin` only: it has no table of
+contents to give the drive, and no XA.
+
+**Audio tracks from MP3.** Most rips keep the music as one file per track. A
+cue like this works as it is:
+
+```
+FILE "game.bin" BINARY
+  TRACK 01 MODE2/2352
+    INDEX 01 00:00:00
+FILE "track02.mp3" MP3
+  TRACK 02 AUDIO
+    INDEX 01 00:00:00
+```
+
+The first time a track is played it is decoded in the background (a second or
+two for a four-minute MP3). This needs `miniaudio` (`pip install -r
+requirements.txt`).
 
 **Controls.**
 
@@ -437,7 +476,7 @@ The disc is a raw MODE2/2352 `.bin`. Select one on the PC with
 | Enter | Start |
 
 Any gamepad works too, using the standard layout. Remap… changes any binding,
-and the choice is kept in the browser. The page names buttons the way each
+and the choice is kept in the browser. A second gamepad is player 2. The page names buttons the way each
 machine does.
 
 **Developer view.** The Developer button in the header opens the tools:
@@ -470,6 +509,10 @@ build all this. Each script's own docstring explains it. For example:
 - `ps1status.py`: CPU, GPU and DMA state.
 - `ps1pace.py`: CPU and GPU pace.
 - `ps1flash.py`: install, boot and load the BIOS in one step.
+- `mktestdisc.py`: test discs of known tones (an MP3+WAV audio CD, and an XA
+  disc with eight channels), with `xaenc.py`, a small XA encoder.
+- `ps1cdtest.py`: XA and an MP3 audio track on the board, checked by frequency.
+- `ps1slot2test.py`: the second pad and memory card on the board.
 - `esp.py`: the ESP32's serial console.
 
 **Releases.** `VERSION` holds the release number and `CHANGELOG.md` says what
@@ -517,8 +560,8 @@ Release **0.1.0**. [CHANGELOG.md](CHANGELOG.md) has the full list.
 - **PlayStation:**
   - About one frame in ten can take 50 ms instead of 33 ms while running. The
     drawing engine is late on busy scenes.
-  - CD audio (CD-DA and XA) is not implemented, and neither are the SPU's
-    capture buffers. There is only one pad and card slot.
+  - XA audio plays only from a disc served by the PC, which decodes it. A disc
+    on the ESP32's SD card has no XA and no audio tracks.
   - One frame of the title sequence shows a strip of junk in its top rows.
 - **Video** leaves the board over Ethernet only; there is no HDMI or VGA yet.
 

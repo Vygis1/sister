@@ -12,7 +12,9 @@ module tb_ps1_cdrom;
 		.dma_rd(1'b0), .dma_rdata(), .dma_rvalid(),
 		.disc_in(1'b0), .fill_lba(), .fill_room(), .fill_run(),
 		.sb_we(1'b0), .sb_addr(12'd0), .sb_data(8'd0), .sb_done(1'b0), .sb_lba(24'd0), .sb_abort(1'b0),
-		.ev_v(1'b0), .ev_data(32'd0), .trace_idx(6'd0));
+		.ev_v(1'b0), .ev_data(32'd0), .trace_idx(6'd0),
+		.toc_we(1'b0), .toc_addr(8'd0), .toc_data(32'd0), .tick(1'b0), .cd_l(), .cd_r(),
+		.xa_lba(), .xa_count(), .xa_pop(1'b0), .xa_we(1'b0), .xa_wdata(32'd0), .xa_level(), .xa_gen(), .xa_filt());
 	integer errors = 0;
 	task wr8; input [1:0] a; input [7:0] v; begin
 		@(negedge clk); sel = 1; we = 1; addr = a; be = 4'b0001 << a; wdata = {4{v}}; @(negedge clk); sel = 0; we = 0;

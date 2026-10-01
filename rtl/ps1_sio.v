@@ -1,5 +1,5 @@
 //////////////////////////////////////////////////////////////////////////////////
-// ps1_sio.v - SIO0, the controller port: a digital pad and a memory card, slot 1.
+// ps1_sio.v - SIO0, the controller ports: a digital pad and a memory card in each slot.
 //
 // The registers at 1F801040h-1F80104Eh as psx-spx describes them: TX/RX data,
 // STAT (TX ready, RX not empty, TX idle, /ACK level, IRQ), MODE, CTRL (TXEN,
@@ -13,7 +13,9 @@
 // with /ACK pulsed after every byte but the last (each pulse raises IRQ7 when
 // the DSR interrupt is enabled, which is how the kernel paces the transfer).
 // The button word is active low: `buttons` is the host's pressed-bits in PS1
-// order. Slot 2 answers nothing (FFh, no /ACK), like an empty port.
+// order. Slot 2 is the same again (CTRL bit 13 picks the slot): its own pad
+// (`buttons2`) and its own card (`card2_in`), which lives 128 kB after card 1
+// and whose stored sectors are queued with the slot in bit 10.
 //
 // --- the memory card -------------------------------------------------------------
 //
@@ -68,11 +70,13 @@ module ps1_sio #(
 	output reg  [31:0] rdata,
 
 	input  wire [15:0] buttons,        // pressed = 1, PS1 bit order (0 select .. 15 square)
+	input  wire [15:0] buttons2,       // the pad in slot 2
 	output wire        irq,            // I_STAT bit 7
 
 	// --- the memory card ------------------------------------------------------------
 	input  wire        card_in,        // a card is in slot 1 (the PC has loaded one)
-	output reg  [12:0] m_line,         // line within the card: sector * 8 + k
+	input  wire        card2_in,       // ...and in slot 2
+	output reg  [13:0] m_line,         // {slot, sector, k}: the line within the two cards
 	output reg         m_req,
 	output reg         m_we,
 	output wire [127:0] m_wdata,
@@ -80,7 +84,7 @@ module ps1_sio #(
 	input  wire        m_valid,        // a read's line is here
 	input  wire [127:0] m_rdata,
 
-	output wire [9:0]  wq_sector,      // the oldest stored sector the PC has not copied
+	output wire [10:0] wq_sector,      // the oldest stored sector the PC has not copied: {slot, sector}
 	output wire [4:0]  wq_count,
 	output reg         wq_ovf,
 	input  wire        wq_pop,         // the PC has it
@@ -123,7 +127,11 @@ module ps1_sio #(
 	reg [7:0]  mc_last;               // the byte the console sent before this one
 	reg [7:0]  mc_msb, mc_lsb;
 	reg [7:0]  mc_chk;
-	reg        mc_flag_new;           // FLAG bit 3
+	reg        mc_flag_new, mc_flag_new2;   // FLAG bit 3, per card
+	reg        card2_in_d;
+	reg        mc_slot;                 // the slot of the card the exchange is with
+	wire       card_here = slot ? card2_in : card_in;
+	wire [15:0] btn      = slot ? buttons2 : buttons;
 	reg        mc_chk_bad;
 	reg        card_in_d;
 	wire [9:0] mc_sector = {mc_msb[1:0], mc_lsb};
@@ -145,16 +153,17 @@ module ps1_sio #(
 	reg        have;                  // the buffer holds the sector being read
 	reg        wr_queued;             // a store is waiting for a fetch to finish (never in practice)
 	reg [9:0]  job_sector;
+	reg        job_slot;
 	assign m_wdata = mbuf[job_k];
 
 	// ---- the reply to the byte being shifted: the pad's or the card's ------------------
 	reg [7:0] reply; reg reply_ack;
 	always @(*) begin
 		reply = 8'hFF; reply_ack = 1'b0;
-		if (joy_sel && !slot) begin
+		if (joy_sel) begin
 			if (mc_active) begin
 				case (mc_cmd)
-				2'd0:    begin reply = {4'd0, mc_flag_new, 3'd0};                         // the command byte
+				2'd0:    begin reply = {4'd0, slot ? mc_flag_new2 : mc_flag_new, 3'd0};    // the command byte
 				               reply_ack = (tx_byte == 8'h52 || tx_byte == 8'h57 || tx_byte == 8'h53); end
 				MC_ID:   case (mc_idx)
 				         8'd2: begin reply = 8'h5A; reply_ack = 1'b1; end
@@ -190,14 +199,14 @@ module ps1_sio #(
 				         endcase
 				endcase
 			end else if (pad_idx == 3'd0 && tx_byte == 8'h81) begin
-				reply = 8'hFF; reply_ack = card_in;                                        // the card answers its address
+				reply = 8'hFF; reply_ack = card_here;                                      // the card answers its address
 			end else begin
 				case (pad_idx)
 				3'd0: if (tx_byte == 8'h01) begin reply = 8'hFF; reply_ack = 1'b1; end
 				3'd1: if (pad_active && tx_byte == 8'h42) begin reply = 8'h41; reply_ack = 1'b1; end
 				3'd2: if (pad_active) begin reply = 8'h5A; reply_ack = 1'b1; end
-				3'd3: if (pad_active) begin reply = ~buttons[7:0]; reply_ack = 1'b1; end
-				3'd4: if (pad_active) begin reply = ~buttons[15:8]; reply_ack = 1'b0; end
+				3'd3: if (pad_active) begin reply = ~btn[7:0]; reply_ack = 1'b1; end
+				3'd4: if (pad_active) begin reply = ~btn[15:8]; reply_ack = 1'b0; end
 				default: ;
 				endcase
 			end
@@ -214,7 +223,7 @@ module ps1_sio #(
 			txen <= 0; joy_sel <= 0; rxen <= 0; ack_ien <= 0; slot <= 0; mode <= 0; baud <= 0;
 			irq_flag <= 0; rx_byte <= 8'hFF; rx_full <= 0; busy <= 0; timer <= 0; tx_byte <= 0; tx_pend <= 0;
 			pad_idx <= 0; pad_active <= 0; ack_wait <= 0; ack_low <= 0; ack_timer <= 0;
-			mc_active <= 1'b0; mc_cmd <= 2'd0; mc_idx <= 8'd0; mc_last <= 8'd0; mc_flag_new <= 1'b1;
+			mc_active <= 1'b0; mc_cmd <= 2'd0; mc_idx <= 8'd0; mc_last <= 8'd0; mc_flag_new <= 1'b1; mc_flag_new2 <= 1'b1;
 		end else begin
 			// ---- register writes ----
 			if (sel && we) begin
@@ -254,14 +263,14 @@ module ps1_sio #(
 					busy <= 1'b0;
 					rx_byte <= reply; rx_full <= 1'b1;
 					if (reply_ack) begin ack_wait <= 1'b1; ack_timer <= 8'd0; end
-					if (joy_sel && !slot) begin
+					if (joy_sel) begin
 						if (pad_idx == 3'd0) pad_active <= (tx_byte == 8'h01);
 						if (pad_idx != 3'd7) pad_idx <= pad_idx + 3'd1;
 
 						// the card follows its exchange
 						mc_last <= tx_byte;
 						if (!mc_active) begin
-							if (pad_idx == 3'd0 && tx_byte == 8'h81 && card_in) begin mc_active <= 1'b1; mc_cmd <= 2'd0; mc_idx <= 8'd1; end
+							if (pad_idx == 3'd0 && tx_byte == 8'h81 && card_here) begin mc_active <= 1'b1; mc_cmd <= 2'd0; mc_idx <= 8'd1; mc_slot <= slot; end
 						end else begin
 							if (!reply_ack) mc_active <= 1'b0;                  // its last byte, or a command it does not know
 							if (mc_idx != 8'hFF) mc_idx <= mc_idx + 8'd1;
@@ -275,7 +284,9 @@ module ps1_sio #(
 							if (mc_cmd == MC_R && mc_idx >= 8'd10 && mc_idx < 8'd138) mc_chk <= mc_chk ^ rd_byte;
 							if (mc_cmd == MC_W && mc_idx >= 8'd6 && mc_idx < 8'd134) begin
 								mc_chk <= mc_chk ^ tx_byte;
-								if (mc_idx == 8'd6) mc_flag_new <= 1'b0;          // the first write since power-on
+								if (mc_idx == 8'd6) begin                         // the first write since power-on
+									if (mc_slot) mc_flag_new2 <= 1'b0; else mc_flag_new <= 1'b0;
+								end
 							end
 							if (mc_cmd == MC_W && mc_idx == 8'd134) mc_chk_bad <= (tx_byte != mc_chk);
 						end
@@ -293,8 +304,9 @@ module ps1_sio #(
 			end
 
 			// a card going in is a fresh card
-			card_in_d <= card_in;
+			card_in_d <= card_in; card2_in_d <= card2_in;
 			if (card_in && !card_in_d) mc_flag_new <= 1'b1;
+			if (card2_in && !card2_in_d) mc_flag_new2 <= 1'b1;
 		end
 	end
 
@@ -304,15 +316,15 @@ module ps1_sio #(
 	// Written from the console's bytes (a write's data phase) and from memory (a
 	// fetch); the two never meet, a fetch running only between the address and
 	// the data of a read.
-	wire wbyte = byte_done && joy_sel && !slot && mc_active && mc_cmd == MC_W
+	wire wbyte = byte_done && joy_sel && mc_active && mc_cmd == MC_W
 	             && mc_idx >= 8'd6 && mc_idx < 8'd134;
 	wire [127:0] wr_merged = merge8(wr_line, wr_j[3:0], tx_byte);
 	function [127:0] merge8; input [127:0] l; input [3:0] b; input [7:0] v;
 		begin merge8 = l; merge8[{b, 3'b000} +: 8] = v; end
 	endfunction
 	// what starts a job: a read's address is in, or a write's checksum checked out
-	wire start_rd = byte_done && joy_sel && !slot && mc_active && mc_cmd == MC_R && mc_idx == 8'd5;
-	wire start_wr = byte_done && joy_sel && !slot && mc_active && mc_cmd == MC_W && mc_idx == 8'd134
+	wire start_rd = byte_done && joy_sel && mc_active && mc_cmd == MC_R && mc_idx == 8'd5;
+	wire start_wr = byte_done && joy_sel && mc_active && mc_cmd == MC_W && mc_idx == 8'd134
 	                && tx_byte == mc_chk;
 
 	always @(posedge clk) begin
@@ -328,28 +340,28 @@ module ps1_sio #(
 			if (start_rd) begin
 				have <= 1'b0;
 				job_rd <= 1'b1; job_k <= 3'd0; job_wait <= 1'b0;
-				job_sector <= {mc_msb[1:0], tx_byte};
-				m_line <= {mc_msb[1:0], tx_byte, 3'd0}; m_we <= 1'b0; m_req <= 1'b1;
+				job_sector <= {mc_msb[1:0], tx_byte}; job_slot <= mc_slot;
+				m_line <= {mc_slot, mc_msb[1:0], tx_byte, 3'd0}; m_we <= 1'b0; m_req <= 1'b1;
 			end else if (job_rd) begin
 				if (m_req && m_ready) begin m_req <= 1'b0; job_wait <= 1'b1; end
 				if (job_wait && m_valid) begin
 					job_wait <= 1'b0;
 					if (job_k == 3'd7) begin job_rd <= 1'b0; have <= 1'b1; end
-					else begin job_k <= job_k + 3'd1; m_line <= m_line + 13'd1; m_req <= 1'b1; end
+					else begin job_k <= job_k + 3'd1; m_line <= m_line + 14'd1; m_req <= 1'b1; end
 				end
 			end
 
 			// a store: eight lines out of the buffer, one after another
 			if (start_wr) begin
 				if (job_rd) wr_queued <= 1'b1;
-				else begin job_wr <= 1'b1; job_k <= 3'd0; m_line <= {mc_sector, 3'd0}; m_we <= 1'b1; m_req <= 1'b1; end
-				job_sector <= mc_sector;
+				else begin job_wr <= 1'b1; job_k <= 3'd0; m_line <= {mc_slot, mc_sector, 3'd0}; m_we <= 1'b1; m_req <= 1'b1; end
+				job_sector <= mc_sector; job_slot <= mc_slot;
 			end else if (wr_queued && !job_rd) begin
 				wr_queued <= 1'b0;
-				job_wr <= 1'b1; job_k <= 3'd0; m_line <= {job_sector, 3'd0}; m_we <= 1'b1; m_req <= 1'b1;
+				job_wr <= 1'b1; job_k <= 3'd0; m_line <= {job_slot, job_sector, 3'd0}; m_we <= 1'b1; m_req <= 1'b1;
 			end else if (job_wr && m_req && m_ready) begin
 				if (job_k == 3'd7) begin job_wr <= 1'b0; m_req <= 1'b0; m_we <= 1'b0; end
-				else begin job_k <= job_k + 3'd1; m_line <= m_line + 13'd1; end
+				else begin job_k <= job_k + 3'd1; m_line <= m_line + 14'd1; end
 			end
 		end
 	end
@@ -357,7 +369,7 @@ module ps1_sio #(
 	// ================================================================================
 	// the queue of stored sectors, for the PC to copy into the card's file
 	// ================================================================================
-	(* ram_style = "distributed" *) reg [9:0] wq [0:15];
+	(* ram_style = "distributed" *) reg [10:0] wq [0:15];
 	reg [4:0] wq_wp, wq_rp;
 	wire      wq_push = job_wr && m_req && m_ready && job_k == 3'd7;   // the sector's last line is taken
 	assign wq_count  = wq_wp - wq_rp;
@@ -367,7 +379,7 @@ module ps1_sio #(
 		else begin
 			if (wq_push) begin
 				if (wq_count == 5'd16) wq_ovf <= 1'b1;
-				else begin wq[wq_wp[3:0]] <= job_sector; wq_wp <= wq_wp + 5'd1; end
+				else begin wq[wq_wp[3:0]] <= {job_slot, job_sector}; wq_wp <= wq_wp + 5'd1; end
 			end
 			if (wq_pop && wq_count != 5'd0) wq_rp <= wq_rp + 5'd1;
 			if (wq_clr_ovf) wq_ovf <= 1'b0;

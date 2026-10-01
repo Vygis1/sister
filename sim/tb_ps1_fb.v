@@ -17,7 +17,9 @@ module tb_ps1_fb;
 	wire px_valid; wire [8:0] px_x, px_y; wire [7:0] px_rgb; wire [31:0] pc;
 	reg fb_cap_go = 0; wire fb_cap_ready; wire [9:0] fb_width; wire [8:0] fb_height;
 	reg [17:0] fbr_addr = 0; reg fbr_req = 0; wire [31:0] fbr_rdata; wire fbr_ack;
-	ps1_top dut ( // inputs this bench does not drive, tied: an open input simulates as X
+	ps1_top dut (
+		.card2_fill(0), .card2_in(0), .joy2(0),
+		.toc_addr(0), .toc_data(0), .toc_we(0), .xa_pop(0), .xa_wdata(0), .xa_we(0), // inputs this bench does not drive, tied: an open input simulates as X
 		.cap_every_vsync(0), .cc_flush(0), .cd_trace_idx(0), .dbg_perf_sel(0), .dbg_rsel(0), .dbg_watch(0), .hr_go(0), .hr_line(0), .joy1(0), .vram_flush(0), .dma_relax(1'b0), .ev_idx(6'd0), .card_in(1'b0), .card_fill(1'b0), .card_wq_pop(1'b0), .card_wq_clr(1'b0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),

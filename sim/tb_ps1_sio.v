@@ -6,7 +6,7 @@ module tb_ps1_sio;
 	reg rst = 1; reg sel = 0, we = 0; reg [3:0] addr = 0, be = 0; reg [31:0] wdata = 0;
 	wire [31:0] rdata; wire irq; reg [15:0] buttons = 16'h0000;
 	ps1_sio #(.SHIFT_CYCLES(100), .ACK_DELAY(10), .ACK_LOW(20)) dut (.clk(clk), .rst(rst), .sel(sel), .we(we), .addr(addr), .be(be), .wdata(wdata), .rdata(rdata), .buttons(buttons), .irq(irq),
-		.rst_q(rst), .card_in(1'b0), .m_line(), .m_req(), .m_we(), .m_wdata(), .m_ready(1'b0), .m_valid(1'b0), .m_rdata(128'd0),
+		.rst_q(rst), .card_in(1'b0), .card2_in(1'b0), .buttons2(16'd0), .m_line(), .m_req(), .m_we(), .m_wdata(), .m_ready(1'b0), .m_valid(1'b0), .m_rdata(128'd0),
 		.wq_sector(), .wq_count(), .wq_ovf(), .wq_pop(1'b0), .wq_clr_ovf(1'b0));
 	integer errors = 0, n;
 	task wr16; input [3:0] a; input [15:0] v; begin
@@ -43,9 +43,10 @@ module tb_ps1_sio;
 		xfer(8'h00, 8'hF7, 1, "byte 3: SWLO (start)");
 		xfer(8'h00, 8'hBF, 0, "byte 4: SWHI (cross)");
 		wr16(4'hA, 16'h0000);                // deselect
-		// slot 2: nothing there
+		// slot 2: the second pad, with its own buttons (nothing pressed here)
 		wr16(4'hA, 16'h3003);
-		xfer(8'h01, 8'hFF, 0, "slot 2: no pad");
+		xfer(8'h01, 8'hFF, 1, "slot 2: pad address");
+		xfer(8'h42, 8'h41, 1, "slot 2: 42h -> digital pad");
 		wr16(4'hA, 16'h0000);
 		if (errors == 0) $display("tb_ps1_sio: all checks passed"); else $display("tb_ps1_sio: %0d FAIL", errors);
 		$finish;

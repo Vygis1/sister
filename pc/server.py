@@ -36,6 +36,8 @@ import wave
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 import fpgalink as fl
+import cdaudio
+import numpy as np
 import socket
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
@@ -1228,30 +1230,78 @@ MAPPER_NAMES = {0: "NROM", 1: "MMC1", 2: "UxROM", 3: "CNROM", 4: "MMC3", 7: "AxR
 # The ESP32 has no card wired today, so the disc lives here: /api/disc/select names
 # the .bin (raw 2352-byte sectors), /api/disc/image serves it with HTTP ranges, and
 # the ESP32's disc task fetches runs of sectors ahead of what the drive asks for.
-DISC = {"path": None, "size": 0}
+DISC = {"path": None, "size": 0, "model": None, "gen": 0}
 DISC_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "disc.json")
+
+
+def open_disc(path):
+    """Make `path` the disc. A .bin with a .cue beside it is opened through the
+    cue, so its audio tracks come with it; a .cue is opened as itself. Audio
+    files the cue names (MP3, WAV, FLAC...) are decoded into a cache by a
+    background thread, ahead of the first time they are played."""
+    model_path = path
+    if path.lower().endswith(".bin"):
+        cue = os.path.splitext(path)[0] + ".cue"
+        if os.path.isfile(cue):
+            model_path = cue
+    model = cdaudio.Disc(model_path)
+    DISC.update(path=path, size=model.sectors * 2352, model=model, gen=DISC["gen"] + 1)
+    threading.Thread(target=model.prepare, daemon=True).start()
+    return model
+
+
+def _disc_json_update(**kw):
+    try:
+        d = json.load(open(DISC_FILE)) if os.path.isfile(DISC_FILE) else {}
+    except (OSError, ValueError):
+        d = {}
+    d.update(kw)
+    try:
+        json.dump(d, open(DISC_FILE, "w"))
+    except OSError:
+        pass
+
+
 # The selection outlives a restart: the ESP32 keeps fetching the image, and
 # a server that came back with no disc selected left the console booting
 # from an empty drive until somebody noticed.
 try:
     _d = json.load(open(DISC_FILE))
     if _d.get("path") and os.path.isfile(_d["path"]):
-        DISC["path"] = _d["path"]; DISC["size"] = os.path.getsize(_d["path"])
+        open_disc(_d["path"])
 except (OSError, ValueError):
     pass
+
+
+def toc_entries():
+    m = DISC["model"]
+    return m.toc() if m else []
+
+
+def toc_single(sectors):
+    """The table of contents of a disc that is one data track and nothing else."""
+    s_end = (sectors + 150) // 75
+    return [(1, 0), (0x81, 2), (0, sectors), (0x80, ((s_end // 60) << 6) | (s_end % 60)), (0xFF, 0x0101)]
+
+
+def upload_toc(write, entries=None):
+    """The table of contents into ps1_cdrom.v (console_top 0x5000 + 4 * entry)."""
+    for a, v in (entries if entries is not None else toc_entries()):
+        write(0x0008_0000 + 0x5000 + 4 * a, v)
+
 
 @app.route("/api/disc/select", methods=["POST"])
 def api_disc_select():
     path = (request.get_json(silent=True) or {}).get("path") or request.args.get("path", "")
     if not path or not os.path.isfile(path):
         return jsonify(error="no such file", path=path), 404
-    DISC["path"] = path
-    DISC["size"] = os.path.getsize(path)
     try:
-        json.dump({"path": path}, open(DISC_FILE, "w"))
-    except OSError:
-        pass
-    return jsonify(ok=True, path=path, size=DISC["size"], sectors=DISC["size"] // 2352)
+        m = open_disc(path)
+    except Exception as e:
+        return jsonify(error="could not open it as a disc: %s" % e, path=path), 400
+    _disc_json_update(path=path)
+    return jsonify(ok=True, path=path, size=DISC["size"], sectors=m.sectors,
+                   tracks=[dict(number=t.number, audio=t.audio, start=t.start) for t in m.tracks])
 
 class HostDisc:
     """The PlayStation's disc straight from this PC, over the wired link.
@@ -1287,25 +1337,26 @@ class HostDisc:
 
     def _run(self):
         L = fl.Link(link.addr[0], link.addr[1], timeout=0.03, retries=10)
-        f = None; fpath = None; owned_at = 0.0
+        owned_at = 0.0
+        toc_gen = None                         # the disc whose table of contents the board has
         while self.on:
             try:
-                if DISC["path"] != fpath:
-                    if f: f.close()
-                    fpath = DISC["path"]; f = open(fpath, "rb") if fpath else None
+                m = DISC["model"]
                 if time.time() - owned_at > 0.5:
                     if L.read(self.CTRL + 0x130) & 3 != 3:
-                        L.write(self.CTRL + 0x130, 3 if f else 1)
+                        # the board was reset or reconfigured: the drive, and its TOC
+                        L.write(self.CTRL + 0x130, 3 if m else 1)
+                        toc_gen = None
                     owned_at = time.time()
+                if m is not None and toc_gen != DISC["gen"]:
+                    upload_toc(L.write)
+                    toc_gen = DISC["gen"]
                 st = L.read(self.CTRL + 0x128)
                 run, room, lba = st >> 31, (st >> 28) & 7, st & 0xFFFFFF
-                if not (run and room and f):
+                if not (run and room and m):
                     time.sleep(0.001)
                     continue
-                f.seek(lba * 2352)
-                sec = f.read(2352)
-                if len(sec) < 2352:
-                    sec = sec.ljust(2352, bytes(1))
+                sec = m.read_sector(lba)
                 L.write_block(self.CTRL + 0x4000, list(struct.unpack("<588I", sec)))
                 L.write(self.CTRL + 0x12C, lba)
                 self.served += 1; self.last_lba = lba; self.error = ""
@@ -1319,6 +1370,73 @@ class HostDisc:
 
 
 host_disc = HostDisc()
+
+
+class XaPump:
+    """XA-ADPCM, decoded here for the drive (ps1_cdrom.v).
+
+    The drive queues the LBA of every XA audio sector the game's filter lets
+    through (ctrl 0x13C); this reads each one out of the disc, decodes and
+    resamples it to 44.1 kHz stereo (pc/cdaudio.py, DuckStation's decoder and
+    interpolator), and keeps the drive's 4096-sample FIFO topped up through the
+    window at ctrl 0x6000. ctrl 0x140 counts the drive's flushes -- a seek, a
+    pause, a new read -- and a new count starts the decoder over, as the chip's
+    does. Only for a disc this PC serves: an SD-card disc is not here to decode.
+    """
+
+    CTRL = 0x0008_0000
+
+    def __init__(self):
+        self.thread = None
+        self.decoded = 0
+        self.pushed = 0
+        self.error = ""
+
+    def start(self):
+        if self.thread is None or not self.thread.is_alive():
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def _run(self):
+        L = fl.Link(link.addr[0], link.addr[1], timeout=0.03, retries=10)
+        dec = cdaudio.XaDecoder()
+        gen = None
+        pend = np.zeros((0, 2), np.int16)
+        while True:
+            try:
+                st = L.read(self.CTRL + 0x140)
+                g, filt, level = st >> 24, (st >> 16) & 1, st & 0x1FFF
+                if g != gen:
+                    gen = g
+                    dec.reset()
+                    pend = pend[:0]
+                q = L.read(self.CTRL + 0x13C)
+                while (q >> 27) and len(pend) < 8192:
+                    lba = q & 0xFFFFFF
+                    L.write(self.CTRL + 0x13C, 1)
+                    m = DISC["model"]
+                    if m is not None and host_disc.on:
+                        sec = m.read_sector(lba)
+                        if dec.accept(sec, bool(filt)):
+                            pend = np.concatenate([pend, dec.decode(sec)])
+                            self.decoded += 1
+                    else:
+                        self.error = "XA audio needs the disc served from this PC"
+                    q = L.read(self.CTRL + 0x13C)
+                room = 4096 - level - 32
+                if room > 0 and len(pend):
+                    k = min(room, len(pend), 1024)
+                    w = ((pend[:k, 1].astype(np.uint32) & 0xFFFF) << 16) | (pend[:k, 0].astype(np.uint32) & 0xFFFF)
+                    L.write_block(self.CTRL + 0x6000, w.tolist())
+                    pend = pend[k:]
+                    self.pushed += k
+                time.sleep(0.004 if len(pend) else 0.008)
+            except (fl.LinkError, OSError) as e:
+                self.error = str(e)
+                time.sleep(0.05)
+
+
+xa_pump = XaPump()
 
 
 # --- the PlayStation's memory card -----------------------------------------------
@@ -1356,76 +1474,94 @@ def blank_card():
     return bytes(d)
 
 
-class MemCard:
-    """Memory card 1: a .mcr file here (raw 128 kB, the format DuckStation and
-    most tools read), in DDR3 on the board while the console runs.
+CARD_FILES = [CARD_FILE, os.environ.get("PS1_CARD2", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                  "..", "saves", "card2.mcr"))]
 
-    The file goes into DDR3 whenever the BIOS does (ps1_load_bios), before the
+
+class MemCard:
+    """The memory cards, slot 1 and slot 2: .mcr files here (raw 128 kB, the
+    format DuckStation and most tools read), in DDR3 on the board while the
+    console runs -- card 2 128 kB after card 1.
+
+    Both go into DDR3 whenever the BIOS does (ps1_load_bios), before the
     processor is let go. Every sector the console stores is queued on the board
-    (ps1_sio.v); a thread of its own, on a socket of its own, reads each one back
-    out of DDR3 and writes it into the file, so a save is on this disk within a
-    fraction of a second of the game writing it. The first load of a session
-    keeps a copy of the file as it was (.bak), in case something goes wrong.
+    (ps1_sio.v) with its slot; a thread of its own, on a socket of its own,
+    reads each one back out of DDR3 and writes it into that card's file, so a
+    save is on this disk within a fraction of a second of the game writing it.
+    The first load of a session keeps a copy of each file as it was (.bak).
     """
 
-    # which card file was last put in, so a restarted server copies the board's
-    # sectors into THAT file and not the default one
+    # which card files were last put in, so a restarted server copies the
+    # board's sectors into THOSE files and not the defaults
     STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "card.json")
 
     def __init__(self):
-        self.path = CARD_FILE
+        self.paths = list(CARD_FILES)
         try:
-            self.path = json.load(open(self.STATE)).get("path") or CARD_FILE
+            st = json.load(open(self.STATE))
+            got = st.get("paths") or [st.get("path")]
+            for i, pth in enumerate(got[:2]):
+                if pth:
+                    self.paths[i] = pth
         except (OSError, ValueError):
             pass
-        self.lock = threading.Lock()        # the file, and loads against saves
+        self.lock = threading.Lock()        # the files, and loads against saves
         self.thread = None
-        self.saved = 0
+        self.saved = [0, 0]
         self.error = ""
-        self.backed_up = False
+        self.backed_up = [False, False]
 
-    def image(self):
+    @property
+    def path(self):
+        return self.paths[0]
+
+    def image(self, slot):
+        path = self.paths[slot]
         try:
-            with open(self.path, "rb") as f:
+            with open(path, "rb") as f:
                 d = f.read()
             if len(d) == CARD_BYTES:
                 return d
-            self.error = "%s is %d bytes, not a 128 kB card image" % (self.path, len(d))
+            self.error = "%s is %d bytes, not a 128 kB card image" % (path, len(d))
             return None
         except FileNotFoundError:
-            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             d = blank_card()
-            with open(self.path, "wb") as f:
+            with open(path, "wb") as f:
                 f.write(d)
             return d
 
     def load(self):
-        """Put the file into DDR3 and the card in the slot, over the main link."""
+        """Put both files into DDR3 and both cards in their slots, over the main link."""
         with self.lock:
-            d = self.image()
-            if d is None:
-                talk(link.write, CARD_CTL, 0)
-                return False
-            if not self.backed_up:
-                try:
-                    with open(self.path + ".bak", "wb") as f:
-                        f.write(d)
-                    self.backed_up = True
-                except OSError:
-                    pass
-            talk(link.write, CARD_CTL, 0b10)          # fill to the card, card out while it changes
-            talk(link.write, NES_CART_BANK, 0)
-            write_pages(NES_PRG, list(struct.unpack("<%dI" % (CARD_BYTES // 4), d)))
-            talk(link.write, CARD_Q, 1 << 31)         # a fresh card owes the file nothing
-            for _ in range(32):                       # nor does the one it replaces
+            inserted = 0
+            talk(link.write, CARD_CTL, 0)                  # cards out while they change
+            for slot in (0, 1):
+                d = self.image(slot)
+                if d is None:
+                    continue
+                if not self.backed_up[slot]:
+                    try:
+                        with open(self.paths[slot] + ".bak", "wb") as f:
+                            f.write(d)
+                        self.backed_up[slot] = True
+                    except OSError:
+                        pass
+                talk(link.write, CARD_CTL, 0b0010 if slot == 0 else 0b1000)   # the fill goes to this card
+                talk(link.write, NES_CART_BANK, 0)
+                write_pages(NES_PRG, list(struct.unpack("<%dI" % (CARD_BYTES // 4), d)))
+                inserted |= 0b0001 if slot == 0 else 0b0100
+            talk(link.write, CARD_Q, 1 << 31)         # fresh cards owe the files nothing
+            for _ in range(32):                       # nor do the ones they replace
                 if not (talk(link.read, CARD_Q) >> 16) & 0x1F:
                     break
                 talk(link.write, CARD_Q, 1)
-            talk(link.write, CARD_CTL, 0b01)
-            self.error = ""
+            talk(link.write, CARD_CTL, inserted)
+            if inserted == 0b0101:
+                self.error = ""
             try:
                 os.makedirs(os.path.dirname(self.STATE), exist_ok=True)
-                json.dump({"path": self.path}, open(self.STATE, "w"))
+                json.dump({"paths": self.paths}, open(self.STATE, "w"))
             except OSError:
                 pass
         self.start()
@@ -1449,27 +1585,28 @@ class MemCard:
             time.sleep(0.05)
             try:
                 q = L.read(CARD_Q)
-                ovf, n, sec = q >> 31, (q >> 16) & 0x1F, q & 0x3FF
+                ovf, n, slot, sec = q >> 31, (q >> 16) & 0x1F, (q >> 10) & 1, q & 0x3FF
                 if not (ovf or n):
                     continue
                 with self.lock, hr_lock:
                     if ovf:
-                        # more stored than the queue could hold: copy the whole card
-                        d = b"".join(self._line(L, CARD_LINE + i) for i in range(CARD_BYTES // 16))
-                        tmp = self.path + ".tmp"
-                        with open(tmp, "wb") as f:
-                            f.write(d)
-                        os.replace(tmp, self.path)
+                        # more stored than the queue could hold: copy both cards whole
+                        for sl in (0, 1):
+                            d = b"".join(self._line(L, CARD_LINE + sl * 0x2000 + i) for i in range(CARD_BYTES // 16))
+                            tmp = self.paths[sl] + ".tmp"
+                            with open(tmp, "wb") as f:
+                                f.write(d)
+                            os.replace(tmp, self.paths[sl])
                         L.write(CARD_Q, 1 << 31)
                         while (L.read(CARD_Q) >> 16) & 0x1F:
                             L.write(CARD_Q, 1)
                     else:
-                        d = b"".join(self._line(L, CARD_LINE + sec * 8 + k) for k in range(8))
-                        with open(self.path, "r+b") as f:
+                        d = b"".join(self._line(L, CARD_LINE + slot * 0x2000 + sec * 8 + k) for k in range(8))
+                        with open(self.paths[slot], "r+b") as f:
                             f.seek(sec * 128)
                             f.write(d)
                         L.write(CARD_Q, 1)
-                    self.saved += 1
+                        self.saved[slot] += 1
                     self.error = ""
             except (fl.LinkError, OSError) as e:
                 self.error = str(e)
@@ -1496,48 +1633,74 @@ def ps1_load_bios(rom):
         memcard.load()
     except (fl.LinkError, TimeoutError, OSError) as e:
         memcard.error = "card not loaded: %s" % e
+    if host_disc.on:
+        try:
+            upload_toc(lambda a, v: talk(link.write, a, v))
+        except (fl.LinkError, TimeoutError):
+            pass
     talk(link.write, VID_CTRL, 0b11)
     talk(link.write, NES_CTRL, 1)          # release the CPU from the reset vector
 
 
-@app.route("/api/card/state")
-def api_card_state():
+def card_states():
     try:
         ctl = talk(link.read, CARD_CTL)
         q = talk(link.read, CARD_Q)
     except (fl.LinkError, TimeoutError):
         ctl = q = None
-    return jsonify(path=os.path.abspath(memcard.path), exists=os.path.isfile(memcard.path),
-                   inserted=None if ctl is None else bool(ctl & 1),
-                   pending=None if q is None else (q >> 16) & 0x1F,
-                   saved=memcard.saved, error=memcard.error)
+    return [dict(slot=sl + 1, name=os.path.basename(memcard.paths[sl]), path=os.path.abspath(memcard.paths[sl]),
+                 exists=os.path.isfile(memcard.paths[sl]),
+                 inserted=None if ctl is None else bool(ctl & (0b0001 if sl == 0 else 0b0100)),
+                 saved=memcard.saved[sl]) for sl in (0, 1)], (None if q is None else (q >> 16) & 0x1F)
+
+
+@app.route("/api/card/state")
+def api_card_state():
+    cards, pending = card_states()
+    return jsonify(cards=cards, pending=pending, error=memcard.error,
+                   # the first card, as this route answered before there were two
+                   path=cards[0]["path"], exists=cards[0]["exists"], inserted=cards[0]["inserted"],
+                   saved=cards[0]["saved"])
 
 
 @app.route("/api/card/select", methods=["POST"])
 def api_card_select():
-    """Use another card file (created blank if it does not exist). It goes in at
-    the next BIOS load; {"now": true} swaps it in straight away, like pulling
-    one card and pushing in another -- only safe while the game is not saving."""
+    """Use another card file (created blank if it does not exist) in slot 1 or 2.
+    It goes in at the next BIOS load; {"now": true} swaps both in straight
+    away, like pulling a card and pushing in another -- only safe while the
+    game is not saving."""
     body = request.get_json(silent=True) or {}
     path = body.get("path", "")
+    slot = int(body.get("slot", 1))
     if not path.lower().endswith(".mcr"):
         return jsonify(error="a card file ends in .mcr"), 400
+    if slot not in (1, 2):
+        return jsonify(error="slot 1 or 2"), 400
     with memcard.lock:
-        memcard.path = path
-        memcard.backed_up = False
+        memcard.paths[slot - 1] = path
+        memcard.backed_up[slot - 1] = False
     if body.get("now"):
         try:
             memcard.load()
         except (fl.LinkError, TimeoutError, OSError) as e:
             return jsonify(error=str(e)), 503
-    return jsonify(ok=True, path=os.path.abspath(path))
+    return jsonify(ok=True, slot=slot, path=os.path.abspath(path))
 
 
 @app.route("/api/disc/host", methods=["POST"])
 def api_disc_host():
     on = bool((request.get_json(silent=True) or {}).get("on", request.args.get("on", "1") == "1"))
     if on: host_disc.start()
-    else: host_disc.stop()
+    else:
+        host_disc.stop()
+        # the SD card's disc is one data track, as far as anything here knows
+        try:
+            code, body = esp_call("/api/state", timeout=4.0)
+            n = json.loads(body).get("disc", {}).get("sectors", 0)
+            if n:
+                upload_toc(lambda a, v: talk(link.write, a, v), toc_single(n))
+        except Exception:
+            pass
     try:
         d = json.load(open(DISC_FILE)) if os.path.isfile(DISC_FILE) else {}
         d["host"] = on
@@ -1566,16 +1729,13 @@ def api_ps1_media():
                         sectors=d.get("sectors", 0), served=d.get("served", 0), error="")
         except Exception as e:
             disc.update(name="", error="the ESP32 did not answer (%s)" % e)
-    try:
-        ctl = talk(link.read, CARD_CTL)
-        q = talk(link.read, CARD_Q)
-    except (fl.LinkError, TimeoutError):
-        ctl = q = None
-    card = dict(name=os.path.basename(memcard.path), path=os.path.abspath(memcard.path),
-                inserted=None if ctl is None else bool(ctl & 1),
-                pending=None if q is None else (q >> 16) & 0x1F,
-                saved=memcard.saved, error=memcard.error)
-    return jsonify(bios=bios, disc=disc, card=card)
+    m = DISC["model"]
+    if m is not None and disc["source"] == "pc":
+        disc["tracks"] = len(m.tracks)
+        disc["audio_tracks"] = sum(1 for t in m.tracks if t.audio)
+    cards, pending = card_states()
+    return jsonify(bios=bios, disc=disc, cards=cards, card_error=memcard.error,
+                   xa=dict(decoded=xa_pump.decoded, error=xa_pump.error))
 
 
 @app.route("/api/disc/state")
@@ -1592,8 +1752,8 @@ def api_disc_crc32():
     Plain text so a microcontroller can parse it without a JSON library:
         <size>, then the block size, then the CRCs, one line each
     """
-    if not DISC["path"]:
-        return "no disc selected", 404
+    if not DISC["path"] or DISC["path"].lower().endswith(".cue"):
+        return "no single-file disc selected", 404
     block = max(65536, int(request.args.get("block", 1 << 20)))
     key = (DISC["path"], DISC["size"], block)
     if DISC.get("crc_key") != key:
@@ -1613,6 +1773,9 @@ def api_disc_crc32():
 def api_disc_image():
     if not DISC["path"]:
         return jsonify(error="no disc selected"), 404
+    if DISC["path"].lower().endswith(".cue"):
+        # several files and decoded audio: served sector by sector from here, not copied
+        return jsonify(error="a .cue disc is served from this PC; it cannot be copied as one image"), 409
     # conditional=True makes send_file honour Range requests; the range is logged
     # as sectors so the order the ESP32 fetched in can be read back later
     rng = request.headers.get("Range", "")
@@ -2619,6 +2782,7 @@ def main():
     # the board uncollected. It polls the board's queue and does nothing while
     # it is empty (or while the core running is not a PlayStation).
     memcard.start()
+    xa_pump.start()
 
     # Look for the ESP in the background: it is a convenience, and the page has
     # to come up whether or not it is there.

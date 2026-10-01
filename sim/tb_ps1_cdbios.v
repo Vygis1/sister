@@ -20,7 +20,9 @@ module tb_ps1_cdbios;
 	// the drive's transport
 	wire [23:0] fill_lba; wire [3:0] fill_room; wire fill_run;
 	reg  sb_we = 0; reg [11:0] sb_addr = 0; reg [7:0] sb_data = 0; reg sb_done = 0; reg [23:0] sb_lba = 0;
-	ps1_top dut ( // inputs this bench does not drive, tied: an open input simulates as X
+	ps1_top dut (
+		.card2_fill(0), .card2_in(0), .joy2(0),
+		.toc_addr(0), .toc_data(0), .toc_we(0), .xa_pop(0), .xa_wdata(0), .xa_we(0), // inputs this bench does not drive, tied: an open input simulates as X
 		.cap_every_vsync(0), .cc_flush(0), .cd_trace_idx(0), .dbg_perf_sel(0), .dbg_rsel(0), .dbg_watch(0), .fb_cap_go(0), .fbr_addr(0), .fbr_req(0), .hr_go(0), .hr_line(0), .joy1(0), .vram_flush(0), .dma_relax(1'b0), .ev_idx(6'd0), .card_in(1'b0), .card_fill(1'b0), .card_wq_pop(1'b0), .card_wq_clr(1'b0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0),
@@ -47,7 +49,9 @@ module tb_ps1_cdbios;
 	end
 	// the image: byte k of sector n is (n*7 + k) & 0xFF, with a plausible header
 	function [7:0] img; input [23:0] lba; input [11:0] k; begin
-		img = (k == 12) ? bcd(((lba + 150) / 75) / 60) : (k == 13) ? bcd(((lba + 150) / 75) % 60) : (k == 14) ? bcd((lba + 150) % 75) : (k == 15) ? 8'h02 :
+		// a data sector starts with its sync pattern (00, ten FFs, 00); without it the
+		// drive takes it for audio and passes over it, as a real drive does
+		img = (k == 0 || k == 11) ? 8'h00 : (k < 11) ? 8'hFF : (k == 12) ? bcd(((lba + 150) / 75) / 60) : (k == 13) ? bcd(((lba + 150) / 75) % 60) : (k == 14) ? bcd((lba + 150) % 75) : (k == 15) ? 8'h02 :
 		      (k >= 16 && k < 20) ? 8'h00 : (lba * 7 + k) & 8'hFF; end endfunction
 	function [7:0] bcd; input [7:0] b; bcd = ((b / 8'd10) << 4) | (b % 8'd10); endfunction
 	integer fed = 0;

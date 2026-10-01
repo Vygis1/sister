@@ -3,8 +3,14 @@
 //
 // The behaviour follows psx-spx and, where the sources disagree, DuckStation and
 // Mednafen (the spec that was written for this, with every disagreement listed,
-// is summarised in the comments below). Reverb and the capture buffers are not
-// here yet: a voice with reverb enabled plays dry.
+// is summarised in the comments below).
+//
+// CD audio (CD-DA and XA, from ps1_cdrom.v after its volume matrix) comes in on
+// cd_l/cd_r a sample a tick and is mixed at the CD volume (1DB0h/1DB2h) when
+// SPUCNT bit 0 says so, and into the reverb's input with bit 2. The capture
+// buffers -- CD left, CD right, voice 1, voice 3, 512 halfwords each from SPU
+// RAM 0000h -- are written a halfword at a time as masked writes, at the lowest
+// priority the memory port has (four in a tick's 1134 clocks).
 //
 // --- the shape ------------------------------------------------------------------
 //
@@ -66,6 +72,10 @@ module ps1_spu #(
 	input  wire         m_ready,
 	input  wire [127:0] m_rdata,
 	input  wire         m_valid,
+
+	// --- CD audio in, a sample a tick (ps1_cdrom.v) ----------------------------------
+	input  wire signed [15:0] cd_l,
+	input  wire signed [15:0] cd_r,
 
 	// --- the sound ------------------------------------------------------------------
 	output reg  [31:0] out_lr,        // {right, left}, signed
@@ -221,7 +231,15 @@ module ps1_spu #(
 	// =============================================================================
 	// the memory port
 	// =============================================================================
-	localparam K_WR = 2'd0, K_FETCH = 2'd1, K_DR = 2'd2;
+	localparam K_WR = 2'd0, K_FETCH = 2'd1, K_DR = 2'd2, K_CAP = 2'd3;
+	// the capture buffers: a tick's four halfwords, waiting for the memory port
+	reg  [8:0]  cap_i;                // the next position, 0..511
+	reg  [8:0]  cap_at;               // the position of the ones waiting
+	reg  [3:0]  cap_pend;             // CD left, CD right, voice 1, voice 3
+	reg  [15:0] cap_v0, cap_v1, cap_v2, cap_v3;
+	reg  [15:0] v1_out, v3_out;       // this tick's voice 1 and 3, after the envelope
+	wire [1:0]  cap_k = cap_pend[0] ? 2'd0 : cap_pend[1] ? 2'd1 : cap_pend[2] ? 2'd2 : 2'd3;
+	wire [15:0] cap_val = (cap_k == 2'd0) ? cap_v0 : (cap_k == 2'd1) ? cap_v1 : (cap_k == 2'd2) ? cap_v2 : cap_v3;
 	reg [1:0]  m_kind;
 	reg        rd_out;            // a read is in flight
 	reg [1:0]  rd_kind;
@@ -255,7 +273,7 @@ module ps1_spu #(
 	           E_R0 = 5'd14, E_R1 = 5'd15, E_RDS = 5'd16, E_RX = 5'd17, E_RRD = 5'd18,
 	           E_RC1 = 5'd19, E_RC2 = 5'd20, E_RC4 = 5'd22, E_RC5 = 5'd23, E_RC6 = 5'd24,
 	           E_RC3 = 5'd21, E_RWR = 5'd25, E_RUS = 5'd26, E_RUP = 5'd27, E_ROUT = 5'd28,
-	           E_ENV2 = 5'd29;
+	           E_ENV2 = 5'd29, E_CD = 5'd30;
 	reg [4:0]  es;
 	reg [3:0]  tick_pend;
 	reg [4:0]  v;
@@ -481,6 +499,7 @@ module ps1_spu #(
 			wc_valid <= 1'b0; wc_flush <= 1'b0; wc_mask <= 16'd0; wc_idle <= 5'd0;
 			dr_valid <= 1'b0; dr_want <= 1'b0; dr_st <= 2'd0; dma_rvalid <= 1'b0;
 			m_req <= 1'b0; m_we <= 1'b0; rd_out <= 1'b0; f_stale <= 1'b0; ba_we <= 1'b0; lr_pend <= 1'b0; lr_pend2 <= 1'b0;
+			cap_i <= 9'd0; cap_pend <= 4'd0;
 			es <= E_IDLE; tick_pend <= 4'd0; out_we <= 1'b0;
 			lfsr <= 16'd0; nz_div <= 16'd0; nz_cnt <= 4'd0;
 			for (i = 0; i < 24; i = i + 1) begin env[i] <= 16'd0; lsax[i] <= 16'd0; end
@@ -584,6 +603,13 @@ module ps1_spu #(
 						m_addr <= SPU_LINE + {9'd0, dr_line}; m_we <= 1'b0;
 						m_req <= 1'b1; m_kind <= K_DR;
 					end
+				end else if (cap_pend != 4'd0) begin
+					// a capture halfword: buffer k at 400h*k, position cap_at
+					m_addr  <= SPU_LINE + {16'd0, cap_k, cap_at[8:3]};
+					m_wdata <= {8{cap_val}};
+					m_wmask <= 16'b11 << {cap_at[2:0], 1'b0};
+					m_we <= 1'b1; m_req <= 1'b1; m_kind <= K_CAP;
+					cap_pend[cap_k] <= 1'b0;
 				end
 			end else if (m_ready) begin
 				m_req <= 1'b0;
@@ -591,6 +617,9 @@ module ps1_spu #(
 					// the line has gone to RAM; every prefetched block may be stale now
 					wc_valid <= 1'b0; wc_flush <= 1'b0; wc_mask <= 16'd0;
 					nx_valid <= 24'd0; f_stale <= 1'b1;
+				end else if (m_kind == K_CAP) begin
+					// a capture halfword: nothing to collect, and no voice is told
+					// (one playing from the capture area hears it a block late)
 				end else begin
 					rd_out <= 1'b1; rd_kind <= m_kind;
 				end
@@ -741,13 +770,37 @@ module ps1_spu #(
 					sumR <= sumR + (o_r >>> 15);
 					if (eon[v]) begin revL <= revL + (o_l >>> 15); revR <= revR + (o_r >>> 15); end
 					prev_out <= w_out;
+					if (v == 5'd1) v1_out <= w_out;
+					if (v == 5'd3) v3_out <= w_out;
 					es <= E_WB;
 				end
 			E_WB: begin
 					env[v] <= w_env;
 					if (w_freq) f_req[v] <= 1'b1;
-					if (v == 5'd23) es <= E_R0;
+					if (v == 5'd23) es <= E_CD;
 					else begin v <= v + 5'd1; es <= E_LD; end
+				end
+			E_CD: begin
+					// CD audio, at the CD volume: into the mix (SPUCNT bit 0) and the
+					// reverb (bit 2); and the tick's capture
+					if (spucnt[0]) begin
+						sumL <= sumL + (mul(cd_l, r[8'h6C][15:0]) >>> 15);
+						sumR <= sumR + (mul(cd_r, r[8'h6C][31:16]) >>> 15);
+					end
+					if (spucnt[2]) begin
+						revL <= revL + (mul(cd_l, r[8'h6C][15:0]) >>> 15);
+						revR <= revR + (mul(cd_r, r[8'h6C][31:16]) >>> 15);
+					end
+					if (spucnt[15]) begin
+						cap_v0 <= cd_l; cap_v1 <= cd_r; cap_v2 <= v1_out; cap_v3 <= v3_out;
+						cap_at <= cap_i; cap_pend <= 4'b1111; cap_i <= cap_i + 9'd1;
+						// the IRQ address on any of the four halfwords about to be written
+						// (byte 400h*k + 2*cap_i, an 8-byte unit only when cap_i[1:0] is 0),
+						// as DuckStation's WriteToCaptureBuffers: games time CD audio by it
+						if (spucnt[6] && irqa[15:9] == 7'd0 && irqa[6:0] == cap_i[8:2] && cap_i[1:0] == 2'd0)
+							irqf <= 1'b1;
+					end
+					es <= E_R0;
 				end
 			// --- the reverb ---------------------------------------------------------------
 			E_R0: begin
@@ -849,7 +902,7 @@ module ps1_spu #(
 	// register reads (same clock)
 	// =============================================================================
 	wire [31:0] rq = r[wi];
-	wire [15:0] stat = {4'd0, 1'b0, !f_empty || cpu_hw_v || dma_w_n != 2'd0 || dr_st != 2'd0,
+	wire [15:0] stat = {4'd0, cap_i[8], !f_empty || cpu_hw_v || dma_w_n != 2'd0 || dr_st != 2'd0,
 	                    spucnt[5:4] == 2'd2 && f_empty, spucnt[5:4] == 2'd3,
 	                    (spucnt[5:4] == 2'd2 && f_empty) || spucnt[5:4] == 2'd3,
 	                    irqf, spucnt[5:0]};

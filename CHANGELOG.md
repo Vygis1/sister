@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+**PlayStation.**
+- **CD audio.** The drive has a table of contents and plays audio tracks: Play,
+  report mode, auto-pause, GetTN, GetTD, GetlocP, Mute, and the volume matrix.
+  An audio CD answers GetID as one, and the BIOS opens its CD player.
+- **Audio tracks from MP3.** A `.cue` disc's tracks can be `.bin`, WAV, MP3,
+  FLAC or OGG files, decoded once into `build/cdda_cache/`.
+- **XA-ADPCM.** The drive applies the game's filter and queues each XA sector.
+  The PC decodes and resamples it exactly as DuckStation does
+  (`pc/cdaudio.py`), and sends the samples back to the drive.
+- **The SPU's capture buffers**, with the IRQ on them, and CD audio in the mix
+  and the reverb.
+- **A second pad and memory card** (`saves/card2.mcr`). A second gamepad on the
+  page is player 2.
+- **Fixed:** a data read over audio sectors stalled the drive. It now passes
+  over them, as a real drive does, and a read that reaches the end of the disc
+  ends with INT4.
+- **Fixed:** the table of contents was built as flip-flops (2,800 LUTs), and
+  the image stopped routing. It is LUT RAM again.
+- **Checked on the board:**
+  - `tools/ps1cdtest.py` plays one XA channel out of eight, then an MP3 track;
+  - the BIOS's CD player plays an MP3 track and a WAV track in full;
+  - `tools/ps1slot2test.py` checks the second pad and card.
+- **Known:**
+  - XA and audio tracks need the disc served by the PC; the ESP32 serves a
+    single `.bin`.
+  - `tb_ps1_cdbios` and `tb_ps1_cddma` fail, as they did at 0.1.0. They are not
+    in the gate.
+
 ## 0.1.0 — first release
 
 Four consoles on the QMTECH Artix-7 XC7A100T. Each is its own image: the

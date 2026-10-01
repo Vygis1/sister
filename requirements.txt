@@ -1,1 +1,4 @@
 flask>=2.2
+numpy>=1.24
+# the PlayStation's audio tracks from MP3, FLAC, OGG and WAV files
+miniaudio>=1.59

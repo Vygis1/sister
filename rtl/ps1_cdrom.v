@@ -33,6 +33,30 @@
 //
 // Addressing: Setloc gives BCD minutes:seconds:frames; sector 0 of the image
 // is 00:02:00, so LBA = (mm*60 + ss)*75 + ff - 150.
+//
+// --- tracks and CD audio -----------------------------------------------------------
+//
+// The table of contents comes from whoever holds the image (toc_*): each
+// track's first LBA, whether it is audio, and its start as mm:ss for GetTD.
+// Without one the disc is a single data track of LAST_LBA+1 sectors.
+//
+// Play (CD-DA): an audio sector is 588 stereo samples of 16-bit PCM, 1/75 s at
+// 44.1 kHz, delivered into the ring like any other. The player reads the
+// current one out four bytes a sample through the header port (which is idle
+// while playing) and asks for the next when it has played all 588, so the
+// drive's position advances exactly as fast as the audio is heard. Report mode
+// sends INT1 with the position every ten frames; auto-pause stops at the end of
+// the track with INT4.
+//
+// XA-ADPCM: with Setmode bit 6, a Mode 2 sector whose submode says real-time
+// audio is not data. It is checked against Setfilter (bit 3), and if it passes
+// its LBA is queued for the PC (xa_*), which decodes it, resamples to 44.1 kHz
+// and streams the samples back into a 4096-sample FIFO that plays a sample a
+// tick. Decoding on the PC rather than here costs four block RAMs instead of a
+// decoder and a 25-tap resampler on a chip that has no room for them.
+//
+// Both go through the CD volume matrix (the CD-ROM's own registers, applied by
+// ADPCTL bit 5) and out on cd_l/cd_r for the SPU, which mixes them.
 //////////////////////////////////////////////////////////////////////////////////
 `default_nettype none
 module ps1_cdrom #(
@@ -70,6 +94,29 @@ module ps1_cdrom #(
 	input  wire        sb_done,       // the whole sector is in
 	input  wire [23:0] sb_lba,        // ...and it is this one: accepted only if it is fill_lba
 	input  wire        sb_abort,      // (the transport gave up on it: forget the bytes so far)
+
+	// --- the table of contents, from whoever holds the image ----------------------------
+	// 00-63h: track n's first sector {audio, lba} (0: the lead-out)
+	// 80-E3h: track n's start {mm[6:0], ss[5:0]}, binary, for GetTD (80h: the lead-out)
+	// FFh:    {first[14:8], last[6:0]}
+	input  wire        toc_we,
+	input  wire [7:0]  toc_addr,
+	input  wire [31:0] toc_data,
+
+	// --- CD audio: one stereo sample a tick (44.1 kHz), after the volume matrix ---------
+	input  wire        tick,
+	output reg  signed [15:0] cd_l,
+	output reg  signed [15:0] cd_r,
+
+	// --- XA-ADPCM: the sectors to decode, and the samples that come back ----------------
+	output wire [23:0] xa_lba,        // the oldest sector waiting to be decoded
+	output wire [4:0]  xa_count,      // how many are waiting
+	input  wire        xa_pop,        // the PC has taken it
+	input  wire        xa_we,         // a decoded sample, {right, left}, 44.1 kHz
+	input  wire [31:0] xa_wdata,
+	output wire [12:0] xa_level,      // samples in the FIFO
+	output reg  [7:0]  xa_gen,        // counts flushes: a stream the PC was decoding has been cut
+	output wire        xa_filt,       // Setmode bit 3: only the Setfilter file/channel is queued
 
 	// what it is doing, for debug registers: the state, the last four commands,
 	// the last Setloc's digits and the mode, and the last seek target
@@ -117,6 +164,36 @@ module ps1_cdrom #(
 	always @(posedge clk) if (sb_we) ring[w_addr] <= sb_data;
 
 	// ==================================================================================
+	// the table of contents
+	// ==================================================================================
+	localparam [23:0] DEF_END = LAST_LBA + 24'd1;
+	localparam [23:0] DEF_END_S = (DEF_END + 24'd150) / 75;
+	localparam [6:0]  DEF_MM = DEF_END_S / 60;
+	localparam [5:0]  DEF_SS = DEF_END_S % 60;
+	(* ram_style = "distributed" *) reg [24:0] toc_lba [0:127];   // {audio, first lba}
+	(* ram_style = "distributed" *) reg [12:0] toc_msf [0:127];   // {mm, ss}
+	reg [6:0]  toc_first, toc_last;
+	reg [23:0] leadout;
+	reg        disc_audio;            // track 1 is audio: an audio CD (GetID says so)
+	integer ti;
+	initial begin
+		for (ti = 0; ti < 128; ti = ti + 1) begin toc_lba[ti] = 25'd0; toc_msf[ti] = 13'd0; end
+		toc_lba[0] = {1'b0, DEF_END};
+		toc_msf[0] = {DEF_MM, DEF_SS};
+		toc_msf[1] = {7'd0, 6'd2};
+		toc_first = 7'd1; toc_last = 7'd1; leadout = DEF_END; disc_audio = 1'b0;
+	end
+	always @(posedge clk) if (toc_we) begin
+		if (toc_addr == 8'hFF) begin toc_first <= toc_data[14:8]; toc_last <= toc_data[6:0]; end
+		else if (toc_addr[7]) toc_msf[toc_addr[6:0]] <= toc_data[12:0];
+		else begin
+			toc_lba[toc_addr[6:0]] <= toc_data[24:0];
+			if (toc_addr[6:0] == 7'd0) leadout <= toc_data[23:0];
+			if (toc_addr[6:0] == 7'd1) disc_audio <= toc_data[24];
+		end
+	end
+
+	// ==================================================================================
 	// registers and the sequencer
 	// ==================================================================================
 	reg [1:0]  index;
@@ -136,6 +213,7 @@ module ps1_cdrom #(
 	// the command in flight and its scheduling
 	reg [7:0]  cmd;
 	reg        cmd_pend;
+	reg        eod_pend;             // a read ran into the lead-out: INT4 (data end) when the drive is free
 	reg [21:0] timer;
 	reg        second_pend;
 	reg [2:0]  second_int;
@@ -150,6 +228,30 @@ module ps1_cdrom #(
 	reg        read_s;                // ReadS: no retries (same here)
 	reg [21:0] sec_timer;
 	reg        seek_then_read;        // a read issued with a pending Setloc: seek first
+	// CD audio
+	reg        playing;               // Play: audio sectors go to the speakers, not to the CPU
+	reg        seek_then_play;        // a Play with somewhere to go first
+	reg [6:0]  play_trk;              // the track Play is in (0: not known yet), for auto-pause
+	reg        muted;                 // Mute / Demute
+	reg [7:0]  flt_file, flt_chan;    // Setfilter
+	reg        xa_play;               // XA-ADPCM sectors are being played
+	reg [3:0]  xa_wait;               // a sector was delivered with XA on: its subheader is being read
+	reg [23:0] xa_cur;                // ...and it is this one
+	reg [7:0]  slot_skip;             // delivered slots that are not data: the FIFO loader steps over them
+	reg [7:0]  rep_nib;               // report mode: the frame's tens digit last reported
+	reg [6:0]  cur_trk;               // the track the head is in
+	reg [7:0]  rel_mm, rel_ss, rel_ff;// and how far into it, for GetlocP and reports
+	// the CD-DA player's state (the player itself is further down)
+	reg  [7:0]  hdr_byte;
+	reg  [2:0]  pl_slot;
+	reg  [9:0]  pl_i;                 // the sample being fetched, 0..587
+	reg  [2:0]  pl_k;                 // its byte, 0..3, and a fifth clock for the last to land
+	reg  [31:0] pl_next;
+	reg         pl_have;              // pl_next is a whole sample, not yet played
+	reg         pl_fetching;
+	reg         pl_done;              // the last sample of the sector has been played
+	reg  [14:0] pk_l, pk_r;           // the sector's peak, for report mode
+	reg signed [15:0] cdda_l, cdda_r;
 	// the delivered sector: which slot, and the data FIFO over it
 	reg [2:0]  cur_slot;
 	reg        cur_v;
@@ -166,7 +268,8 @@ module ps1_cdrom #(
 	always @(posedge clk) begin fifo_byte <= ring[f_addr]; fb_ok <= fifo_has; end
 
 	assign irq = (int_flag != 3'd0) && ((int_mask[2:0] & int_flag) != 3'd0);
-	assign fill_run = reading || seeking;
+	assign fill_run = reading || seeking || playing;
+	assign xa_filt  = mode[3];
 	assign dbg = {stat, reading, seeking, cur_v, r_cnt[2:0], fill_lba[17:0]};   // 8+1+1+1+3+18 = 32
 	assign dbg_seek = {int_flag, 5'd0, loc};
 	assign dbg_hdr  = {cur_hdr[0], cur_hdr[1], cur_hdr[2], cur_hdr[3]};
@@ -174,6 +277,16 @@ module ps1_cdrom #(
 	// BCD helpers
 	function [7:0] bin2bcd; input [7:0] b; bin2bcd = ((b / 8'd10) << 4) | (b % 8'd10); endfunction
 	function [7:0] bcd2bin; input [7:0] b; bcd2bin = b[7:4] * 8'd10 + b[3:0]; endfunction
+	// The TOC has two read ports and no more: the track finder's, and this one,
+	// for the command in hand (Play's track, GetTD's track; one past the last is
+	// GetTD's error and Play's "this track", and 0 is the lead-out). Every other
+	// use reads a register. A constant-index read (toc_lba[1]) once made Vivado
+	// give up on the RAM and build 128 x 25 flip-flops with a 128-way multiplexer
+	// per read: 2,800 LUTs, and the design no longer routed.
+	wire [7:0]  prm0_bin = bcd2bin(prm[0]);
+	wire [6:0]  tq_a     = (prm0_bin > {1'b0, toc_last}) ? cur_trk : prm0_bin[6:0];
+	wire [24:0] tq_lba   = toc_lba[tq_a];
+	wire [12:0] tq_msf   = toc_msf[tq_a];
 	// the head's position as mm:ss:ff too, kept in step with `pos` (a divide by
 	// 75 of a 24-bit number every clock is not something to put on the chip):
 	// set from Setloc's own digits at a seek, counted up a frame per sector
@@ -220,26 +333,69 @@ module ps1_cdrom #(
 	reg  [23:0] hdr_lba;
 	always @(posedge clk)
 		hdr_lba <= (bcd2bin(hdr_mm) * 24'd60 + bcd2bin(hdr_ss)) * 24'd75 + bcd2bin(hdr_ff) - 24'd150;
-	wire        sb_take = sb_done && (sb_lba == fill_lba) && (hdr_lba == fill_lba) && (held < 4'd7);
+	// An audio sector has no sync pattern (00, ten FFs, 00) and so no header to
+	// check. A data read that runs into one takes it and skips it, with no INT1,
+	// as the drive does (DuckStation's DoSectorRead): the BIOS reads an audio CD
+	// that way, times out, and opens its CD player. Refused, it was asked for
+	// again forever and the BIOS sat at its logo.
+	reg         sb_audio;
+	always @(posedge clk) if (sb_we && sb_addr < 12'd12) begin
+		if (sb_addr == 12'd0) sb_audio <= (sb_data != 8'h00);
+		else                  sb_audio <= sb_audio | (sb_data != ((sb_addr == 12'd11) ? 8'h00 : 8'hFF));
+	end
+	reg  [7:0]  slot_audio;           // which ring slots hold audio sectors
+	wire        sb_take = sb_done && (sb_lba == fill_lba) && (held < 4'd7)
+	                      && ((hdr_lba == fill_lba) || playing || seek_then_play || sb_audio);
 	reg  [15:0] sb_mislabelled;      // frames whose header did not match their label (a debug count)
 	always @(posedge clk) if (rst) sb_mislabelled <= 16'd0; else if (sb_done && (sb_lba == fill_lba) && (hdr_lba != fill_lba)) sb_mislabelled <= sb_mislabelled + 16'd1;
 	wire        want_wr   = sel && we && be[3] && (index == 2'd0) && wdata[31];
-	wire        fifo_load = (want_wr || bfrd_pend) && (ld_cnt != 4'd0) && !(bfrd && fifo_has);
+	wire        lp_skip   = (ld_cnt != 4'd0) && slot_skip[r_lp];
+	wire        fifo_load = (want_wr || bfrd_pend) && (ld_cnt != 4'd0) && !(bfrd && fifo_has) && !lp_skip
+	                        && (xa_wait == 4'd0);
 	wire        pop = reading && (sec_timer == (mode[7] ? SECTOR_2X[21:0] : SECTOR_1X[21:0]))
 	                  && ring_has && int_flag == 3'd0 && !cmd_pend && !second_wait && !seeking;
+	// Play takes the next sector when the player has heard all of the last one
+	reg         pl_v;                 // the player has a sector
+	wire        play_pop = playing && !seeking && !pl_v && ring_has;
+	wire        any_pop  = pop || play_pop;
+	wire [7:0]  ff_bcd   = bin2bcd(pos_ff);
+
+	// XA: the queue of sectors for the PC, and the FIFO of samples it sends back
+	(* ram_style = "distributed" *) reg [23:0] xaq [0:15];
+	reg  [4:0]  xaq_wp, xaq_rp;
+	assign xa_count = xaq_wp - xaq_rp;
+	assign xa_lba   = xaq[xaq_rp[3:0]];
+	reg  [31:0] xa_mem [0:4095];
+	reg  [12:0] xa_wp, xa_rp;
+	assign xa_level = xa_wp - xa_rp;
+	always @(posedge clk) begin
+		if (rst) xa_wp <= 13'd0;
+		else if (xa_we && xa_level != 13'd4096) begin xa_mem[xa_wp[11:0]] <= xa_wdata; xa_wp <= xa_wp + 13'd1; end
+	end
+	reg         xa_rd;
+	reg  [31:0] xa_q;
+	always @(posedge clk) if (xa_rd) xa_q <= xa_mem[xa_rp[11:0]];
+	// The CD volume matrix: written to the "next" set, applied by ADPCTL bit 5
+	reg  [7:0]  vn_ll, vn_lr, vn_rr, vn_rl, v_ll, v_lr, v_rr, v_rl;
+	reg         adp_mute;
 
 	integer k;
 	always @(posedge clk) begin
 		if (rst) begin
 			index <= 2'd0; stat <= 8'h02; int_flag <= 3'd0; int_mask <= 5'd0; busy <= 1'b0; mode <= 8'h00;
 			prm_wr <= 5'd0; prm_rd <= 5'd0; rsp_wr <= 5'd0; rsp_rd <= 5'd0;
-			cmd <= 8'd0; cmd_pend <= 1'b0; timer <= 22'd0; dbg_cmds <= 32'd0; dbg_setloc <= 32'd0; trace_w <= 6'd0;
+			cmd <= 8'd0; cmd_pend <= 1'b0; eod_pend <= 1'b0; timer <= 22'd0; dbg_cmds <= 32'd0; dbg_setloc <= 32'd0; trace_w <= 6'd0;
 			tr_v <= 1'b0; tr_d <= 32'd0;
 			second_pend <= 1'b0; second_int <= 3'd0; second_len <= 4'd0; second_wait <= 1'b0;
 			for (k = 0; k < 8; k = k + 1) second_b[k] <= 8'd0;
 			loc <= 24'd0; loc_v <= 1'b0; pos <= 24'd0; seeking <= 1'b0; reading <= 1'b0; read_s <= 1'b0;
 			pos_mm <= 8'd0; pos_ss <= 8'd2; pos_ff <= 8'd0; loc_mm <= 8'd0; loc_ss <= 8'd2; loc_ff <= 8'd0;
 			sec_timer <= 22'd0; seek_then_read <= 1'b0;
+			playing <= 1'b0; seek_then_play <= 1'b0; play_trk <= 7'd0; muted <= 1'b0; flt_file <= 8'd0; flt_chan <= 8'd0;
+			xa_play <= 1'b0; xa_wait <= 4'd0; slot_skip <= 8'd0; rep_nib <= 8'hFF; xaq_wp <= 5'd0; xaq_rp <= 5'd0;
+			xa_rp <= 13'd0; xa_gen <= 8'd0; xa_rd <= 1'b0; adp_mute <= 1'b0;
+			vn_ll <= 8'h80; vn_lr <= 8'h00; vn_rr <= 8'h80; vn_rl <= 8'h00;
+			v_ll  <= 8'h80; v_lr  <= 8'h00; v_rr  <= 8'h80; v_rl  <= 8'h00;
 			cur_slot <= 3'd0; cur_v <= 1'b0; fifo_slot <= 3'd0; fifo_rd <= 12'd0; fifo_end <= 12'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0;
 			r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; r_cnt <= 4'd0; ld_cnt <= 4'd0; r_base <= 24'd0; fill_lba <= 24'd0;
 			dma_rdata <= 32'd0; dma_rvalid <= 1'b0; dma_st <= 3'd0; int1_fire <= 1'b0; dma_dry <= 8'd0;
@@ -248,11 +404,15 @@ module ps1_cdrom #(
 
 			// ---- the ring: a sector arrives, a sector is taken ----
 			if (sb_take) begin
+				slot_audio[r_wp] <= sb_audio;
 				r_wp  <= r_wp + 3'd1;
 				fill_lba <= fill_lba + 24'd1;
 			end
-			r_cnt  <= r_cnt + {3'd0, sb_take} - {3'd0, pop};
-			ld_cnt <= ld_cnt + {3'd0, pop} - {3'd0, fifo_load};
+			r_cnt  <= r_cnt + {3'd0, sb_take} - {3'd0, any_pop};
+			ld_cnt <= ld_cnt + {3'd0, any_pop} - {3'd0, fifo_load} - {3'd0, lp_skip};
+			if (lp_skip) begin r_lp <= r_lp + 3'd1; slot_skip[r_lp] <= 1'b0; end
+			xa_rd <= 1'b0;
+			if (xa_pop && xa_count != 5'd0) xaq_rp <= xaq_rp + 5'd1;
 
 			// ---- the trace: what happened around the data path, one entry a clock ----
 			//   D3 = DMA3 start (from ps1_dma), D4 = DMA3 done {dry words, words so far},
@@ -294,17 +454,24 @@ module ps1_cdrom #(
 			if (sel && we) begin
 				if (be[0]) index <= wdata[1:0];                                  // 1F801800: ADDRESS
 				if (be[1] && index == 2'd0) begin                                // 1F801801.0: COMMAND
-					cmd <= wdata[15:8]; cmd_pend <= 1'b1; busy <= 1'b1; timer <= 22'd0;
+					cmd <= wdata[15:8]; cmd_pend <= 1'b1; busy <= 1'b1; timer <= 22'd0; eod_pend <= 1'b0;
 					dbg_cmds <= {dbg_cmds[23:0], wdata[15:8]};
 					tr_v <= 1'b1;
 					tr_d <= {wdata[15:8], prm[0], prm[1], prm[2]};
 				end
+				if (be[1] && index == 2'd3) vn_rr <= wdata[15:8];              // 1F801801.3: right CD -> right SPU
 				if (be[2]) begin
 					case (index)
 					2'd0: if (!prm_full) begin prm[prm_wr[3:0]] <= wdata[23:16]; prm_wr <= prm_wr + 5'd1; end  // PARAMETER
 					2'd1: int_mask <= wdata[20:16];                                // HINTMSK
-					default: ;
+					2'd2: vn_ll <= wdata[23:16];                                   // left CD -> left SPU
+					default: vn_rl <= wdata[23:16];                                // right CD -> left SPU
 					endcase
+				end
+				if (be[3] && index == 2'd2) vn_lr <= wdata[31:24];             // left CD -> right SPU
+				if (be[3] && index == 2'd3) begin                              // ADPCTL
+					adp_mute <= wdata[24];
+					if (wdata[29]) begin v_ll <= vn_ll; v_lr <= vn_lr; v_rr <= vn_rr; v_rl <= vn_rl; end
 				end
 				if (be[3]) begin
 					case (index)
@@ -368,6 +535,9 @@ module ps1_cdrom #(
 					case (cmd)
 					8'h01, 8'h0B, 8'h0C, 8'h0D: begin                        // Getstat / Mute / Demute / Setfilter
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
+							if (cmd == 8'h0B) muted <= 1'b1;
+							if (cmd == 8'h0C) muted <= 1'b0;
+							if (cmd == 8'h0D) begin flt_file <= prm[0]; flt_chan <= prm[1]; end
 							// the lid bit is reported once after a disc goes in, then cleared
 							if (cmd == 8'h01 && disc_in) stat <= stat & 8'hEF;
 						end
@@ -383,7 +553,7 @@ module ps1_cdrom #(
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 						end
 					8'h0F: begin                                             // Getparam: stat, mode, 00, file, channel
-							rsp[0] <= stat; rsp[1] <= mode; rsp[2] <= 8'h00; rsp[3] <= 8'h00; rsp[4] <= 8'h00;
+							rsp[0] <= stat; rsp[1] <= mode; rsp[2] <= 8'h00; rsp[3] <= flt_file; rsp[4] <= flt_chan;
 							rsp_wr <= 5'd5; int_flag <= 3'd3;
 						end
 					8'h10: begin                                             // GetlocL: the last sector's header
@@ -391,50 +561,57 @@ module ps1_cdrom #(
 							rsp_wr <= 5'd8; int_flag <= 3'd3;
 						end
 					8'h11: begin                                             // GetlocP: track, index, mm, ss, ff (relative), amm, ass, aff
-							rsp[0] <= 8'h01; rsp[1] <= 8'h01;
-							rsp[2] <= bin2bcd(pos_mm); rsp[3] <= bin2bcd(pos_ss); rsp[4] <= bin2bcd(pos_ff);
+							rsp[0] <= bin2bcd({1'b0, cur_trk}); rsp[1] <= 8'h01;
+							rsp[2] <= bin2bcd(rel_mm); rsp[3] <= bin2bcd(rel_ss); rsp[4] <= bin2bcd(rel_ff);
 							rsp[5] <= bin2bcd(pos_mm); rsp[6] <= bin2bcd(pos_ss); rsp[7] <= bin2bcd(pos_ff);
 							rsp_wr <= 5'd8; int_flag <= 3'd3;
 						end
 					8'h13: if (!disc_in) begin
 							rsp[0] <= stat | 8'h01; rsp[1] <= 8'h80; rsp_wr <= 5'd2; int_flag <= 3'd5;
 						end else begin                                       // GetTN: first and last track
-							rsp[0] <= stat; rsp[1] <= 8'h01; rsp[2] <= 8'h01; rsp_wr <= 5'd3; int_flag <= 3'd3;
+							rsp[0] <= stat; rsp[1] <= bin2bcd({1'b0, toc_first}); rsp[2] <= bin2bcd({1'b0, toc_last});
+							rsp_wr <= 5'd3; int_flag <= 3'd3;
 						end
 					8'h14: if (!disc_in) begin
 							rsp[0] <= stat | 8'h01; rsp[1] <= 8'h80; rsp_wr <= 5'd2; int_flag <= 3'd5;
-						end else begin                                       // GetTD(track): 0 = the end, 1 = 00:02
+						end else if (bcd2bin(prm[0]) > {1'b0, toc_last}) begin   // no such track: INT5(stat|error, 10h)
+							rsp[0] <= stat | 8'h01; rsp[1] <= 8'h10; rsp_wr <= 5'd2; int_flag <= 3'd5;
+						end else begin                                       // GetTD(track): its start, mm:ss (0 = the lead-out)
 							rsp[0] <= stat;
-							if (prm[0] == 8'h00) begin rsp[1] <= bin2bcd(end_mm); rsp[2] <= bin2bcd(end_ss); end
-							else begin rsp[1] <= 8'h00; rsp[2] <= 8'h02; end
+							rsp[1] <= bin2bcd({1'b0, tq_msf[12:6]});
+							rsp[2] <= bin2bcd({2'b0, tq_msf[5:0]});
 							rsp_wr <= 5'd3; int_flag <= 3'd3;
 						end
 					8'h15, 8'h16: if (!disc_in) begin                        // nothing to seek on
 							rsp[0] <= stat | 8'h01; rsp[1] <= 8'h80; rsp_wr <= 5'd2; int_flag <= 3'd5;
-						end else if (loc_v && loc > LAST_LBA) begin              // off the end: INT3, then INT5 seek error
+						end else if (loc_v && loc >= leadout) begin              // off the end: INT3, then INT5 seek error
 							loc_v <= 1'b0;
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 							second_pend <= 1'b1; second_int <= 3'd5; second_b[0] <= stat | 8'h04; second_b[1] <= 8'h04; second_len <= 4'd2;
 						end else begin                                       // SeekL / SeekP: INT3(stat), INT2(stat) when there
 							stat <= (stat & 8'h1F) | 8'h42;                  // motor, seeking
 							seeking <= 1'b1; reading <= 1'b0; seek_then_read <= 1'b0;
+							playing <= 1'b0; seek_then_play <= 1'b0; pl_v <= 1'b0;
+							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
 							sec_timer <= 22'd0;
-							if (loc_v) begin fill_lba <= loc; r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; end
+							if (loc_v) begin fill_lba <= loc; r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0; end
 							rsp[0] <= (stat & 8'h1F) | 8'h42; rsp_wr <= 5'd1; int_flag <= 3'd3;
 						end
 					8'h06, 8'h1B: if (!disc_in) begin
 							rsp[0] <= stat | 8'h01; rsp[1] <= 8'h80; rsp_wr <= 5'd2; int_flag <= 3'd5;
-						end else if (loc_v && loc > LAST_LBA) begin
+						end else if (loc_v && loc >= leadout) begin
 							loc_v <= 1'b0;
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 							second_pend <= 1'b1; second_int <= 3'd5; second_b[0] <= stat | 8'h04; second_b[1] <= 8'h04; second_len <= 4'd2;
 						end else begin                                       // ReadN / ReadS: INT3(stat), then INT1 per sector
 							read_s <= (cmd == 8'h1B);
 							rsp[0] <= (stat & 8'h1F) | 8'h22; rsp_wr <= 5'd1; int_flag <= 3'd3;
+							playing <= 1'b0; seek_then_play <= 1'b0; pl_v <= 1'b0;
+							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
 							if (loc_v) begin                                 // a new place: seek there first
 								stat <= (stat & 8'h1F) | 8'h42;
 								seeking <= 1'b1; reading <= 1'b0; seek_then_read <= 1'b1;
-								fill_lba <= loc; r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0;
+								fill_lba <= loc; r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0;
 							end else begin
 								stat <= (stat & 8'h1F) | 8'h22;
 								reading <= 1'b1;
@@ -445,17 +622,23 @@ module ps1_cdrom #(
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 							reading <= 1'b0; seeking <= 1'b0; seek_then_read <= 1'b0;
 							stat <= stat & 8'h1F;
+							playing <= 1'b0; seek_then_play <= 1'b0; pl_v <= 1'b0;
+							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
 							second_pend <= 1'b1; second_int <= 3'd2; second_b[0] <= stat & 8'h1F; second_len <= 4'd1;
 						end
 					8'h08: begin                                             // Stop: INT3(stat), INT2(stat) motor off
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 							reading <= 1'b0; seeking <= 1'b0; seek_then_read <= 1'b0;
 							stat <= 8'h00;
+							playing <= 1'b0; seek_then_play <= 1'b0; pl_v <= 1'b0;
+							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
 							second_pend <= 1'b1; second_int <= 3'd2; second_b[0] <= 8'h00; second_len <= 4'd1;
 						end
 					8'h0A: begin                                             // Init: INT3(stat), INT2(stat)
 							stat <= disc_in ? 8'h02 : 8'h10; mode <= 8'h00;
 							reading <= 1'b0; seeking <= 1'b0; seek_then_read <= 1'b0; loc_v <= 1'b0;
+							playing <= 1'b0; seek_then_play <= 1'b0; pl_v <= 1'b0;
+							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
 							rsp[0] <= disc_in ? 8'h02 : 8'h10; rsp_wr <= 5'd1; int_flag <= 3'd3;
 							second_pend <= 1'b1; second_int <= 3'd2; second_b[0] <= disc_in ? 8'h02 : 8'h10; second_len <= 4'd1;
 						end
@@ -464,7 +647,11 @@ module ps1_cdrom #(
 						end else begin                                       // GetID: INT3(stat), then INT2(02 00 20 00 'S' 'C' 'E' 'A')
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 							second_pend <= 1'b1; second_len <= 4'd8;
-							if (disc_in) begin
+							if (disc_audio) begin                         // an audio CD: INT5(stat|ID error, 90h unlicensed+audio)
+								second_int <= 3'd5;
+								second_b[0] <= stat | 8'h08; second_b[1] <= 8'h90; second_b[2] <= 8'h20; second_b[3] <= 8'h00;
+								second_b[4] <= 8'h00; second_b[5] <= 8'h00; second_b[6] <= 8'h00; second_b[7] <= 8'h00;
+							end else if (disc_in) begin
 								second_int <= 3'd2;
 								second_b[0] <= 8'h02; second_b[1] <= 8'h00; second_b[2] <= 8'h20; second_b[3] <= 8'h00;
 								second_b[4] <= 8'h53; second_b[5] <= 8'h43; second_b[6] <= 8'h45; second_b[7] <= 8'h41;
@@ -476,7 +663,33 @@ module ps1_cdrom #(
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 							second_pend <= 1'b1; second_int <= 3'd2; second_b[0] <= stat; second_len <= 4'd1;
 						end
-					8'h03, 8'h04, 8'h05, 8'h07: begin                        // Play / Forward / Backward / MotorOn: nothing to hear
+					8'h03: if (!disc_in) begin                               // Play, with no disc
+							rsp[0] <= stat | 8'h01; rsp[1] <= 8'h80; rsp_wr <= 5'd2; int_flag <= 3'd5;
+						end else begin                                       // Play([track]): INT3(stat), then the audio
+							rsp[0] <= (stat & 8'h1F) | 8'h82; rsp_wr <= 5'd1; int_flag <= 3'd3;
+							stat <= (stat & 8'h1F) | 8'h82;
+							reading <= 1'b0; seek_then_read <= 1'b0; pl_v <= 1'b0; rep_nib <= 8'hFF;
+							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
+							r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0;
+							if (prm_wr != 5'd0 && prm[0] != 8'h00) begin    // a track: go to its start
+								play_trk <= tq_a;
+								loc <= tq_lba[23:0];
+								loc_mm <= {1'b0, tq_msf[12:6]};
+								loc_ss <= {2'b0, tq_msf[5:0]};
+								loc_ff <= 8'd0; loc_v <= 1'b1;
+								fill_lba <= tq_lba[23:0];
+								seeking <= 1'b1; seek_then_play <= 1'b1; playing <= 1'b0; sec_timer <= 22'd0;
+							end else if (loc_v) begin                        // where Setloc said
+								play_trk <= 7'd0;
+								fill_lba <= loc;
+								seeking <= 1'b1; seek_then_play <= 1'b1; playing <= 1'b0; sec_timer <= 22'd0;
+							end else begin                                   // from here
+								play_trk <= 7'd0;
+								fill_lba <= pos; r_base <= pos; r_cnt <= 4'd0; ld_cnt <= 4'd0;
+								playing <= 1'b1;
+							end
+						end
+					8'h04, 8'h05, 8'h07: begin                               // Forward / Backward / MotorOn: nothing to hear
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 						end
 					8'h19: begin                                             // Test
@@ -513,7 +726,7 @@ module ps1_cdrom #(
 					if (loc_v) begin pos_mm <= loc_mm; pos_ss <= loc_ss; pos_ff <= loc_ff; end
 					loc_v <= 1'b0;
 					r_base <= loc_v ? loc : pos;
-					if (loc_v) begin r_cnt <= 4'd0; ld_cnt <= 4'd0; end   // (the chain restarted in the command's clock)
+					if (loc_v) begin r_cnt <= 4'd0; ld_cnt <= 4'd0; slot_skip <= 8'd0; end   // (the chain restarted in the command's clock)
 					sec_timer <= 22'd1;
 				end else if (sec_timer != SEEK_CYCLES[21:0]) sec_timer <= sec_timer + 22'd1;
 				else if (!cmd_pend && !second_pend && int_flag == 3'd0) begin
@@ -521,6 +734,9 @@ module ps1_cdrom #(
 					if (seek_then_read) begin
 						seek_then_read <= 1'b0; reading <= 1'b1;
 						stat <= (stat & 8'h1F) | 8'h22;
+					end else if (seek_then_play) begin
+						seek_then_play <= 1'b0; playing <= 1'b1; pl_v <= 1'b0;
+						stat <= (stat & 8'h1F) | 8'h82;
 					end else begin
 						// a plain seek finishes with INT2(stat)
 						stat <= (stat & 8'h1F) | 8'h02;
@@ -532,7 +748,8 @@ module ps1_cdrom #(
 				else if (pop) begin
 					// the sector is due and here: it becomes the current one, INT1(stat)
 					sec_timer <= 22'd0;
-					cur_slot <= r_rp; cur_v <= 1'b1; int1_fire <= 1'b1;
+					if (slot_audio[r_rp]) slot_skip[r_rp] <= 1'b1;            // audio: passed over, never data
+					else begin cur_slot <= r_rp; cur_v <= 1'b1; int1_fire <= 1'b1; end
 					r_rp <= r_rp + 3'd1;
 					r_base <= r_base + 24'd1;
 					pos <= r_base + 24'd1;
@@ -543,12 +760,77 @@ module ps1_cdrom #(
 						if (pos_ss == 8'd59) begin pos_ss <= 8'd0; pos_mm <= pos_mm + 8'd1; end
 						else pos_ss <= pos_ss + 8'd1;
 					end else pos_ff <= pos_ff + 8'd1;
-					rsp_rd <= 5'd0; rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd1;
-					if (pos >= LAST_LBA) begin                     // the end of the disc: INT4 next time
-						reading <= 1'b0; stat <= stat & 8'h1F;
+					if (slot_audio[r_rp]) ;
+					else if (mode[6]) begin xa_wait <= 4'd12; xa_cur <= r_base; end   // XA on: what is it?
+					else begin rsp_rd <= 5'd0; rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd1; end
+					if (pos + 24'd1 >= leadout) begin              // the end of the disc: INT4 next time
+						reading <= 1'b0; stat <= stat & 8'h1F; eod_pend <= 1'b1;
+					end
+				end
+			end else if (eod_pend) begin
+				// a sector time after the last one, as DuckStation's StopReadingWithDataEnd
+				if (sec_timer != (mode[7] ? SECTOR_2X[21:0] : SECTOR_1X[21:0])) sec_timer <= sec_timer + 22'd1;
+				else if (int_flag == 3'd0 && !cmd_pend && !second_wait) begin
+					sec_timer <= 22'd0; eod_pend <= 1'b0;
+					rsp_rd <= 5'd0; rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd4;
+				end
+			end else if (playing) begin
+				if (play_pop) begin
+					// the next audio sector: the player has it, the CPU never sees it
+					slot_skip[r_rp] <= 1'b1;
+					pl_v <= 1'b1;
+					r_rp <= r_rp + 3'd1;
+					r_base <= r_base + 24'd1;
+					pos <= r_base + 24'd1;
+					if (pos_ff == 8'd74) begin
+						pos_ff <= 8'd0;
+						if (pos_ss == 8'd59) begin pos_ss <= 8'd0; pos_mm <= pos_mm + 8'd1; end
+						else pos_ss <= pos_ss + 8'd1;
+					end else pos_ff <= pos_ff + 8'd1;
+					if (play_trk == 7'd0) play_trk <= cur_trk;
+					if (pos + 24'd1 >= leadout || (mode[1] && play_trk != 7'd0 && cur_trk != play_trk)) begin
+						// the end of the disc, or of the track with auto-pause: INT4(stat)
+						playing <= 1'b0; pl_v <= 1'b0; stat <= stat & 8'h1F;
+						rsp_rd <= 5'd0; rsp[0] <= stat & 8'h1F; rsp_wr <= 5'd1; int_flag <= 3'd4;
+					end else if (mode[2] && int_flag == 3'd0 && !cmd_pend && !second_wait
+					             && ff_bcd[7:4] != rep_nib[3:0]) begin
+						// report mode: where the music is, every ten frames, absolute and
+						// track-relative in turn, and how loud
+						rep_nib <= {4'd0, ff_bcd[7:4]};
+						rsp_rd <= 5'd0;
+						rsp[0] <= stat; rsp[1] <= bin2bcd({1'b0, cur_trk}); rsp[2] <= 8'h01;
+						if (ff_bcd[4]) begin
+							rsp[3] <= bin2bcd(rel_mm); rsp[4] <= bin2bcd(rel_ss) | 8'h80; rsp[5] <= bin2bcd(rel_ff);
+						end else begin
+							rsp[3] <= bin2bcd(pos_mm); rsp[4] <= bin2bcd(pos_ss); rsp[5] <= bin2bcd(pos_ff);
+						end
+						rsp[6] <= pos_ss[0] ? pk_r[7:0] : pk_l[7:0];
+						rsp[7] <= {pos_ss[0], pos_ss[0] ? pk_r[14:8] : pk_l[14:8]};
+						rsp_wr <= 5'd8; int_flag <= 3'd1;
+					end
+				end
+				if (pl_done) pl_v <= 1'b0;
+			end
+
+			// XA on: the delivered sector's subheader is in; audio goes to the PC to
+			// decode (if the filter lets it), data gets its INT1
+			if (xa_wait != 4'd0) begin
+				xa_wait <= xa_wait - 4'd1;
+				if (xa_wait == 4'd1) begin
+					if (cur_hdr[3] == 8'd2 && cur_hdr[6][6] && cur_hdr[6][2]) begin
+						slot_skip[cur_slot] <= 1'b1;               // real-time audio: never data
+						if (!mode[3] || (cur_hdr[4] == flt_file && cur_hdr[5] == flt_chan)) begin
+							if (xa_count != 5'd16) begin xaq[xaq_wp[3:0]] <= xa_cur; xaq_wp <= xaq_wp + 5'd1; end
+							xa_play <= 1'b1;
+						end
+					end else begin
+						rsp_rd <= 5'd0; rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd1;
 					end
 				end
 			end
+
+			// a tick: the next XA sample out of the FIFO
+			if (tick && xa_play && xa_level != 13'd0) begin xa_rd <= 1'b1; xa_rp <= xa_rp + 13'd1; end
 			// While no disc is in, the drive says so: lid open, motor off --
 			// DuckStation's motor_on = CanReadMedia(), shell_open = !CanReadMedia().
 			// Reported spinning, the BIOS waited for ever for a disc to come up to
@@ -557,12 +839,114 @@ module ps1_cdrom #(
 		end
 	end
 
+	// ==================================================================================
+	// the CD-DA player: four bytes a sample out of the slot being played, through
+	// the header's read port (the header is never read while playing)
+	// ==================================================================================
+	wire        hdr_busy;
+	// the size of a sample, saturated to 15 bits
+	function [14:0] mag15; input [15:0] x; reg [15:0] a;
+		begin a = x[15] ? (~x + 16'd1) : x; mag15 = a[15] ? 15'h7FFF : a[14:0]; end
+	endfunction
+	always @(posedge clk) begin
+		pl_done <= 1'b0;
+		if (rst || !playing) begin
+			pl_have <= 1'b0; pl_fetching <= 1'b0; pl_i <= 10'd0; pl_k <= 3'd0;
+			cdda_l <= 16'sd0; cdda_r <= 16'sd0; pk_l <= 15'd0; pk_r <= 15'd0;
+		end else begin
+			if (play_pop) begin
+				pl_slot <= r_rp; pl_i <= 10'd0; pl_have <= 1'b0; pl_fetching <= 1'b0; pl_k <= 3'd0;
+				pk_l <= 15'd0; pk_r <= 15'd0;
+			end else if (pl_v && !pl_have && !pl_fetching && !hdr_busy && !pl_done) begin
+				pl_fetching <= 1'b1; pl_k <= 3'd0;
+			end else if (pl_fetching) begin
+				if (pl_k != 3'd0) pl_next[(pl_k - 3'd1) * 8 +: 8] <= hdr_byte;
+				if (pl_k == 3'd4) begin pl_fetching <= 1'b0; pl_have <= 1'b1; end
+				else pl_k <= pl_k + 3'd1;
+			end
+			if (tick) begin
+				if (pl_have && pl_v) begin
+					cdda_l <= pl_next[15:0]; cdda_r <= pl_next[31:16];
+					if (mag15(pl_next[15:0])  > pk_l) pk_l <= mag15(pl_next[15:0]);
+					if (mag15(pl_next[31:16]) > pk_r) pk_r <= mag15(pl_next[31:16]);
+					pl_have <= 1'b0;
+					if (pl_i == 10'd587) pl_done <= 1'b1;
+					else pl_i <= pl_i + 10'd1;
+				end else begin
+					cdda_l <= 16'sd0; cdda_r <= 16'sd0;           // nothing in time: silence
+				end
+			end
+		end
+	end
+
+	// ==================================================================================
+	// the track the head is in, and how far into it (a slow walk, never in a hurry)
+	// ==================================================================================
+	reg  [6:0]  trk_i, trk_best;
+	reg  [23:0] best_lba, cur_start;  // where those tracks begin
+	wire [24:0] tf_lba = toc_lba[trk_i];
+	always @(posedge clk) begin
+		if (rst) begin cur_trk <= 7'd1; trk_i <= 7'd1; trk_best <= 7'd1; best_lba <= 24'd0; cur_start <= 24'd0; end
+		else if (trk_i > toc_last || trk_i == 7'd0) begin
+			cur_trk <= trk_best; cur_start <= best_lba;
+			trk_i <= toc_first; trk_best <= toc_first; best_lba <= 24'd0;
+		end else begin
+			if (tf_lba[23:0] <= pos) begin trk_best <= trk_i; best_lba <= tf_lba[23:0]; end
+			trk_i <= trk_i + 7'd1;
+		end
+	end
+	reg  [23:0] cv_r;
+	reg  [1:0]  cv_st;
+	reg  [7:0]  cv_m, cv_s;
+	always @(posedge clk) begin
+		if (rst) begin cv_st <= 2'd0; rel_mm <= 8'd0; rel_ss <= 8'd0; rel_ff <= 8'd0; end
+		else case (cv_st)
+		2'd0: begin
+				cv_r <= (pos >= cur_start) ? pos - cur_start : 24'd0;
+				cv_m <= 8'd0; cv_s <= 8'd0; cv_st <= 2'd1;
+			end
+		2'd1: if (cv_r >= 24'd4500) begin cv_r <= cv_r - 24'd4500; cv_m <= cv_m + 8'd1; end else cv_st <= 2'd2;
+		default: if (cv_r >= 24'd75) begin cv_r <= cv_r - 24'd75; cv_s <= cv_s + 8'd1; end
+		         else begin rel_mm <= cv_m; rel_ss <= cv_s; rel_ff <= cv_r[7:0]; cv_st <= 2'd0; end
+		endcase
+	end
+
+	// ==================================================================================
+	// the output: CD-DA or XA, through the volume matrix, a sample a tick
+	// ==================================================================================
+	reg  [2:0]  mx_st;
+	reg  signed [15:0] mx_l, mx_r;
+	reg  signed [24:0] mx_acc;
+	function signed [15:0] sat16; input signed [24:0] v;
+		sat16 = (v > 25'sd32767) ? 16'sh7FFF : (v < -25'sd32768) ? -16'sh8000 : v[15:0];
+	endfunction
+	always @(posedge clk) begin
+		if (rst) begin mx_st <= 3'd0; cd_l <= 16'sd0; cd_r <= 16'sd0; end
+		else case (mx_st)
+		3'd0: if (tick) mx_st <= 3'd1;
+		3'd1: mx_st <= 3'd2;                                       // the CD-DA sample and the XA read land
+		3'd2: begin
+				if (muted) begin mx_l <= 16'sd0; mx_r <= 16'sd0; end
+				else if (playing) begin mx_l <= cdda_l; mx_r <= cdda_r; end
+				else if (xa_play && !adp_mute) begin mx_l <= xa_q[15:0]; mx_r <= xa_q[31:16]; end
+				else begin mx_l <= 16'sd0; mx_r <= 16'sd0; end
+				mx_st <= 3'd3;
+			end
+		3'd3: begin mx_acc <= mx_l * $signed({1'b0, v_ll}) + mx_r * $signed({1'b0, v_rl}); mx_st <= 3'd4; end
+		3'd4: begin cd_l <= sat16(mx_acc >>> 7);
+		            mx_acc <= mx_l * $signed({1'b0, v_lr}) + mx_r * $signed({1'b0, v_rr}); mx_st <= 3'd5; end
+		default: begin cd_r <= sat16(mx_acc >>> 7); mx_st <= 3'd0; end
+		endcase
+	end
+
 	// the header and subheader of the sector that just became current, for
 	// GetlocL: bytes 12..19 of the slot, read out over the nine clocks after
-	// it is chosen (hdr_byte is a clock behind h_addr)
+	// it is chosen (hdr_byte is a clock behind h_addr). While playing, the
+	// same port reads audio for the player.
 	reg [3:0]   hdr_i;
-	wire [14:0] h_addr = cur_slot * 15'd2352 + 15'd12 + {12'd0, hdr_i[2:0]};
-	reg  [7:0]  hdr_byte;
+	assign hdr_busy = (hdr_i != 4'd9);
+	wire [14:0] h_addr = hdr_busy ? cur_slot * 15'd2352 + 15'd12 + {12'd0, hdr_i[2:0]}
+	                              : pl_slot * 15'd2352 + {3'd0, pl_i, 2'b00} + {12'd0, pl_k[1:0]};
 	always @(posedge clk) hdr_byte <= ring[h_addr];
 	always @(posedge clk) begin
 		if (rst) hdr_i <= 4'd9;

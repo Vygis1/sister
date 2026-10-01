@@ -247,10 +247,21 @@ module console_top #(
 	reg  [5:0]   ev_idx = 6'd0;
 	// the PlayStation's memory card: ctrl 0x134 {fill aimed at the card, card in},
 	// 0x138 the queue of sectors it has stored (see ps1_sio.v / pc/server.py)
-	reg          card_in = 1'b0, card_fill = 1'b0;
-	wire [9:0]   card_wq_sector; wire [4:0] card_wq_count; wire card_wq_ovf;
+	reg          card_in = 1'b0, card_fill = 1'b0, card2_in = 1'b0, card2_fill = 1'b0;
+	wire [10:0]  card_wq_sector; wire [4:0] card_wq_count; wire card_wq_ovf;
 	wire         card_wq_pop = ctrl_we && (off == 16'h0138) && wdata[0];
 	wire         card_wq_clr = ctrl_we && (off == 16'h0138) && wdata[31];
+	// the PlayStation's CD audio:
+	//   0x5000-0x53FC  the table of contents, a word per entry (ps1_cdrom.v toc_*)
+	//   0x6000-0x6FFC  XA samples decoded on the PC: every write is the next one
+	//   0x013C  read {waiting[31:27], 0, lba[23:0]} of the oldest XA sector to
+	//           decode; write bit 0 pops it
+	//   0x0140  read {flushes[31:24], 0, samples in the FIFO[12:0]}
+	wire         toc_we   = ctrl_we && (off[15:12] == 4'h5) && (off[11:10] == 2'b00);
+	wire [7:0]   toc_addr = off[9:2];
+	wire         xa_we    = ctrl_we && (off[15:12] == 4'h6);
+	wire         xa_pop   = ctrl_we && (off == 16'h013C) && wdata[0];
+	wire [23:0]  xa_lba; wire [4:0] xa_count; wire [12:0] xa_level; wire [7:0] xa_gen; wire xa_filt;
 	wire [31:0]  ps1_ev_data; wire [5:0] ps1_ev_wp;             // the frame event log (ctrl 0x120/0x124)
 	wire [31:0]  ps1_icv_pc, ps1_icv_got, ps1_icv_want, ps1_icv_n;
 	wire         ps1_dbg_exec;
@@ -510,7 +521,7 @@ module console_top #(
 			16'h00EC: begin perf_sel <= wdata[5:0];
 			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14]; end
 			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
-			16'h0134: begin card_in <= wdata[0]; card_fill <= wdata[1]; end
+			16'h0134: begin card_in <= wdata[0]; card_fill <= wdata[1]; card2_in <= wdata[2]; card2_fill <= wdata[3]; end
 			16'h00F0: stream_ctl <= wdata;
 			16'h00F4: stream_base_r <= wdata;
 			16'h00F8: stream_words_r <= wdata;
@@ -601,12 +612,14 @@ module console_top #(
 		16'h0118: ctrl_rdata = {31'd0, cc_flush_busy};                        // the CPU cache flush: 1 while it is writing back
 		16'h0128: ctrl_rdata = {cd_fill_run, cd_fill_room[2:0], 4'd0, cd_fill_lba};   // the drive: running, room, the LBA it wants next
 		16'h0130: ctrl_rdata = {30'd0, hcd_disc, hcd_own};                    // the PC has the drive / a disc is in
-		16'h0134: ctrl_rdata = {30'd0, card_fill, card_in};                   // the memory card: fill aimed at it / in the slot
+		16'h0134: ctrl_rdata = {28'd0, card2_fill, card2_in, card_fill, card_in};   // memory cards: {fill to 2, 2 in, fill to 1, 1 in}
 		// the oldest sector the card stored that the PC has not copied: {overflow, 10'd0,
 		// how many are waiting[4:0], 6'd0, sector[9:0]}. Reading takes nothing; writing
 		// bit 0 pops it, bit 31 clears the overflow -- a read that is retried over UDP
 		// must not lose a save.
-		16'h0138: ctrl_rdata = {card_wq_ovf, 10'd0, card_wq_count, 6'd0, card_wq_sector};
+		16'h0138: ctrl_rdata = {card_wq_ovf, 10'd0, card_wq_count, 5'd0, card_wq_sector};   // sector bit 10: the slot
+		16'h013C: ctrl_rdata = {xa_count, 3'd0, xa_lba};
+		16'h0140: ctrl_rdata = {xa_gen, 7'd0, xa_filt, 3'd0, xa_level};   // bit 16: the game filters XA itself
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -997,7 +1010,7 @@ module console_top #(
 			.dbg_icv_pc(ps1_icv_pc), .dbg_icv_got(ps1_icv_got), .dbg_icv_want(ps1_icv_want), .dbg_icv_n(ps1_icv_n),
 			.dbg_exec(ps1_dbg_exec), .dbg_rsel(ps1_rsel), .dbg_rval(ps1_rval),
 			.fs_en(fs_en), .fs_arm(fs_arm), .fs_empty(fs_empty), .fs_ready(fs_ready), .fs_rd(stream_frd && !from_ddr), .fs_data(fs_data_w), .fs_valid(fs_valid_w),
-			.joy1(joy1), .vram_flush(vram_flush_go), .vram_flush_busy(vram_flush_busy), .cap_every_vsync(stream_ctl[30]),
+			.joy1(joy1), .joy2(joy2), .vram_flush(vram_flush_go), .vram_flush_busy(vram_flush_busy), .cap_every_vsync(stream_ctl[30]),
 			.dbg_watch(ps1_watch), .dbg_watch_hit(ps1_watch_hit), .dbg_watch_nz(ps1_watch_nz), .dbg_watch_pulse(ps1_watch_pulse), .dbg_watch_npulse(ps1_watch_npulse),
 			.dbg_a0(ps1_a0), .dbg_a1(ps1_a1), .dbg_ra(ps1_ra), .dbg_sp(ps1_sp),
 			.dbg_wa_en(ps1_wa_en), .dbg_wa_reg(ps1_wa_reg), .dbg_wa_val(ps1_wa_val), .dbg_wb_en(ps1_wb_en), .dbg_wb_reg(ps1_wb_reg), .dbg_wb_val(ps1_wb_val), .dbg_word(ps1_dbg_word), .dbg_fill(ps1_dbg_fill),
@@ -1008,8 +1021,12 @@ module console_top #(
 			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
 			.spu_out(audio_lr), .spu_out_we(audio_lr_we),
 			.dma_relax(dma_relax), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
-			.card_in(card_in), .card_fill(card_fill), .card_wq_sector(card_wq_sector), .card_wq_count(card_wq_count),
-			.card_wq_ovf(card_wq_ovf), .card_wq_pop(card_wq_pop), .card_wq_clr(card_wq_clr)
+			.card_in(card_in), .card_fill(card_fill), .card2_in(card2_in), .card2_fill(card2_fill),
+			.card_wq_sector(card_wq_sector), .card_wq_count(card_wq_count),
+			.card_wq_ovf(card_wq_ovf), .card_wq_pop(card_wq_pop), .card_wq_clr(card_wq_clr),
+			.toc_we(toc_we), .toc_addr(toc_addr), .toc_data(wdata),
+			.xa_lba(xa_lba), .xa_count(xa_count), .xa_pop(xa_pop),
+			.xa_we(xa_we), .xa_wdata(wdata), .xa_level(xa_level), .xa_gen(xa_gen), .xa_filt(xa_filt)
 		);
 	end else begin : g_ps1
 		assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
@@ -1030,7 +1047,8 @@ module console_top #(
 		assign ps1_wa_en = 1'b0; assign ps1_wb_en = 1'b0; assign ps1_wa_reg = 5'd0; assign ps1_wb_reg = 5'd0; assign ps1_wa_val = 32'd0; assign ps1_wb_val = 32'd0;
 		assign ps1_dbg_fill = 32'd0;
 		assign hr_done = 1'b0; assign hr_data = 128'd0;
-		assign card_wq_sector = 10'd0; assign card_wq_count = 5'd0; assign card_wq_ovf = 1'b0;
+		assign card_wq_sector = 11'd0; assign card_wq_count = 5'd0; assign card_wq_ovf = 1'b0;
+		assign xa_lba = 24'd0; assign xa_count = 5'd0; assign xa_level = 13'd0; assign xa_gen = 8'd0; assign xa_filt = 1'b0;
 		assign ps1_node_v = 1'b0; assign ps1_node_addr = 24'd0; assign ps1_node_hdr = 32'd0;
 		assign fb_cap_ready = 1'b0; assign fb_width = 10'd0; assign fb_height = 9'd0;
 		assign fbr_rdata_w = 32'd0; assign fbr_ack_w = fbr_req;   // no frame here: answer at once

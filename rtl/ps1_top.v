@@ -62,11 +62,27 @@ module ps1_top (
 	// last looked, so the PC can copy them into the card's file.
 	input  wire        card_in,
 	input  wire        card_fill,
-	output wire [9:0]  card_wq_sector,
+	input  wire        card2_in,        // the card in slot 2, 128 kB after card 1
+	input  wire        card2_fill,      // the host's fill goes to card 2
+	output wire [10:0] card_wq_sector,  // {slot, sector}
 	output wire [4:0]  card_wq_count,
 	output wire        card_wq_ovf,
 	input  wire        card_wq_pop,
 	input  wire        card_wq_clr,
+
+	// CD audio (ps1_cdrom.v): the disc's table of contents, and XA-ADPCM decoded
+	// on the PC -- the sectors to decode out, the samples back in
+	input  wire        toc_we,
+	input  wire [7:0]  toc_addr,
+	input  wire [31:0] toc_data,
+	output wire [23:0] xa_lba,
+	output wire [4:0]  xa_count,
+	input  wire        xa_pop,
+	input  wire        xa_we,
+	input  wire [31:0] xa_wdata,
+	output wire [12:0] xa_level,
+	output wire [7:0]  xa_gen,
+	output wire        xa_filt,
 
 	// --- DDR3 line interface -------------------------------------------------------
 	output wire [23:0]  d_addr,
@@ -157,6 +173,7 @@ module ps1_top (
 	// the instruction-cache check: the first word it got wrong, and how many it checked
 	output reg  [31:0] dbg_icv_pc, dbg_icv_got, dbg_icv_want, dbg_icv_n,
 	input  wire [15:0] joy1,           // the web UI's pad, pressed bits in PS1 order
+	input  wire [15:0] joy2,           // the second pad, in slot 2
 	input  wire        cap_every_vsync,   // frame capture at every vertical sync (see ps1_gpu)
 	input  wire        vram_flush,     // pulse: the VRAM cache writes its dirty lines back (for host dumps)
 	output wire        vram_flush_busy,
@@ -744,7 +761,8 @@ module ps1_top (
 				hf_line[host_windex[3:2]*32 +: 32] <= host_wdata;
 				if (host_windex[3:2] == 2'd3) begin
 					hf_req_r  <= 1'b1;
-					hf_addr_r <= card_fill ? CARD_LINE + {11'd0, host_windex[16:4]}
+					hf_addr_r <= card2_fill ? CARD_LINE + 24'h2000 + {11'd0, host_windex[16:4]}
+					           : card_fill ? CARD_LINE + {11'd0, host_windex[16:4]}
 					                       : BIOS_LINE + {5'd0, host_windex[18:4]};
 				end
 			end
@@ -790,7 +808,7 @@ module ps1_top (
 	// The memory card shares it too, last in line. Replies come back in order
 	// but carry no owner, so only ONE read is out on this port at a time (p4_rd),
 	// and it remembers whose it is (p4_mc).
-	wire [12:0]  mc_line; wire mc_req, mc_we; wire [127:0] mc_wdata;
+	wire [13:0]  mc_line; wire mc_req, mc_we; wire [127:0] mc_wdata;
 	reg          p4_rd, p4_mc;
 	wire         hr_turn = hr_req && !hf_req_r && !vz_active && !p4_rd;
 	wire         mc_turn = mc_req && !hf_req_r && !vz_active && !hr_req && (mc_we || !p4_rd);
@@ -808,7 +826,7 @@ module ps1_top (
 			end
 		end
 	end
-	wire [23:0]  hf_p_addr  = vz_active ? {8'd0, vz_line[15:0]} : hr_turn ? hr_addr : mc_turn ? CARD_LINE + {11'd0, mc_line} : hf_addr_r;
+	wire [23:0]  hf_p_addr  = vz_active ? {8'd0, vz_line[15:0]} : hr_turn ? hr_addr : mc_turn ? CARD_LINE + {10'd0, mc_line} : hf_addr_r;
 	wire [127:0] hf_p_wdata = vz_active ? 128'd0 : mc_turn ? mc_wdata : hf_line;
 	wire         hf_p_we    = hr_turn ? 1'b0 : mc_turn ? mc_we : 1'b1;
 	// port 3: the display frame
@@ -861,7 +879,7 @@ module ps1_top (
 	ps1_sio u_sio (
 		.clk(clk), .rst(core_rst),
 		.sel(pad_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[3:0]), .be(c_be), .wdata(c_dout), .rdata(sio_rdata),
-		.buttons(joy1), .irq(sio_irq),
+		.buttons(joy1), .buttons2(joy2), .irq(sio_irq), .card2_in(card2_in),
 		.rst_q(rst), .card_in(card_in),
 		.m_line(mc_line), .m_req(mc_req), .m_we(mc_we), .m_wdata(mc_wdata),
 		.m_ready(mc_ready), .m_valid(mc_valid), .m_rdata(p_rdata[639:512]),
@@ -872,6 +890,8 @@ module ps1_top (
 	wire [31:0] cd_rdata;
 	wire        cd_irq;
 	wire        cd_dma_rd, cd_dma_rvalid, cd_dma_go; wire [31:0] cd_dma_rdata, cd_dma_go_info; wire [15:0] cd_dma_words;
+	wire signed [15:0] cd_audio_l, cd_audio_r;   // CD-DA / XA, to the SPU
+	wire        cd_tick;                         // the SPU's 44.1 kHz tick (made further down)
 	wire [23:0] cd_fill_lba; wire [3:0] cd_fill_room; wire cd_fill_run; wire [31:0] cd_dbg, cd_dbg_cmds, cd_dbg_setloc, cd_dbg_seek, cd_dbg_hdr;
 	assign cd_fill_lba_o = cd_fill_lba; assign cd_fill_room_o = cd_fill_room; assign cd_fill_run_o = cd_fill_run; assign cd_dbg_o = cd_dbg; assign cd_dbg_cmds_o = cd_dbg_cmds; assign cd_dbg_setloc_o = cd_dbg_setloc; assign cd_dbg_seek_o = cd_dbg_seek; assign cd_dbg_hdr_o = cd_dbg_hdr; assign cd_dma_words_o = cd_dma_words;
 	ps1_cdrom u_cd (
@@ -882,7 +902,11 @@ module ps1_top (
 		.fill_lba(cd_fill_lba), .fill_room(cd_fill_room), .fill_run(cd_fill_run),
 		.disc_in(cd_disc_in), .sb_we(cd_sb_we), .sb_addr(cd_sb_addr), .sb_data(cd_sb_data), .sb_done(cd_sb_done), .sb_lba(cd_sb_lba), .sb_abort(1'b0),
 		.dbg(cd_dbg), .dbg_cmds(cd_dbg_cmds), .dbg_setloc(cd_dbg_setloc), .dbg_seek(cd_dbg_seek), .dbg_hdr(cd_dbg_hdr),
-		.ev_v(cd_dma_go), .ev_data(cd_dma_go_info), .trace_idx(cd_trace_idx), .trace_data(cd_trace_data), .trace_wp(cd_trace_wp)
+		.ev_v(cd_dma_go), .ev_data(cd_dma_go_info), .trace_idx(cd_trace_idx), .trace_data(cd_trace_data), .trace_wp(cd_trace_wp),
+		.toc_we(toc_we), .toc_addr(toc_addr), .toc_data(toc_data),
+		.tick(cd_tick), .cd_l(cd_audio_l), .cd_r(cd_audio_r),
+		.xa_lba(xa_lba), .xa_count(xa_count), .xa_pop(xa_pop),
+		.xa_we(xa_we), .xa_wdata(xa_wdata), .xa_level(xa_level), .xa_gen(xa_gen), .xa_filt(xa_filt)
 	);
 	// the SPU's side of DMA channel 4, its memory port and its interrupt
 	wire        spu_dma_wr, spu_dma_ready, spu_dma_rd, spu_dma_rvalid, spu_irq;
@@ -949,10 +973,12 @@ module ps1_top (
 		end
 	end
 	wire [31:0] spu_rdata;
+	assign cd_tick = spu_tick;
 	ps1_spu u_spu (
 		.clk(clk), .rst(core_rst),
 		.sel(spu_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[9:0]), .be(c_be), .wdata(c_dout), .rdata(spu_rdata),
 		.tick(spu_tick), .irq(spu_irq),
+		.cd_l(cd_audio_l), .cd_r(cd_audio_r),
 		.dma_wr(spu_dma_wr), .dma_wdata(spu_dma_wdata), .dma_ready(spu_dma_ready),
 		.dma_rd(spu_dma_rd), .dma_rdata(spu_dma_rdata), .dma_rvalid(spu_dma_rvalid),
 		.m_addr(sp_m_addr), .m_req(sp_m_req), .m_we(sp_m_we), .m_wdata(sp_m_wdata), .m_wmask(sp_m_wmask),

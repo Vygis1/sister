@@ -35,11 +35,15 @@ module tb_ps1_spu;
 	wire [23:0] m_addr; wire m_req, m_we; wire [127:0] m_wdata; wire [15:0] m_wmask;
 	reg         m_ready = 0; reg [127:0] m_rdata = 0; reg m_valid = 0;
 	wire [31:0] out_lr; wire out_we;
+	// CD audio in: a known value every tick. The script never sets SPUCNT bit 0, so
+	// none of it reaches the mix -- but the capture buffers take it anyway, as the
+	// chip's do (psx-spx: CD capture is always active)
+	reg  [15:0] cdl = 16'h0000, cdr = 16'h0000;
 
 	ps1_spu #(.SPU_LINE(SPU_LINE)) dut (
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .addr(addr), .be(be), .wdata(wdata), .rdata(rdata),
-		.tick(tick), .irq(irq),
+		.tick(tick), .cd_l(cdl), .cd_r(cdr), .irq(irq),
 		.dma_wr(dma_wr), .dma_wdata(dma_wdata), .dma_ready(dma_ready),
 		.dma_rd(1'b0), .dma_rdata(dma_rdata), .dma_rvalid(dma_rvalid),
 		.m_addr(m_addr), .m_req(m_req), .m_we(m_we), .m_wdata(m_wdata), .m_wmask(m_wmask),
@@ -112,6 +116,41 @@ module tb_ps1_spu;
 	end
 
 	integer t, si, c, nz;
+
+	// --- the capture buffers: what each tick should leave in SPU RAM -------------------
+	// CD left at 000h, CD right at 400h, voice 1 at 800h, voice 3 at C00h, a halfword a
+	// tick at position 0..511 (DuckStation's WriteToCaptureBuffers). The CD values are
+	// this bench's own; the voices' are the SPU's voice outputs of that tick.
+	reg  [15:0] cap_x [0:3][0:511];
+	reg         cap_seen [0:511];
+	integer     ncap = 0, cap_prev = -1, cap_seq_bad = 0, ci, ck;
+	initial for (ci = 0; ci < 512; ci = ci + 1) cap_seen[ci] = 1'b0;
+	always @(posedge clk) if (dut.es == 5'd30 && dut.spucnt[15]) begin
+		cap_x[0][dut.cap_i] <= cdl; cap_x[1][dut.cap_i] <= cdr;
+		cap_x[2][dut.cap_i] <= dut.v1_out; cap_x[3][dut.cap_i] <= dut.v3_out;
+		cap_seen[dut.cap_i] <= 1'b1;
+		if (cap_prev >= 0 && dut.cap_i != ((cap_prev + 1) % 512)) cap_seq_bad = cap_seq_bad + 1;
+		cap_prev = dut.cap_i; ncap = ncap + 1;
+
+	end
+	// and every capture write as it goes out, so a voice that sounds only for a
+	// while is checked while it does (the buffers end up holding the last lap only)
+	integer     capw = 0, capw_bad = 0, capw_v1 = 0, cw_line, cw_j, cw_pos;
+	always @(posedge clk) if (m_req && m_ready && m_we && dut.m_kind == 2'd3) begin
+		cw_line = m_addr - SPU_LINE;
+		cw_j = 0; for (mk = 0; mk < 8; mk = mk + 1) if (m_wmask == (16'b11 << (2 * mk))) cw_j = mk + 8;
+		cw_pos = (cw_line % 64) * 8 + (cw_j - 8);
+		capw = capw + 1;
+		if (cw_line >= 256 || cw_j < 8 || m_wdata[(cw_j - 8) * 16 +: 16] !== cap_x[cw_line / 64][cw_pos]) begin
+			capw_bad = capw_bad + 1;
+			if (capw_bad <= 6) $display("  FAIL capture write: line %0d mask %04h data %04h, want %04h", cw_line, m_wmask,
+			                            m_wdata[(cw_j - 8) * 16 +: 16], cap_x[cw_line / 64][cw_pos]);
+		end
+		if (cw_line / 64 == 2 && m_wdata[(cw_j - 8) * 16 +: 16] != 0) capw_v1 = capw_v1 + 1;
+	end
+	function [15:0] spu_hw; input integer byte_addr;
+		spu_hw = mem[byte_addr >> 4][(byte_addr & 15) * 8 +: 16];
+	endfunction
 	initial begin
 		#(64'd200_000_000);
 		$display("tb_ps1_spu: TIMED OUT (samples %0d, dma_ready %b, fifo level %0d, wc_valid %b wc_flush %b m_req %b es %0d)",
@@ -162,6 +201,7 @@ module tb_ps1_spu;
 			end
 			if (t == TICKS) t = TICKS + 1;
 			else begin
+				cdl = 16'h1000 + t * 7; cdr = 16'h8000 - t * 13;
 				@(negedge clk); tick = 1; @(negedge clk); tick = 0;
 				if (t % 500 == 0) $display("    tick %0d, %0d samples out, %0d mismatches", t, got, errors);
 				repeat (1130) @(posedge clk);
@@ -176,7 +216,37 @@ module tb_ps1_spu;
 		if (got != TICKS) begin $display("  FAIL %0d samples for %0d ticks", got, TICKS); errors = errors + 1; end
 		nz = 0; for (k = 0; k < TICKS; k = k + 1) if (expect[k] != 0) nz = nz + 1;
 		if (nz < TICKS / 2) begin $display("  FAIL the model's output is mostly silence: the test proves nothing"); errors = errors + 1; end
-		if (errors == 0) $display("tb_ps1_spu: all checks passed -- every sample matches the model");
+		// the capture buffers, read out of the memory the SPU wrote them to
+		c = 0;
+		for (ci = 0; ci < 512; ci = ci + 1) if (cap_seen[ci])
+			for (ck = 0; ck < 4; ck = ck + 1)
+				if (spu_hw(ck * 1024 + ci * 2) !== cap_x[ck][ci]) begin
+					c = c + 1;
+					if (c <= 6) $display("  FAIL capture buffer %0d position %0d: %04h, want %04h", ck, ci, spu_hw(ck * 1024 + ci * 2), cap_x[ck][ci]);
+				end
+		errors = errors + c;
+		$display("  capture: %0d ticks, %0d writes (%0d wrong, %0d of voice 1 sounding); in memory at the end %0d wrong; %0d out of sequence",
+		         ncap, capw, capw_bad, capw_v1, c, cap_seq_bad);
+		errors = errors + capw_bad;
+		if (capw != 4 * ncap) begin $display("  FAIL capture: %0d writes for %0d ticks", capw, ncap); errors = errors + 1; end
+		if (ncap < 512) begin $display("  FAIL capture: fewer ticks than one lap of the buffers"); errors = errors + 1; end
+		if (cap_seq_bad) begin $display("  FAIL capture: the position did not step by one a tick"); errors = errors + 1; end
+		if (capw_v1 < 30) begin $display("  FAIL capture: voice 1 never sounded, its writes prove nothing (%0d)", capw_v1); errors = errors + 1; end
+		// the IRQ address on a capture position: the interrupt comes when the
+		// buffers are written there, and not before
+		w16(10'h1AA, 16'hC000);                                   // IRQ off: acknowledge
+		c = (dut.cap_i + 8) & 9'h1FC;                             // a position a few ticks ahead, 8-byte aligned
+		w16(10'h1A4, (16'd2 << 7) | (c >> 2));                    // in the voice-1 buffer
+		w16(10'h1AA, 16'hC040);                                   // IRQ on
+		nz = 0;
+		for (t = 0; t < 20 && !irq; t = t + 1) begin
+			if (dut.cap_i == c) nz = 1;                           // reached it
+			@(negedge clk); tick = 1; @(negedge clk); tick = 0; repeat (1130) @(posedge clk);
+		end
+		if (!irq) begin $display("  FAIL capture IRQ: none at position %0d", c); errors = errors + 1; end
+		else if (!nz && dut.cap_i != ((c + 1) & 9'h1FF)) begin $display("  FAIL capture IRQ: early, at position %0d for %0d", dut.cap_i, c); errors = errors + 1; end
+		else $display("  capture IRQ at position %0d", c);
+		if (errors == 0) $display("tb_ps1_spu: all checks passed -- every sample matches the model, and the capture buffers");
 		else             $display("tb_ps1_spu: FAIL -- %0d mismatches", errors);
 		$finish;
 	end
