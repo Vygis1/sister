@@ -44,7 +44,8 @@ module regfile #(
 	parameter        CORE_SMS = 1,
 	parameter        CORE_MD  = 0,
 	parameter        MD_DDR3  = 0,
-	parameter        CORE_PS1 = 0
+	parameter        CORE_PS1 = 0,
+	parameter        CORE_N64 = 0
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -300,7 +301,7 @@ module regfile #(
 	localparam MD_ONLY = (CORE_MD && !CORE_NES && !CORE_SMS);
 
 	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1),
+	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),
@@ -387,7 +388,7 @@ module regfile #(
 			// outside -- both are a black screen -- and the board gets blamed for
 			// the design or the other way round. One bit ends that.
 			16'h0010: if (req_we) bus_err = 2'd2;
-			          else bus_rdata = {30'd0, (MD_DDR3 != 0) || (CORE_PS1 != 0), d_calibrated};
+			          else bus_rdata = {30'd0, (MD_DDR3 != 0) || (CORE_PS1 != 0) || (CORE_N64 != 0), d_calibrated};
 			default:  bus_err = 2'd1;
 		endcase
 

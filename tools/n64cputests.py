@@ -19,22 +19,41 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, '..', 'build', 'n64tests')
 
 
-def score(w, h, rgb, x0=500):
-    """rows of green (PASS) and red (FAIL) text in the result column"""
+def score(w, h, rgb):
+    """PASS and FAIL rows: in each band of text, the rightmost coloured box --
+    if it is four characters wide (a PASS or FAIL box; headers and labels are
+    wider) -- green for PASS, red for FAIL"""
+    def kind(x, y):
+        p = (y * w + x) * 3
+        R, G, B = rgb[p], rgb[p + 1], rgb[p + 2]
+        if G >= 100 and R < 60 and B < 60: return 'g'
+        if R >= 100 and G < 60 and B < 60: return 'r'
+        if R > 150 and G > 150 and B > 150: return 'w'
+        return None
     passes = fails = 0
-    state = None
-    for y in range(16, h):
-        g = r = 0
-        for x in range(x0, w):
-            p = (y * w + x) * 3
-            R, G, B = rgb[p], rgb[p + 1], rgb[p + 2]
-            if G > 150 and R < 100: g += 1
-            elif R > 150 and G < 100 and B < 100: r += 1
-        now = 'g' if g > 2 else 'r' if r > 2 else None
-        if now and now != state:
-            if now == 'g': passes += 1
+    y = 0
+    while y < h:
+        if not any(kind(x, y) in ('g', 'r') for x in range(0, w, 2)):
+            y += 1
+            continue
+        top = y
+        while y < h and any(kind(x, y) in ('g', 'r') for x in range(0, w, 2)):
+            y += 1
+        mid = (top + y) // 2
+        # the rightmost coloured pixel, and the box it belongs to
+        x = w - 1
+        while x >= 0 and kind(x, mid) not in ('g', 'r'):
+            x -= 1
+        if x < 0:
+            continue
+        colour, right, gap = kind(x, mid), x, 0
+        while x >= 0 and gap <= 2:
+            gap = gap + 1 if kind(x, mid) is None else 0
+            x -= 1
+        width = right - x - gap
+        if 24 <= width <= 44:
+            if colour == 'g': passes += 1
             else: fails += 1
-        state = now
     return passes, fails
 
 

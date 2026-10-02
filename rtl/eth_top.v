@@ -28,7 +28,8 @@ module eth_top #(
 	// The Mega Drive's cartridge in DDR3 rather than block RAM. Only meaningful
 	// with CORE_MD, and it brings the whole memory controller in with it.
 	parameter MD_DDR3  = 0,
-	parameter CORE_PS1 = 0
+	parameter CORE_PS1 = 0,
+	parameter CORE_N64 = 0
 )(
 	input  wire       sys_clk,       // 50 MHz onboard oscillator, ball U22
 	input  wire       eth_refclk,    // 50 MHz from the LAN8720, U4 pin 47
@@ -143,7 +144,7 @@ module eth_top #(
 	wire [15:0]  d_wdata_wmask;
 	wire         d_ready, d_valid, d_calibrated;
 
-	localparam HAS_DDR3 = MD_DDR3 || CORE_PS1;
+	localparam HAS_DDR3 = MD_DDR3 || CORE_PS1 || CORE_N64;
 	generate if (HAS_DDR3) begin : g_ddr3
 		// MIG wants 200 MHz for both its system clock and its IDELAY reference,
 		// and the board has a 50 MHz oscillator. One MMCM: 50 x 16 = 800 MHz in
@@ -243,7 +244,7 @@ module eth_top #(
 	assign eth_mdio = mdio_oe ? mdio_out : 1'bz;
 
 	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1)) u_regs (
+	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64)) u_regs (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wdata_wmask),
 		.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid),
 		.d_calibrated(d_calibrated),

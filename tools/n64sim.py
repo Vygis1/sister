@@ -85,6 +85,66 @@ def compare_ram(steps, png=None):
     return not bad
 
 
+def compare_final(png=None):
+    """Both run to the end (the model by its rule, the bench with FINISH1): the
+    screens they leave must be the same. The rest of RDRAM may differ -- how
+    long a wait loop spun is not deterministic between the two."""
+    rom = open(os.path.join(OUT, 'rom.path')).read().strip()
+    m = n64model.N64(open(rom, 'rb').read())
+    m.stub_boot()
+    n64model.run(m, 20_000_000)
+    lines = open(os.path.join(OUT, 'rtl_rdram.hex')).read().split()
+    rtl = bytearray(b''.join(bytes.fromhex(l) for l in lines))
+    origin, width = m.vi[1] & 0xFFFFFF, m.vi[2] & 0xFFF
+    bpp = 4 if (m.vi[0] & 3) == 3 else 2
+    w, h, rgb = m.framebuffer()
+    size = width * h * bpp
+    same = rtl[origin:origin + size] == m.rdram[origin:origin + size]
+    print('screen (%dx%d at %06x): %s' % (w, h, origin, 'the same' if same else 'DIFFERENT'))
+    if png:
+        m.rdram = rtl
+        w, h, rgb = m.framebuffer()
+        n64model.write_png(png, w, h, rgb)
+        print("the RTL's screen -> %s" % png)
+    return same
+
+
+def system_prepare(rom_path):
+    """the cartridge as the PC sends it: little-endian 32-bit words, the first
+    megabyte and its header (what the boot ROM copies)"""
+    os.makedirs(OUT, exist_ok=True)
+    rom = open(rom_path, 'rb').read()[:0x101000]
+    rom = rom.ljust((len(rom) + 3) // 4 * 4, bytes(1))
+    with open(os.path.join(OUT, 'cart.hex'), 'w') as f:
+        for i in range(0, len(rom), 4):
+            f.write('%08x' % int.from_bytes(rom[i:i + 4], 'little') + '\n')
+    open(os.path.join(OUT, 'rom.path'), 'w').write(os.path.abspath(rom_path))
+    print('wrote %s (%d words)' % (os.path.join(OUT, 'cart.hex'), len(rom) // 4))
+
+
+def system_check(png=None):
+    """tb_n64_top's screen against the model's: RDRAM's lines are little-endian"""
+    rom = open(os.path.join(OUT, 'rom.path')).read().strip()
+    m = n64model.N64(open(rom, 'rb').read())
+    m.stub_boot()
+    n64model.run(m, 20_000_000)
+    rtl = bytearray()
+    for l in open(os.path.join(OUT, 'sys_rdram.hex')).read().split():
+        rtl += bytes.fromhex(l)[::-1]           # a 128-bit line printed MSB first: byte 0 is last
+    origin, width = m.vi[1] & 0xFFFFFF, m.vi[2] & 0xFFF
+    bpp = 4 if (m.vi[0] & 3) == 3 else 2
+    w, h, rgb = m.framebuffer()
+    size = width * h * bpp
+    same = rtl[origin:origin + size] == m.rdram[origin:origin + size]
+    print('screen (%dx%d at %06x): %s' % (w, h, origin, 'the same' if same else 'DIFFERENT'))
+    if png:
+        m.rdram = rtl
+        w, h, rgb = m.framebuffer()
+        n64model.write_png(png, w, h, rgb)
+        print("tb_n64_top's screen -> %s" % png)
+    return same
+
+
 def compare():
     a = open(os.path.join(OUT, 'model.trace')).read().split('\n')
     b = open(os.path.join(OUT, 'rtl.trace')).read().split('\n')
@@ -101,6 +161,15 @@ def compare():
 
 
 if __name__ == '__main__':
+    if '--system-check' in sys.argv:
+        png = sys.argv[sys.argv.index('--png') + 1] if '--png' in sys.argv else None
+        sys.exit(0 if system_check(png) else 1)
+    if '--system' in sys.argv:
+        system_prepare(sys.argv[1])
+        sys.exit(0)
+    if '--final' in sys.argv:
+        png = sys.argv[sys.argv.index('--png') + 1] if '--png' in sys.argv else None
+        sys.exit(0 if compare_final(png) else 1)
     if '--compare' in sys.argv:
         ok = compare()
         if '--ram' in sys.argv:

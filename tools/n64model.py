@@ -119,22 +119,31 @@ class VR4300:
         self.probe_fail = 0
         self.entry = TLBEntry()   # EntryHi / EntryLo0/1 / PageMask staging
         self.context_ptebase = 0
-        self.context_bad = 0
+        self.context_bad = 0x7FFFF             # power-on: BadVPN2 all ones (Context reads 007FFFF0)
         self.xcontext_ptebase = 0
         self.xcontext_bad = 0
         self.xcontext_region = 0
         self.wired = 0
-        self.badvaddr = 0
+        self.badvaddr = M64                    # power-on: all ones
         self.count = 0        # in half-cycles: Count = count >> 1
         self.compare = 0      # likewise
         self.status = 0x34000000 | (1 << 22) | (1 << 2)   # reset: BEV, ERL; IPL3 leaves 0x34000000
-        self.cause = 0
-        self.epc = 0
-        self.errorepc = 0
+        # power-on Cause: BD set, CE 3, ExcCode 31 (B000007C); IPL3 writes only IP0/IP1
+        self.cause = 0xB000007C
+        self.epc = M64
+        self.errorepc = M64
         self.config = 0x7006E463
         self.taglo = 0
         self.latch = 0
+        # Power-on TLB contents are garbage that matches nothing a program uses
+        # (krom's TLB tests take a refill miss at address 0x10 with no setup). An
+        # all-zero entry would match page 0 and raise "invalid" instead; so each
+        # entry starts where libultra's osUnmapTLBAll puts it, on a KSEG0 page,
+        # which never goes through the TLB.
         self.tlb = [TLBEntry() for _ in range(32)]
+        for i, e in enumerate(self.tlb):
+            e.vpn = 0x80000000 + i * 0x2000
+            e.sync()
         self.random_state = 31
         self.instructions = 0
         self.decoded = {}
@@ -754,7 +763,9 @@ class N64:
         self.ai = [0] * 6
         self.cpu = VR4300(self)
         self.vi_cycle = 0
-        self.vi_polls = 0          # reads of VI_V_CURRENT: a finished test waits on them
+        self.vi_polls = 0          # reads of VI_V_CURRENT
+        self.vi_frames = 0
+        self.rdram_writes = 0      # a finished test has stopped writing
 
     # --- the bus ------------------------------------------------------------------------
     def read(self, a, n):
@@ -786,6 +797,7 @@ class N64:
     def write(self, a, n, v):
         if a < self.RDRAM:
             self.rdram[a:a + n] = v.to_bytes(n, 'big')
+            self.rdram_writes += 1
             return
         if 0x04000000 <= a < 0x04002000:
             m = self.dmem if a < 0x04001000 else self.imem
@@ -894,9 +906,11 @@ class N64:
         return 1 if (self.mi_intr & self.mi_mask) else 0
 
     # --- the VI's time --------------------------------------------------------------------
-    # NTSC: 525 half-lines a frame, 60 frames a second, at 93.75 MHz -- about
-    # 2,976 instructions a half-line, counting one instruction a cycle.
-    HALFLINE = 2976
+    # NTSC is 525 half-lines a frame at 60 frames a second: about 2,976 cycles a
+    # half-line at 93.75 MHz. The model counts instructions, not cycles, and no
+    # test it runs depends on the true rate (the timing tests are for hardware),
+    # so its frame is short: waiting for a scanline costs a fraction as much.
+    HALFLINE = 200
 
     def vi_line(self):
         """V_CURRENT: the half-line being scanned, 0 .. V_SYNC"""
@@ -905,8 +919,12 @@ class N64:
 
     def vi_tick(self):
         self.vi_cycle += 1
-        if self.vi_cycle % self.HALFLINE == 0 and self.vi_line() == (self.vi[3] & 0x3FF):
-            self.mi_intr |= 0x08
+        if self.vi_cycle % self.HALFLINE == 0:
+            line = self.vi_line()
+            if line == (self.vi[3] & 0x3FF):
+                self.mi_intr |= 0x08
+            if line == 0:
+                self.vi_frames += 1
 
     # --- the boot, without a PIF ROM -------------------------------------------------------
     def fast_boot(self):
@@ -921,7 +939,7 @@ class N64:
                          (0x310, 0x3F), (0x314, 0), (0x318, self.RDRAM)):
             self.rdram[off:off + 4] = val.to_bytes(4, 'big')
         c = self.cpu
-        c.status = 0x34000000
+        c.status = STATUS_AFTER_IPL3
         c.r[29] = 0xFFFFFFFFA4001FF0                  # sp
         c.r[20] = 1                                   # s4: NTSC
         c.r[22] = 0x3F                                # s6: CIC seed (6102)
@@ -969,6 +987,13 @@ class N64:
         return width, height, bytes(out)
 
 
+# Status as the cartridge's boot code (IPL3) leaves it: CU1, FR, SR, and
+# 64-bit addressing in all three modes (KX SX UX). krom's exception tests read
+# it back from hardware as 241000E0. (34000000, which some emulators use, is
+# the state before IPL3 runs.)
+STATUS_AFTER_IPL3 = 0x241000E0
+
+
 def boot_stub(entry):
     """what runs at the reset address instead of the PIF ROM: Status, the stack,
     the CIC registers the boot code leaves (s4 = NTSC, s6 = the 6102 seed), and a
@@ -976,7 +1001,7 @@ def boot_stub(entry):
     sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
     from mipsasm import Asm, T0, SP, S4, S6, ZERO
     a = Asm(org=0xBFC00000)
-    a.lui(T0, 0x3400); a.mtc0(T0, 12)
+    a.lui(T0, STATUS_AFTER_IPL3 >> 16); a.ori(T0, T0, STATUS_AFTER_IPL3 & 0xFFFF); a.mtc0(T0, 12)
     a.lui(SP, 0xA400); a.ori(SP, SP, 0x1FF0)
     a.ori(S4, ZERO, 1); a.ori(S6, ZERO, 0x3F)
     a.lui(T0, entry >> 16); a.ori(T0, T0, entry & 0xFFFF)
@@ -994,17 +1019,21 @@ def write_png(path, w, h, rgb):
 
 
 def run(m, steps, idle=200_000, trace=False):
-    """Run until `steps`, or until the program is plainly finished: it has read
-    the VI's current line a thousand times (krom's tests wait on scanlines only
-    in their last loop), or it has spun on one address for `idle` steps."""
+    """Run until `steps`, or until the program is plainly finished: two whole
+    video frames in which it wrote nothing to RDRAM (a finished test only waits
+    on the VI), or `idle` steps spun on one address."""
     c = m.cpu
     seen_pc, same = None, 0
+    frame, writes, quiet = m.vi_frames, m.rdram_writes, 0
     for i in range(steps):
         if trace:
             print('%016x %08x' % (c.pc, m.read(c.translate(c.pc, False, 4), 4)))
         c.step()
-        if m.vi_polls > 1000:
-            break
+        if m.vi_frames != frame:
+            quiet = quiet + 1 if m.rdram_writes == writes else 0
+            frame, writes = m.vi_frames, m.rdram_writes
+            if quiet >= 2:
+                break
         if i & 63 == 0:
             if c.pc == seen_pc:
                 same += 64

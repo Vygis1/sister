@@ -1202,16 +1202,37 @@ NES_PRG, NES_CHR = 0x0009_0000, 0x000D_0000
 # The Mega Drive's cartridge is in DDR3 now, so the limit is the machine's own:
 # 4 MB is the largest cartridge one ever had. The other two still live in the
 # block RAM they share.
-CART_LIMIT = {0: 256 * 1024, 1: 256 * 1024, 2: 4 * 1024 * 1024, 3: 512 * 1024}
-CONSOLE_NAMES = {0: "NES", 1: "Master System", 2: "Mega Drive", 3: "PlayStation"}
+CART_LIMIT = {0: 256 * 1024, 1: 256 * 1024, 2: 4 * 1024 * 1024, 3: 512 * 1024,
+              4: 16 * 1024 * 1024}     # the N64: the fill's word index is 22 bits
+CONSOLE_NAMES = {0: "NES", 1: "Master System", 2: "Mega Drive", 3: "PlayStation", 4: "Nintendo 64"}
 
 
 def cores_built():
     """Which machines are in the image that is currently running."""
     try:
-        return (talk(link.read, NES_CONSOLE) >> 16) & 0xF
+        return (talk(link.read, NES_CONSOLE) >> 16) & 0xFF
     except (fl.LinkError, TimeoutError):
         return 0
+
+
+def n64_rom(rom):
+    """The cartridge in its native byte order (.z64), or None if it is not an
+    N64 ROM. Dumps come in three orders, told apart by the first word:
+    80371240 as is, 37804012 byte-swapped in pairs (.v64), 40123780 with
+    each word reversed (.n64)."""
+    head = rom[:4]
+    if head == bytes((0x80, 0x37, 0x12, 0x40)):
+        return rom
+    if head == bytes((0x37, 0x80, 0x40, 0x12)):
+        b = bytearray(rom[:len(rom) & ~1])
+        b[0::2], b[1::2] = rom[1:len(b):2], rom[0:len(b):2]
+        return bytes(b)
+    if head == bytes((0x40, 0x12, 0x37, 0x80)):
+        b = bytearray(rom[:len(rom) & ~3])
+        for k in range(4):
+            b[k::4] = rom[3 - k:len(b):4]
+        return bytes(b)
+    return None
 
 
 def is_megadrive(rom):
@@ -1687,6 +1708,63 @@ def api_card_select():
     return jsonify(ok=True, slot=slot, path=os.path.abspath(path))
 
 
+@app.route("/api/n64/frame")
+def api_n64_frame():
+    """The N64's screen as a PNG: the VI says where the framebuffer is and what
+    shape (ctrl 0x150..0x15C); its lines are read out of RDRAM one at a time
+    through the line window. Slow -- a 640x480 picture is 76,800 reads -- but it
+    needs nothing on the board beyond what is already there."""
+    import zlib
+    NCTRL = 0x0008_0000
+    status = talk(link.read, NCTRL + 0x150)
+    origin = talk(link.read, NCTRL + 0x154) & 0xFFFFFF
+    width = talk(link.read, NCTRL + 0x158) & 0xFFF
+    yscale = talk(link.read, NCTRL + 0x15C) & 0xFFF
+    kind = status & 3
+    if kind < 2 or not width:
+        return jsonify(error="the VI shows no framebuffer", status=status), 404
+    bpp = 4 if kind == 3 else 2
+    height = min(480, (yscale * 240) >> 10) if yscale else 240
+    nbytes = width * height * bpp
+    first, last = origin >> 4, (origin + nbytes + 15) >> 4
+    L = fl.Link(link.addr[0], link.addr[1], timeout=0.05, retries=10)
+    raw = bytearray()
+    with hr_lock:
+        for line in range(first, last):
+            L.write(NES + 0x7C, line)
+            for _ in range(200):
+                if L.read(NES + 0x7C) >> 31:
+                    break
+            raw += b"".join(struct.pack("<I", L.read(NES + 0x80 + 4 * k)) for k in range(4))
+    raw = raw[origin & 15:(origin & 15) + nbytes]
+    rows = []
+    for y in range(height):
+        r = bytearray(1)
+        for x in range(width):
+            p = (y * width + x) * bpp
+            if bpp == 4:
+                r += raw[p:p + 3]
+            else:
+                v = (raw[p] << 8) | raw[p + 1]
+                r += bytes((((v >> 11) & 31) << 3, ((v >> 6) & 31) << 3, ((v >> 1) & 31) << 3))
+        rows.append(bytes(r))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    png = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(b"".join(rows), 6)) + chunk(b"IEND", b"")
+    return send_file(io.BytesIO(png), mimetype="image/png")
+
+
+@app.route("/api/n64/state")
+def api_n64_state():
+    NCTRL = 0x0008_0000
+    v = [talk(link.read, NCTRL + o) for o in (0x150, 0x154, 0x158, 0x15C, 0x160, 0x14)]
+    return jsonify(vi_status=v[0], vi_origin=v[1], vi_width=v[2], vi_yscale=v[3],
+                   retired=v[4], pc="%08x" % v[5])
+
+
 @app.route("/api/disc/host", methods=["POST"])
 def api_disc_host():
     on = bool((request.get_json(silent=True) or {}).get("on", request.args.get("on", "1") == "1"))
@@ -1958,6 +2036,32 @@ def api_nes_load():
         name = rom[0x120:0x150].decode("ascii", "replace").strip()
         return jsonify(ok=True, console="Mega Drive", prg=len(prg), chr=0,
                        mapper=0, mapper_name=name or "Mega Drive",
+                       mirror="n/a", signed=True)
+
+    # --- Nintendo 64 ---------------------------------------------------------
+    # The header says so (in any of the three byte orders dumps come in). The
+    # cartridge goes into DDR3 at 16 MB through the same fill as every other,
+    # with the CPU held; on release our boot ROM copies the game into RDRAM.
+    z64 = n64_rom(rom)
+    if z64 is not None:
+        if not (cores_built() & 0b1_0000):
+            return jsonify(error="this is a Nintendo 64 cartridge, and the core "
+                                 "running on the board is not the N64. Install "
+                                 "the n64 core first."), 409
+        if len(z64) > CART_LIMIT[4]:
+            z64 = z64[:CART_LIMIT[4]]       # the first 16 MB: enough for every test ROM
+        talk(link.write, NES_CTRL, 0)
+        talk(link.write, NES_CONSOLE, 4)
+        prg = z64.ljust((len(z64) + 3) // 4 * 4, bytes(1))
+        for bank, base in enumerate(range(0, len(prg), CART_BANK_BYTES)):
+            chunk = prg[base:base + CART_BANK_BYTES]
+            talk(link.write, NES_CART_BANK, bank)
+            write_pages(NES_PRG, list(struct.unpack(f"<{len(chunk)//4}I", chunk)))
+        talk(link.write, NES_FILL_END, 1)
+        talk(link.write, NES_CTRL, 1)
+        name = z64[0x20:0x34].decode("ascii", "replace").strip()
+        return jsonify(ok=True, console="Nintendo 64", prg=len(prg), chr=0,
+                       mapper=0, mapper_name=name or "Nintendo 64",
                        mirror="n/a", signed=True)
 
     # --- PlayStation ---------------------------------------------------------

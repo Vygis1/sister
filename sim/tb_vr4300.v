@@ -57,10 +57,29 @@ module tb_vr4300;
 		else if (a >= 32'h1FC0_0000 && a < 32'h1FC0_07C0) fetch32 = pif[(a - 32'h1FC0_0000) >> 2];
 		else fetch32 = 32'd0;
 	endfunction
+	// --- the VI, as far as a test needs it: its registers, and a line counter -----------
+	// a half-line every 200 clocks (the model's pace: tools/n64model.py HALFLINE)
+	reg  [31:0] vi_reg [0:15];
+	reg  [31:0] hl_clk = 0;
+	reg  [9:0]  vi_line = 0;
+	integer     frames = 0, wr_count = 0;
+	initial for (i = 0; i < 16; i = i + 1) vi_reg[i] = 0;
+	wire [9:0]  vsync = (vi_reg[6][9:0] != 0) ? vi_reg[6][9:0] : 10'd525;
+	always @(posedge clk) begin
+		if (hl_clk == 199) begin
+			hl_clk <= 0;
+			if (vi_line >= vsync) begin vi_line <= 0; frames = frames + 1; end
+			else vi_line <= vi_line + 1;
+		end else hl_clk <= hl_clk + 1;
+	end
+	function [31:0] reg32; input [31:0] a;
+		if (a >= 32'h0440_0000 && a < 32'h0440_0038) reg32 = (a[5:2] == 4'd4) ? {22'd0, vi_line} : vi_reg[a[5:2]];
+		else reg32 = 32'd0;            // the rest: zero (the CPU tests only write them)
+	endfunction
 	function [63:0] read64; input [31:0] a;
 		if (a < 32'h0080_0000) read64 = ram[a[22:3]];
 		else if (a >= 32'h1FC0_0000 && a < 32'h1FC0_07C0) read64 = {pif[(a - 32'h1FC0_0000) >> 2], pif[((a - 32'h1FC0_0000) >> 2) + 1]};
-		else read64 = 64'd0;           // registers: zero (the CPU tests only write them)
+		else read64 = {reg32({a[31:3], 3'b000}), reg32({a[31:3], 3'b100})};
 	endfunction
 
 	integer WAITS = 0;
@@ -86,9 +105,15 @@ module tb_vr4300;
 	reg [31:0] da; reg [2:0] dwt; reg dpend = 0; integer bk;
 	always @(posedge clk) begin
 		if (d_req) begin
-			if (d_we && d_addr < 32'h0080_0000)
+			if (d_we && d_addr < 32'h0080_0000) begin
 				for (bk = 0; bk < 8; bk = bk + 1)
 					if (d_be[bk]) ram[d_addr[22:3]][63 - 8 * bk -: 8] <= d_wdata[63 - 8 * bk -: 8];
+				wr_count = wr_count + 1;
+			end
+			if (d_we && d_addr >= 32'h0440_0000 && d_addr < 32'h0440_0038) begin
+				if (d_be[3:0] != 4'd0) vi_reg[{d_addr[5:3], 1'b0}] <= d_wdata[63:32];
+				if (d_be[7:4] != 4'd0) vi_reg[{d_addr[5:3], 1'b1}] <= d_wdata[31:0];
+			end
 			da = d_addr; dwt = waits(0);
 			if (dwt == 0) begin d_ready <= 1'b1; d_rdata <= read64(d_addr); dpend <= 1'b0; end
 			else begin d_ready <= 1'b0; dpend <= 1'b1; end
@@ -101,6 +126,16 @@ module tb_vr4300;
 	// --- the trace ---------------------------------------------------------------------
 	integer f, STEPS = 200000, n = 0;
 	initial if (!$value$plusargs("STEPS%d", STEPS)) STEPS = 200000;
+	// FINISH1: stop instead when the program is done -- two whole frames with no
+	// RDRAM write, which is a finished test waiting on the VI (the model's rule)
+	integer FINISH = 0, last_frame = 0, last_wr = 0, quiet = 0;
+	initial if (!$value$plusargs("FINISH%d", FINISH)) FINISH = 0;
+	reg done = 0;
+	always @(posedge clk) if (FINISH != 0 && frames != last_frame) begin
+		quiet = (wr_count == last_wr) ? quiet + 1 : 0;
+		last_frame = frames; last_wr = wr_count;
+		if (quiet >= 2) done = 1;
+	end
 	initial f = $fopen("../../sim/n64/rtl.trace", "w");
 	always @(posedge clk) begin
 		if (tr_exc) begin $fwrite(f, "X %02x\n", tr_code); n = n + 1; end
@@ -109,7 +144,7 @@ module tb_vr4300;
 			else       $fwrite(f, "%08x\n", tr_pc);
 			n = n + 1;
 		end
-		if (n >= STEPS) begin
+		if (n >= STEPS || done) begin
 			$fclose(f);
 			// RDRAM as the CPU left it: the model's is compared with it, and the
 			// framebuffer in it is the test's screen

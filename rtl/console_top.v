@@ -73,7 +73,10 @@ module console_top #(
 	// The PlayStation. Its own image; shares the DDR3 port the Mega Drive uses
 	// for its cartridge (never both in one bitstream), where it keeps 1 MB of
 	// VRAM. Draws its boot screen from a pre-loaded program.
-	parameter CORE_PS1 = 0
+	parameter CORE_PS1 = 0,
+	// The Nintendo 64 (n64_top.v). Its own image, like the PlayStation's; RDRAM
+	// and the cartridge are in DDR3.
+	parameter CORE_N64 = 0
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -163,12 +166,14 @@ module console_top #(
 	localparam [3:0] CONSOLE_SMS = 4'd1;
 	localparam [3:0] CONSOLE_MD  = 4'd2;
 	localparam [3:0] CONSOLE_PS1 = 4'd3;
+	localparam [3:0] CONSOLE_N64 = 4'd4;
 	// Read by the host rather than assumed, so a build without a given core
 	// reports that honestly instead of selecting it and showing a black screen.
-	localparam [3:0] CORES_BUILT = (CORE_NES ? 4'b0001 : 4'b0000)
-	                             | (CORE_SMS ? 4'b0010 : 4'b0000)
-	                             | (CORE_MD  ? 4'b0100 : 4'b0000)
-	                             | (CORE_PS1 ? 4'b1000 : 4'b0000);
+	localparam [7:0] CORES_BUILT = (CORE_NES ? 8'b0000_0001 : 8'd0)
+	                             | (CORE_SMS ? 8'b0000_0010 : 8'd0)
+	                             | (CORE_MD  ? 8'b0000_0100 : 8'd0)
+	                             | (CORE_PS1 ? 8'b0000_1000 : 8'd0)
+	                             | (CORE_N64 ? 8'b0001_0000 : 8'd0);
 
 	// Which core is selected out of reset: the first one this image actually
 	// contains.
@@ -185,6 +190,7 @@ module console_top #(
 	                               : CORE_SMS ? CONSOLE_SMS
 	                               : CORE_MD  ? CONSOLE_MD
 	                               : CORE_PS1 ? CONSOLE_PS1
+	                               : CORE_N64 ? CONSOLE_N64
 	                                          : CONSOLE_NES;
 
 	wire [15:0] dbg_pc;
@@ -213,7 +219,9 @@ module console_top #(
 	wire [31:0]  ps1_dbg_cause, ps1_dbg_epc, ps1_dbg_dma, ps1_dbg_gpu2, ps1_dbg_disp, ps1_dbg_draw;
 	wire [31:0]  ps1_dbg_v2c, ps1_dbg_c0, ps1_dbg_perf;
 	wire [15:0]  ps1_d_wmask;
-	assign d_wmask = (CORE_PS1 != 0) ? ps1_d_wmask : 16'hFFFF;
+	wire [15:0]  n64_d_wmask;
+	wire [31:0]  n64_vi_status, n64_vi_origin, n64_vi_width, n64_vi_yscale, n64_dbg_pc, n64_retired;
+	assign d_wmask = (CORE_PS1 != 0) ? ps1_d_wmask : (CORE_N64 != 0) ? n64_d_wmask : 16'hFFFF;
 	reg  [5:0]   perf_sel;   // 64 now: the drawing engine, and where in a frame it is busy
 	// --- the debug switches, TIED OFF ----------------------------------------
 	// Each of these kept a second implementation alive so the two could be
@@ -497,6 +505,7 @@ module console_top #(
 	wire sms_sel  = (console_sel == CONSOLE_SMS);
 	wire md_sel   = (console_sel == CONSOLE_MD);
 	wire ps1_sel  = (console_sel == CONSOLE_PS1);
+	wire n64_sel  = (console_sel == CONSOLE_N64);
 	wire core_rst = rst || !run;
 	wire nes_rst  = core_rst || !nes_sel;
 	wire z80_rst  = core_rst || !sms_sel;
@@ -543,7 +552,7 @@ module console_top #(
 			// no explanation, so the write is ignored and the read-back shows
 			// the host what actually happened.
 			16'h0020: begin
-				if (CORES_BUILT[wdata[3:0]]) console_sel <= wdata[3:0];
+				if (wdata[3:0] < 4'd8 && CORES_BUILT[wdata[2:0]]) console_sel <= wdata[3:0];
 				test_mode <= wdata[8];
 			end
 			default: ;
@@ -563,10 +572,10 @@ module console_top #(
 		// NES's PC while the Mega Drive was selected returned a tied-off zero
 		// and looked exactly like a CPU that had stopped -- the most misleading
 		// possible answer, since a stuck PC is the first thing anyone checks.
-		16'h0014: ctrl_rdata = ps1_sel ? ps1_dbg_pc : md_sel ? md_dbg_pc : {16'd0, dbg_pc};
+		16'h0014: ctrl_rdata = ps1_sel ? ps1_dbg_pc : n64_sel ? n64_dbg_pc : md_sel ? md_dbg_pc : {16'd0, dbg_pc};
 		16'h0018: ctrl_rdata = nmi_count;
 		16'h001C: ctrl_rdata = {17'd0, chr_is_ram, prg_last, 4'd0, mapper_id};
-		16'h0020: ctrl_rdata = {12'd0, CORES_BUILT, 7'd0, test_mode, 4'd0, console_sel};
+		16'h0020: ctrl_rdata = {8'd0, CORES_BUILT, 7'd0, test_mode, 4'd0, console_sel};
 		16'h0024: ctrl_rdata = con_count;
 		16'h0028: ctrl_rdata = {16'd0, z80_pc};
 		// Lines the Mega Drive's cache asked for, and lines it got. Equal and
@@ -620,6 +629,13 @@ module console_top #(
 		16'h0138: ctrl_rdata = {card_wq_ovf, 10'd0, card_wq_count, 5'd0, card_wq_sector};   // sector bit 10: the slot
 		16'h013C: ctrl_rdata = {xa_count, 3'd0, xa_lba};
 		16'h0140: ctrl_rdata = {xa_gen, 7'd0, xa_filt, 3'd0, xa_level};   // bit 16: the game filters XA itself
+		// the N64: the VI's registers (where the framebuffer is, and its shape) and
+		// how far the CPU has got -- the host reads the screen out of RDRAM by these
+		16'h0150: ctrl_rdata = n64_vi_status;
+		16'h0154: ctrl_rdata = n64_vi_origin;
+		16'h0158: ctrl_rdata = n64_vi_width;
+		16'h015C: ctrl_rdata = n64_vi_yscale;
+		16'h0160: ctrl_rdata = n64_retired;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -918,12 +934,33 @@ module console_top #(
 		assign md_dbg_mem = 32'd0;
 	end endgenerate
 
+	// --- the Nintendo 64 -------------------------------------------------------------
+	generate if (CORE_N64) begin : g_n64
+		n64_top u_n64 (
+			.clk(clk), .rst(rst),
+			// held in reset (and the cartridge filling) until the host releases it
+			.run(n64_sel && run),
+			.host_windex(md_windex_full), .host_we(prog_we && n64_sel), .host_wdata(wdata),
+			.fill_end(fill_end && n64_sel),
+			.hr_go(hr_go), .hr_line(hr_line), .hr_done(hr_done), .hr_data(hr_data),
+			.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(n64_d_wmask),
+			.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid), .d_calibrated(d_calibrated),
+			.joy1(joy1),
+			.vi_status(n64_vi_status), .vi_origin(n64_vi_origin), .vi_width(n64_vi_width), .vi_yscale(n64_vi_yscale),
+			.dbg_pc(n64_dbg_pc), .dbg_retired(n64_retired)
+		);
+	end else begin : g_n64
+		assign n64_d_wmask = 16'hFFFF;
+		assign n64_vi_status = 32'd0; assign n64_vi_origin = 32'd0; assign n64_vi_width = 32'd0;
+		assign n64_vi_yscale = 32'd0; assign n64_dbg_pc = 32'd0; assign n64_retired = 32'd0;
+	end endgenerate
+
 	// The DDR3 port has exactly one driver: the Mega Drive when its cartridge is
 	// there, the PlayStation when it is the core, and a tie-off when neither uses
 	// memory (NES, Master System). Without this last case the port floats; with
 	// it in the wrong place it fights the core that legitimately drives it, which
 	// is the multi-driven net that showed up the first time PS1 was built.
-	generate if (!((CORE_MD && MD_DDR3) || CORE_PS1)) begin : g_no_mem
+	generate if (!((CORE_MD && MD_DDR3) || CORE_PS1 || CORE_N64)) begin : g_no_mem
 		assign d_addr = 24'd0; assign d_req = 1'b0; assign d_we = 1'b0;
 		assign d_wdata = 128'd0;
 	end endgenerate
@@ -1046,7 +1083,9 @@ module console_top #(
 		assign ps1_a0 = 32'd0; assign ps1_a1 = 32'd0; assign ps1_ra = 32'd0; assign ps1_sp = 32'd0;
 		assign ps1_wa_en = 1'b0; assign ps1_wb_en = 1'b0; assign ps1_wa_reg = 5'd0; assign ps1_wb_reg = 5'd0; assign ps1_wa_val = 32'd0; assign ps1_wb_val = 32'd0;
 		assign ps1_dbg_fill = 32'd0;
-		assign hr_done = 1'b0; assign hr_data = 128'd0;
+		if (!CORE_N64) begin : g_no_hr
+			assign hr_done = 1'b0; assign hr_data = 128'd0;   // the N64 answers these when it is the core
+		end
 		assign card_wq_sector = 11'd0; assign card_wq_count = 5'd0; assign card_wq_ovf = 1'b0;
 		assign xa_lba = 24'd0; assign xa_count = 5'd0; assign xa_level = 13'd0; assign xa_gen = 8'd0; assign xa_filt = 1'b0;
 		assign ps1_node_v = 1'b0; assign ps1_node_addr = 24'd0; assign ps1_node_hdr = 32'd0;

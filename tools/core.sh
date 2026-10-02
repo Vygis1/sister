@@ -4,6 +4,8 @@
 #   ./tools/core.sh nes          just the NES
 #   ./tools/core.sh sms          just the Master System
 #   ./tools/core.sh md           just the Mega Drive
+#   ./tools/core.sh ps1          just the PlayStation
+#   ./tools/core.sh n64          just the Nintendo 64
 #   ./tools/core.sh shell        the golden image
 #   ./tools/core.sh dev          both consoles in one image, for JTAG
 #
@@ -48,9 +50,13 @@ case "${1:-nes}" in
          # The PlayStation keeps 1 MB of VRAM in DDR3, so like the Mega Drive it
          # needs the memory controller. Its boot program is baked into the core.
          EXTRA="-ip $MIG_XCI" ;;
+  n64|nintendo64)
+         NAME=n64;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:1"
+         # RDRAM and the cartridge live in DDR3: the memory controller again.
+         EXTRA="-ip $MIG_XCI" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;
   shell) NAME=shell; TOP=shell_top; XDC=boards/qmtech_a100t/shell_top.xdc ;;
-  *) echo "usage: tools/core.sh [nes|sms|md|ps1|dev|shell]" >&2; exit 1 ;;
+  *) echo "usage: tools/core.sh [nes|sms|md|ps1|n64|dev|shell]" >&2; exit 1 ;;
 esac
 
 LOG="build/core_$NAME.log"

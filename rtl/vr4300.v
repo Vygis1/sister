@@ -33,7 +33,12 @@
 // and byte enables) is taken in a clock where the pipeline advances; its answer
 // (ready, and data) may come any clock after, and stays until the next request.
 // Until it comes the pipeline holds. A cache or plain memory can sit behind
-// either without the pipeline knowing which. The data port is 64 bits wide,
+// either without the pipeline knowing which.
+//
+// The instruction port may ABANDON a request: the fetch behind a taken
+// branch's delay slot is dropped, and with D then empty the next fetch is
+// issued without waiting for its answer. A new request supersedes any
+// unanswered one; memory must not deliver the old answer for the new request. The data port is 64 bits wide,
 // big-endian: byte enable 0 and d_rdata[63:56] are the byte at offset 0.
 //
 // --- not yet --------------------------------------------------------------------------
@@ -549,18 +554,34 @@ module vr4300 #(
 	wire        e_skip  = e_ok && likely_skip;
 	wire [31:0] vec_base = st_bev ? 32'hBFC0_0200 : 32'h8000_0000;
 	wire        refill  = !st_exl && (e_exc_any == X_TLBL + 5'd1 || e_exc_any == X_TLBS + 5'd1) && !e_int;
-	wire [31:0] vector  = vec_base + (refill ? 32'h000 : 32'h180);
+	// the TLB refill vector is 080 when addressing is 64-bit in the current mode
+	wire        bits64  = (st_exl || st_erl || st_ksu == 2'b00) ? c0_status[7] : (st_ksu == 2'b01) ? c0_status[6] : c0_status[5];
+	wire [31:0] vector  = vec_base + (refill ? (bits64 ? 32'h080 : 32'h000) : 32'h180);
 
 	// =============================================================================
 	// the multiply/divide unit
 	// =============================================================================
+	// The unit takes its operands whenever E moves on, and is told a clock later
+	// whether the instruction really ran: the start then hangs off a register,
+	// not off E's exception decision (overflow, traps, the address checks),
+	// which was the end of the CPU's longest path. The unit counts as busy for
+	// that clock, so a MFHI/MFLO right behind still waits.
+	reg         md_go_q, hi_wr_q, lo_wr_q;
+	reg  [2:0]  md_op_q;
+	reg  [63:0] md_a_q, md_b_q;
+	always @(posedge clk) begin
+		md_go_q <= !rst && e_ok && md_start;
+		hi_wr_q <= !rst && e_ok && hi_wr;
+		lo_wr_q <= !rst && e_ok && lo_wr;
+		if (e_go) begin md_op_q <= md_op; md_a_q <= a; md_b_q <= b; end
+	end
 	vr4300_muldiv md (
 		.clk(clk), .rst(rst),
-		.start(e_ok && md_start), .op(md_op), .a(a), .b(b),
-		.wr_hi(e_ok && hi_wr), .wr_lo(e_ok && lo_wr), .wdata(a),
+		.start(md_go_q), .op(md_op_q), .a(md_a_q), .b(md_b_q),
+		.wr_hi(hi_wr_q), .wr_lo(lo_wr_q), .wdata(md_a_q),
 		.busy(md_busy), .hi(hi), .lo(lo)
 	);
-	assign e_muldiv_wait = e_valid && md_busy && (reads_hilo || md_start || hi_wr || lo_wr);
+	assign e_muldiv_wait = e_valid && (md_busy || md_go_q || hi_wr_q || lo_wr_q) && (reads_hilo || md_start || hi_wr || lo_wr);
 
 	// =============================================================================
 	// the pipeline
@@ -677,10 +698,12 @@ module vr4300 #(
 	wire [31:0] lw = dw[63 - 8 * w_off -: 32];
 	wire [31:0] lw_word = w_off[2] ? dw[31:0] : dw[63:32];         // the aligned word, for LWL/LWR
 	wire [1:0]  k4 = w_off[1:0];
-	wire [31:0] lwl = (lw_word << (8 * k4)) | (w_rt[31:0] & ((32'd1 << (8 * k4)) - 32'd1));
+	// (masks built by shifting all-ones: a subtractor here was a 64-bit carry chain
+	//  at the head of the CPU's longest path)
+	wire [31:0] lwl = (lw_word << (8 * k4)) | (w_rt[31:0] & ~(32'hFFFF_FFFF << (8 * k4)));
 	wire [31:0] lwr_keep = ~(32'hFFFF_FFFF >> (8 * (3 - k4)));
 	wire [31:0] lwr = (w_rt[31:0] & lwr_keep) | (lw_word >> (8 * (3 - k4)));
-	wire [63:0] ldl = (dw << (8 * w_off)) | (w_rt & ((64'd1 << (8 * w_off)) - 64'd1));
+	wire [63:0] ldl = (dw << (8 * w_off)) | (w_rt & ~(64'hFFFF_FFFF_FFFF_FFFF << (8 * w_off)));
 	wire [63:0] ldr_keep = ~(64'hFFFF_FFFF_FFFF_FFFF >> (8 * (7 - w_off)));
 	wire [63:0] ldr = (w_rt & ldr_keep) | (dw >> (8 * (7 - w_off)));
 	always @(*) begin
@@ -711,12 +734,14 @@ module vr4300 #(
 	always @(posedge clk) begin
 		if (rst) begin
 			c0_status <= 32'h0040_0004;                                   // BEV, ERL
-			c0_cause_ip01 <= 32'd0; c0_exccode <= 5'd0; c0_ce <= 2'd0; c0_bd <= 1'b0;
-			c0_epc <= 32'd0; c0_errorepc <= 32'd0; c0_badvaddr <= 32'd0;
+			// power-on values, as krom's tests read them on hardware: Cause
+			// B000007C, EPC/ErrorEPC/BadVAddr all ones, Context 007FFFF0
+			c0_cause_ip01 <= 32'd0; c0_exccode <= 5'd31; c0_ce <= 2'd3; c0_bd <= 1'b1;
+			c0_epc <= 32'hFFFF_FFFF; c0_errorepc <= 32'hFFFF_FFFF; c0_badvaddr <= 32'hFFFF_FFFF;
 			c0_count <= 33'd0; c0_compare <= 33'd0; c0_timer <= 1'b0;
 			c0_index <= 6'd0; c0_probe <= 1'b0; c0_wired <= 6'd0; rnd <= 5'd31;
 			c0_entryhi <= 64'd0; c0_entrylo0 <= 64'd0; c0_entrylo1 <= 64'd0; c0_pagemask <= 64'd0;
-			c0_context <= 64'd0; c0_xcontext <= 64'd0;
+			c0_context <= 64'h0000_0000_007F_FFF0; c0_xcontext <= 64'd0;
 			c0_config <= 32'h7006_E463; c0_lladdr <= 32'd0; c0_taglo <= 32'd0; c0_watchlo <= 32'd0; c0_watchhi <= 32'd0;
 			c0_latch <= 64'd0; llbit <= 1'b0;
 		end else begin
@@ -819,7 +844,13 @@ module vr4300_muldiv (
 	wire [32:0]  pb_ = step[0] ? mb[64:32] : {1'b0, mb[31:0]};
 	wire signed [65:0] part = $signed(pa_) * $signed(pb_);
 	wire [7:0]   shift = ({1'b0, step[1]} + {1'b0, step[0]}) * 8'd32;
-	wire [127:0] acc_next = acc + ({{62{part[65]}}, part} << shift);
+	// the product is registered before it is added: multiply in one clock,
+	// accumulate in the next (five clocks for a MULT, as on the chip)
+	reg  [65:0]  part_q;
+	reg  [7:0]   shift_q;
+	reg          part_v;       // part_q holds a product still to be added
+	reg          mdone;        // all four products issued
+	wire [127:0] acc_next = acc + ({{62{part_q[65]}}, part_q} << shift_q);
 
 	// --- divide -------------------------------------------------------------------------
 	reg  [63:0]  q, d;          // quotient (shifting in), divisor
@@ -848,6 +879,8 @@ module vr4300_muldiv (
 				endcase
 				acc  <= 128'd0;
 				step <= 2'd0;
+				part_v <= 1'b0;
+				mdone  <= 1'b0;
 				n    <= (op[1] == 1'b0) ? 7'd4 : (op[2] ? 7'd64 : 7'd32);
 				// divide: magnitudes, signs remembered
 				if (op[1]) begin
@@ -870,9 +903,13 @@ module vr4300_muldiv (
 			end else if (run) begin
 				if (kind[1] == 1'b0) begin
 					// multiply: accumulate one partial product a clock
-					acc  <= acc_next;
-					step <= step + 2'd1;
-					if (step == 2'd3) begin
+					if (part_v) acc <= acc_next;
+					if (!mdone) begin
+						part_q <= part; shift_q <= shift; part_v <= 1'b1;
+						step <= step + 2'd1;
+						if (step == 2'd3) mdone <= 1'b1;
+					end else part_v <= 1'b0;
+					if (mdone && part_v) begin            // the last product is going in now
 						run <= 1'b0;
 						if (kind[2]) begin
 							lo <= acc_next[63:0];
