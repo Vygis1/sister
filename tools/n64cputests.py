@@ -1,0 +1,72 @@
+"""krom's CPU test ROMs through the Python model: PASS and FAIL counted off the screen.
+
+    python tools/n64cputests.py [sim/roms/n64/krom] [--only NAME]
+
+Each ROM prints a row per case into a 640x480 32-bit framebuffer, with the
+word PASS in green or FAIL in red in the right-hand column. This runs each one
+in tools/n64model.py, writes its screen to build/n64tests/NAME.png, and counts
+the rows by colour: a run of green or red pixels in that column is one row.
+"""
+import glob
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import n64model  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(HERE, '..', 'build', 'n64tests')
+
+
+def score(w, h, rgb, x0=500):
+    """rows of green (PASS) and red (FAIL) text in the result column"""
+    passes = fails = 0
+    state = None
+    for y in range(16, h):
+        g = r = 0
+        for x in range(x0, w):
+            p = (y * w + x) * 3
+            R, G, B = rgb[p], rgb[p + 1], rgb[p + 2]
+            if G > 150 and R < 100: g += 1
+            elif R > 150 and G < 100 and B < 100: r += 1
+        now = 'g' if g > 2 else 'r' if r > 2 else None
+        if now and now != state:
+            if now == 'g': passes += 1
+            else: fails += 1
+        state = now
+    return passes, fails
+
+
+def main():
+    root = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('--') else \
+        os.path.join(HERE, '..', 'sim', 'roms', 'n64', 'krom')
+    only = sys.argv[sys.argv.index('--only') + 1] if '--only' in sys.argv else None
+    os.makedirs(OUT, exist_ok=True)
+    roms = sorted(glob.glob(os.path.join(root, 'CPUTest', '**', '*.N64'), recursive=True))
+    total_p = total_f = 0
+    for path in roms:
+        name = os.path.splitext(os.path.basename(path))[0]
+        if only and only.lower() not in name.lower():
+            continue
+        m = n64model.N64(open(path, 'rb').read())
+        m.fast_boot()
+        t0 = time.time()
+        err = ''
+        try:
+            n64model.run(m, 8_000_000)
+        except Exception as e:
+            err = '%s: %s' % (type(e).__name__, e)
+        w, h, rgb = m.framebuffer()
+        p = f = 0
+        if w:
+            n64model.write_png(os.path.join(OUT, name + '.png'), w, h, rgb)
+            p, f = score(w, h, rgb)
+        total_p += p; total_f += f
+        print('%-22s %3d pass %3d fail  %9d instr %5.0f s  %s' % (name, p, f, m.cpu.instructions, time.time() - t0, err or ('' if w else 'no picture')))
+        sys.stdout.flush()
+    print('total: %d pass, %d fail' % (total_p, total_f))
+
+
+if __name__ == '__main__':
+    main()
