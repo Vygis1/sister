@@ -640,6 +640,15 @@ module vr4300 #(
 				e_a     <= rf_a;
 				e_b     <= rf_b;
 				e_bd    <= e_valid && is_br && e_ok;
+			end else begin
+				// E is held. What it reads may be arriving by forwarding from an
+				// instruction that leaves W this clock -- after which nothing holds it
+				// but the register file, which E read a while ago. So keep what is
+				// forwarded now. (Without this, `lw r1,0(r2); sw r1,0(r2)` straight
+				// after `ori r2` stored to the address r2 had BEFORE the ori: the
+				// load-use wait let the ori retire, and the sw used the stale copy.)
+				e_a <= a;
+				e_b <= b;
 			end
 			// --- E to M ------------------------------------------------------------------
 			if (adv_mw) begin

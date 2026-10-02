@@ -142,10 +142,23 @@ module n64_top #(
 	reg  [10:0] vi_clk;
 	reg  [5:0]  mi_intr, mi_mask;
 	reg  [31:0] mi_mode;
-	reg  [31:0] pi_reg [0:12];
+	// the PI: its registers and DMA engine are below (pi_*); these say what the
+	// CPU wrote, for the engine to take
+	reg         pi_we;
+	reg  [3:0]  pi_widx;
+	reg  [31:0] pi_wval;
+	reg  [23:0] pi_dram, pi_rdlen, pi_wrlen;
+	reg  [31:0] pi_cart;
+	reg         pi_busy, pi_done;
+	reg  [31:0] pi_dom [5:12];                   // the domain timing registers: stored, unused
+	// the DMA engine's line requests to the DDR3 port (it is below)
+	reg          pd_rd_req, pd_rd_ack, pd_wr_req, pd_wr_ack;
+	reg  [23:0]  pd_rd_line, pd_wr_line;
+	reg  [127:0] pd_rd_data, pd_wr_data;
+	reg  [15:0]  pd_wr_mask;
 	reg  [31:0] sp_status;
 	initial for (k = 0; k < 14; k = k + 1) vi[k] = 32'd0;
-	initial for (k = 0; k < 13; k = k + 1) pi_reg[k] = 32'd0;
+	initial for (k = 5; k < 13; k = k + 1) pi_dom[k] = 32'd0;
 	assign vi_status = vi[0];
 	assign vi_origin = vi[1];
 	assign vi_width  = vi[2];
@@ -176,7 +189,14 @@ module n64_top #(
 			end else if (a[31:20] == 12'h044) begin                 // VI
 				reg_read = (a[5:2] == 4'd4) ? {22'd0, vi_line} : vi[a[5:2]];
 			end else if (a[31:20] == 12'h046) begin                 // PI: never busy here
-				reg_read = (a[5:2] == 4'd4) ? 32'd0 : pi_reg[a[5:2]];
+				case (a[5:2])
+				4'd0: reg_read = {8'd0, pi_dram};
+				4'd1: reg_read = pi_cart;
+				4'd2: reg_read = {8'd0, pi_rdlen};
+				4'd3: reg_read = {8'd0, pi_wrlen};
+				4'd4: reg_read = {28'd0, mi_intr[4], 2'b00, pi_busy};
+				default: reg_read = (a[5:2] <= 4'd12) ? pi_dom[a[5:2]] : 32'd0;
+				endcase
 			end else if (a[31:20] == 12'h040 && a[19:16] == 4'h4) begin  // SP
 				reg_read = (a[4:2] == 3'd4) ? sp_status : 32'd0;
 			end
@@ -274,7 +294,8 @@ module n64_top #(
 	reg          i_replay, d_replay;  // a fill has finished: read the line again to answer
 
 	localparam S_IDLE = 4'd0, S_FILL = 4'd1, S_WB = 4'd2, S_DREAD = 4'd3, S_DFILL = 4'd4,
-	           S_IREAD = 4'd5, S_IFILL0 = 4'd6, S_IFILL1 = 4'd7, S_HREAD = 4'd8;
+	           S_IREAD = 4'd5, S_IFILL0 = 4'd6, S_IFILL1 = 4'd7, S_HREAD = 4'd8,
+	           S_PREAD = 4'd9, S_PWRITE = 4'd10;
 	reg  [3:0]   st;
 	// the host's fill: four words to a line. A finished line moves to its own
 	// buffer for the write, so the next line's first word can arrive while that
@@ -302,9 +323,15 @@ module n64_top #(
 			wb_wp <= 3'd0; wb_rp <= 3'd0;
 			fill_pending <= 1'b0; fill_cnt <= 2'd0; fill_buf <= 128'd0; fill_line <= 20'd0;
 			hr_pending <= 1'b0; hr_done <= 1'b0; sweep <= 9'd0;
+			pd_rd_ack <= 1'b0; pd_wr_ack <= 1'b0;
 			mi_intr <= 6'd0; mi_mask <= 6'd0; mi_mode <= 32'd0; sp_status <= 32'd1;
+			pi_we <= 1'b0;
 		end else begin
-			i_replay <= 1'b0; d_replay <= 1'b0;
+			if (!pd_rd_req) pd_rd_ack <= 1'b0;          // the engine has taken it
+			if (!pd_wr_req) pd_wr_ack <= 1'b0;
+			i_replay <= 1'b0; d_replay <= 1'b0; pi_we <= 1'b0;
+			// a DMA has finished: the PI's interrupt; the uncached lines may be stale
+			if (pi_done) begin mi_intr[4] <= 1'b1; il_v <= 1'b0; dl_v <= 1'b0; end
 			// --- the host's fill (only while the CPU is held) --------------------------------
 			if (host_we) begin
 				fill_line <= host_windex[21:2];
@@ -414,9 +441,9 @@ module n64_top #(
 						end else if (wa[31:20] == 12'h044) begin                        // VI
 							if (wa[5:2] == 4'd4) mi_intr[3] <= 1'b0;                   // V_CURRENT write clears the VI interrupt
 							else vi[wa[5:2]] <= wv;
-						end else if (wa[31:20] == 12'h046) begin                        // PI (DMA: not yet)
-							if (wa[5:2] == 4'd4) begin if (wv[1]) mi_intr[4] <= 1'b0; end
-							else pi_reg[wa[5:2]] <= wv;
+						end else if (wa[31:20] == 12'h046) begin                        // PI: to the DMA engine
+							if (wa[5:2] == 4'd4 && wv[1]) mi_intr[4] <= 1'b0;
+							pi_we <= 1'b1; pi_widx <= wa[5:2]; pi_wval <= wv;
 						end else if (wa[31:20] == 12'h040 && wa[19:16] == 4'h4) begin  // SP status
 							if (wa[4:2] == 3'd4) begin
 								if (wv[1]) sp_status[0] <= 1'b1;
@@ -474,6 +501,11 @@ module n64_top #(
 					d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; i_for <= ipa;
 					if (ip_fill) begin d_addr <= line_of({ipa[31:5], 5'd0}); st <= S_IFILL0; end
 					else begin d_addr <= line_of(ipa); st <= S_IREAD; end
+				end else if (pd_rd_req && !pd_rd_ack) begin
+					d_addr <= pd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_PREAD;
+				end else if (pd_wr_req && !pd_wr_ack) begin
+					d_addr <= pd_wr_line; d_wdata <= pd_wr_data; d_wmask <= pd_wr_mask;
+					d_we <= 1'b1; d_req <= 1'b1; st <= S_PWRITE;
 				end else if (hr_pending) begin
 					d_addr <= hr_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_HREAD;
 				end
@@ -481,10 +513,13 @@ module n64_top #(
 			S_FILL: if (d_ready) begin
 				d_req <= 1'b0; fill_pending <= 1'b0; st <= S_IDLE;
 			end
+			S_PWRITE: if (d_ready) begin
+				d_req <= 1'b0; pd_wr_ack <= 1'b1; st <= S_IDLE;
+			end
 			S_WB: if (d_ready) begin
 				d_req <= 1'b0; wb_rp <= wb_rp + 3'd1; st <= S_IDLE;
 			end
-			S_DREAD, S_DFILL, S_IREAD, S_IFILL0, S_IFILL1, S_HREAD: begin
+			S_DREAD, S_DFILL, S_IREAD, S_IFILL0, S_IFILL1, S_HREAD, S_PREAD: begin
 				if (d_ready) d_req <= 1'b0;
 				if (d_valid) begin
 					st <= S_IDLE;
@@ -517,11 +552,142 @@ module n64_top #(
 						// (and stop waiting now, as for the data side)
 						if (ip && ipa == i_for && !i_req) begin ip <= 1'b0; i_replay <= 1'b1; end
 					end
+					S_PREAD: begin pd_rd_data <= d_rdata; pd_rd_ack <= 1'b1; end
 					default: begin hr_data <= d_rdata; hr_done <= 1'b1; hr_pending <= 1'b0; end
 					endcase
 				end
 			end
 			default: st <= S_IDLE;
+			endcase
+		end
+	end
+
+	// =============================================================================
+	// the PI's DMA: cartridge to RDRAM, exactly as the PI does it
+	// =============================================================================
+	// After ares/n64/pi/dma.cpp (and tools/n64model.py pi_dma_write): blocks of up
+	// to 128 bytes that never cross a 2 kB row of RDRAM, read from the cartridge a
+	// halfword at a time. A block whose RDRAM address is not 8-aligned writes that
+	// many bytes fewer, and RDRAM's address then rounds up to 8; the first block
+	// writes byte by byte, the rest a pair at a time (an odd count gains a byte).
+	// When it is done both addresses have moved on and the length reads 127 (or
+	// 127 less the last misalignment).
+	//
+	// Byte-serial: a block is read into a buffer, then written out, a byte a
+	// clock, through one line of each kind -- which still beats the real PI.
+	reg  [7:0]   pd_blk [0:127];
+	reg  [3:0]   pd_st;
+	reg  signed [25:0] pd_len;
+	reg  [7:0]   pd_cur, pd_i, pd_n, pd_maxblk;
+	reg  [2:0]   pd_mis;
+	reg          pd_first, pd_dist_short;
+	reg  [23:0]  pd_cl_tag;                 // the cartridge line in hand
+	reg  [127:0] pd_cl;
+	reg          pd_cl_v;
+	reg          pd_wl_v;                   // the RDRAM line being gathered
+	localparam P_IDLE = 4'd0, P_BLOCK = 4'd1, P_READ = 4'd2, P_RWAIT = 4'd3, P_WRITE = 4'd4,
+	           P_FLUSH = 4'd5, P_FWAIT = 4'd6, P_NEXT = 4'd7, P_END = 4'd8, P_EWAIT = 4'd9;
+	wire [23:0]  pd_cart_off = pi_cart[23:0];
+	wire         pd_in_cart  = pi_cart >= 32'h1000_0000 && pi_cart < 32'h1400_0000;
+	wire [23:0]  pd_cart_line = CART_LINE + {2'd0, pi_cart[25:4]};
+	wire [11:0]  pd_dist = 12'h800 - {1'b0, pi_dram[10:0]};
+	wire [8:0]   pd_room = {1'b0, pd_maxblk} - {6'd0, pi_dram[2:0]};
+	wire [11:0]  pd_lim  = (pd_dist < {3'd0, pd_room}) ? pd_dist : {3'd0, pd_room};
+	wire [7:0]   pd_byte = pd_blk[pd_i[6:0]];
+	integer pk;
+
+	always @(posedge clk) begin
+		pi_done <= 1'b0;
+		if (rst) begin
+			pd_st <= P_IDLE; pd_rd_req <= 1'b0; pd_wr_req <= 1'b0; pd_cl_v <= 1'b0; pd_wl_v <= 1'b0;
+			pi_busy <= 1'b0;
+			// the PI as IPL3 leaves it, after its last DMA (krom's DMA test reads this back)
+			pi_dram <= 24'h10_1000; pi_cart <= 32'h1000_000C; pi_rdlen <= 24'h7F; pi_wrlen <= 24'h7F;
+		end else begin
+			if (pd_rd_ack) pd_rd_req <= 1'b0;
+			if (pd_wr_ack) pd_wr_req <= 1'b0;
+			// the CPU's writes: the addresses masked as they go in; the lengths start DMAs
+			if (pi_we) begin
+				case (pi_widx)
+				4'd0: pi_dram <= pi_wval[23:0] & 24'hFF_FFFE;
+				4'd1: pi_cart <= pi_wval & 32'hFFFF_FFFE;
+				4'd2: begin pi_rdlen <= (pi_wval[23:0] | 24'd1) + 24'd1; pi_done <= 1'b1; end   // RDRAM -> a ROM: nothing to write
+				4'd3: if (!pi_busy) begin
+					pi_wrlen <= pi_wval[23:0];
+					pd_len <= {2'b00, pi_wval[23:0]} + 26'd1;
+					pd_first <= 1'b1; pd_maxblk <= 8'd128;
+					pi_busy <= 1'b1; pd_cl_v <= 1'b0; pd_wl_v <= 1'b0;
+					pd_st <= P_BLOCK;
+				end
+				4'd4: if (pi_wval[0]) begin pi_busy <= 1'b0; pd_st <= P_IDLE; end      // reset the DMA
+				default: if (pi_widx >= 4'd5 && pi_widx <= 4'd12) pi_dom[pi_widx] <= pi_wval;
+				endcase
+			end
+
+			case (pd_st)
+			P_BLOCK: begin
+				if (pd_len <= 0) pd_st <= P_END;
+				else begin
+					// this block: misalignment, and its length
+					pd_mis <= pi_dram[2:0];
+					pd_dist_short <= pd_dist < 12'd8;
+					pd_cur <= ($signed({14'd0, pd_lim}) < pd_len) ? pd_lim[7:0] : pd_len[7:0];
+					pd_i <= 8'd0;
+					pd_st <= P_READ;
+				end
+			end
+			P_READ: begin
+				// a halfword from the cartridge into the block
+				if (pd_i >= pd_cur) begin
+					// how many of them go to RDRAM
+					pd_n <= ((pd_cur <= {5'd0, pd_mis}) ? 8'd0 :
+					         (pd_first && {1'b0, pd_cur} < 9'd127 - {6'd0, pd_mis}) ? pd_cur - {5'd0, pd_mis}
+					         : ((pd_cur - {5'd0, pd_mis} + 8'd1) & 8'hFE));
+					pd_i <= 8'd0;
+					pd_st <= P_WRITE;
+				end else if (!pd_in_cart) begin
+					pd_blk[pd_i[6:0]] <= 8'd0; pd_blk[pd_i[6:0] + 7'd1] <= 8'd0;
+					pi_cart <= pi_cart + 32'd2; pd_len <= pd_len - 26'sd2; pd_i <= pd_i + 8'd2;
+				end else if (pd_cl_v && pd_cl_tag == pd_cart_line) begin
+					pd_blk[pd_i[6:0]]         <= pd_cl[8 * pi_cart[3:0] +: 8];
+					pd_blk[pd_i[6:0] + 7'd1]  <= pd_cl[8 * (pi_cart[3:0] + 4'd1) +: 8];
+					pi_cart <= pi_cart + 32'd2; pd_len <= pd_len - 26'sd2; pd_i <= pd_i + 8'd2;
+				end else begin
+					pd_rd_line <= pd_cart_line; pd_rd_req <= 1'b1; pd_st <= P_RWAIT;
+				end
+			end
+			P_RWAIT: if (pd_rd_ack) begin
+				pd_cl <= pd_rd_data; pd_cl_tag <= pd_rd_line; pd_cl_v <= 1'b1; pd_st <= P_READ;
+			end
+			P_WRITE: begin
+				if (pd_i >= pd_n) pd_st <= P_NEXT;
+				else if (pi_dram >= 24'h80_0000) begin
+					pi_dram <= pi_dram + 24'd1; pd_i <= pd_i + 8'd1;      // past RDRAM: nowhere to put it
+				end else if (pd_wl_v && pd_wr_line != RDRAM_LINE + {4'd0, pi_dram[22:4]}) begin
+					pd_st <= P_FLUSH;                                       // a new line: the old one out first
+				end else begin
+					if (!pd_wl_v) begin pd_wr_line <= RDRAM_LINE + {4'd0, pi_dram[22:4]}; pd_wr_mask <= 16'd0; pd_wl_v <= 1'b1; end
+					pd_wr_data[8 * pi_dram[3:0] +: 8] <= pd_byte;
+					pd_wr_mask <= (pd_wl_v ? pd_wr_mask : 16'd0) | (16'd1 << pi_dram[3:0]);
+					pi_dram <= pi_dram + 24'd1; pd_i <= pd_i + 8'd1;
+				end
+			end
+			P_FLUSH: begin pd_wr_req <= 1'b1; pd_st <= P_FWAIT; end
+			P_FWAIT: if (pd_wr_ack) begin pd_wl_v <= 1'b0; pd_st <= P_WRITE; end
+			P_NEXT: begin
+				// the block is done: RDRAM's address up to 8, the length register, the next block's size
+				pi_dram <= (pi_dram + 24'd7) & 24'hFF_FFF8;
+				pi_wrlen <= (pd_cur <= 8'd8) ? 24'd127 - {21'd0, pd_mis} : 24'd127;
+				pd_first <= 1'b0;
+				pd_maxblk <= pd_dist_short ? 8'd128 - {5'd0, pd_mis} : 8'd128;
+				pd_st <= P_BLOCK;
+			end
+			P_END: begin
+				if (pd_wl_v) begin pd_wr_req <= 1'b1; pd_st <= P_EWAIT; end
+				else begin pi_busy <= 1'b0; pi_done <= 1'b1; pd_st <= P_IDLE; end
+			end
+			P_EWAIT: if (pd_wr_ack) begin pd_wl_v <= 1'b0; pi_busy <= 1'b0; pi_done <= 1'b1; pd_st <= P_IDLE; end
+			default: ;
 			endcase
 		end
 	end

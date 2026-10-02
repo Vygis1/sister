@@ -842,7 +842,8 @@ class N64:
             return 0
         if 0x04600000 <= a < 0x04600034:
             i = (a >> 2) & 15
-            if i == 4: return 0           # PI_STATUS: never busy (DMA is instant here)
+            if i == 4:                    # PI_STATUS: never busy (DMA is instant here); bit 3 the interrupt
+                return 8 if self.mi_intr & 0x10 else 0
             return self.pi[i]
         if 0x04700000 <= a < 0x04700020: return 0
         if 0x04800000 <= a < 0x0480001C:
@@ -887,22 +888,63 @@ class N64:
             if i == 4:
                 if v & 2: self.mi_intr &= ~0x10
                 return
-            self.pi[i] = v
-            if i == 3:                                          # PI_WR_LEN: cartridge -> RDRAM
-                dram = self.pi[0] & 0x00FFFFFE
-                cart = self.pi[1] & 0xFFFFFFFE
-                length = (v & 0x00FFFFFF) + 1
-                for k in range(length):
-                    if dram + k < self.RDRAM:
-                        self.rdram[dram + k] = self.read(cart + k, 1)
+            # the addresses are masked as they are written (ares/n64/pi/io.cpp)
+            if i == 0:
+                self.pi[0] = v & 0x00FFFFFE
+            elif i == 1:
+                self.pi[1] = v & 0xFFFFFFFE
+            elif i == 3:                                        # PI_WR_LEN: cartridge -> RDRAM
+                self.pi[3] = v & 0x00FFFFFF
+                self.pi_dma_write(v & 0x00FFFFFF)
                 self.mi_intr |= 0x10
-            elif i == 2:                                        # PI_RD_LEN: RDRAM -> cartridge (ignored)
+            elif i == 2:                                        # PI_RD_LEN: RDRAM -> cartridge (no effect on a ROM)
+                self.pi[2] = ((v & 0x00FFFFFF) | 1) + 1
                 self.mi_intr |= 0x10
+            else:
+                self.pi[i] = v
             return
         if 0x04800000 <= a < 0x0480001C:
             if a == 0x04800018:
                 self.mi_intr &= ~0x02
             return
+
+    def pi_dma_write(self, wlen):
+        """Cartridge to RDRAM, as the PI does it (ares/n64/pi/dma.cpp):
+        in blocks of up to 128 bytes that never cross a 2 kB RDRAM row, read a
+        halfword at a time from the cartridge. A block whose RDRAM address is
+        not 8-aligned writes that many bytes fewer; RDRAM's address then rounds
+        up to 8. The first block writes byte by byte, the rest a pair at a time
+        (so an odd count gains a byte). Afterwards both addresses have moved on
+        and the length register reads 127 (or 127 less the misalignment)."""
+        length = wlen + 1
+        dram = self.pi[0] & 0x00FFFFFE
+        cart = self.pi[1] & 0xFFFFFFFE
+        maxblk, first = 128, True
+        while length > 0:
+            mis = dram & 7
+            dist = 0x800 - (dram & 0x7FF)
+            cur = min(length, min(maxblk - mis, dist))
+            mem = []
+            i = 0
+            while i < cur:
+                h = self.read(cart, 2) if 0x10000000 <= cart < 0x1FC00000 else 0
+                mem += [h >> 8, h & 0xFF]
+                cart = (cart + 2) & M32
+                length -= 2
+                i += 2
+            n = cur - mis
+            if not (first and cur < 127 - mis):
+                n = (n + 1) & ~1                      # written in pairs
+            for k in range(max(0, n)):
+                if dram < self.RDRAM:
+                    self.rdram[dram] = mem[k] if k < len(mem) else 0
+                dram += 1
+            dram = (dram + 7) & ~7
+            self.pi[3] = 127 - mis if cur <= 8 else 127
+            first = False
+            maxblk = 128 - mis if dist < 8 else 128
+        self.pi[0] = dram & 0x00FFFFFF
+        self.pi[1] = cart
 
     def mi_irq(self):
         self.vi_tick()
@@ -950,6 +992,8 @@ class N64:
         c.npc = (c.pc + 4) & M64
         self.vi[0] = 0
         self.pi[5:9] = [rom[3], rom[2], rom[1], rom[0]] if len(rom) > 4 else [0] * 4
+        # the PI as IPL3 leaves it, after its last DMA (krom's DMA test reads this back)
+        self.pi[0:4] = [0x00101000, 0x1000000C, 0x7F, 0x7F]
 
     def stub_boot(self):
         """The same as fast_boot, but the registers are set by a few instructions
