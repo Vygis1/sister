@@ -569,7 +569,10 @@ class VR4300:
         elif op == 0x2C: self.sdl(r[rt], (r[rs] + simm) & M64)
         elif op == 0x2D: self.sdr(r[rt], (r[rs] + simm) & M64)
         elif op == 0x2E: self.swr(r[rt], (r[rs] + simm) & M64)
-        elif op == 0x2F: pass                                      # CACHE: the model has none
+        elif op == 0x2F:                                           # CACHE: the model has no caches,
+            if not self.kernel() and not (self.status & (1 << 28)):  # but the checks are the chip's
+                raise Exc(CPU_, 0)
+            self.translate((r[rs] + simm) & M64, False, 4)
         elif op == 0x30:                                           # LL
             va = (r[rs] + simm) & M64
             pa = self.translate(va, False, 4)

@@ -71,11 +71,25 @@ module tb_n64_top;
 	// --- the run --------------------------------------------------------------------------
 	reg [31:0] words [0:524287];          // the cartridge, as the PC sends it: little-endian 32-bit words
 	integer nwords, frames = 0, last_frame = 0, last_wr = 0, quiet = 0;
+	time    t_run = 0;
 	reg [9:0] prev_line = 0;
 	always @(posedge clk) begin
 		prev_line <= dut.vi_line;
 		if (dut.vi_line == 10'd0 && prev_line != 10'd0) frames = frames + 1;
 	end
+	// an undefined value reaching memory is a bug somewhere before it: say where
+	reg xseen = 0;
+	always @(negedge clk) if (!xseen && dut.c_dreq && dut.c_dwe && (^dut.c_dwdata === 1'bx)) begin
+		xseen = 1;
+		$display("tb_n64_top: an UNDEFINED store at %0t: address %08x be %02x data %016x, pc %08x",
+		         $time, dut.c_daddr, dut.c_dbe, dut.c_dwdata, dut.cpu.m_pc);
+	end
+	always @(negedge clk) if (!xseen && dut.c_dready && dut.d_from_cache && dut.cpu.w_valid && dut.cpu.w_mem && (^dut.c_drdata === 1'bx)) begin
+		xseen = 1;
+		$display("tb_n64_top: an UNDEFINED cached load answer at %0t: address %08x, line %0d, pc %08x",
+		         $time, dut.dpa, dut.dpa[12:4], dut.cpu.w_pc);
+	end
+
 	// the retire trace, in tools/n64sim.py's format, for comparison with the model
 	integer f, tf;
 	initial tf = $fopen("../../sim/n64/sys.trace", "w");
@@ -101,7 +115,7 @@ module tb_n64_top;
 		@(negedge clk); fill_end = 1; @(negedge clk); fill_end = 0;
 		repeat (200) @(negedge clk);
 		$display("tb_n64_top: filled; run at %0t", $time);
-		run = 1;
+		run = 1; t_run = $time;
 		// the end: two frames with no RDRAM write after the boot's copy is done
 		while (quiet < 2 || dbg_retired < 1000) begin
 			@(posedge clk);
@@ -112,6 +126,7 @@ module tb_n64_top;
 			end
 		end
 		$display("tb_n64_top: done after %0d instructions, VI origin %08x width %0d status %08x", dbg_retired, vi_origin, vi_width, vi_status);
+		$display("tb_n64_top: %0d clocks since run, %0d frames", ($time - t_run) / 20, frames);
 		f = $fopen("../../sim/n64/sys_rdram.hex", "w");
 		for (i = 0; i < 524288; i = i + 1) $fwrite(f, "%032x\n", rdram[i]);
 		$fclose(f);

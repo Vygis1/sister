@@ -44,8 +44,9 @@
 // --- not yet --------------------------------------------------------------------------
 //
 // The TLB lookup (mapped addresses raise a TLB refill exception, which is what an
-// empty TLB does), COP1 (the FPU: coprocessor-unusable, or a reserved instruction
-// when enabled), and the caches (CACHE is a no-op while nothing is cached).
+// empty TLB does), and COP1 (the FPU: coprocessor-unusable, or a reserved
+// instruction when enabled). The caches are the memory's (n64_top.v): CACHE goes
+// out on the data port with its operation, and the CPU only waits for the answer.
 // 64-bit addressing (Status.KX) is not handled; no N64 game uses it.
 //////////////////////////////////////////////////////////////////////////////////
 
@@ -71,6 +72,8 @@ module vr4300 #(
 	output wire        d_cached,
 	output wire [7:0]  d_be,         // bit k = the byte at offset k
 	output wire [63:0] d_wdata,
+	output wire        d_cache,      // a CACHE instruction: d_cop is its operation, d_addr its address
+	output wire [4:0]  d_cop,
 	input  wire        d_ready,
 	input  wire [63:0] d_rdata,
 
@@ -161,6 +164,8 @@ module vr4300 #(
 	reg  [7:0]  m_be;
 	reg  [63:0] m_wdata;
 	reg  [2:0]  m_kind;            // merging load: {1, 0 LWL 1 LWR 2 LDL 3 LDR}, else 0
+	reg         m_cache;           // a CACHE instruction
+	reg  [4:0]  m_cop;
 	reg         m_xmark, w_xmark;  // an exception was taken here: for the trace, in program order
 	reg  [4:0]  m_xcode, w_xcode;
 	// W
@@ -283,6 +288,7 @@ module vr4300 #(
 	reg  [2:0]  mkind;        // 0 LWL 1 LWR 2 LDL 3 LDR
 	reg  [1:0]  msize;        // 0 byte 1 half 2 word 3 dword (alignment)
 	reg         c0_wr;        // MTC0/DMTC0
+	reg         is_cache;     // CACHE
 	reg         is_eret, is_ll, is_sc;
 	reg         md_start;     // starts the multiply/divide unit
 	reg  [2:0]  md_op;        // 0 MULT 1 MULTU 2 DIV 3 DIVU 4 DMULT 5 DMULTU 6 DDIV 7 DDIVU
@@ -328,7 +334,7 @@ module vr4300 #(
 		take_br = 1'b0; br_to = br_target; is_br = 1'b0; likely_skip = 1'b0;
 		exc = 5'd0;
 		is_mem = 1'b0; is_load = 1'b0; is_store = 1'b0; lsel = 3'd0; mkind = 3'd0; msize = 2'd0;
-		c0_wr = 1'b0; is_eret = 1'b0; is_ll = 1'b0; is_sc = 1'b0;
+		c0_wr = 1'b0; is_eret = 1'b0; is_ll = 1'b0; is_sc = 1'b0; is_cache = 1'b0;
 		md_start = 1'b0; md_op = 3'd0; hi_wr = 1'b0; lo_wr = 1'b0; reads_hilo = 1'b0;
 		case (op)
 		6'h00: begin
@@ -470,7 +476,10 @@ module vr4300 #(
 		6'h3F: if (d64_ok) begin is_mem = 1'b1; is_store = 1'b1; msize = 2'd3; end else exc = X_RI + 5'd1;
 		6'h2A, 6'h2E: begin is_mem = 1'b1; is_store = 1'b1; msize = 2'd0; end           // SWL, SWR
 		6'h2C, 6'h2D: if (d64_ok) begin is_mem = 1'b1; is_store = 1'b1; msize = 2'd0; end else exc = X_RI + 5'd1;
-		6'h2F: ;                                                                       // CACHE: nothing cached yet
+		6'h2F: begin                                                                   // CACHE: to the caches, through the data port
+			if (!kernel && !c0_status[28]) exc = X_CPU + 5'd1;
+			else begin is_mem = 1'b1; is_cache = 1'b1; msize = 2'd2; end           // a word's alignment, as ares checks it
+		end
 		6'h30: begin dst = rt; is_mem = 1'b1; is_load = 1'b1; we_rf = 1'b1; lsel = 3'd4; msize = 2'd2; is_ll = 1'b1; end
 		6'h34: begin dst = rt;
 			if (!d64_ok) exc = X_RI + 5'd1;
@@ -638,6 +647,8 @@ module vr4300 #(
 				m_mem    <= is_mem && !(is_sc && !llbit);
 				m_load   <= is_load;
 				m_store  <= is_store;
+				m_cache  <= is_cache;
+				m_cop    <= rt;
 				m_we_rf  <= we_rf && dst != 5'd0;
 				m_rd     <= dst;
 				m_res    <= res;
@@ -683,6 +694,8 @@ module vr4300 #(
 	// =============================================================================
 	assign d_req    = m_valid && m_mem && adv_mw;
 	assign d_we     = m_store;
+	assign d_cache  = m_cache;
+	assign d_cop    = m_cop;
 	assign d_addr   = m_paddr;
 	assign d_cached = m_cached;
 	assign d_be     = m_be;
