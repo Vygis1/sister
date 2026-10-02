@@ -1,6 +1,8 @@
 """krom's test ROMs through the RTL CPU (sim/tb_vr4300.v), checked against the model.
 
-    python tools/n64rtltests.py [--only NAME] [--nowaits]
+    python tools/n64rtltests.py [--only NAME] [--nowaits] [--rom PATH]
+
+--rom runs one ROM of our own instead of krom's set (tools/n64tlbtest.py's).
 
 For each ROM:
   1. tools/n64sim.py prepares RDRAM, the boot stub, and the model's trace;
@@ -60,10 +62,13 @@ def main():
     waits = '' if '--nowaits' in sys.argv else 'WAITS1'
     os.makedirs(OUT, exist_ok=True)
     roms = sorted(glob.glob(os.path.join(KROM, 'CPUTest', 'CPU', '**', '*.N64'), recursive=True))
+    roms += sorted(glob.glob(os.path.join(KROM, 'CPUTest', 'CP1', '**', '*.N64'), recursive=True))
     # the exception and COP0 tests too (not the ones that need a timer interrupt
     # or the VI interrupt: the bench has neither yet)
     roms += sorted(r for r in glob.glob(os.path.join(KROM, 'CPUTest', 'Exceptions', '**', '*.N64'), recursive=True)
                    if not any(k in r for k in ('Compare', 'VIIntr')))
+    if '--rom' in sys.argv:
+        roms = [os.path.abspath(sys.argv[sys.argv.index('--rom') + 1])]
     good = bad = 0
     for rom in roms:
         name = os.path.splitext(os.path.basename(rom))[0]

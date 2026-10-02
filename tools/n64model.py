@@ -27,6 +27,7 @@ the boot code leaves in low memory are filled in, as many emulators do.
 Speed: around a quarter of a million instructions a second. Enough for test
 ROMs; it is a reference, not a player.
 """
+import n64fpu
 import struct
 import sys
 import zlib
@@ -133,6 +134,7 @@ class VR4300:
         self.epc = M64
         self.errorepc = M64
         self.config = 0x7006E463
+        self.fpu = n64fpu.FPU(self)
         self.taglo = 0
         self.latch = 0
         # Power-on TLB contents are garbage that matches nothing a program uses
@@ -544,7 +546,7 @@ class VR4300:
         elif op == 0x0E: r[rt] = r[rs] ^ imm
         elif op == 0x0F: r[rt] = sx32(imm << 16)
         elif op == 0x10: self.cop0(w, rs, rt, rd)
-        elif op == 0x11: self.cop1(w)
+        elif op == 0x11: self.cop1(w, pc, tgt)
         elif op == 0x18:
             self.d64()
             a = r[rs]
@@ -600,7 +602,7 @@ class VR4300:
                 r[rt] = 0
         elif op == 0x3F: self.d64(); self.store(r[rs] + simm, 8, r[rt])
         elif op in (0x31, 0x35, 0x39, 0x3D):                       # LWC1 LDC1 SWC1 SDC1
-            self.cop1(w)
+            self.cop1(w, pc, tgt)
         else:
             raise Exc(RI)
 
@@ -737,12 +739,14 @@ class VR4300:
         else:
             raise Exc(RI)
 
-    def cop1(self, w):
-        # the FPU is a later step; until then it is a coprocessor-unusable
-        # exception when disabled, and a reserved instruction when enabled
-        if not (self.status & (1 << 29)):
+    def cop1(self, w, pc, tgt):
+        # the FPU: tools/n64fpu.py
+        try:
+            self.fpu.execute(w, pc, tgt)
+        except n64fpu.CopUnusable:
             raise Exc(CPU_, 1)
-        raise Exc(RI)
+        except n64fpu.Trap:
+            raise Exc(FPE)
 
 
 class N64:

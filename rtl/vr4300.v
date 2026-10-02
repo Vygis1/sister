@@ -44,9 +44,17 @@
 // --- not yet --------------------------------------------------------------------------
 //
 // The TLB lookup (mapped addresses raise a TLB refill exception, which is what an
-// empty TLB does), and COP1 (the FPU: coprocessor-unusable, or a reserved
-// instruction when enabled). The caches are the memory's (n64_top.v): CACHE goes
-// out on the data port with its operation, and the CPU only waits for the answer.
+// empty TLB does). The caches are the memory's (n64_top.v): CACHE goes out on
+// the data port with its operation, and the CPU only waits for the answer.
+//
+// --- COP1 ----------------------------------------------------------------------------
+//
+// The arithmetic is vr4300_fpu.v; the registers are here. E is the commit point,
+// so the FPU's registers and FCR31 are written when the instruction leaves E,
+// and need no forwarding: the next instruction reads them from the file. An
+// operation holds E until the unit is done, and its trap is an E exception like
+// any other. Only the FP loads write later, in W; while one is in flight a COP1
+// instruction waits in E, which also keeps the file to one write port.
 // 64-bit addressing (Status.KX) is not handled; no N64 game uses it.
 //////////////////////////////////////////////////////////////////////////////////
 
@@ -100,7 +108,7 @@ module vr4300 #(
 	// exception codes
 	localparam [4:0] X_INT = 5'd0, X_MOD = 5'd1, X_TLBL = 5'd2, X_TLBS = 5'd3, X_ADEL = 5'd4,
 	                 X_ADES = 5'd5, X_SYS = 5'd8, X_BP = 5'd9, X_RI = 5'd10, X_CPU = 5'd11,
-	                 X_OV = 5'd12, X_TR = 5'd13;
+	                 X_OV = 5'd12, X_TR = 5'd13, X_FPE = 5'd15;
 
 	// =============================================================================
 	// COP0 state (written in E)
@@ -136,6 +144,15 @@ module vr4300 #(
 	initial for (k = 0; k < 32; k = k + 1) rf[k] = 64'd0;
 
 	// =============================================================================
+	// COP1's registers: 32 x 64 as two halves, since a single-precision write may
+	// fill either; and FCR31 (FCR0 is a constant)
+	// =============================================================================
+	reg  [31:0] fpr_lo [0:31];
+	reg  [31:0] fpr_hi [0:31];
+	initial for (k = 0; k < 32; k = k + 1) begin fpr_lo[k] = 32'd0; fpr_hi[k] = 32'd0; end
+	reg  [31:0] fcr31;
+
+	// =============================================================================
 	// pipeline registers
 	// =============================================================================
 	// F
@@ -166,6 +183,10 @@ module vr4300 #(
 	reg  [2:0]  m_kind;            // merging load: {1, 0 LWL 1 LWR 2 LDL 3 LDR}, else 0
 	reg         m_cache;           // a CACHE instruction
 	reg  [4:0]  m_cop;
+	reg         m_fpl, w_fpl;      // an FP load (LWC1/LDC1): it writes an FP register in W
+	reg         m_fpl_d, w_fpl_d;  // LDC1: the whole register
+	reg         m_fpl_hi, w_fpl_hi;// LWC1 into the upper half (an odd register with FR clear)
+	reg  [4:0]  m_fpl_idx, w_fpl_idx;
 	reg         m_xmark, w_xmark;  // an exception was taken here: for the trace, in program order
 	reg  [4:0]  m_xcode, w_xcode;
 	// W
@@ -186,8 +207,10 @@ module vr4300 #(
 	wire d_wait = d_valid && !i_ready;                   // instruction word not back yet
 	wire e_hazard;                                       // E needs a load still in M
 	wire e_muldiv_wait;                                  // E needs HI/LO, or the unit, still busy
+	wire e_fp_wait;                                      // E uses the FP registers while an FP load is in flight
+	wire e_fpu_wait;                                     // E's FP operation is not done
 	wire stall_all = w_wait || d_wait;
-	wire stall_e   = e_hazard || e_muldiv_wait;          // E holds; a bubble goes to M
+	wire stall_e   = e_hazard || e_muldiv_wait || e_fp_wait || e_fpu_wait;   // E holds; a bubble goes to M
 	wire adv       = !stall_all && !stall_e;             // F, D, E advance
 	wire adv_mw    = !stall_all;                         // M, W advance
 
@@ -222,15 +245,31 @@ module vr4300 #(
 	wire [63:0] b = fw_m_b ? m_res : fw_w_b ? w_value : e_b;
 
 	// which operands E actually reads (so a load in M only stalls what needs it)
-	wire uses_rs = !(op == 6'h02 || op == 6'h03 || op == 6'h0F || op == 6'h10)
+	wire uses_rs = !(op == 6'h02 || op == 6'h03 || op == 6'h0F || op == 6'h10 || op == 6'h11)
 	               && !(op == 6'h00 && (fn == 6'h00 || fn == 6'h02 || fn == 6'h03 || fn == 6'h38 || fn == 6'h3A || fn == 6'h3B
 	                                    || fn == 6'h3C || fn == 6'h3E || fn == 6'h3F || fn == 6'h10 || fn == 6'h12 || fn == 6'h0C || fn == 6'h0D || fn == 6'h0F));
 	wire uses_rt = (op == 6'h00) || op == 6'h04 || op == 6'h05 || op == 6'h14 || op == 6'h15
 	               || (op >= 6'h28 && op <= 6'h2F) || op == 6'h38 || op == 6'h3C || op == 6'h3F
 	               || op == 6'h22 || op == 6'h26 || op == 6'h1A || op == 6'h1B
-	               || (op == 6'h10 && (rs == 5'h04 || rs == 5'h05));
+	               || ((op == 6'h10 || op == 6'h11) && (rs == 5'h04 || rs == 5'h05))
+	               || (op == 6'h11 && rs == 5'h06);
 	wire ld_in_m = m_valid && m_load && m_we_rf && m_rd != 5'd0;
 	assign e_hazard = e_valid && ld_in_m && ((uses_rs && m_rd == rs) || (uses_rt && m_rd == rt));
+
+	// =============================================================================
+	// E: the FP registers. With Status.FR clear the registers pair up: fs reads
+	// the even register, and a 32-bit move of an odd one is its pair's upper half.
+	// ft as an arithmetic operand is NOT paired, as ares has it (fgr_t).
+	// =============================================================================
+	wire        fr = c0_status[26];
+	wire        fp_ls = op == 6'h39 || op == 6'h3D;             // SWC1, SDC1: ft is paired
+	wire [4:0]  fs_e = fr ? rd : {rd[4:1], 1'b0};
+	wire [4:0]  ft_e = (fp_ls && !fr) ? {rt[4:1], 1'b0} : rt;
+	wire [63:0] fpa = {fpr_hi[fs_e], fpr_lo[fs_e]};
+	wire [63:0] fpb = {fpr_hi[ft_e], fpr_lo[ft_e]};
+	wire [31:0] fpa32 = (!fr && rd[0]) ? fpa[63:32] : fpa[31:0];  // MFC1
+	wire [31:0] fpb32 = (!fr && rt[0]) ? fpb[63:32] : fpb[31:0];  // SWC1
+	wire        fpl_inflight = (m_valid && m_fpl) || (w_valid && w_fpl);
 
 	// =============================================================================
 	// E: the ALU
@@ -295,6 +334,17 @@ module vr4300 #(
 	reg         hi_wr, lo_wr; // MTHI, MTLO
 	reg         reads_hilo;   // MFHI, MFLO
 	reg  [63:0] c0_rdata;
+	// COP1
+	reg         fp_arith;     // to the unit (S/D/W/L, all but MOV)
+	reg         fp_mt, fp_dmt, fp_mov, fp_ctc, fp_bc, fp_unimpl;
+	reg         fp_load, fp_ld_d;
+	wire        fpu_done, fpu_res32, fpu_wr, fpu_trap, fpu_cmp_wr, fpu_cmp_val;
+	wire [63:0] fpu_res;
+	wire [5:0]  fpu_cause;
+	wire [4:0]  fpu_flags;
+	reg         fpu_on;       // the unit is working on (or has finished) E's instruction
+	// CTC1 to FCR31 traps when it sets a cause that is enabled, or E
+	wire        ctc_trap = ((b[16:12] & b[11:7]) != 5'd0) || b[17];
 
 	wire d64_ok = kernel || c0_status[7] && st_ksu == 2'b00 || (st_ksu == 2'b01 && c0_status[6]) || (st_ksu == 2'b10 && c0_status[5]);
 	wire [63:0] hi, lo;
@@ -336,6 +386,8 @@ module vr4300 #(
 		is_mem = 1'b0; is_load = 1'b0; is_store = 1'b0; lsel = 3'd0; mkind = 3'd0; msize = 2'd0;
 		c0_wr = 1'b0; is_eret = 1'b0; is_ll = 1'b0; is_sc = 1'b0; is_cache = 1'b0;
 		md_start = 1'b0; md_op = 3'd0; hi_wr = 1'b0; lo_wr = 1'b0; reads_hilo = 1'b0;
+		fp_arith = 1'b0; fp_mt = 1'b0; fp_dmt = 1'b0; fp_mov = 1'b0; fp_ctc = 1'b0; fp_bc = 1'b0; fp_unimpl = 1'b0;
+		fp_load = 1'b0; fp_ld_d = 1'b0;
 		case (op)
 		6'h00: begin
 			we_rf = 1'b1;
@@ -440,9 +492,45 @@ module vr4300 #(
 				end else exc = X_RI + 5'd1;
 			endcase
 		end
-		6'h11, 6'h31, 6'h35, 6'h39, 6'h3D: begin                       // COP1 and its loads/stores: not yet
-			if (!c0_status[29]) begin exc = X_CPU + 5'd1; end
-			else exc = X_RI + 5'd1;
+		6'h11: begin                                                   // COP1
+			if (!c0_status[29]) exc = X_CPU + 5'd1;
+			else case (rs)
+			5'h00: begin dst = rt; we_rf = 1'b1; res = sx32(fpa32); end                     // MFC1
+			5'h01: begin dst = rt; we_rf = 1'b1; res = fpa; end                             // DMFC1
+			5'h02: begin dst = rt; we_rf = 1'b1;                                            // CFC1
+				res = sx32((rd == 5'd0) ? 32'h0000_0A00 : (rd == 5'd31) ? fcr31 : 32'd0);
+			end
+			5'h04: fp_mt = 1'b1;                                                             // MTC1
+			5'h05: fp_dmt = 1'b1;                                                            // DMTC1
+			5'h06: begin fp_ctc = 1'b1; if (rd == 5'd31 && ctc_trap) exc = X_FPE + 5'd1; end // CTC1
+			5'h08: begin                                                                     // BC1F/T(L)
+				if (rt[4:2] != 3'd0) begin fp_unimpl = 1'b1; exc = X_FPE + 5'd1; end
+				else begin
+					fp_bc = 1'b1; is_br = 1'b1;
+					take_br = fcr31[23] == rt[0];
+					likely_skip = rt[1] && !(fcr31[23] == rt[0]);
+				end
+			end
+			5'h10, 5'h11, 5'h14, 5'h15: begin
+				if (rs[4:1] == 4'b1000 && fn == 6'h06) fp_mov = 1'b1;                       // MOV.S/D: no checks
+				else begin
+					fp_arith = 1'b1;
+					if (fpu_on && fpu_done && fpu_trap) exc = X_FPE + 5'd1;
+				end
+			end
+			default: begin fp_unimpl = 1'b1; exc = X_FPE + 5'd1; end
+			endcase
+		end
+		6'h31, 6'h35: begin                                                    // LWC1, LDC1
+			if (!c0_status[29]) exc = X_CPU + 5'd1;
+			else begin
+				is_mem = 1'b1; is_load = 1'b1; fp_load = 1'b1; fp_ld_d = op[2];
+				lsel = op[2] ? 3'd6 : 3'd4; msize = op[2] ? 2'd3 : 2'd2;
+			end
+		end
+		6'h39, 6'h3D: begin                                                    // SWC1, SDC1
+			if (!c0_status[29]) exc = X_CPU + 5'd1;
+			else begin is_mem = 1'b1; is_store = 1'b1; msize = op[2] ? 2'd3 : 2'd2; end
 		end
 		6'h12, 6'h13: exc = (c0_status[30 + op[0]] ? X_RI : X_CPU) + 5'd1;
 		6'h18: begin dst = rt;
@@ -533,6 +621,8 @@ module vr4300 #(
 		6'h29: begin st_be = 8'b0000_0011 << va[2:0]; st_data = {4{b[15:0]}}; end
 		6'h2B, 6'h38: begin st_be = 8'b0000_1111 << va[2:0]; st_data = {2{b[31:0]}}; end
 		6'h3F, 6'h3C: begin st_be = 8'hFF; st_data = b; end
+		6'h39: begin st_be = 8'b0000_1111 << va[2:0]; st_data = {2{fpb32}}; end           // SWC1
+		6'h3D: begin st_be = 8'hFF; st_data = fpb; end                                    // SDC1
 		6'h2A: begin                                                    // SWL: bytes k..3 of the word
 			wmask = 4'hF << va[1:0];
 			st_be = va[2] ? {wmask, 4'd0} : {4'd0, wmask};
@@ -593,6 +683,65 @@ module vr4300 #(
 	assign e_muldiv_wait = e_valid && (md_busy || md_go_q || hi_wr_q || lo_wr_q) && (reads_hilo || md_start || hi_wr || lo_wr);
 
 	// =============================================================================
+	// COP1: the unit, and what the instruction in E commits
+	// =============================================================================
+	assign e_fp_wait  = e_valid && (op == 6'h11 || fp_ls) && fpl_inflight;
+	assign e_fpu_wait = e_valid && fp_arith && !(fpu_on && fpu_done);
+	wire   fpu_start  = e_valid && fp_arith && !fpu_on && !fpl_inflight;
+	always @(posedge clk) begin
+		if (rst || adv) fpu_on <= 1'b0;
+		else if (fpu_start) fpu_on <= 1'b1;
+	end
+	vr4300_fpu fpu (
+		.clk(clk), .rst(rst), .start(fpu_start), .fmt(rs), .fn(fn), .fs_v(fpa), .ft_v(fpb),
+		.rm(fcr31[1:0]), .en(fcr31[11:7]), .fs_flush(fcr31[24]),
+		.done(fpu_done), .res(fpu_res), .res32(fpu_res32), .wr(fpu_wr), .trap(fpu_trap),
+		.cause(fpu_cause), .flags(fpu_flags), .cmp_wr(fpu_cmp_wr), .cmp_val(fpu_cmp_val)
+	);
+
+	// the instruction in E runs (it may still trap): not an interrupt, not a fetch fault
+	wire        e_exec = e_go && !int_pending && e_fexc == 5'd0;
+	// the one write port: E's commit, or W's FP load (never both: see e_fp_wait)
+	reg         fpw_lo, fpw_hi;
+	reg  [4:0]  fpw_idx;
+	reg  [31:0] fpw_dlo, fpw_dhi;
+	always @(*) begin
+		fpw_lo = 1'b0; fpw_hi = 1'b0; fpw_idx = sa; fpw_dlo = fpu_res[31:0]; fpw_dhi = fpu_res[63:32];
+		if (adv_mw && w_valid && w_fpl) begin
+			fpw_idx = w_fpl_idx; fpw_dlo = w_value[31:0]; fpw_dhi = w_fpl_d ? w_value[63:32] : w_value[31:0];
+			fpw_lo = w_fpl_d || !w_fpl_hi; fpw_hi = w_fpl_d || w_fpl_hi;
+		end else if (e_ok) begin
+			if (fp_mt) begin
+				fpw_idx = fs_e; fpw_dlo = b[31:0]; fpw_dhi = b[31:0];
+				fpw_hi = !fr && rd[0]; fpw_lo = !(!fr && rd[0]);
+			end else if (fp_dmt) begin
+				fpw_idx = fs_e; fpw_dlo = b[31:0]; fpw_dhi = b[63:32]; fpw_lo = 1'b1; fpw_hi = 1'b1;
+			end else if (fp_mov) begin
+				fpw_idx = sa; fpw_dlo = fpa[31:0]; fpw_dhi = fpa[63:32]; fpw_lo = 1'b1; fpw_hi = 1'b1;
+			end else if (fp_arith && fpu_wr) begin
+				fpw_lo = 1'b1; fpw_hi = 1'b1;
+			end
+		end
+	end
+	always @(posedge clk) begin
+		if (fpw_lo) fpr_lo[fpw_idx] <= fpw_dlo;
+		if (fpw_hi) fpr_hi[fpw_idx] <= fpw_dhi;
+	end
+	// FCR31: an operation's cause (kept when it traps, as ares does), its flags, the condition
+	always @(posedge clk) begin
+		if (rst) fcr31 <= 32'd0;
+		else if (e_exec && op == 6'h11 && c0_status[29]) begin
+			if (fp_arith) begin
+				fcr31[17:12] <= fpu_cause;
+				fcr31[6:2]   <= fcr31[6:2] | fpu_flags;
+				if (fpu_cmp_wr) fcr31[23] <= fpu_cmp_val;
+			end else if (fp_bc) fcr31[17:12] <= 6'd0;
+			else if (fp_unimpl) fcr31[17:12] <= 6'b100000;
+			else if (fp_ctc && rd == 5'd31) fcr31 <= b[31:0] & 32'h0183_FFFF;
+		end
+	end
+
+	// =============================================================================
 	// the pipeline
 	// =============================================================================
 	// F's address: translated the same way as data (kseg0/kseg1 direct)
@@ -619,7 +768,7 @@ module vr4300 #(
 		if (rst) begin
 			f_pc <= RESET_PC; f_valid <= 1'b1;
 			d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0;
-			d_noissue <= 1'b0; m_xmark <= 1'b0; w_xmark <= 1'b0;
+			d_noissue <= 1'b0; m_xmark <= 1'b0; w_xmark <= 1'b0; m_fpl <= 1'b0; w_fpl <= 1'b0;
 		end else begin
 			// --- F and D ---------------------------------------------------------------
 			if (adv) begin
@@ -670,6 +819,14 @@ module vr4300 #(
 				m_be     <= is_load ? 8'hFF : st_be;
 				m_wdata  <= st_data;
 				m_kind   <= (is_load && lsel == 3'd7) ? {1'b1, mkind[1:0]} : 3'd0;
+				m_fpl     <= fp_load && e_ok;
+				m_fpl_d   <= fp_ld_d;
+				m_fpl_hi  <= !fp_ld_d && !fr && rt[0];
+				m_fpl_idx <= fr ? rt : {rt[4:1], 1'b0};
+				w_fpl     <= m_fpl;
+				w_fpl_d   <= m_fpl_d;
+				w_fpl_hi  <= m_fpl_hi;
+				w_fpl_idx <= m_fpl_idx;
 				m_xmark  <= e_redir_exc;
 				m_xcode  <= e_int ? X_INT : e_exc_any - 5'd1;
 				w_xmark  <= m_xmark;
@@ -780,7 +937,8 @@ module vr4300 #(
 					c0_bd  <= e_bd;
 				end
 				c0_exccode <= e_int ? X_INT : e_exc_any - 5'd1;
-				c0_ce <= (op == 6'h11 || op == 6'h31 || op == 6'h35 || op == 6'h39 || op == 6'h3D) ? 2'd1
+				c0_ce <= (e_int || e_exc_any != X_CPU + 5'd1) ? 2'd0
+				       : (op == 6'h11 || op == 6'h31 || op == 6'h35 || op == 6'h39 || op == 6'h3D) ? 2'd1
 				       : (op == 6'h12) ? 2'd2 : (op == 6'h13) ? 2'd3 : 2'd0;
 				c0_status[1] <= 1'b1;
 				if (!e_int && (e_exc_any == X_ADEL + 5'd1 || e_exc_any == X_ADES + 5'd1 ||
