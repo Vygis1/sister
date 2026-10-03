@@ -1,13 +1,14 @@
 //////////////////////////////////////////////////////////////////////////////////
 // n64_rdp_persp.v - the RDP's perspective divide: (s, t) / w with a table
 // reciprocal, as tools/n64rdp.py perspective_divide does it (perspective.h,
-// parallel-RDP, MIT): 17-bit results and an overflow flag. Two clocks.
+// parallel-RDP, MIT): 17-bit results and an overflow flag. Two clocks; held while ce is low.
 //////////////////////////////////////////////////////////////////////////////////
 
 `default_nettype none
 
 module n64_rdp_persp (
 	input  wire         clk,
+	input  wire         ce,
 	input  wire signed [15:0] s, t, w,     // s, t, w >> 16 of the interpolated values
 	output reg  signed [16:0] so, to,
 	output reg          overflow
@@ -104,7 +105,7 @@ module n64_rdp_persp (
 	end
 	reg  [3:0]   shift_q;  reg w_carry_q;  reg signed [15:0] s_q, t_q;
 	reg  signed [16:0] rcp_q;
-	always @(posedge clk) begin
+	always @(posedge clk) if (ce) begin
 		shift_q <= shift; w_carry_q <= (w <= 16'sd0); s_q <= s; t_q <= t;
 		rcp_q <= ((ty * $signed({1'b0, wnorm})) >>> 10) + $signed({3'b000, tx});
 	end
@@ -128,7 +129,7 @@ module n64_rdp_persp (
 		div1 = {ovf, temp[16:0]};
 	end endfunction
 	wire [17:0] ds = div1(s_q, rcp_q, shift_q), dt = div1(t_q, rcp_q, shift_q);
-	always @(posedge clk) begin
+	always @(posedge clk) if (ce) begin
 		if (w_carry_q) begin so <= 17'sd32767; to <= 17'sd32767; overflow <= 1'b1; end
 		else begin so <= ds[16:0]; to <= dt[16:0]; overflow <= ds[17] | dt[17]; end
 	end

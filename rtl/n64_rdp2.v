@@ -42,13 +42,26 @@ module n64_rdp2 #(
 	output wire [23:0]  cw_line,
 	output wire [127:0] cw_data,
 	output wire [15:0]  cw_mask,          // bit k: byte k is written
+	// the raster's span reads: pipelined, taken on rq_ready, answered in order on rs_valid
+	output wire         rq_valid,
+	input  wire         rq_ready,
+	output wire [23:0]  rq_line,
+	input  wire         rs_valid,
+	input  wire [127:0] rs_data,
 	// DMEM, over the XBUS
 	output reg          xb_req,
 	output reg  [8:0]   xb_dw,
 	input  wire         xb_ack,
 	input  wire [63:0]  xb_data,
 	output reg          irq,
-	output wire         idle              // nothing walking or drawing (for tests)
+	output wire         idle,             // nothing walking or drawing (for tests)
+	// debugging: the last 32 commands decoded ({address after it, w0, w1}), until log_stop
+	input  wire         log_stop,
+	input  wire [4:0]   log_idx,
+	output reg  [87:0]  log_q,
+	output reg  [31:0]  log_n,
+	output wire [63:0]  dbg,              // {ws, cb_n, raster busy, tmem busy, wk_req, raster_mem, tmem_mem, 0 (3), the raster's 48}
+	output wire [63:0]  dbg2              // {the raster's y (16), the command (6), 0 (2), fb_addr (24), z_addr[23:8]}
 );
 	// =============================================================================
 	// the registers
@@ -190,20 +203,22 @@ module n64_rdp2 #(
 	wire [5:0]   op0 = cbuf[0][61:56];
 	reg  [4:0]   xi;                       // the executor's step
 	wire [31:0]  w0 = cbuf[0][63:32], w1 = cbuf[0][31:0];
+	// (the command log is not built: the board is full. Its ports stay for the benches.)
+	always @(posedge clk) begin log_n <= 32'd0; log_q <= 88'd0; end
 	wire [31:0]  w2 = cbuf[1][63:32], w3 = cbuf[1][31:0], w4 = cbuf[2][63:32], w5 = cbuf[2][31:0];
 	wire [31:0]  w6 = cbuf[3][63:32], w7 = cbuf[3][31:0];
-	// the line port: the walk's, or (while a primitive is drawn) the raster's
-	reg          raster_mem;
+	// the line port: the walk's, or a TMEM load's (the raster has its own, rq/rs)
+	reg          raster_mem;               // (a primitive is being drawn)
 	reg          wk_req;  reg [23:0] wk_line;
-	wire         mr_req;  wire [23:0] mr_line;
+	wire [23:0]  r_rq_line;
+	assign rq_line = RDRAM_LINE + r_rq_line;
 	reg          tmem_mem;                 // (or a TMEM load's)
 	reg          ld_go;                    // a TMEM load, started (n64_rdp_tmem.v)
 	wire         ld_busy;
 	wire         tl_req;  wire [23:0] tl_line;
-	assign cf_req  = raster_mem ? mr_req : tmem_mem ? tl_req : wk_req;
-	assign cf_line = raster_mem ? RDRAM_LINE + mr_line : tmem_mem ? RDRAM_LINE + tl_line : wk_line;
+	assign cf_req  = raster_mem ? 1'b0 : tmem_mem ? tl_req : wk_req;
+	assign cf_line = tmem_mem ? RDRAM_LINE + tl_line : wk_line;
 	wire         wk_ack = cf_ack && !raster_mem && !tmem_mem;
-	wire         mr_ack = cf_ack && raster_mem;
 	wire         tl_ack = cf_ack && tmem_mem;
 	wire         copy_cycle = om0[21:20] == 2'd2, fill_or_copy = om0[21];
 
@@ -373,6 +388,9 @@ module n64_rdp2 #(
 		end
 	end
 	assign idle = ws == W_IDLE && !dwin_v && current >= endp && cb_n == 5'd0;
+	wire [63:0]  r_dbg;
+	assign dbg = {ws, cb_n, pr_busy, ld_busy, wk_req, raster_mem, tmem_mem, 3'd0, r_dbg[47:0]};
+	assign dbg2 = {r_dbg[63:48], op0, 2'd0, fb_addr, z_addr[23:8]};
 
 	// =============================================================================
 	// the raster
@@ -382,22 +400,22 @@ module n64_rdp2 #(
 	// =============================================================================
 	// TMEM (n64_rdp_tmem.v): the loads, and the raster's sampler reads it
 	// =============================================================================
-	wire [10:0]  tra0, tra1, tra2, tra3;
-	wire [15:0]  trq0, trq1, trq2, trq3;
-	wire [2:0]   tsel;
+	wire [10:0]  tfa0, tfa1, tfa2, tfa3, tsa0, tsa1, tsa2, tsa3;
+	wire [15:0]  tfq0, tfq1, tfq2, tfq3, tsq0, tsq1, tsq2, tsq3;
+	wire         tm_ce;
 	wire [55:0]  tw_l = tile_w[w1[26:24]];
-	wire [10:0]  tm_dbg_a = 11'd0;
-	wire [15:0]  tm_dbg_q;
 	n64_rdp_tmem u_tmem (
 		.clk(clk), .rst(rst), .go(ld_go), .busy(ld_busy), .op(op0), .w0(w0), .w1(w1),
 		.t_fmt(tw_l[55:53]), .t_size(tw_l[52:51]), .t_line(tw_l[49:41]), .t_tmem(tw_l[40:32]),
 		.img_addr(timg_addr), .img_width_m1(timg_width_m1), .img_size(timg_size),
 		.mr_req(tl_req), .mr_ack(tl_ack), .mr_line(tl_line), .mr_data(cf_data),
-		.ra0(tra0), .ra1(tra1), .ra2(tra2), .ra3(tra3), .rq0(trq0), .rq1(trq1), .rq2(trq2), .rq3(trq3),
-		.dbg_a(tm_dbg_a), .dbg_q(tm_dbg_q)
+		.ce(tm_ce),
+		.fa0(tfa0), .fa1(tfa1), .fa2(tfa2), .fa3(tfa3), .fq0(tfq0), .fq1(tfq1), .fq2(tfq2), .fq3(tfq3),
+		.sa0(tsa0), .sa1(tsa1), .sa2(tsa2), .sa3(tsa3), .sq0(tsq0), .sq1(tsq1), .sq2(tsq2), .sq3(tsq3)
 	);
-	wire [55:0]  tw_r = tile_w[tsel];
-	wire [47:0]  tsz_r = tile_sz[tsel];
+	// the tiles, all eight, for the pixel pipeline (each pixel's texels may want any)
+	wire [447:0] tw_all = {tile_w[0], tile_w[1], tile_w[2], tile_w[3], tile_w[4], tile_w[5], tile_w[6], tile_w[7]};
+	wire [383:0] tsz_all = {tile_sz[0], tile_sz[1], tile_sz[2], tile_sz[3], tile_sz[4], tile_sz[5], tile_sz[6], tile_sz[7]};
 
 	n64_rdp_raster u_raster (
 		.clk(clk), .rst(rst), .go(pr_go), .busy(pr_busy),
@@ -410,9 +428,11 @@ module n64_rdp2 #(
 		.k4(convert[17:9]), .k5(convert[8:0]), .prim_lod_frac(prim_lod_frac), .prim_min_level(prim_min_level), .prim_dz(prim_dz),
 		.sc_xlo(sc_xlo), .sc_ylo(sc_ylo), .sc_xhi(sc_xhi), .sc_yhi(sc_yhi), .sc_field(sc_field), .sc_odd(sc_odd),
 		.fb_addr(fb_addr), .fb_width_m1(fb_width_m1), .fb_fmt(fb_fmt), .z_addr(z_addr), .prim_depth(prim_depth),
-		.tsel(tsel), .tw(tw_r), .tsz(tsz_r),
-		.ra0(tra0), .ra1(tra1), .ra2(tra2), .ra3(tra3), .rq0(trq0), .rq1(trq1), .rq2(trq2), .rq3(trq3),
-		.mr_req(mr_req), .mr_ack(mr_ack), .mr_line(mr_line), .mr_data(cf_data),
+		.tw_all(tw_all), .tsz_all(tsz_all), .tm_ce(tm_ce),
+		.fa0(tfa0), .fa1(tfa1), .fa2(tfa2), .fa3(tfa3), .fq0(tfq0), .fq1(tfq1), .fq2(tfq2), .fq3(tfq3),
+		.sa0(tsa0), .sa1(tsa1), .sa2(tsa2), .sa3(tsa3), .sq0(tsq0), .sq1(tsq1), .sq2(tsq2), .sq3(tsq3),
+		.rq_valid(rq_valid), .rq_ready(rq_ready), .rq_line(r_rq_line), .rs_valid(rs_valid), .rs_data(rs_data),
+		.dbg(r_dbg),
 		.mw_req(cw_req), .mw_ack(cw_ack), .mw_line(r_mw_line), .mw_data(cw_data), .mw_mask(cw_mask)
 	);
 endmodule

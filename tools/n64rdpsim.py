@@ -5,7 +5,7 @@
         runs ROM in the model, drawing nothing until VI frame F (default 0), then
         captures N frames (default: until the program goes quiet) into sim/n64d/
     ./tools/sim.sh tb_n64_rdp
-    python tools/n64rdpsim.py --check [--png]
+    python tools/n64rdpsim.py --check [--png [--origin HEX]]
         compares the RDRAM the RTL left with the model's
 
 What is captured:
@@ -276,6 +276,8 @@ def check(png):
         print('RDRAM: the same (%d lines changed by both)' % model_lines)
     if png:
         st, origin, width = [int(x, 16) for x in open(os.path.join(OUT, 'vi.txt')).read().split()]
+        if '--origin' in sys.argv:           # another buffer than the one the VI showed
+            origin = int(sys.argv[sys.argv.index('--origin') + 1], 16)
         for name, mem in (('model', exp), ('rtl', got)):
             m = n64model.N64(b'\0' * 0x1000)
             m.rdram[:] = mem[:len(m.rdram)]

@@ -175,7 +175,20 @@ module n64_rsp #(
 	// the sequencer
 	// =============================================================================
 	localparam [3:0] R_HALT = 4'd0, R_FETCH = 4'd1, R_EX = 4'd2, R_V2 = 4'd3, R_SMEM = 4'd4,
-	                 R_SMEM2 = 4'd5, R_VLD = 4'd6, R_VLD2 = 4'd7, R_VST = 4'd8, R_LFV = 4'd9;
+	                 R_SMEM2 = 4'd5, R_VLD = 4'd6, R_VLD2 = 4'd7, R_VST = 4'd8, R_LFV = 4'd9,
+	                 R_FL1 = 4'd10, R_FL2 = 4'd11, R_FL3 = 4'd12, R_FS1 = 4'd13, R_FS2 = 4'd14;
+	// the fast loads and stores: aligned, a doubleword at a time on DMEM's port A
+	// (the byte-serial states do every other case). f_op: 0 LB/LH/LW (by ls_idx, ls_n),
+	// 1 LQV, 2 LDV, 3 a scalar store, 4 SQV, 5 SDV, 6 LDV unaligned (two reads),
+	// 7 LRV (the quadword's two reads)
+	reg  [2:0]  f_op;
+	reg  [8:0]  f_dw;                     // the doubleword
+	reg  [2:0]  f_off;                    // the byte in it
+	reg  [3:0]  f_e;                      // the element (LDV)
+	reg  [63:0] f_lo, f_wd;               // LQV's first; a store's data
+	reg  [7:0]  f_mask;                   // a store's bytes (bit k = offset k)
+	reg  [4:0]  f_vt;
+	reg  [4:0]  f_start;                  // LRV: the first byte of the register written
 	reg  [3:0]  st;
 	reg         pc_dw_lo;
 	wire [31:0] ir = pc_dw_lo ? ia_q[31:0] : ia_q[63:32];
@@ -185,6 +198,7 @@ module n64_rsp #(
 	wire [5:0]  fn = ir[5:0];
 	wire [31:0] a = sr[rs], b = sr[rt];
 	wire [31:0] simm = sx16(ir[15:0]);
+	wire [11:0] ea = a[11:0] + simm[11:0];        // a scalar load or store's address
 	wire [11:0] br_t = pc + 12'd4 + {ir[9:0], 2'b00};     // (pc here is the branch's own: see below)
 	reg  [11:0] ipc;                      // the executing instruction's address
 
@@ -338,9 +352,11 @@ module n64_rsp #(
 	end endfunction
 
 	assign ia_addr = pc[11:3];
-	assign da_addr = sa_addr[11:3];
-	assign da_we   = (st == R_VST && ls_k != ls_n) ? (8'h01 << sa_addr[2:0]) : 8'd0;   // bit k = offset k
-	assign da_wd   = {8{sa_val}};
+	wire        fast_st = st == R_FL1 || st == R_FL2 || st == R_FS1 || st == R_FS2;
+	assign da_addr = fast_st ? f_dw : sa_addr[11:3];
+	assign da_we   = (st == R_FS1 || st == R_FS2) ? f_mask
+	               : (st == R_VST && ls_k != ls_n) ? (8'h01 << sa_addr[2:0]) : 8'd0;   // bit k = offset k
+	assign da_wd   = (st == R_FS1 || st == R_FS2) ? f_wd : {8{sa_val}};
 	// the byte a load step brought (the doubleword arrived a clock after its address)
 	reg  [2:0]   ld_off;
 	wire [7:0]   ld_byte = da_q[63 - 8 * ld_off -: 8];
@@ -830,12 +846,22 @@ module n64_rsp #(
 					ls_n <= (op[1:0] == 2'b00) ? 5'd1 : (op[1:0] == 2'b01) ? 5'd2 : 5'd4;
 					ls_acc <= 32'd0; ls_idx <= {2'd0, op[2], op[0]};       // [1] unsigned, [0] half/word
 					st <= R_SMEM;
+					// aligned: in one read
+					if (!(op[1:0] == 2'b11 && (a[1:0] + simm[1:0]) != 2'b00) && !(op[1:0] == 2'b01 && (a[0] ^ simm[0]))) begin
+						f_op <= 3'd0; f_dw <= ea[11:3]; f_off <= ea[2:0]; st <= R_FL1;
+					end
 				end
 				6'h28, 6'h29, 6'h2B: begin                                       // scalar stores
 					ls_kind <= 5'h10; ls_store <= 1'b1; ls_a <= a[11:0] + simm[11:0]; ls_k <= 5'd0;
 					ls_n <= (op[1:0] == 2'b00) ? 5'd1 : (op[1:0] == 2'b01) ? 5'd2 : 5'd4;
 					ls_v <= {96'd0, b};
 					st <= R_VST;
+					if (!(op[1:0] == 2'b11 && ea[1:0] != 2'b00) && !(op[1:0] == 2'b01 && ea[0])) begin
+						f_op <= 3'd3; f_dw <= ea[11:3];
+						f_wd <= (op[1:0] == 2'b11) ? {2{b}} : (op[1:0] == 2'b01) ? {4{b[15:0]}} : {8{b[7:0]}};
+						f_mask <= (op[1:0] == 2'b11) ? (8'h0F << ea[2:0]) : (op[1:0] == 2'b01) ? (8'h03 << ea[2:0]) : (8'h01 << ea[2:0]);
+						st <= R_FS1;
+					end
 				end
 				6'h32, 6'h3A: begin                                              // LWC2, SWC2
 					ls_kind <= {1'b0, ir[14:11]}; ls_store <= op[3]; ls_e <= me; ls_t <= vt; ls_k <= 5'd0;
@@ -851,6 +877,32 @@ module n64_rsp #(
 						ls_plan(kk, op[3], a[11:0] + sc, me);
 					end
 					st <= op[3] ? R_VST : R_VLD;
+					// LQV/SQV, 16-aligned, element 0; LDV/SDV, 8-aligned, element even and <= 8
+					begin : fastv
+						reg [11:0] va; reg [6:0] i7; reg [4:0] rs5;
+						i7 = ir[6:0];
+						va = (ir[14:11] == 4'd4 || ir[14:11] == 4'd5) ? a[11:0] + {i7[6], i7, 4'b0000} : a[11:0] + {{2{i7[6]}}, i7, 3'b000};
+						f_vt <= vt; f_dw <= va[11:3]; f_e <= me; f_off <= va[2:0];
+						// LDV anywhere (bytes e..e+7, no wrap in the register); LRV: the quadword's
+						// bytes up to the address, into the register's end from byte 16 - (a - e)
+						if (ir[14:11] == 4'd3 && !op[3] && me <= 4'd8 && va[2:0] != 3'd0) begin
+							f_op <= 3'd6; st <= R_FL1;
+						end
+						if (ir[14:11] == 4'd5 && !op[3]) begin
+							rs5 = 5'd16 - ({1'b0, va[3:0]} - {1'b0, me});
+							f_dw <= {va[11:4], 1'b0}; f_start <= rs5;
+							if ({1'b0, va[3:0]} < {1'b0, me}) st <= R_FETCH;      // (nothing to load)
+							else begin f_op <= 3'd7; st <= R_FL1; end
+						end
+						if (ir[14:11] == 4'd4 && va[3:0] == 4'd0 && me == 4'd0) begin
+							f_op <= op[3] ? 3'd4 : 3'd1; f_wd <= vtr[127:64]; f_lo <= vtr[63:0]; f_mask <= 8'hFF;
+							st <= op[3] ? R_FS1 : R_FL1;
+						end
+						if (ir[14:11] == 4'd3 && va[2:0] == 3'd0 && !me[0] && me <= 4'd8) begin
+							f_op <= op[3] ? 3'd5 : 3'd2; f_wd <= vtr[127 - 8 * me -: 64]; f_mask <= 8'hFF;
+							st <= op[3] ? R_FS1 : R_FL1;
+						end
+					end
 				end
 				default: ;                                                     // everything else does nothing
 				endcase
@@ -923,6 +975,49 @@ module n64_rsp #(
 				vw_lane <= lfv_mask(ls_e);
 				st <= R_FETCH;
 			end
+
+			// --- the fast loads and stores ------------------------------------------------------
+			R_FL1: begin                                     // (the address is out: next clock, its doubleword)
+				if (f_op == 3'd1 || f_op == 3'd6 || f_op == 3'd7) f_dw <= f_dw + 9'd1;
+				st <= R_FL2;
+			end
+			R_FL2: begin
+				case (f_op)
+				3'd0: begin : sl
+					reg [31:0] w; reg [15:0] h; reg [7:0] by;
+					w = da_q[63 - 8 * f_off -: 32]; h = da_q[63 - 8 * f_off -: 16]; by = da_q[63 - 8 * f_off -: 8];
+					sr_we <= 1'b1; sr_wa <= ls_t;
+					case (ls_n)
+					5'd1: sr_wd <= ls_idx[1] ? {24'd0, by} : {{24{by[7]}}, by};
+					5'd2: sr_wd <= ls_idx[1] ? {16'd0, h} : {{16{h[15]}}, h};
+					default: sr_wd <= w;
+					endcase
+					st <= R_FETCH;
+				end
+				3'd1, 3'd6, 3'd7: begin f_lo <= da_q; st <= R_FL3; end   // (the second doubleword: next clock)
+				default: begin                                // LDV: lanes e .. e + 7
+					vw_reg <= ls_t; vw_data <= {da_q, da_q} >> (8 * f_e); vw_lane <= 16'h00FF << f_e;
+					st <= R_FETCH;
+				end
+				endcase
+			end
+			R_FL3: begin : fl3
+				reg [127:0] q2; reg [63:0] d8;
+				q2 = {f_lo, da_q};
+				d8 = q2[127 - 8 * f_off -: 64];
+				vw_reg <= ls_t;
+				case (f_op)
+				3'd6: begin vw_data <= {d8, d8} >> (8 * f_e); vw_lane <= 16'h00FF << f_e; end
+				3'd7: begin vw_data <= q2 >> (8 * f_start); vw_lane <= 16'hFFFF << f_start; end
+				default: begin vw_data <= q2; vw_lane <= 16'hFFFF; end
+				endcase
+				st <= R_FETCH;
+			end
+			R_FS1: begin                                     // (written this clock: da_we above)
+				if (f_op == 3'd4) begin f_dw <= f_dw + 9'd1; f_wd <= f_lo; st <= R_FS2; end
+				else st <= R_FETCH;
+			end
+			R_FS2: st <= R_FETCH;
 
 			// --- a store: a byte a clock ------------------------------------------------------
 			R_VST: begin

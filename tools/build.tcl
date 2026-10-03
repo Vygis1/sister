@@ -139,7 +139,13 @@ if {[llength $generics] > 0} {
 # half only. 8 is the most Vivado accepts.
 set_param general.maxThreads 8
 
-synth_design -top $top -part $part -generic $generics
+# AREA=1 (the environment) asks synthesis and opt_design for their area-first directives:
+# for a design that would not otherwise fit (the N64 with its RDP pipeline: 97% of the LUTs).
+if {[info exists ::env(AREA)] && $::env(AREA) ne ""} {
+    synth_design -top $top -part $part -generic $generics -directive AreaOptimized_high
+} else {
+    synth_design -top $top -part $part -generic $generics
+}
 
 # Critical warnings are errors wearing a friendlier label. A multi-driven net
 # lets synthesis silently drop a driver, and the hardware then does not match
@@ -175,7 +181,11 @@ if {$synth_only} {
 
 puts ""
 puts " implementing..."
-opt_design
+if {[info exists ::env(AREA)] && $::env(AREA) ne ""} {
+    opt_design -directive ExploreArea
+} else {
+    opt_design
+}
 
 # Start from where the last build finished. Vivado keeps the placement and
 # routing of everything that has not changed and only works on what has, which

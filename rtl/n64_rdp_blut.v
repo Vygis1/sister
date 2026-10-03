@@ -4,11 +4,12 @@
 `default_nettype none
 module n64_rdp_blut (
 	input  wire        clk,
+	input  wire        ce,               // (q holds while low: the pipeline is stalled)
 	input  wire [14:0] a,
 	output reg  [7:0]  q
 );
 	(* rom_style = "block" *) reg [7:0] r;
-	always @(posedge clk) q <= r;
+	always @(posedge clk) if (ce) q <= r;
 	always @(*) begin
 		case (a)
 		15'd2049: r = 8'h01;

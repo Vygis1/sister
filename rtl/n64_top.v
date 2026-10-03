@@ -196,6 +196,14 @@ module n64_top #(
 	reg          rd_rd_ack, rd_wr_ack, cf_ack, cw_ack;
 	wire [23:0]  rd_rd_line, rd_wr_line, cf_line, cw_line;
 	wire [127:0] cw_data;  wire [15:0] cw_mask;      // the RDP's line writes
+	// the RDP's span reads: pipelined. Each request is taken on rq_ready (a clock); the lines
+	// come back in order on rs_valid. While any are outstanding no one else may read, so
+	// every line that returns then is the RDP's (writes go on as before)
+	wire         rq_valid;  wire [23:0] rq_line;
+	reg          rq_ready, rs_valid;
+	reg  [127:0] rs_data;
+	reg  [6:0]   rdp_out;                             // RDP reads outstanding
+	wire         rd_ok = rdp_out == 7'd0;              // another client may read
 	reg  [127:0] rd_rd_data, cf_data;
 	wire [127:0] rd_wr_data;
 	wire [15:0]  rd_wr_mask;
@@ -408,7 +416,7 @@ module n64_top #(
 	localparam S_IDLE = 4'd0, S_FILL = 4'd1, S_WB = 4'd2, S_DREAD = 4'd3, S_DFILL = 4'd4,
 	           S_IREAD = 4'd5, S_IFILL0 = 4'd6, S_IFILL1 = 4'd7, S_HREAD = 4'd8,
 	           S_PREAD = 4'd9, S_PWRITE = 4'd10, S_FREAD = 4'd11, S_SREAD = 4'd12, S_SWRITE = 4'd13, S_AREAD = 4'd14,
-	           S_RREAD = 5'd15, S_RWRITE = 5'd16, S_CREAD = 5'd17, S_CWRITE = 5'd18;
+	           S_RREAD = 5'd15, S_RWRITE = 5'd16, S_CREAD = 5'd17, S_CWRITE = 5'd18, S_RQ = 5'd19;
 	reg  [4:0]   st;
 	// the host's fill: four words to a line. A finished line moves to its own
 	// buffer for the write, so the next line's first word can arrive while that
@@ -448,6 +456,7 @@ module n64_top #(
 			fr_pending <= 1'b0; fr_v <= 1'b0; fbr_ack <= 1'b0;
 			pd_rd_ack <= 1'b0; pd_wr_ack <= 1'b0; sd_rd_ack <= 1'b0; sd_wr_ack <= 1'b0; si_we <= 1'b0;
 			ad_rd_ack <= 1'b0; ai_we <= 1'b0; rd_rd_ack <= 1'b0; rd_wr_ack <= 1'b0; cf_ack <= 1'b0; cw_ack <= 1'b0;
+			rq_ready <= 1'b0; rs_valid <= 1'b0; rdp_out <= 7'd0;
 			dsp_pend <= 1'b0; isp_pend <= 1'b0;
 			mi_intr <= 6'd0; mi_mask <= 6'd0; mi_mode <= 32'd0;
 			pi_we <= 1'b0;
@@ -460,7 +469,10 @@ module n64_top #(
 			if (!rd_rd_req) rd_rd_ack <= 1'b0;
 			if (!rd_wr_req) rd_wr_ack <= 1'b0;
 			// (the RDP's acks are a clock long: it may ask again on the clock it takes one)
-			cf_ack <= 1'b0; cw_ack <= 1'b0;
+			cf_ack <= 1'b0; cw_ack <= 1'b0; rq_ready <= 1'b0; rs_valid <= 1'b0;
+			// the RDP's span reads: taken (S_RQ) and returned
+			rdp_out <= rdp_out + {6'd0, st == S_RQ && d_ready} - {6'd0, d_valid && !rd_ok};
+			if (d_valid && !rd_ok) begin rs_valid <= 1'b1; rs_data <= d_rdata; end
 			si_we <= 1'b0; ai_we <= 1'b0;
 			if (ai_irq) mi_intr[2] <= 1'b1;
 			if (si_done) begin mi_intr[1] <= 1'b1; il_v <= 1'b0; dl_v <= 1'b0; end
@@ -640,38 +652,44 @@ module n64_top #(
 					// by index, or by index when the tag matches (the hit forms)
 					// (the invalidate itself: the tag arrays' write ports below)
 					dp_cop <= 1'b0; d_ready_r <= 1'b1;
-				end else if (dp && !c_dreq) begin
+				end else if (dp && !c_dreq && rd_ok) begin
 					d_addr <= line_of(dpa); d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1;
 					d_for <= dpa; st <= dp_fill ? S_DFILL : S_DREAD;
-				end else if (ip && !i_req) begin
+				end else if (ip && !i_req && rd_ok) begin
 					d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; i_for <= ipa;
 					if (ip_fill) begin d_addr <= line_of({ipa[31:5], 5'd0}); st <= S_IFILL0; end
 					else begin d_addr <= line_of(ipa); st <= S_IREAD; end
-				end else if (pd_rd_req && !pd_rd_ack) begin
+				end else if (pd_rd_req && !pd_rd_ack && rd_ok) begin
 					d_addr <= pd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_PREAD;
 				end else if (pd_wr_req && !pd_wr_ack) begin
 					d_addr <= pd_wr_line; d_wdata <= pd_wr_data; d_wmask <= pd_wr_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_PWRITE;
-				end else if (rd_rd_req && !rd_rd_ack) begin
+				end else if (rd_rd_req && !rd_rd_ack && rd_ok) begin
 					d_addr <= rd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RREAD;
 				end else if (rd_wr_req && !rd_wr_ack) begin
 					d_addr <= rd_wr_line; d_wdata <= rd_wr_data; d_wmask <= rd_wr_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_RWRITE;
-				end else if (cf_req && !cf_ack) begin
+				// (at most 4 outstanding: ddr3_mem's return queue holds 8 and drops a line that
+				// arrives when it looks full -- MIG cannot be held off -- and across the clock
+				// crossing it looks fuller than it is, by the pops not yet seen. 56 and then 6 both
+				// lost lines and hung the RDP.)
+				end else if (rq_valid && !rq_ready && rdp_out < 7'd4) begin
+					d_addr <= rq_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ;
+				end else if (cf_req && !cf_ack && rd_ok) begin
 					d_addr <= cf_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_CREAD;
 				end else if (cw_req && !cw_ack) begin
 					d_addr <= cw_line; d_wdata <= cw_data; d_wmask <= cw_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_CWRITE;
-				end else if (ad_rd_req && !ad_rd_ack) begin
+				end else if (ad_rd_req && !ad_rd_ack && rd_ok) begin
 					d_addr <= ad_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_AREAD;
-				end else if (sd_rd_req && !sd_rd_ack) begin
+				end else if (sd_rd_req && !sd_rd_ack && rd_ok) begin
 					d_addr <= sd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_SREAD;
 				end else if (sd_wr_req && !sd_wr_ack) begin
 					d_addr <= sd_wr_line; d_wdata <= sd_wr_data; d_wmask <= sd_wr_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_SWRITE;
-				end else if (fr_pending) begin
+				end else if (fr_pending && rd_ok) begin
 					d_addr <= fr_for; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_FREAD;
-				end else if (hr_pending) begin
+				end else if (hr_pending && rd_ok) begin
 					d_addr <= hr_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_HREAD;
 				end
 			end
@@ -689,6 +707,9 @@ module n64_top #(
 			end
 			S_CWRITE: if (d_ready) begin
 				d_req <= 1'b0; cw_ack <= 1'b1; st <= S_IDLE;
+			end
+			S_RQ: if (d_ready) begin
+				d_req <= 1'b0; rq_ready <= 1'b1; st <= S_IDLE;
 			end
 			S_WB: if (d_ready) begin
 				d_req <= 1'b0; wb_rp <= wb_rp + 3'd1; st <= S_IDLE;
@@ -1121,7 +1142,7 @@ module n64_top #(
 	wire [31:0]  rsp_dlog_n;
 	wire [63:0]  rsp_dbg_dq;
 	wire         rsp_frozen;
-	n64_rsp #(.RDRAM_LINE(RDRAM_LINE), .DEBUG_FREEZE(1)) u_rsp (
+	n64_rsp #(.RDRAM_LINE(RDRAM_LINE), .DEBUG_FREEZE(0)) u_rsp (
 		.clk(clk), .rst(rst || !run),
 		.c_mem_en(sp_go_d || sp_go_i), .c_mem_we(sp_go_d && c_dwe_q ? c_dbe_q : 8'd0),
 		.c_mem_dw(sp_go_d ? dpa[12:3] : ipa[12:3]), .c_mem_wd(c_dwdata_q),
@@ -1145,6 +1166,20 @@ module n64_top #(
 	always @(posedge clk) if (c_dreq) begin c_dbe_q <= c_dbe; c_dwe_q <= c_dwe; c_dwdata_q <= c_dwdata; end
 
 	wire         dp_cpu_we = c_dreq && c_dwe && !c_dcache && c_daddr[31:20] == 12'h041;
+	wire [63:0]  rdp_dbg, rdp_dbg2;
+	// --- debugging: RDP writes outside SM64's images (the Z buffer at 0x400, the colour
+	// images from 0x38F800): counted, and the first one kept with the RDP's state then
+	reg  [31:0]  oob_n;
+	reg  [23:0]  oob_line;  reg [15:0] oob_mask;  reg [31:0] oob_w;  reg [63:0] oob_d, oob_d2;
+	wire [23:0]  cw_rel = cw_line - RDRAM_LINE;      // (the line, in RDRAM)
+	wire         cw_oob = !((cw_rel >= 24'h40 && cw_rel < 24'h25C0) || (cw_rel >= 24'h38F80 && cw_rel < 24'h40000));
+	always @(posedge clk) begin
+		if (cpu_rst) oob_n <= 32'd0;
+		else if (cw_req && cw_ack && cw_oob) begin
+			if (oob_n == 32'd0) begin oob_line <= cw_rel; oob_mask <= cw_mask; oob_w <= cw_data[31:0]; oob_d <= rdp_dbg; oob_d2 <= rdp_dbg2; end
+			oob_n <= oob_n + 32'd1;
+		end
+	end
 	n64_rdp2 #(.RDRAM_LINE(RDRAM_LINE)) u_rdp (
 		.clk(clk), .rst(rst || !run),
 		.c_we(dp_cpu_we), .c_idx(sp_reg_wa[4:2]), .c_wd(sp_reg_wv),
@@ -1152,29 +1187,15 @@ module n64_top #(
 		.regs_flat(dp_flat),
 		.cf_req(cf_req), .cf_ack(cf_ack), .cf_line(cf_line), .cf_data(cf_data),
 		.cw_req(cw_req), .cw_ack(cw_ack), .cw_line(cw_line), .cw_data(cw_data), .cw_mask(cw_mask),
+		.rq_valid(rq_valid), .rq_ready(rq_ready), .rq_line(rq_line), .rs_valid(rs_valid), .rs_data(rs_data),
 		.xb_req(xb_req), .xb_dw(xb_dw), .xb_ack(xb_ack), .xb_data(xb_q),
-		.irq(dp_irq), .idle()
+		.irq(dp_irq), .idle(),
+		.log_stop(1'b0), .log_idx(5'd0), .log_q(), .log_n(), .dbg(rdp_dbg), .dbg2(rdp_dbg2)
 	);
 
 	// --- debugging: the last 16 writes to RDRAM below 0x400 (the exception vectors and
 	// below the Z buffer), and who made them: 1 the CPU, 2 PI, 3 the RSP, 4 the RDP, 5 SI
 	reg  [4:0]   st_q;
-	reg  [127:0] lw_ring [0:15];
-	reg  [31:0]  lw_n;
-	reg  [127:0] lw_q;
-	wire [2:0]   lw_src = (st == S_WB) ? 3'd1 : (st == S_PWRITE) ? 3'd2 : (st == S_RWRITE) ? 3'd3
-	                    : (st == S_CWRITE) ? 3'd4 : (st == S_SWRITE) ? 3'd5 : 3'd0;
-	wire [23:0]  lw_rel = d_addr - RDRAM_LINE;
-	always @(posedge clk) begin
-		st_q <= st;
-		if (cpu_rst) lw_n <= 32'd0;
-		else if (lw_src != 3'd0 && st_q != st && lw_rel < 24'h40) begin
-			lw_ring[lw_n[3:0]] <= {lw_src, 5'd0, lw_rel[5:0], 2'd0, d_wmask, d_wdata[31:0], last_pc, retired};
-			lw_n <= lw_n + 32'd1;
-		end
-		lw_q <= lw_ring[dbg_sel[11:8]];
-	end
-
 	// =============================================================================
 	// the debug window: what the RSP, the RDP and the interrupts have been doing,
 	// for the PC to read while a game runs (console_top 0x170 select, 0x174 data)
@@ -1187,8 +1208,6 @@ module n64_top #(
 	//   29    the RSP: {halted, st, pc}   30 its instruction   31 its last COP0 read {reg, value[27:0]}
 	//   32    RSP DMAs started   33-35 the DMA log's entry dbg_sel[15:8] (n64_rsp.v dlog), words 0-2
 	//   36-37 while the RSP is frozen: DMEM/IMEM doubleword dbg_sel[25:16] ([25] IMEM)   38 frozen
-	//   39    writes below RDRAM 0x400 logged   40-43 the log's entry dbg_sel[11:8]: {source, line,
-	//         mask}, the first data word, the CPU's last pc, instructions retired
 	// =============================================================================
 	reg  [31:0] n_rsp_go, n_sp_irq, n_dp_irq, n_ai_irq, n_vi_irq, n_si, n_pi, n_exc, n_exc_int, last_exc, last_fault;
 	reg         rsp_halted_d;
@@ -1237,11 +1256,17 @@ module n64_top #(
 		6'd36: dbg_q <= rsp_dbg_dq[63:32];
 		6'd37: dbg_q <= rsp_dbg_dq[31:0];
 		6'd38: dbg_q <= {31'd0, rsp_frozen};
-		6'd39: dbg_q <= lw_n;
-		6'd40: dbg_q <= lw_q[127:96];
-		6'd41: dbg_q <= lw_q[95:64];
-		6'd42: dbg_q <= lw_q[63:32];
-		6'd43: dbg_q <= lw_q[31:0];
+		6'd39: dbg_q <= rdp_dbg[63:32];
+		6'd40: dbg_q <= rdp_dbg[31:0];
+		6'd42: dbg_q <= oob_n;
+		6'd43: dbg_q <= {oob_line, 8'd0};
+		6'd44: dbg_q <= {oob_mask, 16'd0};
+		6'd45: dbg_q <= oob_w;
+		6'd46: dbg_q <= oob_d[63:32];
+		6'd47: dbg_q <= oob_d[31:0];
+		6'd48: dbg_q <= oob_d2[63:32];
+		6'd49: dbg_q <= oob_d2[31:0];
+		6'd41: dbg_q <= {rq_valid, rq_ready, rs_valid, rd_ok, rdp_out, 3'd0, st, cf_req, cf_ack, cw_req, cw_ack, d_req, d_ready, d_valid, 6'd0};
 		default: dbg_q <= 32'hDEB0_0000 | {26'd0, dbg_sel[5:0]};
 		endcase
 	end

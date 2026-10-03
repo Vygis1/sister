@@ -43,40 +43,64 @@ module n64_rdp_tmem (
 	input  wire         mr_ack,
 	output reg  [23:0]  mr_line,
 	input  wire [127:0] mr_data,
-	// the sampler's reads: four words, by index (a clock later)
-	input  wire [10:0]  ra0, ra1, ra2, ra3,
-	output wire [15:0]  rq0, rq1, rq2, rq3,
-	// tests: TMEM word by index, a clock later
-	input  wire [10:0]  dbg_a,
-	output reg  [15:0]  dbg_q
+	// the sampler's reads, a clock later, held while ce is low: four words by index
+	// (fa*, a texel's first read, either half), and four more in the high half (sa*,
+	// the second read: a TLUT's entry, a 32-bit texel's blue and alpha), on the port
+	// the loads write through (a load and a draw never overlap)
+	input  wire         ce,
+	input  wire [10:0]  fa0, fa1, fa2, fa3,
+	output wire [15:0]  fq0, fq1, fq2, fq3,
+	input  wire [10:0]  sa0, sa1, sa2, sa3,
+	output wire [15:0]  sq0, sq1, sq2, sq3
 );
-	// --- the memory: four copies of 512 doublewords, one block RAM each, written
-	// together (a doubleword's 16-bit lanes by enable), each read by one of the
-	// sampler's ports. Word i is lane i[1:0] (lane 0 the high bits) of doubleword i[10:2].
-	reg  [63:0]  cp0 [0:511], cp1 [0:511], cp2 [0:511], cp3 [0:511];
+	// --- the memory: four copies, one per sampler port, each in two halves (the low and
+	// high 2 kB: 256 doublewords, a block RAM each), written together (a doubleword's
+	// 16-bit lanes by enable). Word i is lane i[1:0] (lane 0 the high bits) of doubleword
+	// i[10:2]; i[10] is the half.
+	reg  [63:0]  lo0 [0:255], lo1 [0:255], lo2 [0:255], lo3 [0:255];
+	reg  [63:0]  hi0 [0:255], hi1 [0:255], hi2 [0:255], hi3 [0:255];
 	reg  [3:0]   wen;                     // the lanes written
 	reg  [8:0]   wa;                      // the doubleword
 	reg  [63:0]  wdw;
 	integer      b;
+	reg  [63:0]  fl0, fl1, fl2, fl3, fh0, fh1, fh2, fh3, sh0, sh1, sh2, sh3;
+	reg  [1:0]   lf0, lf1, lf2, lf3, ls0, ls1, ls2, ls3;
+	reg          hf0, hf1, hf2, hf3;
+	// the low halves: the loads (port A), the first reads (port B)
 	always @(posedge clk) begin
-		for (b = 0; b < 4; b = b + 1) if (wen[b]) begin
-			cp0[wa][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
-			cp1[wa][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
-			cp2[wa][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
-			cp3[wa][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
+		for (b = 0; b < 4; b = b + 1) if (wen[b] && !wa[8]) begin
+			lo0[wa[7:0]][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
+			lo1[wa[7:0]][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
+			lo2[wa[7:0]][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
+			lo3[wa[7:0]][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
 		end
 	end
-	reg  [63:0]  q0, q1, q2, q3;  reg [1:0] l0, l1, l2, l3;
-	always @(posedge clk) begin
-		q0 <= cp0[ra0[10:2]]; q1 <= cp1[ra1[10:2]]; q2 <= cp2[ra2[10:2]]; q3 <= cp3[ra3[10:2]];
-		l0 <= ra0[1:0]; l1 <= ra1[1:0]; l2 <= ra2[1:0]; l3 <= ra3[1:0];
+	always @(posedge clk) if (ce) begin
+		fl0 <= lo0[fa0[9:2]]; fl1 <= lo1[fa1[9:2]]; fl2 <= lo2[fa2[9:2]]; fl3 <= lo3[fa3[9:2]];
 	end
-	assign rq0 = q0[63 - 16 * l0 -: 16], rq1 = q1[63 - 16 * l1 -: 16];
-	assign rq2 = q2[63 - 16 * l2 -: 16], rq3 = q3[63 - 16 * l3 -: 16];
-	// (tests read through port 0's copy, with the loads done)
-	reg  [63:0]  dq;  reg [1:0] dl;
-	always @(posedge clk) begin dq <= cp0[dbg_a[10:2]]; dl <= dbg_a[1:0]; end
-	always @(*) dbg_q = dq[63 - 16 * dl -: 16];
+	// the high halves: the loads and the second reads (port A), the first reads (port B)
+	always @(posedge clk) begin
+		for (b = 0; b < 4; b = b + 1) if (wen[b] && wa[8]) begin
+			hi0[wa[7:0]][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
+			hi1[wa[7:0]][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
+			hi2[wa[7:0]][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
+			hi3[wa[7:0]][63 - 16 * b -: 16] <= wdw[63 - 16 * b -: 16];
+		end
+		if (ce) begin sh0 <= hi0[sa0[9:2]]; sh1 <= hi1[sa1[9:2]]; sh2 <= hi2[sa2[9:2]]; sh3 <= hi3[sa3[9:2]]; end
+	end
+	always @(posedge clk) if (ce) begin
+		fh0 <= hi0[fa0[9:2]]; fh1 <= hi1[fa1[9:2]]; fh2 <= hi2[fa2[9:2]]; fh3 <= hi3[fa3[9:2]];
+	end
+	always @(posedge clk) if (ce) begin
+		lf0 <= fa0[1:0]; lf1 <= fa1[1:0]; lf2 <= fa2[1:0]; lf3 <= fa3[1:0];
+		hf0 <= fa0[10]; hf1 <= fa1[10]; hf2 <= fa2[10]; hf3 <= fa3[10];
+		ls0 <= sa0[1:0]; ls1 <= sa1[1:0]; ls2 <= sa2[1:0]; ls3 <= sa3[1:0];
+	end
+	wire [63:0]  f0 = hf0 ? fh0 : fl0, f1 = hf1 ? fh1 : fl1, f2 = hf2 ? fh2 : fl2, f3 = hf3 ? fh3 : fl3;
+	assign fq0 = f0[63 - 16 * lf0 -: 16], fq1 = f1[63 - 16 * lf1 -: 16];
+	assign fq2 = f2[63 - 16 * lf2 -: 16], fq3 = f3[63 - 16 * lf3 -: 16];
+	assign sq0 = sh0[63 - 16 * ls0 -: 16], sq1 = sh1[63 - 16 * ls1 -: 16];
+	assign sq2 = sh2[63 - 16 * ls2 -: 16], sq3 = sh3[63 - 16 * ls3 -: 16];
 
 	// --- the load ------------------------------------------------------------------------------
 	wire [11:0]  slo = w0[23:12], tlo = w0[11:0], shi = w1[23:12], thi = w1[11:0];
