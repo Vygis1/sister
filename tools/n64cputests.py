@@ -63,6 +63,7 @@ def main():
     only = sys.argv[sys.argv.index('--only') + 1] if '--only' in sys.argv else None
     os.makedirs(OUT, exist_ok=True)
     roms = sorted(glob.glob(os.path.join(root, 'CPUTest', '**', '*.N64'), recursive=True))
+    roms += sorted(glob.glob(os.path.join(root, 'RSPTest', '**', '*.N64'), recursive=True))
     total_p = total_f = 0
     for path in roms:
         name = os.path.splitext(os.path.basename(path))[0]

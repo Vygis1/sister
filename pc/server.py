@@ -37,6 +37,7 @@ from flask import Flask, Response, jsonify, request, send_file, send_from_direct
 
 import fpgalink as fl
 import cdaudio
+import n64_saves
 import numpy as np
 import socket
 
@@ -738,7 +739,7 @@ def frame_is_ddr():
     now = time.time()
     if _ddr_frame["v"] is None or now - _ddr_frame["at"] > 2.0:
         try:
-            _ddr_frame.update(v=bool((talk(link.read, NES_CONSOLE) >> 16) & 0b1000), at=now)
+            _ddr_frame.update(v=bool((talk(link.read, NES_CONSOLE) >> 16) & 0b1_1000), at=now)   # PS1 or N64
         except (fl.LinkError, TimeoutError):
             if _ddr_frame["v"] is None:
                 return False
@@ -808,6 +809,14 @@ class FrameStream:
         """Configure the board to stream this frame size and start receiving."""
         self.w, self.h = w, h
         self.words = ((w + 1) // 2) * h
+        self.fmt = "ps1"
+        n64 = n64_geometry() if running_console() == 4 else None
+        if n64:
+            # the N64: the board sends its framebuffer straight out of RDRAM, in
+            # the VI's own shape (n64_top.v); converted for the page in frame()
+            self.w, self.h, bpp = n64
+            self.words = self.w * self.h * bpp // 4
+            self.fmt = "n64_%d" % (bpp * 8)
         if self.sock is None:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             if hasattr(socket, "SIO_UDP_CONNRESET"):   # see fpgalink.Link
@@ -891,6 +900,8 @@ class FrameStream:
             ddr = bool((d >> 28) & 3)      # interlaced: the direct path shows it black
         except Exception:
             pass
+        if self.fmt != "ps1":
+            ddr = True                     # the N64's frame is only ever read out of RDRAM
         self.from_ddr = ddr
         talk(link.write, STREAM_CTL, (0xC800_0000 if ddr else 0xC000_0000) | STREAM_PORT)
         talk(link.write, FB_CAP, 1)         # the first capture; the streamer re-arms after each frame
@@ -951,6 +962,15 @@ class FrameStream:
                 continue
             fid, = struct.unpack(">H", data[2:4])
             off, total, n = struct.unpack(">IIH", data[4:14])
+            if total != self.words and getattr(self, "fmt", "ps1") != "ps1":
+                # the N64 changed its framebuffer's shape: take the new size
+                n64 = n64_geometry()
+                if n64:
+                    self.w, self.h, bpp = n64
+                    self.fmt = "n64_%d" % (bpp * 8)
+                self.words = total
+                self.frames.clear()
+                self.mismatch = 0
             if total != self.words:
                 # The board works the frame size out from the picture it is
                 # actually showing, so a total we did not expect means the video
@@ -1035,7 +1055,10 @@ class FrameStream:
                         self.diag["held_incomplete"] += 1
                         continue
                     self._seq.pop(fid, None)
-                    self.latest = (bytes(buf), self.w, self.h)
+                    data = bytes(buf)
+                    if getattr(self, "fmt", "ps1") != "ps1":
+                        data = n64_to_rgb555(data, self.w, self.h, self.fmt)
+                    self.latest = (data, self.w, self.h)
                     self.count += 1
                     del self.frames[fid]
 
@@ -1055,6 +1078,40 @@ frame_stream = FrameStream()
 PS1_DISP = 0x0008_0000 + 0x6C   # {disp_on, hres, vres480, interlace, 0, disp_y, 0, disp_x}
 
 
+def n64_geometry():
+    """The N64's framebuffer: (width, height, bytes a pixel) from the VI's
+    registers (ctrl 0x150..0x15C), or None while it shows nothing."""
+    try:
+        status = talk(link.read, 0x0008_0000 + 0x150)
+        width = talk(link.read, 0x0008_0000 + 0x158) & 0xFFF
+        yscale = talk(link.read, 0x0008_0000 + 0x15C) & 0xFFF
+    except Exception:
+        return None
+    if (status & 3) < 2 or not width:
+        return None
+    height = min(480, (yscale * 240) >> 10) if yscale else 240
+    bpp = 4 if (status & 3) == 3 else 2
+    if width * height * bpp // 4 > 262143:
+        height //= 2                # the board sends every other row (n64_top fb_halve)
+    return width, height, bpp
+
+
+def n64_to_rgb555(data, w, h, fmt):
+    """An N64 frame as the page draws the PlayStation's: 16-bit pixels, red in
+    the low five bits. The stream stores each word byte-reversed (see
+    _receive), so the words are turned back first; then the framebuffer's bytes
+    are in RDRAM's order: R G B A for 32-bit, a big-endian RGBA5551 for 16."""
+    import numpy as np
+    raw = np.frombuffer(data, dtype="<u4").astype(">u4").tobytes()
+    if fmt == "n64_32":
+        px = np.frombuffer(raw, dtype=np.uint8)[:w * h * 4].reshape(-1, 4).astype(np.uint16)
+        out = (px[:, 0] >> 3) | ((px[:, 1] >> 3) << 5) | ((px[:, 2] >> 3) << 10)
+    else:
+        v = np.frombuffer(raw, dtype=">u2")[:w * h].astype(np.uint16)
+        out = ((v >> 11) & 31) | (((v >> 6) & 31) << 5) | (((v >> 1) & 31) << 10)
+    return out.astype("<u2").tobytes()
+
+
 def display_geometry():
     """What the console is showing, from ONE register.
 
@@ -1068,6 +1125,9 @@ def display_geometry():
     The size only has to be close: the receiver takes the real one from the
     first packet whose total does not match (see FrameStream.run).
     """
+    if running_console() == 4:
+        g = n64_geometry()
+        return (g[0], g[1]) if g else (FB_W, FB_H)
     try:
         d = talk(link.read, PS1_DISP)
     except Exception:
@@ -1938,12 +1998,26 @@ _PS1_BITS = {"select": 0, "start": 3, "up": 4, "right": 5, "down": 6, "left": 7,
              "y": 12, "b": 13, "a": 14, "x": 15}    # triangle, circle, cross, square
 
 
+# The N64 controller's 16 buttons, in the order it reports them (the upper half
+# of its answer to a read): 15 A, 14 B, 13 Z, 12 Start, 11-8 the D-pad (up down
+# left right), 5 L, 4 R, 3-0 the C buttons (up down left right). On a modern pad
+# the bottom face button is A and the left one B, as emulators lay it out; the
+# left trigger is Z; the C buttons are the top and right face buttons, Select
+# and R2 -- and the page also sends the right stick as those four.
+_N64_BITS = {"a": 15, "x": 14, "l2": 13, "start": 12,
+             "up": 11, "down": 10, "left": 9, "right": 8,
+             "l1": 5, "r1": 4,
+             "y": 3, "b": 2, "select": 1, "r2": 0}
+
+
 def pad_for_console(v, which):
     """Re-lay a NES-ordered pad byte for whichever machine is running."""
     if which == 2:
         table = _MD_BITS
     elif which == 3:
         table = _PS1_BITS
+    elif which == 4:
+        table = _N64_BITS
     else:                               # NES and Master System share the order
         return v & 0xFF
     out = 0
@@ -1961,7 +2035,93 @@ def api_nes_input():
         talk(link.write, NES_JOY1, pad_for_console(int(body["joy1"]), which))
     if "joy2" in body:
         talk(link.write, NES_JOY2, pad_for_console(int(body["joy2"]), which))
+    if "stick1" in body and which == 4:
+        # the N64's stick: two signed bytes, X then Y (up is positive)
+        x, y = (max(-128, min(127, int(v))) for v in body["stick1"])
+        talk(link.write, N64_STICK1, ((x & 0xFF) << 8) | (y & 0xFF))
     return jsonify(ok=True)
+
+
+# --- the N64 cartridge's save EEPROM -----------------------------------------------
+# The board keeps it in block RAM (rtl/n64_pif.v) and the server keeps it in
+# saves/n64/, one file per game. It is put on the board when a cartridge is
+# loaded, read back every 20 seconds while the game runs, and written to the file
+# when it has changed -- and once more before another cartridge replaces it.
+N64_STICK1 = NES + 0x164
+N64_CFG    = NES + 0x168        # [1:0] EEPROM size (0 none, 1 4 kbit, 2 16 kbit), [7:4] pads plugged in
+N64_EEP    = NES + 0x16C        # a byte: write {bit 31 = write, [23:16] data, [10:0] address}; read [23:16]
+N64_SAVES  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "saves", "n64")
+_n64_save = {"path": None, "size": 0, "last": None}
+_n64_save_lock = threading.Lock()
+
+
+def n64_save_path(z64):
+    """saves/n64/<game ID and region> <title>.eep"""
+    gid = z64[0x3B:0x3F].decode("latin-1")
+    title = z64[0x20:0x34].decode("ascii", "replace").strip()
+    safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in f"{gid} {title}").strip()
+    return os.path.join(N64_SAVES, (safe or "unknown") + ".eep")
+
+
+def n64_eeprom_read(size):
+    out = bytearray(size)
+    for a in range(size):
+        talk(link.write, N64_EEP, a)
+        out[a] = (talk(link.read, N64_EEP) >> 16) & 0xFF
+    return bytes(out)
+
+
+def n64_eeprom_write(data):
+    for a, b in enumerate(data):
+        talk(link.write, N64_EEP, (1 << 31) | (b << 16) | a)
+
+
+def n64_save_flush():
+    """the EEPROM to its file, if it has changed since it was last put there"""
+    with _n64_save_lock:
+        path, size = _n64_save["path"], _n64_save["size"]
+        if not path or not size:
+            return
+        data = n64_eeprom_read(size)
+        if data != _n64_save["last"]:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+            _n64_save["last"] = data
+
+
+def n64_save_begin(z64):
+    """a cartridge is going in: its EEPROM size, and its save back on the board"""
+    try:
+        n64_save_flush()                     # the cartridge before it, first
+    except Exception:
+        pass
+    size = n64_saves.eeprom_size(z64[:0x40])
+    code = {512: 1, 2048: 2}.get(size, 0)
+    talk(link.write, N64_CFG, (0b0001 << 4) | code)    # controller 1 plugged in
+    path = n64_save_path(z64) if size else None
+    data = bytes(size)
+    if path and os.path.exists(path):
+        data = open(path, "rb").read()[:size].ljust(size, b"\0")
+    if size:
+        n64_eeprom_write(data)
+    with _n64_save_lock:
+        _n64_save.update(path=path, size=size, last=data)
+
+
+def _n64_save_loop():
+    while True:
+        time.sleep(20)
+        try:
+            if running_console() == 4:
+                n64_save_flush()
+        except Exception:
+            pass
+
+
+threading.Thread(target=_n64_save_loop, daemon=True).start()
 
 
 def write_pages(base, words):
@@ -2052,6 +2212,7 @@ def api_nes_load():
             z64 = z64[:CART_LIMIT[4]]       # the first 16 MB: enough for every test ROM
         talk(link.write, NES_CTRL, 0)
         talk(link.write, NES_CONSOLE, 4)
+        n64_save_begin(z64)
         prg = z64.ljust((len(z64) + 3) // 4 * 4, bytes(1))
         for bank, base in enumerate(range(0, len(prg), CART_BANK_BYTES)):
             chunk = prg[base:base + CART_BANK_BYTES]

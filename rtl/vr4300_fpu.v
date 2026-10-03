@@ -59,7 +59,7 @@ module vr4300_fpu (
 
 	localparam [3:0] P_IDLE = 4'd0, P_DEC = 4'd1, P_ADD = 4'd2, P_MUL = 4'd3, P_DIV = 4'd4,
 	                 P_SQRT = 4'd5, P_NORM = 4'd6, P_ROUND = 4'd7, P_DENORM = 4'd8, P_TOINT = 4'd9,
-	                 P_FIN = 4'd10, P_DONE = 4'd11;
+	                 P_FIN = 4'd10, P_DONE = 4'd11, P_UNP = 4'd12, P_ALIGN = 4'd13, P_TOINT2 = 4'd14;
 	reg  [3:0]  st;
 
 	// --- the operation, as taken ----------------------------------------------------
@@ -90,12 +90,14 @@ module vr4300_fpu (
 		end
 	endfunction
 	wire [70:0] ua = unpack(q_a, dbl), ub = unpack(q_b, dbl);
-	wire [2:0]  ka = ua[70:68], kb = ub[70:68];
-	wire        sna = ua[67], snb = ub[67];
-	wire        sa = ua[66], sb_raw = ub[66];
-	wire [12:0] ea = ua[65:53], eb = ub[65:53];
-	wire [52:0] ga = ua[52:0], gb = ub[52:0];
 	localparam [2:0] K_ZERO = 3'd0, K_SUB = 3'd1, K_NORM = 3'd2, K_INF = 3'd3, K_NAN = 3'd4;
+	// the operands unpacked, and how they compare -- registered (P_UNP), so the
+	// decision on what to do is not in the same clock as the unpacking
+	reg  [2:0]  ka, kb;
+	reg         sna, snb, sa, sb_raw;
+	reg  [12:0] ea, eb;
+	reg  [52:0] ga, gb;
+	reg         c_eq, c_lt;
 	wire        a_qnan = ka == K_NAN && !sna, b_qnan = kb == K_NAN && !snb;
 	wire        a_snan = ka == K_NAN && sna,  b_snan = kb == K_NAN && snb;
 
@@ -128,6 +130,9 @@ module vr4300_fpu (
 	wire [127:0] small_sh = {small64, 64'd0} >> ash;               // [127:64] kept, [63:0] shifted out
 	wire        add_st = small_sh[63:0] != 64'd0;
 	wire [63:0] big64 = {1'b0, g_big, 10'd0};
+	reg  [63:0] al_big, al_small;
+	reg         al_st, al_sign, al_sub;
+	reg  [12:0] al_e;
 
 	// --- multiply ------------------------------------------------------------------------
 	reg  [105:0] macc;
@@ -208,9 +213,8 @@ module vr4300_fpu (
 	wire        ti_far = $signed(ti_sh) > 13'sd55;
 	wire [5:0]  ti_s = ti_far ? 6'd0 : ti_sh[5:0];
 	wire [115:0] ti_w = {ga, 63'd0} >> ti_s;                        // [115:63] integer, [62] round, [61:0] sticky
-	wire [52:0] ti_int = ti_far ? 53'd0 : ti_w[115:63];
-	wire        ti_rb  = ti_far ? 1'b0 : ti_w[62];
-	wire        ti_st  = ti_far ? 1'b1 : (ti_w[61:0] != 62'd0);
+	reg  [52:0] ti_int;
+	reg         ti_rb, ti_st;
 	wire [1:0]  ti_mode = (q_fn[5] == 1'b1) ? q_rm
 	                    : (q_fn[1:0] == 2'd0) ? 2'd0 : (q_fn[1:0] == 2'd1) ? 2'd1 : (q_fn[1:0] == 2'd2) ? 2'd2 : 2'd3;
 	wire        ti_inc = inc_of(ti_mode, sa, ti_int[0], ti_rb, ti_st);
@@ -222,9 +226,10 @@ module vr4300_fpu (
 	// --- compares -------------------------------------------------------------------------------
 	wire [62:0] mag_a = dbl ? q_a[62:0] : {32'd0, q_a[30:0]};
 	wire [62:0] mag_b = dbl ? q_b[62:0] : {32'd0, q_b[30:0]};
-	wire        both_zero = ka == K_ZERO && kb == K_ZERO;
-	wire        c_eq = both_zero || (sa == sb_raw && mag_a == mag_b);
-	wire        c_lt = !both_zero && ((sa && !sb_raw) || (!sa && !sb_raw && mag_a < mag_b) || (sa && sb_raw && mag_a > mag_b));
+	wire        u_sa = ua[66], u_sb = ub[66];
+	wire        both_zero = ua[70:68] == K_ZERO && ub[70:68] == K_ZERO;
+	wire        u_c_eq = both_zero || (u_sa == u_sb && mag_a == mag_b);
+	wire        u_c_lt = !both_zero && ((u_sa && !u_sb) || (!u_sa && !u_sb && mag_a < mag_b) || (u_sa && u_sb && mag_a > mag_b));
 
 	// --- the end: flags, cause, the trap ----------------------------------------------------------
 	// raise(bits): the cause for each; the flag for those not enabled; a trap if any is
@@ -246,10 +251,17 @@ module vr4300_fpu (
 			st <= P_IDLE; done <= 1'b0;
 		end else if (start) begin
 			q_fmt <= fmt; q_fn <= fn; q_a <= fs_v; q_b <= ft_v; q_rm <= rm; q_en <= en; q_fs <= fs_flush;
-			st <= P_DEC; done <= 1'b0;
+			st <= P_UNP; done <= 1'b0;
 			trap <= 1'b0; wr <= 1'b0; cmp_wr <= 1'b0; cause <= 6'd0; flags <= 5'd0; res32 <= 1'b0;
 		end else begin
 			case (st)
+			P_UNP: begin
+				ka <= ua[70:68]; kb <= ub[70:68]; sna <= ua[67]; snb <= ub[67]; sa <= ua[66]; sb_raw <= ub[66];
+				ea <= ua[65:53]; eb <= ub[65:53]; ga <= ua[52:0]; gb <= ub[52:0];
+				c_eq <= u_c_eq; c_lt <= u_c_lt;
+				st <= P_DEC;
+			end
+
 			P_DEC: begin
 				raised <= 5'd0; r_st <= 1'b0; is_conv <= 1'b0;
 				tf_d <= dbl;
@@ -266,7 +278,7 @@ module vr4300_fpu (
 							finish_with(5'd0, zero_of((sa == b_sub_sign) ? sa : (q_rm == 2'd3), dbl), !dbl, 1'b1);
 						else if (kb == K_ZERO) finish_with(5'd0, dbl ? q_a : {32'd0, q_a[31:0]}, !dbl, 1'b1);
 						else if (ka == K_ZERO) finish_with(5'd0, dbl ? {b_sub_sign, q_b[62:0]} : {32'd0, b_sub_sign, q_b[30:0]}, !dbl, 1'b1);
-						else st <= P_ADD;
+						else st <= P_ALIGN;
 					end
 					2'd2: begin
 						if (ka == K_INF || kb == K_INF) begin
@@ -354,16 +366,22 @@ module vr4300_fpu (
 				end else unimpl;
 			end
 
+			P_ALIGN: begin
+				al_big <= big64; al_small <= small_sh[127:64]; al_st <= add_st;
+				al_sign <= s_big; al_sub <= eff_sub; al_e <= e_big;
+				st <= P_ADD;
+			end
+
 			P_ADD: begin
-				r_sign <= s_big;
-				r_e <= {e_big[12], e_big} + 14'd1;
-				r_st <= add_st;
-				if (eff_sub) begin
-					if (big64 == small_sh[127:64] && !add_st)
+				r_sign <= al_sign;
+				r_e <= {al_e[12], al_e} + 14'd1;
+				r_st <= al_st;
+				if (al_sub) begin
+					if (al_big == al_small && !al_st)
 						finish_with(5'd0, zero_of(q_rm == 2'd3, dbl), !dbl, 1'b1);   // exactly cancelled
-					else begin r_sig <= big64 - small_sh[127:64] - {63'd0, add_st}; st <= P_NORM; end
+					else begin r_sig <= al_big - al_small - {63'd0, al_st}; st <= P_NORM; end
 				end else begin
-					r_sig <= big64 + small_sh[127:64]; st <= P_NORM;
+					r_sig <= al_big + al_small; st <= P_NORM;
 				end
 			end
 
@@ -436,6 +454,13 @@ module vr4300_fpu (
 			end
 
 			P_TOINT: begin
+				ti_int <= ti_far ? 53'd0 : ti_w[115:63];
+				ti_rb  <= ti_far ? 1'b0 : ti_w[62];
+				ti_st  <= ti_far ? 1'b1 : (ti_w[61:0] != 62'd0);
+				st <= P_TOINT2;
+			end
+
+			P_TOINT2: begin
 				if (ti_ovf) unimpl;                                    // rounded out of range
 				else finish_with((ti_rb || ti_st) ? 5'b00001 : 5'd0, ti_w32 ? {32'd0, ti_val[31:0]} : ti_val, ti_w32, 1'b1);
 			end

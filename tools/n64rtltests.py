@@ -43,6 +43,12 @@ def trace_check():
     a = open(os.path.join(SIMDIR, 'model.trace')).read().split('\n')
     b = open(os.path.join(SIMDIR, 'rtl.trace')).read().split('\n')
     n = min(len(a), len(b))
+    # one trace stopping early is agreement when it is a prefix of the other and
+    # both end spinning on the same address (a test that ends in a loop, and a
+    # bench that stops on a clock budget)
+    a_loop = set(l.split()[0] for l in [l for l in a if l][-8:])
+    b_end = [l for l in b if l][-1:] or ['']
+    spin = bool(b_end[0]) and b_end[0].split()[0] in a_loop
     for i in range(n):
         if a[i] != b[i]:
             # allowed only on the VI line read: is the model's instruction there the poll?
@@ -53,6 +59,8 @@ def trace_check():
                 m = n64model.N64(open(rom, 'rb').read())
                 m.fast_boot()
                 word = m.read(pc & 0x1FFFFFFF, 4)
+            if (a[i] == '' or b[i] == '') and spin:
+                return i + 1, True, a[i], b[i]
             return i + 1, word == VI_POLL, a[i], b[i]
     return n, True, '', ''
 

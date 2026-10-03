@@ -221,6 +221,10 @@ module console_top #(
 	wire [15:0]  ps1_d_wmask;
 	wire [15:0]  n64_d_wmask;
 	wire [31:0]  n64_vi_status, n64_vi_origin, n64_vi_width, n64_vi_yscale, n64_dbg_pc, n64_retired;
+	wire [31:0]  n64_dbg_q;                 // the N64's debug window (n64_top.v), shown at 0x174
+	wire [17:0]  n64_fb_words;
+	wire [15:0]  n64_fb_wpr;
+	wire         n64_fb_halve;
 	assign d_wmask = (CORE_PS1 != 0) ? ps1_d_wmask : (CORE_N64 != 0) ? n64_d_wmask : 16'hFFFF;
 	reg  [5:0]   perf_sel;   // 64 now: the drawing engine, and where in a frame it is busy
 	// --- the debug switches, TIED OFF ----------------------------------------
@@ -379,26 +383,32 @@ module console_top #(
 	// picture came apart into stripes. The machine knows its own frame size.
 	wire [9:0]  fb_wpr  = (fb_width + 10'd1) >> 1;
 	wire [18:0] fb_auto = fb_wpr * fb_height;
-	assign stream_words = (CORE_PS1 != 0) ? fb_auto[17:0] : stream_words_r[17:0];
+	assign stream_words = (CORE_PS1 != 0) ? fb_auto[17:0] : (CORE_N64 != 0) ? n64_fb_words : stream_words_r[17:0];
 	// a streamed frame may start when the capture behind it is complete; the
 	// block-RAM framebuffers of the older cores are always readable
 	// A frame may go out as soon as the scanout has put something in the
 	// buffer; the buffer is emptied when a scan starts, so this is the top of
 	// a frame and not the middle of the last one.
 	// --- the frame the network sends: from DDR3, or straight off the scanout --
-	wire from_ddr = (CORE_PS1 != 0) && stream_ctl[27];
+	wire from_ddr = ((CORE_PS1 != 0) || (CORE_N64 != 0)) && stream_ctl[27];
 	// fb_stream is only in the way when the DDR3 copy is being used: switched
 	// off, it stops holding the scanout back, and only the capture does.
 	wire fs_en    = stream_en && !from_ddr;
 
 	localparam [17:0] FB_ROW_WORDS = 18'd320;   // a row of the DDR3 frame, in words
-	reg  [17:0] sfa;        // the word being fetched
+	// the word being fetched: 19 bits, since an N64 frame sent every other row
+	// (640 x 480 at 32 bits) reaches twice as far as its 153,600 words -- with
+	// 18 its last rows wrapped round to the top of the picture
+	reg  [18:0] sfa;
 	reg  [15:0] sfc;        // how far along its row that is
 	reg         sfr;        // a read is out
 	reg  [31:0] sfd;        // the word in hand
 	reg         sfv;        // and it is good
 	reg         cap_wait;   // a capture was asked for and is not finished
-	wire [15:0] sf_rowlen = {6'd0, fb_wpr};
+	// a row of the frame in words, and the step to the next row's start: the
+	// PlayStation's copy is at a 320-word pitch, the N64's rows are contiguous
+	wire [15:0] sf_rowlen = (CORE_N64 != 0) ? n64_fb_wpr : {6'd0, fb_wpr};
+	wire [18:0] sf_pitch  = (CORE_N64 != 0) ? ({3'd0, n64_fb_wpr} << n64_fb_halve) : {1'b0, FB_ROW_WORDS};
 
 	assign fbr_rdata = fbr_rdata_w;
 	assign fbr_ack   = from_ddr ? 1'b1 : fbr_ack_w;   // the host's slow path yields while streaming
@@ -407,9 +417,9 @@ module console_top #(
 	// it sees one, and gives a frame up if one turns up in the middle (a capture
 	// abandoned at a flip, see fb_stream.v). The DDR3 copy's first word is the
 	// one at the start of its first row.
-	assign stream_ready  = (CORE_PS1 == 0) ? 1'b1
+	assign stream_ready  = (CORE_PS1 == 0 && CORE_N64 == 0) ? 1'b1
 	                     : (from_ddr ? (!cap_wait && sfv && sfa == 18'd0 && sfc == 16'd0) : fs_ready);
-	assign stream_direct = (CORE_PS1 != 0);
+	assign stream_direct = (CORE_PS1 != 0) || (CORE_N64 != 0);
 	assign stream_fvalid = from_ddr ? sfv : fs_valid_w;
 	assign stream_fdata  = from_ddr ? sfd : fs_data_w;
 
@@ -437,10 +447,10 @@ module console_top #(
 					// the frame is 320 words a row in memory but only fb_wpr of
 					// them are the picture; step over the rest
 					if (sfc + 16'd1 >= sf_rowlen) begin
-						sfa <= sfa + (FB_ROW_WORDS - {2'd0, sf_rowlen} + 18'd1);
+						sfa <= sfa + (sf_pitch - {3'd0, sf_rowlen} + 19'd1);
 						sfc <= 16'd0;
 					end else begin
-						sfa <= sfa + 18'd1;
+						sfa <= sfa + 19'd1;
 						sfc <= sfc + 16'd1;
 					end
 				end
@@ -497,6 +507,15 @@ module console_top #(
 	reg [5:0]  prg_last;
 	reg [3:0]  console_sel;
 	reg [15:0] joy1, joy2;           // 8 bits for the older cores; the PS1 pad uses all 16
+	reg [15:0] n64_stick1;
+	reg [1:0]  n64_eep;              // the N64 cartridge's EEPROM: 0 none, 1 4 kbit, 2 16 kbit
+	reg [3:0]  n64_pads;             // which N64 controllers are plugged in
+	reg [10:0] n64_eh_addr;
+	reg [5:0]  n64_dbg_sel;          // what the N64's debug window shows (0x170)
+	reg [7:0]  n64_eh_wdata;
+	wire [7:0] n64_eh_rdata;
+	// a write to 0x16C with bit 31 set writes the EEPROM's byte; any write moves the read
+	wire       n64_eh_we = ctrl_we && off == 16'h016C && wdata[31];
 	reg [31:0] frame_count;
 
 	// A core that is not selected is held in reset, so it cannot drive the
@@ -516,6 +535,7 @@ module console_top #(
 	always @(posedge clk) begin
 		if (rst) begin
 			run <= 1'b0; cpu_halt <= 1'b0; mirror_v <= 1'b0; joy1 <= 16'd0; joy2 <= 16'd0;
+			n64_stick1 <= 16'd0; n64_eep <= 2'd0; n64_pads <= 4'b0001; n64_dbg_sel <= 6'd0;
 			mapper_id <= 4'd0; prg_last <= 6'd3; console_sel <= CONSOLE_FIRST;
 			chr_is_ram <= 1'b0;
 			test_mode <= 1'b0;
@@ -543,6 +563,10 @@ module console_top #(
 			16'h00AC: ps1_watch <= wdata[20:0];
 			16'h0008: joy1 <= wdata[15:0];
 			16'h000C: joy2 <= wdata[15:0];
+			16'h0164: n64_stick1 <= wdata[15:0];                     // the N64's stick: X [15:8], Y [7:0]
+			16'h0168: begin n64_eep <= wdata[1:0]; n64_pads <= wdata[7:4]; end
+			16'h016C: begin n64_eh_addr <= wdata[10:0]; n64_eh_wdata <= wdata[23:16]; end   // the EEPROM, a byte
+			16'h0170: n64_dbg_sel <= wdata[5:0];                       // the N64's debug window: what 0x174 shows
 			16'h001C: begin
 				mapper_id  <= wdata[3:0];
 				prg_last   <= wdata[13:8];
@@ -636,6 +660,10 @@ module console_top #(
 		16'h0158: ctrl_rdata = n64_vi_width;
 		16'h015C: ctrl_rdata = n64_vi_yscale;
 		16'h0160: ctrl_rdata = n64_retired;
+		16'h0168: ctrl_rdata = {24'd0, n64_pads, 2'd0, n64_eep};
+		16'h016C: ctrl_rdata = {8'd0, n64_eh_rdata, 5'd0, n64_eh_addr};
+		16'h0170: ctrl_rdata = {26'd0, n64_dbg_sel};
+		16'h0174: ctrl_rdata = n64_dbg_q;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -945,14 +973,22 @@ module console_top #(
 			.hr_go(hr_go), .hr_line(hr_line), .hr_done(hr_done), .hr_data(hr_data),
 			.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(n64_d_wmask),
 			.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid), .d_calibrated(d_calibrated),
-			.joy1(joy1),
+			.joy1(joy1), .stick1(n64_stick1), .pad_present(n64_pads), .eep_size(n64_eep),
+			.eh_we(n64_eh_we), .eh_addr(n64_eh_we ? wdata[10:0] : n64_eh_addr), .eh_wdata(wdata[23:16]), .eh_rdata(n64_eh_rdata),
 			.vi_status(n64_vi_status), .vi_origin(n64_vi_origin), .vi_width(n64_vi_width), .vi_yscale(n64_vi_yscale),
-			.dbg_pc(n64_dbg_pc), .dbg_retired(n64_retired)
+			.dbg_pc(n64_dbg_pc), .dbg_retired(n64_retired), .dbg_sel(n64_dbg_sel), .dbg_q(n64_dbg_q),
+			// the picture: straight out of RDRAM, no capture step
+			.fbr_req(from_ddr && sfr), .fbr_word(sfa), .fbr_ack(fbr_ack_w), .fbr_rdata(fbr_rdata_w),   // all 19 bits
+			.fb_words(n64_fb_words), .fb_wpr(n64_fb_wpr), .fb_halve(n64_fb_halve),
+			.audio_lr(audio_lr), .audio_lr_we(audio_lr_we)
 		);
+		assign fb_cap_ready = 1'b1;
 	end else begin : g_n64
 		assign n64_d_wmask = 16'hFFFF;
 		assign n64_vi_status = 32'd0; assign n64_vi_origin = 32'd0; assign n64_vi_width = 32'd0;
-		assign n64_vi_yscale = 32'd0; assign n64_dbg_pc = 32'd0; assign n64_retired = 32'd0;
+		assign n64_vi_yscale = 32'd0; assign n64_dbg_pc = 32'd0; assign n64_retired = 32'd0; assign n64_dbg_q = 32'd0;
+		assign n64_fb_words = 18'd0; assign n64_fb_wpr = 16'd0; assign n64_fb_halve = 1'b0;
+		assign n64_eh_rdata = 8'd0;
 	end endgenerate
 
 	// The DDR3 port has exactly one driver: the Mega Drive when its cartridge is
@@ -1054,7 +1090,7 @@ module console_top #(
 			.hr_go(hr_go), .hr_line(hr_line), .hr_done(hr_done), .hr_data(hr_data),
 			.dbg_node_v(ps1_node_v), .dbg_node_addr(ps1_node_addr), .dbg_node_hdr(ps1_node_hdr),
 			.fb_cap_go(fb_cap_go), .fb_cap_ready(fb_cap_ready), .fb_width(fb_width), .fb_height(fb_height),
-			.fbr_addr(from_ddr ? sfa : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
+			.fbr_addr(from_ddr ? sfa[17:0] : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
 			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
 			.spu_out(audio_lr), .spu_out_we(audio_lr_we),
 			.dma_relax(dma_relax), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
@@ -1066,7 +1102,9 @@ module console_top #(
 			.xa_we(xa_we), .xa_wdata(wdata), .xa_level(xa_level), .xa_gen(xa_gen), .xa_filt(xa_filt)
 		);
 	end else begin : g_ps1
-		assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
+		if (!CORE_N64) begin : g_no_lr      // the N64 drives it when it is the core
+			assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
+		end
 		assign ps1_ev_data = 32'd0; assign ps1_ev_wp = 6'd0;
 		assign ps1_px_valid = 1'b0;
 		assign ps1_px_x = 9'd0; assign ps1_px_y = 9'd0; assign ps1_px_rgb = 8'd0;
@@ -1089,8 +1127,11 @@ module console_top #(
 		assign card_wq_sector = 11'd0; assign card_wq_count = 5'd0; assign card_wq_ovf = 1'b0;
 		assign xa_lba = 24'd0; assign xa_count = 5'd0; assign xa_level = 13'd0; assign xa_gen = 8'd0; assign xa_filt = 1'b0;
 		assign ps1_node_v = 1'b0; assign ps1_node_addr = 24'd0; assign ps1_node_hdr = 32'd0;
-		assign fb_cap_ready = 1'b0; assign fb_width = 10'd0; assign fb_height = 9'd0;
-		assign fbr_rdata_w = 32'd0; assign fbr_ack_w = fbr_req;   // no frame here: answer at once
+		assign fb_width = 10'd0; assign fb_height = 9'd0;
+		if (!CORE_N64) begin : g_no_frame          // the N64 answers these when it is the core
+			assign fb_cap_ready = 1'b0;
+			assign fbr_rdata_w = 32'd0; assign fbr_ack_w = fbr_req;   // no frame here: answer at once
+		end
 		assign fs_data_w = 32'd0; assign fs_valid_w = 1'b0;
 	end endgenerate
 

@@ -210,10 +210,10 @@ module regfile #(
 	wire [31:0] ps1_audio_lr;
 	wire        ps1_audio_lr_we;
 
-	// NOT IN A PLAYSTATION IMAGE: the PlayStation has its own SPU (ps1_spu.v),
+	// NOT IN A PLAYSTATION OR N64 IMAGE: the PlayStation has its own SPU (ps1_spu.v),
 	// which is stereo at 44.1 kHz and gets its own ring (ps1_aring.v) at the same
 	// addresses. Every other image keeps the synthesiser exactly as it was.
-	generate if (!CORE_PS1) begin : g_syn
+	generate if (!CORE_PS1 && !CORE_N64) begin : g_syn
 		synth u_synth (
 			.clk(clk), .rst(rst),
 			.off(off), .we(syn_we), .wdata(bus_wdata),
@@ -223,7 +223,8 @@ module regfile #(
 			.buf_rdata(abuf_rdata)
 		);
 	end else begin : g_nosyn
-		// The PlayStation's own ring: stereo, 44.1 kHz, at the same addresses.
+		// The PlayStation's own ring: stereo, 44.1 kHz, at the same addresses
+		// (the N64's AI feeds it too, through console_top's audio_lr).
 		ps1_aring u_aring (
 			.clk(clk), .rst(rst),
 			.sample(ps1_audio_lr), .sample_we(ps1_audio_lr_we),
@@ -276,17 +277,17 @@ module regfile #(
 	// data register instead would be one UDP packet per four bytes, which is
 	// forty times the traffic for the same cartridge. A bank register keeps the
 	// block writes and removes the ceiling.
-	reg [3:0] cart_bank;
+	reg [5:0] cart_bank;
 	// Pulsed when the last word of a cartridge has been written, so a DDR3
 	// cartridge can flush a part-filled line. Nothing else needs it.
 	reg       fill_end;
 
 	always @(posedge clk) begin
 		fill_end <= 1'b0;
-		if (rst) cart_bank <= 4'd0;
+		if (rst) cart_bank <= 6'd0;
 		else if (new_req && bus_we && (page == PAGE_NES)) begin
 			case (off[15:0])
-			16'h0030: cart_bank <= bus_wdata[3:0];
+			16'h0030: cart_bank <= bus_wdata[5:0];
 			16'h0034: fill_end  <= 1'b1;
 			default: ;
 			endcase
@@ -315,9 +316,10 @@ module regfile #(
 		.con_rdata(con_rdata),
 		.prog_windex({prg_pg, off[15:2]}),
 		.md_windex({prg_pg, off[15:2]}),
-		// Bank, then page, then word: 4 + 2 + 14 bits is 4 MB of cartridge,
-		// which is the largest a Mega Drive ever had.
-		.md_windex_full({cart_bank[3:0], prg_pg, off[15:2]}),
+		// Bank, then page, then word: 6 + 2 + 14 bits is 16 MB of cartridge: the
+		// N64's. (It was 4 bits, 4 MB, the largest Mega Drive; an 8 MB N64 game's
+		// second half then landed on top of its first.)
+		.md_windex_full({cart_bank[5:0], prg_pg, off[15:2]}),
 		.char_windex({chr_pg, off[15:2]}),
 		.ctrl_we(new_req && bus_we && (bus_addr[31:16] == PAGE_NES)),
 		.stream_en(stream_en), .stream_port(stream_port), .stream_base(stream_base), .stream_words(stream_words),

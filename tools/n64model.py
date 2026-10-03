@@ -27,6 +27,9 @@ the boot code leaves in low memory are filled in, as many emulators do.
 Speed: around a quarter of a million instructions a second. Enough for test
 ROMs; it is a reference, not a player.
 """
+import n64pif
+import n64rsp
+import n64rdp
 import n64fpu
 import struct
 import sys
@@ -766,9 +769,26 @@ class N64:
         self.mi_mask = 0
         self.mi_mode = 0
         self.sp_status = 1          # halted
-        self.si_status = 0
+        self.rsp = None             # (made below, once DMEM and IMEM exist)
+        self.si_status = 0          # bit 12: the SI interrupt
+        self.si_dram = 0
+        self.si_rd = 0
+        self.si_wr = 0
+        self.joy = n64pif.Joybus(self.pifram)
         self.ai = [0] * 6
+        # the AI, as ares has it (ares/n64/ai): two DMAs queued, the first playing
+        self.ai_addr = [0, 0]
+        self.ai_len = [0, 0]
+        self.ai_count = 0
+        self.ai_enable = 0
+        self.ai_dacrate = 0
+        self.ai_bitrate = 0
+        self.ai_acc = 0
+        self.ai_carry = 0
+        self.ai_samples = []       # what was played: (left, right), signed
         self.cpu = VR4300(self)
+        self.rsp = n64rsp.RSP(self)
+        self.rdp = n64rdp.RDP(self)     # the DP registers, for the CPU and the RSP (tools/n64rdp.py)
         self.vi_cycle = 0
         self.vi_polls = 0          # reads of VI_V_CURRENT
         self.vi_frames = 0
@@ -814,6 +834,7 @@ class N64:
         if 0x1FC007C0 <= a < 0x1FC00800:
             o = a - 0x1FC007C0
             self.pifram[o:o + n] = v.to_bytes(n, 'big')
+            self.joy.wrote()
             return
         if 0x10000000 <= a < 0x1FC00000:
             return
@@ -829,10 +850,11 @@ class N64:
 
     def reg_read(self, a):
         if 0x04040000 <= a < 0x04040020:
-            i = (a >> 2) & 7
-            if i == 4: return self.sp_status
-            return 0
-        if a == 0x04080000: return 0
+            return self.rsp.sp_read((a >> 2) & 7)               # tools/n64rsp.py
+        if a == 0x04080000:
+            return self.rsp.pc & 0xFFC
+        if 0x04100000 <= a < 0x04100020:
+            return self.rdp.reg_read((a >> 2) & 7)              # tools/n64rdp.py
         if 0x04300000 <= a < 0x04300010:
             i = (a >> 2) & 3
             return [self.mi_mode, 0x02020102, self.mi_intr, self.mi_mask][i]
@@ -842,28 +864,39 @@ class N64:
                 self.vi_polls += 1
                 return self.vi_line()
             return self.vi[i]
-        if 0x04500000 <= a < 0x04500018:
-            return 0
         if 0x04600000 <= a < 0x04600034:
             i = (a >> 2) & 15
             if i == 4:                    # PI_STATUS: never busy (DMA is instant here); bit 3 the interrupt
                 return 8 if self.mi_intr & 0x10 else 0
             return self.pi[i]
         if 0x04700000 <= a < 0x04700020: return 0
+        if 0x04500000 <= a < 0x04500018:
+            i = (a & 0x1F) >> 2
+            if i == 3:                                          # AI_STATUS
+                c = self.ai_count
+                return (int(c > 1) | (1 << 20) | (1 << 24) | (self.ai_enable << 25)
+                        | (int(c > 0) << 30) | (int(c > 1) << 31))
+            return self.ai_len[0] & 0x3FFFF                     # AI_LENGTH, mirrored
         if 0x04800000 <= a < 0x0480001C:
-            return self.si_status if a == 0x04800018 else 0
+            i = (a & 0x1F) >> 2
+            if i == 0: return self.si_dram
+            if i == 1: return self.si_rd
+            if i == 4: return self.si_wr
+            if i == 6: return self.si_status
+            return 0
         if 0x03F00000 <= a < 0x04000000: return 0
         return 0
 
     def reg_write(self, a, v):
         v &= M32
         if 0x04040000 <= a < 0x04040020:
-            i = (a >> 2) & 7
-            if i == 4:
-                if v & 1: self.sp_status &= ~1      # clear halt (the RSP is not modelled yet)
-                if v & 2: self.sp_status |= 1
-                if v & 8: self.mi_intr &= ~1
-                if v & 16: self.mi_intr |= 1
+            self.rsp.sp_write((a >> 2) & 7, v)                  # tools/n64rsp.py
+            return
+        if a == 0x04080000:
+            self.rsp.set_pc(v)
+            return
+        if 0x04100000 <= a < 0x04100020:
+            self.rdp.reg_write((a >> 2) & 7, v)                 # tools/n64rdp.py: END runs it
             return
         if 0x04300000 <= a < 0x04300010:
             i = (a >> 2) & 3
@@ -881,11 +914,6 @@ class N64:
                 self.mi_intr &= ~0x08                          # writing V_CURRENT clears the VI interrupt
             else:
                 self.vi[i] = v
-            return
-        if 0x04500000 <= a < 0x04500018:
-            i = (a >> 2) & 7
-            if i == 3: self.mi_intr &= ~0x04
-            elif i < 6: self.ai[i] = v
             return
         if 0x04600000 <= a < 0x04600034:
             i = (a >> 2) & 15
@@ -907,8 +935,45 @@ class N64:
             else:
                 self.pi[i] = v
             return
+        if 0x04500000 <= a < 0x04500018:
+            i = (a & 0x1F) >> 2
+            if i == 0 and self.ai_count < 2:
+                self.ai_addr[self.ai_count] = v & 0xFFFFF8
+            elif i == 1 and self.ai_count < 2:
+                if self.ai_count == 0:
+                    self.mi_intr |= 0x04
+                self.ai_len[self.ai_count] = v & 0x3FFF8
+                self.ai_count += 1
+            elif i == 2:
+                self.ai_enable = v & 1
+            elif i == 3:
+                self.mi_intr &= ~0x04
+            elif i == 4:
+                self.ai_dacrate = v & 0x3FFF
+            elif i == 5:
+                self.ai_bitrate = v & 0xF
+            return
         if 0x04800000 <= a < 0x0480001C:
-            if a == 0x04800018:
+            i = (a & 0x1F) >> 2
+            if i == 0:
+                self.si_dram = v & 0xFFFFF8
+            elif i == 1 or i == 4:
+                # an SI DMA of the 64 bytes of PIF RAM, out of it (1) or into it (4);
+                # done at once, with its interrupt (tools/n64pif.py)
+                d = self.si_dram
+                if i == 1:
+                    self.si_rd = v & ~1
+                    self.joy.before_read()
+                    self.rdram[d:d + 64] = self.pifram
+                    self.rdram_writes += 1
+                else:
+                    self.si_wr = v & ~1
+                    self.pifram[:] = self.rdram[d:d + 64]
+                    self.joy.wrote()
+                self.si_status |= 1 << 12
+                self.mi_intr |= 0x02
+            elif i == 6:
+                self.si_status &= ~(1 << 12)
                 self.mi_intr &= ~0x02
             return
 
@@ -951,6 +1016,7 @@ class N64:
         self.pi[1] = cart
 
     def mi_irq(self):
+        self.rsp.step()             # an RSP instruction for each of the CPU's
         self.vi_tick()
         return 1 if (self.mi_intr & self.mi_mask) else 0
 
@@ -966,7 +1032,45 @@ class N64:
         vsync = (self.vi[6] & 0x3FF) or 525
         return (self.vi_cycle // self.HALFLINE) % (vsync + 1)
 
+    # the model's second: 60 frames of 526 lines of HALFLINE instructions
+    MODEL_HZ = 60 * 526 * 200
+    VIDEO_HZ = 48681812                 # NTSC
+
+    def ai_tick(self):
+        if not self.ai_count:
+            return
+        self.ai_acc += self.VIDEO_HZ // (self.ai_dacrate + 1)
+        while self.ai_acc >= self.MODEL_HZ:
+            self.ai_acc -= self.MODEL_HZ
+            self.ai_sample()
+
+    def ai_sample(self):
+        # one sample pair out of RDRAM (ares AI::sample). The address counter
+        # carries from bit 12 into bit 13 a sample late, as the hardware's does:
+        # within a buffer that is invisible (the carry lands before the next
+        # read), but a buffer that ends on an 8 kB boundary leaves it pending,
+        # and the next buffer plays from 8 kB above its address.
+        if self.ai_count and self.ai_len[0] and self.ai_enable:
+            a = self.ai_addr[0]
+            if self.ai_carry:
+                a = (a & 0x1FFF) | ((((a >> 13) + 1) & 0x7FF) << 13)
+            w = int.from_bytes(self.rdram[a:a + 4], 'big')
+            l, r = w >> 16, w & 0xFFFF
+            self.ai_samples.append((l - 0x10000 if l & 0x8000 else l, r - 0x10000 if r & 0x8000 else r))
+            if len(self.ai_samples) > 1 << 16:
+                del self.ai_samples[:1 << 15]
+            lo = ((a & 0x1FFF) + 4) & 0x1FFF
+            self.ai_addr[0] = (a & ~0x1FFF) | lo
+            self.ai_carry = int(lo == 0)
+            self.ai_len[0] -= 4
+        if self.ai_count and self.ai_len[0] == 0:
+            self.ai_count -= 1
+            if self.ai_count:
+                self.ai_addr[0], self.ai_len[0] = self.ai_addr[1], self.ai_len[1]
+                self.mi_intr |= 0x04
+
     def vi_tick(self):
+        self.ai_tick()
         self.vi_cycle += 1
         if self.vi_cycle % self.HALFLINE == 0:
             line = self.vi_line()

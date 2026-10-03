@@ -113,7 +113,9 @@ def system_prepare(rom_path):
     """the cartridge as the PC sends it: little-endian 32-bit words, the first
     megabyte and its header (what the boot ROM copies)"""
     os.makedirs(OUT, exist_ok=True)
-    rom = open(rom_path, 'rb').read()[:0x101000]
+    rom = open(rom_path, 'rb').read()
+    if '--full' not in sys.argv:
+        rom = rom[:0x101000]      # (--full: all of it, for tb_n64_top's PRELOAD1)
     rom = rom.ljust((len(rom) + 3) // 4 * 4, bytes(1))
     with open(os.path.join(OUT, 'cart.hex'), 'w') as f:
         for i in range(0, len(rom), 4):

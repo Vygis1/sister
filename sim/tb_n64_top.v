@@ -24,6 +24,9 @@ module tb_n64_top;
 	wire [23:0]  d_addr; wire d_req, d_we; wire [127:0] d_wdata; wire [15:0] d_wmask;
 	reg          d_ready = 0, d_valid = 0; reg [127:0] d_rdata = 0;
 	wire [31:0]  vi_status, vi_origin, vi_width, vi_yscale, dbg_pc, dbg_retired;
+	reg          fbr_req = 0; reg [17:0] fbr_word = 0;
+	reg  [15:0]  joy1 = 16'd0, stick1 = 16'd0;    // controller 1 (the bench's +JOY/+STICK can set them)
+	wire         fbr_ack; wire [31:0] fbr_rdata; wire [17:0] fb_words; wire [15:0] fb_wpr; wire fb_halve;
 
 	n64_top #(.HALFLINE(11'd1587)) dut (
 		.clk(clk), .rst(rst), .run(run),
@@ -31,8 +34,13 @@ module tb_n64_top;
 		.hr_go(hr_go), .hr_line(hr_line), .hr_done(hr_done), .hr_data(hr_data),
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),
 		.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid), .d_calibrated(1'b1),
-		.joy1(16'd0), .vi_status(vi_status), .vi_origin(vi_origin), .vi_width(vi_width), .vi_yscale(vi_yscale),
-		.dbg_pc(dbg_pc), .dbg_retired(dbg_retired)
+		.joy1(joy1), .vi_status(vi_status), .vi_origin(vi_origin), .vi_width(vi_width), .vi_yscale(vi_yscale),
+		.dbg_pc(dbg_pc), .dbg_retired(dbg_retired), .dbg_sel(6'd0), .dbg_q(),
+		.fbr_req(fbr_req), .fbr_word(fbr_word), .fbr_ack(fbr_ack), .fbr_rdata(fbr_rdata),
+		.fb_words(fb_words), .fb_wpr(fb_wpr), .fb_halve(fb_halve),
+		.stick1(stick1), .pad_present(4'b0001), .eep_size(2'd0),
+		.eh_we(1'b0), .eh_addr(11'd0), .eh_wdata(8'd0), .eh_rdata(),
+		.audio_lr(), .audio_lr_we()
 	);
 
 	// --- DDR3: RDRAM (8 MB) at line 0, the cartridge (16 MB) at line 0x100000 -----------
@@ -69,7 +77,7 @@ module tb_n64_top;
 	end
 
 	// --- the run --------------------------------------------------------------------------
-	reg [31:0] words [0:524287];          // the cartridge, as the PC sends it: little-endian 32-bit words
+	reg [31:0] words [0:4194303];          // the cartridge, as the PC sends it: little-endian 32-bit words
 	integer nwords, frames = 0, last_frame = 0, last_wr = 0, quiet = 0;
 	time    t_run = 0;
 	reg [9:0] prev_line = 0;
@@ -90,8 +98,17 @@ module tb_n64_top;
 		         $time, dut.dpa, dut.dpa[12:4], dut.cpu.w_pc);
 	end
 
+	// every sample the AI takes, for tools/n64aitest.py's comparison with the model
+	integer af;
+	initial af = $fopen("../../sim/n64/ai.trace", "w");
+	always @(posedge clk)
+		if (dut.ai_pend && !dut.ai_we && dut.ai_count != 2'd0 && dut.ai_len0 != 18'd0 && dut.ai_enable
+		    && dut.al_v && dut.al_tag == dut.ai_a[22:4]) $fwrite(af, "%08x\n", dut.ai_word);
+
 	// the retire trace, in tools/n64sim.py's format, for comparison with the model
-	integer f, tf;
+	integer f, tf, sbad, sw, maxf, maxi;
+	reg [31:0] pjoy;
+	reg [23:0] sa; reg [31:0] sexp;
 	initial tf = $fopen("../../sim/n64/sys.trace", "w");
 	always @(posedge clk) begin
 		if (dut.tr_exc) $fwrite(tf, "X %02x\n", dut.tr_code);
@@ -101,23 +118,39 @@ module tb_n64_top;
 		end
 	end
 	initial begin
-		for (i = 0; i < 524288; i = i + 1) words[i] = 32'hxxxx_xxxx;
+		for (i = 0; i < 4194304; i = i + 1) words[i] = 32'hxxxx_xxxx;
 		$readmemh("../../sim/n64/cart.hex", words);
-		nwords = 0; while (nwords < 524288 && words[nwords] !== 32'hxxxx_xxxx) nwords = nwords + 1;
+		nwords = 0; while (nwords < 4194304 && words[nwords] !== 32'hxxxx_xxxx) nwords = nwords + 1;
 		$display("tb_n64_top: cartridge %0d words", nwords);
 		repeat (5) @(posedge clk); rst = 0;
+		// JUNK1: RDRAM full of leftovers, as the board's is after another program
+		if ($test$plusargs("JUNK1")) for (i = 0; i < 524288; i = i + 1)
+			rdram[i] = {i[31:0] * 32'h9E3779B1, i[31:0] ^ 32'hA5A5_1234, ~i[31:0] * 32'h85EB_CA6B, i[31:0] + 32'hDEAD_BEEF};
+		// PRELOAD1: the cartridge straight into DDR3, for a game too big to fill
+		// through the host's port in reasonable simulated time
+		if ($test$plusargs("PRELOAD1")) begin
+			for (i = 0; i < nwords; i = i + 1) cart[i >> 2][32 * (i & 3) +: 32] = words[i];
+			$display("tb_n64_top: preloaded %0d words; line 0 %032x", nwords, cart[0]);
+			nwords = 0;
+		end
 		// the host's fill: a word a clock is faster than the network, which is fine
 		for (i = 0; i < nwords; i = i + 1) begin
 			@(negedge clk); host_we = 1; host_windex = i; host_wdata = words[i];
 			@(negedge clk); host_we = 0;
 			repeat (3) @(negedge clk);       // leave the port time to write each line
 		end
-		@(negedge clk); fill_end = 1; @(negedge clk); fill_end = 0;
+		if (!$test$plusargs("PRELOAD1")) begin @(negedge clk); fill_end = 1; @(negedge clk); fill_end = 0; end   // (an empty fill would flush a zero line)
 		repeat (200) @(negedge clk);
 		$display("tb_n64_top: filled; run at %0t", $time);
 		run = 1; t_run = $time;
+		// controller 1 (+JOY=hex buttons, +STICK=hex X,Y), and a fixed length (+FRAMES=n)
+		// for a program that never stops drawing
+		if ($value$plusargs("JOY%h", pjoy)) joy1 = pjoy[15:0];
+		if ($value$plusargs("STICK%h", pjoy)) stick1 = pjoy[15:0];
+		if (!$value$plusargs("FRAMES%d", maxf)) maxf = 0;
+		if (!$value$plusargs("MAXI%d", maxi)) maxi = 0;      // stop after this many instructions
 		// the end: two frames with no RDRAM write after the boot's copy is done
-		while (quiet < 2 || dbg_retired < 1000) begin
+		while ((quiet < 2 || dbg_retired < 1000) && !(maxf != 0 && frames >= maxf) && !(maxi != 0 && dbg_retired >= maxi)) begin
 			@(posedge clk);
 			if (frames != last_frame) begin
 				quiet = (rdram_writes == last_wr) ? quiet + 1 : 0;
@@ -127,6 +160,23 @@ module tb_n64_top;
 		end
 		$display("tb_n64_top: done after %0d instructions, VI origin %08x width %0d status %08x", dbg_retired, vi_origin, vi_width, vi_status);
 		$display("tb_n64_top: %0d clocks since run, %0d frames", ($time - t_run) / 20, frames);
+		// the frame stream's port: words of the picture, against RDRAM at the VI's origin
+		sbad = 0;
+		for (i = 0; i < (fb_words != 0 ? 3000 : 0); i = i + 1) begin
+			sw = (i < 2000) ? i : (fb_words - 1 - (i - 2000));      // the start, and the end of the frame
+			@(negedge clk); fbr_word = sw; fbr_req = 1;
+			while (!fbr_ack) @(negedge clk);
+			sa = vi_origin[23:0] + 4 * sw;
+			sexp = {rdram[sa >> 4][8 * (sa[3:0]) +: 8], rdram[sa >> 4][8 * (sa[3:0] + 1) +: 8],
+			        rdram[sa >> 4][8 * (sa[3:0] + 2) +: 8], rdram[sa >> 4][8 * (sa[3:0] + 3) +: 8]};
+			if (fbr_rdata !== sexp) begin
+				sbad = sbad + 1;
+				if (sbad < 5) $display("tb_n64_top: stream word %0d is %08x, RDRAM has %08x", sw, fbr_rdata, sexp);
+			end
+			fbr_req = 0; @(negedge clk);
+		end
+		$display("tb_n64_top: the stream port: %0d words a frame, %0d a row%s; %0s",
+		         fb_words, fb_wpr, fb_halve ? " (every other row)" : "", sbad ? "FAIL" : "3000 words read right");
 		f = $fopen("../../sim/n64/sys_rdram.hex", "w");
 		for (i = 0; i < 524288; i = i + 1) $fwrite(f, "%032x\n", rdram[i]);
 		$fclose(f);

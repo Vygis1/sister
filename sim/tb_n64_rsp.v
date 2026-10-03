@@ -1,0 +1,112 @@
+//////////////////////////////////////////////////////////////////////////////////
+// tb_n64_rsp - the RSP by itself, repeating the model's runs of it.
+//
+//   python tools/n64rspsim.py ROM          (writes sim/n64r/runs.hex and the model's results)
+//   ./tools/sim.sh tb_n64_rsp
+//   python tools/n64rspsim.py --check
+//
+// For each run: DMEM and IMEM are loaded through the RSP's CPU port, SP_PC set,
+// the halt cleared, and the RSP left to run until it halts again. Its instruction
+// trace goes to sim/n64r/rtl.trace and the DMEM it leaves to rtl_dmem.hex. Its
+// DMA sees an RDRAM of zeros (the tests this is for do their DMA from the CPU).
+//////////////////////////////////////////////////////////////////////////////////
+`timescale 1ns/1ps
+`default_nettype none
+
+module tb_n64_rsp;
+	reg clk = 0, rst = 1;
+	always #10 clk = ~clk;
+
+	reg          c_mem_en = 0; reg [7:0] c_mem_we = 0; reg [9:0] c_mem_dw = 0; reg [63:0] c_mem_wd = 0;
+	wire [63:0]  c_mem_q; wire c_mem_ack;
+	reg          c_reg_we = 0; reg [3:0] c_reg_idx = 0; reg [31:0] c_reg_wd = 0;
+	wire [31:0]  c_reg_q;
+	wire         dm_rd_req, dm_wr_req; reg dm_rd_ack = 0, dm_wr_ack = 0;
+	wire [23:0]  dm_rd_line, dm_wr_line; wire [127:0] dm_wr_data; wire [15:0] dm_wr_mask;
+	wire         irq_set, irq_clr, halted, tr_valid; wire [11:0] tr_pc; wire [31:0] tr_ir;
+	wire         dp_we; wire [2:0] dp_idx, dp_ridx; wire [31:0] dp_wd; wire x_ack; wire [63:0] x_q;
+	wire [287:0] sp_regs_flat;
+
+	n64_rsp dut (
+		.clk(clk), .rst(rst),
+		.c_mem_en(c_mem_en), .c_mem_we(c_mem_we), .c_mem_dw(c_mem_dw), .c_mem_wd(c_mem_wd), .c_mem_q(c_mem_q), .c_mem_ack(c_mem_ack),
+		.c_reg_we(c_reg_we), .c_reg_re(1'b0), .c_reg_idx(c_reg_idx), .c_reg_wd(c_reg_wd), .c_reg_q(c_reg_q),
+		.x_req(1'b0), .x_dw(9'd0), .x_ack(x_ack), .x_q(x_q),
+		.dp_we(dp_we), .dp_idx(dp_idx), .dp_wd(dp_wd), .dp_q(32'd0), .dp_ridx(dp_ridx),
+		.dm_rd_req(dm_rd_req), .dm_rd_ack(dm_rd_ack), .dm_rd_line(dm_rd_line), .dm_rd_data(128'd0),
+		.dm_wr_req(dm_wr_req), .dm_wr_ack(dm_wr_ack), .dm_wr_line(dm_wr_line), .dm_wr_data(dm_wr_data), .dm_wr_mask(dm_wr_mask),
+		.irq_set(irq_set), .irq_clr(irq_clr), .halted_o(halted), .sp_regs_flat(sp_regs_flat),
+		.tr_valid(tr_valid), .tr_pc(tr_pc), .tr_ir(tr_ir)
+	);
+	// a DDR3 of zeros for the RSP's own DMA
+	always @(posedge clk) begin
+		dm_rd_ack <= dm_rd_req && !dm_rd_ack;
+		dm_wr_ack <= dm_wr_req && !dm_wr_ack;
+	end
+
+	integer fd, tf, df, vf, nruns, r, i, j, t, code;
+	reg [63:0] w;
+	reg [11:0] pc0;
+	always @(posedge clk) if (tr_valid) $fwrite(tf, "%03x %08x\n", tr_pc, tr_ir);
+	always @(posedge clk) if (dut.st == 4'd2 && dut.op == 6'h12 && dut.ir[25]) $display("EX ir %08x ve %0d vt %0d vtr %032x vte %032x", dut.ir, dut.ve, dut.vt, dut.vtr, dut.vte);
+
+	task mem_write; input [9:0] dw; input [63:0] v; begin
+		@(negedge clk); c_mem_en = 1; c_mem_we = 8'hFF; c_mem_dw = dw; c_mem_wd = v;
+		@(negedge clk); c_mem_en = 0; c_mem_we = 0;
+		while (!c_mem_ack) @(negedge clk);
+	end endtask
+	task mem_read; input [9:0] dw; output [63:0] v; begin
+		@(negedge clk); c_mem_en = 1; c_mem_we = 8'h00; c_mem_dw = dw;
+		@(negedge clk); c_mem_en = 0;
+		while (!c_mem_ack) @(negedge clk);
+		v = c_mem_q;
+	end endtask
+	task reg_write; input [3:0] idx; input [31:0] v; begin
+		@(negedge clk); c_reg_we = 1; c_reg_idx = idx; c_reg_wd = v;
+		@(negedge clk); c_reg_we = 0;
+	end endtask
+
+	initial begin
+		fd = $fopen("../../sim/n64r/runs.hex", "r");
+		tf = $fopen("../../sim/n64r/rtl.trace", "w");
+		df = $fopen("../../sim/n64r/rtl_dmem.hex", "w");
+		vf = $fopen("../../sim/n64r/rtl_vstate.txt", "w");
+		if (fd == 0) begin $display("tb_n64_rsp: FAIL no runs"); $finish; end
+		code = $fscanf(fd, "%h\n", nruns);
+		repeat (4) @(posedge clk); rst = 0;
+		for (r = 0; r < nruns; r = r + 1) begin
+			code = $fscanf(fd, "%h\n", pc0);
+			for (i = 0; i < 1024; i = i + 1) begin
+				code = $fscanf(fd, "%h\n", w);
+				mem_write(i[9:0], w);                 // DMEM, then IMEM
+			end
+			@(negedge clk); $fwrite(tf, "RUN %0d\n", r);
+			reg_write(4'd8, {20'd0, pc0});
+			reg_write(4'd4, 32'h0000_0005);              // clear halt and broke
+			t = 0;
+			@(negedge clk); @(negedge clk);
+			while (!halted && t < 2000000) begin @(negedge clk); t = t + 1; end
+			if (!halted) $display("tb_n64_rsp: run %0d did not halt", r);
+			repeat (4) @(negedge clk);
+			// the vector unit's state, as tools/n64rspsim.py writes the model's
+			$fwrite(vf, "RUN %0d\n", r);
+			for (i = 0; i < 32; i = i + 1) begin
+				$fwrite(vf, "v%02d ", i);
+				for (j = 0; j < 16; j = j + 1) $fwrite(vf, "%02x", dut.vb[j][i]);
+				$fwrite(vf, "\n");
+			end
+			$fwrite(vf, "acc");
+			for (j = 0; j < 8; j = j + 1) $fwrite(vf, " %04x%04x%04x", dut.acch[j], dut.accm[j], dut.accl[j]);
+			$fwrite(vf, "\nflags %02x %02x %02x %02x %02x\n", dut.vcoh, dut.vcol, dut.vcch, dut.vccl, dut.vce);
+			for (i = 0; i < 512; i = i + 1) begin
+				mem_read(i[9:0], w);
+				$fwrite(df, "%016x\n", w);
+			end
+		end
+		$fclose(tf); $fclose(df); $fclose(vf);
+		$display("tb_n64_rsp: %0d runs done", nruns);
+		$finish;
+	end
+endmodule
+
+`default_nettype wire

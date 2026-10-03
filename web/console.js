@@ -125,6 +125,10 @@ const PAD_LABELS = {
   2: { a: 'A', b: 'B', select: 'C', start: 'Start' },
   3: { a: '\u2715', b: '\u25CB', x: '\u25A1', y: '\u25B3', l1: 'L1', r1: 'R1', l2: 'L2', r2: 'R2',
        select: 'Select', start: 'Start' },
+  // the N64 (pc/server.py _N64_BITS): the C buttons are four of these, and the
+  // right stick; the arrow keys and the left stick are its analog stick
+  4: { a: 'A', x: 'B', l2: 'Z', l1: 'L', r1: 'R', start: 'Start',
+       y: 'C\u2191', b: 'C\u2193', select: 'C\u2190', r2: 'C\u2192' },
 };
 const padLabels = () => PAD_LABELS[curConsole] || PAD_LABELS[0];
 let keyMap = { ...DEFAULT_KEYS }, padMap = { ...DEFAULT_PADS };
@@ -163,12 +167,33 @@ function drawPad(v) {
     el.classList.toggle('on', !!(v & BIT[el.dataset.b])));
 }
 
+// The N64's analog stick: the gamepad's left stick, or the arrow keys pushed all
+// the way (80 of the stick's +-85 or so). Up is positive, as the controller has it.
+let padStick = [0, 0], sentStick = '';
+const ARROWS = BIT.up | BIT.down | BIT.left | BIT.right;
+function keyStick() {
+  const k = keyState;
+  return [((k & BIT.right) ? 80 : 0) - ((k & BIT.left) ? 80 : 0),
+          ((k & BIT.up) ? 80 : 0) - ((k & BIT.down) ? 80 : 0)];
+}
+
 async function pushPad() {
-  const v = keyState | padState;
+  let v = keyState | padState;
   drawPad(v);
-  if (v === sentState) return;
-  sentState = v;
-  try { await post('/api/nes/input', { joy1: v }); } catch (err) { /* header reports it */ }
+  let body = null;
+  if (curConsole === 4) {
+    // the arrow keys are the stick here, not the D-pad
+    v = (keyState & ~ARROWS) | padState;
+    const stick = (padStick[0] || padStick[1]) ? padStick : keyStick();
+    if (v === sentState && stick.join() === sentStick) return;
+    sentState = v; sentStick = stick.join();
+    body = { joy1: v, stick1: stick };
+  } else {
+    if (v === sentState) return;
+    sentState = v;
+    body = { joy1: v };
+  }
+  try { await post('/api/nes/input', body); } catch (err) { /* header reports it */ }
 }
 
 let listeningFor = null;
@@ -195,6 +220,15 @@ function readPad(gp) {
   let v = 0;
   for (const b of BUTTONS) { const i = padMap[b]; if (gp.buttons[i] && gp.buttons[i].pressed) v |= BIT[b]; }
   const [ax, ay] = [gp.axes[0] || 0, gp.axes[1] || 0];
+  if (curConsole === 4) {
+    // the N64: the left stick is analog, the right one is the C buttons
+    const dz = a => (Math.abs(a) < 0.12 ? 0 : a);
+    if (gp === firstPad()) padStick = [Math.round(dz(ax) * 80), Math.round(-dz(ay) * 80)];
+    const [cx, cy] = [gp.axes[2] || 0, gp.axes[3] || 0];
+    if (cy < -0.5) v |= BIT.y; if (cy > 0.5) v |= BIT.b;
+    if (cx < -0.5) v |= BIT.select; if (cx > 0.5) v |= BIT.r2;
+    return v;
+  }
   if (ax < -0.5) v |= BIT.left; if (ax > 0.5) v |= BIT.right;
   if (ay < -0.5) v |= BIT.up; if (ay > 0.5) v |= BIT.down;
   return v;
@@ -216,7 +250,7 @@ function pollPad() {
   const v2 = (gp2 && !listeningFor) ? readPad(gp2) : 0;
   if (v2 !== pad2State) { pad2State = v2; pushPad2(); }
   if (!gp) {
-    if (padState) { padState = 0; pushPad(); }
+    if (padState || padStick[0] || padStick[1]) { padState = 0; padStick = [0, 0]; pushPad(); }
     $('pad-src').textContent = 'keyboard';
     return;
   }
@@ -227,7 +261,12 @@ function pollPad() {
     return;
   }
   const v = readPad(gp);
-  if (v !== padState) { padState = v; pushPad(); }
+  // on the N64 the stick moves without any button changing
+  if (v !== padState || (curConsole === 4 && padStick.join() !== sentStick)) { padState = v; pushPad(); }
+}
+function firstPad() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  return [...pads].find(p => p && p.connected);
 }
 
 const KEY_LABEL = code => code.replace(/^Key/, '').replace(/^Digit/, '')

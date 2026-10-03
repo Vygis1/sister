@@ -20,6 +20,12 @@ def main():
     steps = int(sys.argv[sys.argv.index('--steps') + 1]) if '--steps' in sys.argv else 3_000_000
     rom = open(open(os.path.join(OUT, 'rom.path')).read().strip(), 'rb').read()
     m = n64model.N64(rom)
+    if '--junk' in sys.argv:
+        # tb_n64_top's JUNK1: line i is {i*9E3779B1, i^A5A51234, ~i*85EBCA6B, i+DEADBEEF}, byte 0 lowest
+        M = 0xFFFFFFFF
+        for i in range(len(m.rdram) // 16):
+            ws = ((i + 0xDEADBEEF) & M, ((~i & M) * 0x85EBCA6B) & M, (i ^ 0xA5A51234) & M, (i * 0x9E3779B1) & M)
+            m.rdram[16 * i:16 * i + 16] = b''.join(w.to_bytes(4, 'little') for w in ws)
     for i, w in enumerate(n64bootrom.program()):
         m.pifrom[4 * i:4 * i + 4] = w.to_bytes(4, 'big')
     c = m.cpu

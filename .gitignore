@@ -57,3 +57,5 @@ dist/
 
 # N64 bench inputs and outputs, generated from test ROMs (tools/n64sim.py)
 sim/n64/
+sim/n64b/
+sim/n64r/
