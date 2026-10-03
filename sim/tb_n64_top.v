@@ -35,7 +35,7 @@ module tb_n64_top;
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),
 		.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid), .d_calibrated(1'b1),
 		.joy1(joy1), .vi_status(vi_status), .vi_origin(vi_origin), .vi_width(vi_width), .vi_yscale(vi_yscale),
-		.dbg_pc(dbg_pc), .dbg_retired(dbg_retired), .dbg_sel(6'd0), .dbg_q(),
+		.dbg_pc(dbg_pc), .dbg_retired(dbg_retired), .dbg_sel(32'd0), .dbg_q(), .vi_slow(1'b0),
 		.fbr_req(fbr_req), .fbr_word(fbr_word), .fbr_ack(fbr_ack), .fbr_rdata(fbr_rdata),
 		.fb_words(fb_words), .fb_wpr(fb_wpr), .fb_halve(fb_halve),
 		.stick1(stick1), .pad_present(4'b0001), .eep_size(2'd0),

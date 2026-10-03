@@ -74,6 +74,7 @@ module n64_top #(
 	input  wire         d_calibrated,
 	// --- for the host ---------------------------------------------------------------
 	input  wire [15:0]  joy1,
+	input  wire         vi_slow,        // the VI at half rate (the game at half speed)
 	output wire [31:0]  vi_status,
 	output wire [31:0]  vi_origin,
 	output wire [31:0]  vi_width,
@@ -81,7 +82,7 @@ module n64_top #(
 	output wire [31:0]  dbg_pc,
 	output wire [31:0]  dbg_retired,
 	// the debug window: dbg_sel picks what dbg_q shows (see "the debug window" below)
-	input  wire [5:0]   dbg_sel,
+	input  wire [31:0]  dbg_sel,        // [5:0] what dbg_q shows, [15:8] the DMA log's entry, [25:16] a DMEM/IMEM doubleword
 	output reg  [31:0]  dbg_q,
 	// --- the picture, for the frame stream ------------------------------------------
 	// word i of the frame is RDRAM at the VI's origin + 4i, its bytes in address
@@ -158,7 +159,7 @@ module n64_top #(
 	// =============================================================================
 	reg  [31:0] vi [0:13];
 	reg  [9:0]  vi_line;
-	reg  [10:0] vi_clk;
+	reg  [11:0] vi_clk;
 	reg  [5:0]  mi_intr, mi_mask;
 	reg  [31:0] mi_mode;
 	// the PI: its registers and DMA engine are below (pi_*); these say what the
@@ -252,15 +253,18 @@ module n64_top #(
 	assign fb_halve = fb_halve_r;
 	assign fb_words = fb_words_r;
 
-	// the VI's clock: a half-line every HALFLINE clocks; V_INTR raises the MI's VI bit
+	// the VI's clock: a half-line every HALFLINE clocks (twice that with vi_slow: the
+	// game then has twice the clocks a frame, and runs at half speed); V_INTR raises the
+	// MI's VI bit
+	wire [11:0] halfline_n = vi_slow ? {HALFLINE, 1'b0} : {1'b0, HALFLINE};
 	always @(posedge clk) begin
-		if (cpu_rst) begin vi_line <= 10'd0; vi_clk <= 11'd0; end
-		else if (vi_clk == HALFLINE - 11'd1) begin
-			vi_clk <= 11'd0;
+		if (cpu_rst) begin vi_line <= 10'd0; vi_clk <= 12'd0; end
+		else if (vi_clk == halfline_n - 12'd1) begin
+			vi_clk <= 12'd0;
 			vi_line <= (vi_line >= vi_vsync) ? 10'd0 : vi_line + 10'd1;
-		end else vi_clk <= vi_clk + 11'd1;
+		end else vi_clk <= vi_clk + 12'd1;
 	end
-	wire vi_hit = (vi_clk == HALFLINE - 11'd1) && (((vi_line >= vi_vsync) ? 10'd0 : vi_line + 10'd1) == vi[3][9:0]);
+	wire vi_hit = (vi_clk == halfline_n - 12'd1) && (((vi_line >= vi_vsync) ? 10'd0 : vi_line + 10'd1) == vi[3][9:0]);
 
 	function [31:0] reg_read; input [31:0] a;
 		begin
@@ -595,6 +599,16 @@ module n64_top #(
 					end
 				end
 			end
+
+			// an interrupt raised on the clock the CPU clears it stays raised: the event is newer
+			// than the clear. (The clears above came last and won, and a lost DP or SP interrupt
+			// left SM64's scheduler waiting for ever, the RSP idle, after a few thousand tasks.)
+			if (sp_irq_set) mi_intr[0] <= 1'b1;
+			if (si_done) mi_intr[1] <= 1'b1;
+			if (ai_irq) mi_intr[2] <= 1'b1;
+			if (vi_hit) mi_intr[3] <= 1'b1;
+			if (pi_done) mi_intr[4] <= 1'b1;
+			if (dp_irq) mi_intr[5] <= 1'b1;
 
 			// a fill's replay: the block RAM is re-read this clock, so the answer is now
 			if (i_replay && !i_req) begin i_ready_r <= 1'b1; i_from_cache <= 1'b1; end
@@ -1095,7 +1109,11 @@ module n64_top #(
 	wire [31:0]  sp_cq;
 	wire [287:0] sp_regs_flat;
 	wire         rsp_halted;
-	n64_rsp #(.RDRAM_LINE(RDRAM_LINE)) u_rsp (
+	wire [95:0]  rsp_dbg, rsp_dlog;
+	wire [31:0]  rsp_dlog_n;
+	wire [63:0]  rsp_dbg_dq;
+	wire         rsp_frozen;
+	n64_rsp #(.RDRAM_LINE(RDRAM_LINE), .DEBUG_FREEZE(1)) u_rsp (
 		.clk(clk), .rst(rst || !run),
 		.c_mem_en(sp_go_d || sp_go_i), .c_mem_we(sp_go_d && c_dwe_q ? c_dbe_q : 8'd0),
 		.c_mem_dw(sp_go_d ? dpa[12:3] : ipa[12:3]), .c_mem_wd(c_dwdata_q),
@@ -1107,7 +1125,8 @@ module n64_top #(
 		.dm_rd_req(rd_rd_req), .dm_rd_ack(rd_rd_ack), .dm_rd_line(rd_rd_line), .dm_rd_data(rd_rd_data),
 		.dm_wr_req(rd_wr_req), .dm_wr_ack(rd_wr_ack), .dm_wr_line(rd_wr_line), .dm_wr_data(rd_wr_data), .dm_wr_mask(rd_wr_mask),
 		.irq_set(sp_irq_set), .irq_clr(sp_irq_clr), .halted_o(rsp_halted),
-		.sp_regs_flat(sp_regs_flat),
+		.sp_regs_flat(sp_regs_flat), .dbg(rsp_dbg), .dlog_idx(dbg_sel[15:8]), .dlog_q(rsp_dlog), .dlog_n(rsp_dlog_n),
+		.dbg_dw(dbg_sel[25:16]), .dbg_dq(rsp_dbg_dq), .frozen(rsp_frozen),
 		.tr_valid(), .tr_pc(), .tr_ir()
 	);
 	genvar gs;
@@ -1137,6 +1156,9 @@ module n64_top #(
 	//   21    AI interrupts   22 VI interrupts  23    SI DMAs done   24 PI DMAs done
 	//   25    CPU exceptions  26 of them interrupts (code 0)
 	//   27    the last exception: {code, 0, its pc[23:0]}   28 the last non-interrupt one
+	//   29    the RSP: {halted, st, pc}   30 its instruction   31 its last COP0 read {reg, value[27:0]}
+	//   32    RSP DMAs started   33-35 the DMA log's entry dbg_sel[15:8] (n64_rsp.v dlog), words 0-2
+	//   36-37 while the RSP is frozen: DMEM/IMEM doubleword dbg_sel[25:16] ([25] IMEM)   38 frozen
 	// =============================================================================
 	reg  [31:0] n_rsp_go, n_sp_irq, n_dp_irq, n_ai_irq, n_vi_irq, n_si, n_pi, n_exc, n_exc_int, last_exc, last_fault;
 	reg         rsp_halted_d;
@@ -1160,9 +1182,9 @@ module n64_top #(
 				else last_fault <= {tr_code, 3'd0, last_pc[23:0]};
 			end
 		end
-		case (dbg_sel)
-		6'd0, 6'd1, 6'd2, 6'd3, 6'd4, 6'd5, 6'd6, 6'd7, 6'd8: dbg_q <= sp_regs_flat[287 - 32 * dbg_sel -: 32];
-		6'd9, 6'd10, 6'd11, 6'd12, 6'd13, 6'd14, 6'd15, 6'd16: dbg_q <= dp_flat[255 - 32 * (dbg_sel - 6'd9) -: 32];
+		case (dbg_sel[5:0])
+		6'd0, 6'd1, 6'd2, 6'd3, 6'd4, 6'd5, 6'd6, 6'd7, 6'd8: dbg_q <= sp_regs_flat[287 - 32 * dbg_sel[5:0] -: 32];
+		6'd9, 6'd10, 6'd11, 6'd12, 6'd13, 6'd14, 6'd15, 6'd16: dbg_q <= dp_flat[255 - 32 * (dbg_sel[5:0] - 6'd9) -: 32];
 		6'd17: dbg_q <= {20'd0, mi_mask, mi_intr};
 		6'd18: dbg_q <= n_rsp_go;
 		6'd19: dbg_q <= n_sp_irq;
@@ -1175,7 +1197,17 @@ module n64_top #(
 		6'd26: dbg_q <= n_exc_int;
 		6'd27: dbg_q <= last_exc;
 		6'd28: dbg_q <= last_fault;
-		default: dbg_q <= 32'hDEB0_0000 | {26'd0, dbg_sel};
+		6'd29: dbg_q <= rsp_dbg[95:64];
+		6'd30: dbg_q <= rsp_dbg[63:32];
+		6'd31: dbg_q <= rsp_dbg[31:0];
+		6'd32: dbg_q <= rsp_dlog_n;
+		6'd33: dbg_q <= rsp_dlog[95:64];
+		6'd34: dbg_q <= rsp_dlog[63:32];
+		6'd35: dbg_q <= rsp_dlog[31:0];
+		6'd36: dbg_q <= rsp_dbg_dq[63:32];
+		6'd37: dbg_q <= rsp_dbg_dq[31:0];
+		6'd38: dbg_q <= {31'd0, rsp_frozen};
+		default: dbg_q <= 32'hDEB0_0000 | {26'd0, dbg_sel[5:0]};
 		endcase
 	end
 

@@ -511,7 +511,8 @@ module console_top #(
 	reg [1:0]  n64_eep;              // the N64 cartridge's EEPROM: 0 none, 1 4 kbit, 2 16 kbit
 	reg [3:0]  n64_pads;             // which N64 controllers are plugged in
 	reg [10:0] n64_eh_addr;
-	reg [5:0]  n64_dbg_sel;          // what the N64's debug window shows (0x170)
+	reg        n64_vi_slow;          // the N64's VI at half rate (0x178 bit 0)
+	reg [31:0] n64_dbg_sel;          // what the N64's debug window shows (0x170): [5:0] which, [15:8] a log entry, [25:16] a DMEM word
 	reg [7:0]  n64_eh_wdata;
 	wire [7:0] n64_eh_rdata;
 	// a write to 0x16C with bit 31 set writes the EEPROM's byte; any write moves the read
@@ -535,7 +536,7 @@ module console_top #(
 	always @(posedge clk) begin
 		if (rst) begin
 			run <= 1'b0; cpu_halt <= 1'b0; mirror_v <= 1'b0; joy1 <= 16'd0; joy2 <= 16'd0;
-			n64_stick1 <= 16'd0; n64_eep <= 2'd0; n64_pads <= 4'b0001; n64_dbg_sel <= 6'd0;
+			n64_stick1 <= 16'd0; n64_eep <= 2'd0; n64_pads <= 4'b0001; n64_dbg_sel <= 32'd0; n64_vi_slow <= 1'b0;
 			mapper_id <= 4'd0; prg_last <= 6'd3; console_sel <= CONSOLE_FIRST;
 			chr_is_ram <= 1'b0;
 			test_mode <= 1'b0;
@@ -566,7 +567,8 @@ module console_top #(
 			16'h0164: n64_stick1 <= wdata[15:0];                     // the N64's stick: X [15:8], Y [7:0]
 			16'h0168: begin n64_eep <= wdata[1:0]; n64_pads <= wdata[7:4]; end
 			16'h016C: begin n64_eh_addr <= wdata[10:0]; n64_eh_wdata <= wdata[23:16]; end   // the EEPROM, a byte
-			16'h0170: n64_dbg_sel <= wdata[5:0];                       // the N64's debug window: what 0x174 shows
+			16'h0170: n64_dbg_sel <= wdata;                       // the N64's debug window: what 0x174 shows
+			16'h0178: n64_vi_slow <= wdata[0];                         // the N64's VI at half rate
 			16'h001C: begin
 				mapper_id  <= wdata[3:0];
 				prg_last   <= wdata[13:8];
@@ -662,8 +664,9 @@ module console_top #(
 		16'h0160: ctrl_rdata = n64_retired;
 		16'h0168: ctrl_rdata = {24'd0, n64_pads, 2'd0, n64_eep};
 		16'h016C: ctrl_rdata = {8'd0, n64_eh_rdata, 5'd0, n64_eh_addr};
-		16'h0170: ctrl_rdata = {26'd0, n64_dbg_sel};
+		16'h0170: ctrl_rdata = n64_dbg_sel;
 		16'h0174: ctrl_rdata = n64_dbg_q;
+		16'h0178: ctrl_rdata = {31'd0, n64_vi_slow};
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -973,7 +976,7 @@ module console_top #(
 			.hr_go(hr_go), .hr_line(hr_line), .hr_done(hr_done), .hr_data(hr_data),
 			.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(n64_d_wmask),
 			.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid), .d_calibrated(d_calibrated),
-			.joy1(joy1), .stick1(n64_stick1), .pad_present(n64_pads), .eep_size(n64_eep),
+			.joy1(joy1), .vi_slow(n64_vi_slow), .stick1(n64_stick1), .pad_present(n64_pads), .eep_size(n64_eep),
 			.eh_we(n64_eh_we), .eh_addr(n64_eh_we ? wdata[10:0] : n64_eh_addr), .eh_wdata(wdata[23:16]), .eh_rdata(n64_eh_rdata),
 			.vi_status(n64_vi_status), .vi_origin(n64_vi_origin), .vi_width(n64_vi_width), .vi_yscale(n64_vi_yscale),
 			.dbg_pc(n64_dbg_pc), .dbg_retired(n64_retired), .dbg_sel(n64_dbg_sel), .dbg_q(n64_dbg_q),

@@ -32,16 +32,30 @@ module tb_n64_rsp;
 		.c_mem_en(c_mem_en), .c_mem_we(c_mem_we), .c_mem_dw(c_mem_dw), .c_mem_wd(c_mem_wd), .c_mem_q(c_mem_q), .c_mem_ack(c_mem_ack),
 		.c_reg_we(c_reg_we), .c_reg_re(1'b0), .c_reg_idx(c_reg_idx), .c_reg_wd(c_reg_wd), .c_reg_q(c_reg_q),
 		.x_req(1'b0), .x_dw(9'd0), .x_ack(x_ack), .x_q(x_q),
-		.dp_we(dp_we), .dp_idx(dp_idx), .dp_wd(dp_wd), .dp_q(32'd0), .dp_ridx(dp_ridx),
-		.dm_rd_req(dm_rd_req), .dm_rd_ack(dm_rd_ack), .dm_rd_line(dm_rd_line), .dm_rd_data(128'd0),
+		.dp_we(dp_we), .dp_idx(dp_idx), .dp_wd(dp_wd), .dp_q(dp_val), .dp_ridx(dp_ridx),
+		.dm_rd_req(dm_rd_req), .dm_rd_ack(dm_rd_ack), .dm_rd_line(dm_rd_line), .dm_rd_data(dm_rd_data),
 		.dm_wr_req(dm_wr_req), .dm_wr_ack(dm_wr_ack), .dm_wr_line(dm_wr_line), .dm_wr_data(dm_wr_data), .dm_wr_mask(dm_wr_mask),
-		.irq_set(irq_set), .irq_clr(irq_clr), .halted_o(halted), .sp_regs_flat(sp_regs_flat),
+		.irq_set(irq_set), .irq_clr(irq_clr), .halted_o(halted), .sp_regs_flat(sp_regs_flat), .dbg(), .dlog_idx(8'd0), .dlog_q(), .dlog_n(), .dbg_dw(10'd0), .dbg_dq(), .frozen(),
 		.tr_valid(tr_valid), .tr_pc(tr_pc), .tr_ir(tr_ir)
 	);
-	// a DDR3 of zeros for the RSP's own DMA
+	// RDRAM for the RSP's own DMA: zeros, but for the lines each run's DMAs read in
+	// the model (sim/n64r/reads.hex, loaded before the run); writes are kept
+	reg  [127:0] ram [0:524287];
+	// the DP register reads the model's run made, answered in turn (an MFC0 of 8-15)
+	reg  [31:0]  dpv [0:65535];
+	integer      dpn, dpi, pf;
+	wire [31:0]  dp_val = (dpi < dpn) ? dpv[dpi] : 32'd0;
+	always @(posedge clk) if (dut.st == 4'd2 && dut.op == 6'h10 && dut.rs == 5'd0 && dut.rd[3]) dpi = dpi + 1;
+	reg  [127:0] dm_rd_data;
+	integer      rf, rn, rl, ri;
+	reg  [127:0] rd_v;
 	always @(posedge clk) begin
 		dm_rd_ack <= dm_rd_req && !dm_rd_ack;
 		dm_wr_ack <= dm_wr_req && !dm_wr_ack;
+		if (dm_rd_req && !dm_rd_ack) dm_rd_data <= ram[dm_rd_line[18:0]];
+		if (dm_wr_req && !dm_wr_ack)
+			for (ri = 0; ri < 16; ri = ri + 1)
+				if (dm_wr_mask[ri]) ram[dm_wr_line[18:0]][8 * ri +: 8] <= dm_wr_data[8 * ri +: 8];
 	end
 
 	integer fd, tf, df, vf, nruns, r, i, j, t, code;
@@ -68,6 +82,9 @@ module tb_n64_rsp;
 
 	initial begin
 		fd = $fopen("../../sim/n64r/runs.hex", "r");
+		rf = $fopen("../../sim/n64r/reads.hex", "r");
+		pf = $fopen("../../sim/n64r/dpreads.hex", "r");
+		for (ri = 0; ri < 524288; ri = ri + 1) ram[ri] = 128'd0;
 		tf = $fopen("../../sim/n64r/rtl.trace", "w");
 		df = $fopen("../../sim/n64r/rtl_dmem.hex", "w");
 		vf = $fopen("../../sim/n64r/rtl_vstate.txt", "w");
@@ -81,6 +98,23 @@ module tb_n64_rsp;
 				mem_write(i[9:0], w);                 // DMEM, then IMEM
 			end
 			@(negedge clk); $fwrite(tf, "RUN %0d\n", r);
+			// stop it, if the last run did not halt, before its memory is written
+			reg_write(4'd4, 32'h0000_0002);
+			repeat (8) @(negedge clk);
+			// this run's DP register reads, answered in order
+			dpn = 0; dpi = 0;
+			if (pf != 0) begin
+				code = $fscanf(pf, "%h", dpn);
+				for (ri = 0; ri < dpn; ri = ri + 1) code = $fscanf(pf, "%h", dpv[ri]);
+			end
+			// this run's RDRAM lines
+			if (rf != 0) begin
+				code = $fscanf(rf, "%h", rn);
+				for (ri = 0; ri < rn; ri = ri + 1) begin
+					code = $fscanf(rf, "%h %h", rl, rd_v);
+					ram[rl] = rd_v;
+				end
+			end
 			reg_write(4'd8, {20'd0, pc0});
 			reg_write(4'd4, 32'h0000_0005);              // clear halt and broke
 			t = 0;

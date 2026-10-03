@@ -69,10 +69,19 @@ module n64_rdp #(
 	reg  [63:0]  cmd;
 	reg          have;
 
-	// a write from either side
-	wire         we = c_we || r_we;
-	wire [2:0]   widx = c_we ? c_idx : r_idx;
-	wire [31:0]  wd = c_we ? c_wd : r_wd;
+	// a write from either side; the RSP's, on the clock the CPU writes too, is kept
+	// and done on the next (it was dropped)
+	reg          rp_we;
+	reg  [2:0]   rp_idx;
+	reg  [31:0]  rp_wd;
+	wire         we = c_we || rp_we || r_we;
+	wire [2:0]   widx = c_we ? c_idx : rp_we ? rp_idx : r_idx;
+	wire [31:0]  wd = c_we ? c_wd : rp_we ? rp_wd : r_wd;
+	always @(posedge clk) begin
+		if (rst) rp_we <= 1'b0;
+		else if (c_we && r_we) begin rp_we <= 1'b1; rp_idx <= r_idx; rp_wd <= r_wd; end
+		else if (!c_we) rp_we <= 1'b0;
+	end
 
 	always @(posedge clk) begin
 		irq <= 1'b0;

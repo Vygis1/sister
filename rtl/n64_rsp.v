@@ -20,7 +20,8 @@
 `default_nettype none
 
 module n64_rsp #(
-	parameter [23:0] RDRAM_LINE = 24'h00_0000
+	parameter [23:0] RDRAM_LINE = 24'h00_0000,
+	parameter        DEBUG_FREEZE = 0      // stop at the first DMA from below 1 MB (debugging SM64)
 ) (
 	input  wire         clk,
 	input  wire         rst,
@@ -63,6 +64,13 @@ module n64_rsp #(
 	output reg          irq_clr,
 	output wire         halted_o,
 	output wire [287:0] sp_regs_flat,     // the SP's registers 0-7 and SP_PC, for reading
+	output wire [95:0]  dbg,              // {halted, st, pc}, the instruction, the last COP0 read {reg, value[27:0]}
+	input  wire [7:0]   dlog_idx,         // the DMA log: entry dlog_idx of the last 256 DMAs started
+	output reg  [95:0]  dlog_q,
+	output reg  [31:0]  dlog_n,           // DMAs started
+	input  wire [9:0]   dbg_dw,           // while frozen: the doubleword dbg_dq shows ([9] IMEM)
+	output reg  [63:0]  dbg_dq,
+	output reg          frozen,           // stopped at the first DMA from below 1 MB (see dlog)
 	// a retire trace, for the bench
 	output reg          tr_valid,
 	output reg  [11:0]  tr_pc,
@@ -152,6 +160,14 @@ module n64_rsp #(
 	                       {31'd0, dma_full}, {31'd0, dma_busy}, {31'd0, semaphore}};
 	function automatic [31:0] sp_read; input [255:0] all; input [2:0] i; sp_read = all[255 - 32 * i -: 32]; endfunction
 	reg  [11:0] pc, npc;
+	reg  [31:0] last_c0;
+	reg  [95:0] dlog [0:255];
+	reg         dlog_stop;
+	initial dlog_stop = 1'b0;
+	initial frozen = 1'b0;
+	reg  [1:0] dbg_v; reg [1:0] dbg_im;
+	always @(posedge clk) dlog_q <= dlog[dlog_idx];
+	initial dlog_n = 32'd0;
 	assign c_reg_q = (c_reg_idx == 4'd8) ? {20'd0, halted ? pc : 12'd0} : sp_read(sp_all, c_reg_idx[2:0]);
 	assign sp_regs_flat = {sp_all, {20'd0, halted ? pc : 12'd0}};
 
@@ -553,10 +569,24 @@ module n64_rsp #(
 	reg  [31:0] cw;      // a COP0 write's value, and which
 	reg  [2:0]  ci;
 	reg         cwe;
+	// An MTC0 on the clock the CPU writes one of these too is kept and done on the
+	// next clock. (It was dropped: a lost semaphore release left SM64's microcode
+	// spinning on the semaphore, its task never finishing, after a few thousand.)
+	wire        rsp_cw = st == R_EX && op == 6'h10 && rs == 5'h04 && !rd[3];
+	wire        cpu_cw = c_reg_we && c_reg_idx[3] == 1'b0;
+	reg         rw_pend;
+	reg  [2:0]  rw_i;
+	reg  [31:0] rw_d;
 	always @(*) begin
 		cwe = 1'b0; ci = 3'd0; cw = 32'd0;
-		if (c_reg_we && c_reg_idx[3] == 1'b0) begin cwe = 1'b1; ci = c_reg_idx[2:0]; cw = c_reg_wd; end
-		else if (st == R_EX && op == 6'h10 && rs == 5'h04 && !rd[3]) begin cwe = 1'b1; ci = rd[2:0]; cw = b; end
+		if (cpu_cw) begin cwe = 1'b1; ci = c_reg_idx[2:0]; cw = c_reg_wd; end
+		else if (rw_pend) begin cwe = 1'b1; ci = rw_i; cw = rw_d; end
+		else if (rsp_cw) begin cwe = 1'b1; ci = rd[2:0]; cw = b; end
+	end
+	always @(posedge clk) begin
+		if (rst) rw_pend <= 1'b0;
+		else if (cpu_cw && rsp_cw) begin rw_pend <= 1'b1; rw_i <= rd[2:0]; rw_d <= b; end
+		else if (!cpu_cw) rw_pend <= 1'b0;
 	end
 
 	always @(posedge clk) begin
@@ -566,7 +596,7 @@ module n64_rsp #(
 		if (dm_rd_ack) dm_rd_req <= 1'b0;
 		if (dm_wr_ack) dm_wr_req <= 1'b0;
 		if (rst) begin
-			st <= R_HALT; halted <= 1'b1; broken <= 1'b0; sstep <= 1'b0; intbreak <= 1'b0; semaphore <= 1'b0; signal <= 8'd0;
+			st <= R_HALT; halted <= 1'b1; dlog_n <= 32'd0; dlog_stop <= 1'b0; frozen <= 1'b0; broken <= 1'b0; sstep <= 1'b0; intbreak <= 1'b0; semaphore <= 1'b0; signal <= 8'd0;
 			pc <= 12'd0; npc <= 12'd4;
 			dma_busy <= 1'b0; dma_full <= 1'b0; dst <= D_IDLE; d_lv <= 1'b0; d_wv <= 1'b0; dm_rd_req <= 1'b0; dm_wr_req <= 1'b0;
 			c_len <= 12'd0; c_count <= 8'd0; c_skip <= 12'd0; c_pbus <= 12'd0; c_region <= 1'b0; c_dram <= 24'd0;
@@ -577,6 +607,12 @@ module n64_rsp #(
 			if (c_mem_en) begin
 				b_en <= 1'b1; b_imem <= c_mem_dw[9]; b_addr <= c_mem_dw[8:0]; b_we <= c_mem_we; b_wd <= c_mem_wd;
 				cpu_b <= 1'b1; cpu_b_imem <= c_mem_dw[9];
+			end
+			// --- debugging: while frozen, port B reads the doubleword asked for -------------
+			dbg_v <= {dbg_v[0], 1'b0}; dbg_im <= {dbg_im[0], dbg_dw[9]};
+			if (dbg_v[1]) dbg_dq <= dbg_im[1] ? ib_q : db_q;
+			if (frozen && !c_mem_en && !x_req && !b_en) begin
+				b_en <= 1'b1; b_imem <= dbg_dw[9]; b_addr <= dbg_dw[8:0]; b_we <= 8'h00; dbg_v[0] <= 1'b1;
 			end
 			// --- the XBUS, when the CPU and the DMA leave port B free ------------------------
 			if (x_req && !x_b && !x_b2 && !x_ack && !c_mem_en && !(dst == D_RD || dst == D_WRB)) begin
@@ -615,7 +651,18 @@ module n64_rsp #(
 
 			// --- the DMA -----------------------------------------------------------------
 			case (dst)
-			D_IDLE: if (dma_full && !(cwe && (ci == 3'd2 || ci == 3'd3))) begin
+			// (debugging: an audio command chunk (DMEM 0x380) read from below 1 MB, which SM64 never does, is logged
+			// and not started, and everything stops, so DMEM can be read as it was)
+			D_IDLE: if (DEBUG_FREEZE && dma_full && !frozen && !dlog_stop && p_rd && p_dram < 24'h10_0000 && p_pbus == 12'h380 && !p_region) begin
+				dlog[dlog_n[7:0]] <= {halted, p_rd, p_region, 5'd0, p_dram, ipc, p_pbus, p_count, p_skip, p_len, 8'd0};
+				dlog_n <= dlog_n + 32'd1; dlog_stop <= 1'b1; frozen <= 1'b1;
+			end else if (dma_full && !frozen && !(cwe && (ci == 3'd2 || ci == 3'd3))) begin
+				// (the log stops at the first read from below 0x1000, which no microcode does:
+				// what went before it is what is wanted)
+				if (!dlog_stop) begin
+					dlog[dlog_n[7:0]] <= {halted, p_rd, p_region, 5'd0, p_dram, ipc, p_pbus, p_count, p_skip, p_len, 8'd0};
+					dlog_n <= dlog_n + 32'd1;
+				end
 				c_pbus <= p_pbus; c_region <= p_region; c_dram <= p_dram; c_len <= p_len; c_count <= p_count; c_skip <= p_skip;
 				dma_rd <= p_rd; dma_busy <= 1'b1; dma_full <= 1'b0;
 				d_n <= p_len[11:3] + 10'd1; d_lv <= 1'b0; d_wv <= 1'b0;
@@ -663,7 +710,10 @@ module n64_rsp #(
 					c_count <= c_count - 8'd1; c_dram <= c_dram + {12'd0, c_skip}; d_n <= c_len[11:3] + 10'd1;
 					dst <= dma_rd ? D_RD : D_WRB;
 				end else begin
-					dma_busy <= 1'b0; c_len <= 12'hFF8; dst <= D_IDLE;
+					// BUSY stays up when a queued DMA follows (ares starts it in the same step).
+					// Dropped for the one clock before D_IDLE took it, a microcode polling BUSY
+					// saw it finished: SM64's audio parsed a command chunk before it had come.
+					dma_busy <= dma_full; c_len <= 12'hFF8; dst <= D_IDLE;
 				end
 			end
 			default: dst <= D_IDLE;
@@ -674,6 +724,7 @@ module n64_rsp #(
 			R_HALT: if (!halted) st <= R_FETCH;
 			R_FETCH: begin
 				if (halted) st <= R_HALT;
+				else if (frozen) ;
 				else begin
 					pc_dw_lo <= pc[2]; ipc <= pc;
 					pc <= npc; npc <= npc + 12'd4;
@@ -729,6 +780,7 @@ module n64_rsp #(
 					if (rs == 5'h00) begin
 						sr_we <= 1'b1; sr_wa <= rt;
 						sr_wd <= rd[3] ? dp_q : sp_read(sp_all, rd[2:0]);
+						last_c0 <= {rd[3:0], rd[3] ? dp_q[27:0] : sp_all[255 - 32 * rd[2:0] - 4 -: 28]};
 						if (!rd[3] && rd[2:0] == 3'd7) semaphore <= 1'b1;
 					end else if (rs == 5'h04 && rd[3]) begin
 						dp_we <= 1'b1; dp_idx <= rd[2:0]; dp_wd <= b;
@@ -939,6 +991,8 @@ module n64_rsp #(
 		default: ls_n <= 5'd0;
 		endcase
 	end endtask
+
+	assign dbg = {halted, 11'd0, st, 4'd0, pc, ir, last_c0};
 endmodule
 
 `default_nettype wire
