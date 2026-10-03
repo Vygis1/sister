@@ -67,6 +67,11 @@ module n64_rdp2 #(
 	// the registers
 	// =============================================================================
 	reg  [23:0] start, endp, current;
+	// a new buffer (START, then END) set while the last is still being walked waits for the
+	// walk to reach the last one's end: a command cut there goes on at the new START. (Taken
+	// at once, the rest of the old list was skipped and a command's tail read from the new
+	// one: SM64 then drew with a garbage colour image over its own memory.)
+	reg         pend;  reg [23:0] pend_end;
 	reg         start_valid, source, freeze, flush, start_gclk;
 	reg  [23:0] clock;
 
@@ -203,23 +208,69 @@ module n64_rdp2 #(
 	wire [5:0]   op0 = cbuf[0][61:56];
 	reg  [4:0]   xi;                       // the executor's step
 	wire [31:0]  w0 = cbuf[0][63:32], w1 = cbuf[0][31:0];
-	// (the command log is not built: the board is full. Its ports stay for the benches.)
-	always @(posedge clk) begin log_n <= 32'd0; log_q <= 88'd0; end
+	// (debugging) the last 32 commands decoded: {the walk address after it, w0, w1}, until log_stop
+	(* ram_style = "distributed" *) reg [87:0] cmd_log [0:31];
+	always @(posedge clk) begin
+		if (ws == X_DECODE && !log_stop) cmd_log[log_n[4:0]] <= {current, w0, w1};
+		log_q <= cmd_log[log_idx];
+	end
+	always @(posedge clk) begin
+		if (rst) log_n <= 32'd0;
+		else if (ws == X_DECODE && !log_stop) log_n <= log_n + 32'd1;
+	end
 	wire [31:0]  w2 = cbuf[1][63:32], w3 = cbuf[1][31:0], w4 = cbuf[2][63:32], w5 = cbuf[2][31:0];
 	wire [31:0]  w6 = cbuf[3][63:32], w7 = cbuf[3][31:0];
 	// the line port: the walk's, or a TMEM load's (the raster has its own, rq/rs)
 	reg          raster_mem;               // (a primitive is being drawn)
 	reg          wk_req;  reg [23:0] wk_line;
 	wire [23:0]  r_rq_line;
-	assign rq_line = RDRAM_LINE + r_rq_line;
+	wire         r_rq_valid;              // the raster's span reads
+	// --- the read-ahead (n64_rdp_stream.v) for the walk and the TMEM loads, and the one
+	// pipelined read port it shares with the raster's span reads. A request presented is
+	// held, and its owner kept, until n64_top takes it (rq_ready); each read's owner goes in
+	// a queue, so each line that comes back goes to whoever asked for it.
+	wire         s_qv;  wire [19:0] s_ql;
+	reg          hs, hs_own;              // a request presented and not yet taken; its owner (1 the read-ahead)
+	reg  [23:0]  hs_line;
+	wire         own_now = !r_rq_valid;   // (the raster first)
+	assign rq_valid = hs || r_rq_valid || s_qv;
+	assign rq_line = hs ? hs_line : RDRAM_LINE + (own_now ? {4'd0, s_ql} : r_rq_line);
+	wire         rdy_r = rq_ready && hs && !hs_own;
+	wire         rdy_s = rq_ready && hs && hs_own;
+	reg  [7:0]   tagq;  reg [2:0] tq_w, tq_r;   // the owners of the reads taken, oldest at tq_r
+	wire         rs_s = rs_valid && tagq[tq_r];
+	wire         rs_r = rs_valid && !tagq[tq_r];
+	always @(posedge clk) begin
+		if (rst) begin hs <= 1'b0; tq_w <= 3'd0; tq_r <= 3'd0; end
+		else begin
+			if (!hs && (r_rq_valid || s_qv)) begin hs <= 1'b1; hs_own <= own_now; hs_line <= rq_line; end
+			if (hs && rq_ready) begin hs <= 1'b0; tagq[tq_w] <= hs_own; tq_w <= tq_w + 3'd1; end
+			if (rs_valid) tq_r <= tq_r + 3'd1;
+		end
+	end
 	reg          tmem_mem;                 // (or a TMEM load's)
 	reg          ld_go;                    // a TMEM load, started (n64_rdp_tmem.v)
 	wire         ld_busy;
 	wire         tl_req;  wire [23:0] tl_line;
-	assign cf_req  = raster_mem ? 1'b0 : tmem_mem ? tl_req : wk_req;
-	assign cf_line = tmem_mem ? RDRAM_LINE + tl_line : wk_line;
-	wire         wk_ack = cf_ack && !raster_mem && !tmem_mem;
-	wire         tl_ack = cf_ack && tmem_mem;
+	assign cf_req  = 1'b0;                 // (the line port is not used: the read-ahead does its work)
+	assign cf_line = 24'd0;
+	// the read-ahead's client: a TMEM load, or the walk. It is emptied at every END (the list
+	// grows in place) -- once no request of its own is being presented
+	reg          s_flush_p;
+	wire         s_flush = s_flush_p && !(hs && hs_own);
+	wire         s_ack;  wire [127:0] s_data;
+	n64_rdp_stream u_stream (.clk(clk), .rst(rst), .flush(s_flush),
+		.c_req(!s_flush_p && !(hs && hs_own) && !raster_mem && (tmem_mem ? tl_req : wk_req)),
+		.c_line(tmem_mem ? tl_line[19:0] : wk_line[19:0] - RDRAM_LINE[19:0]),
+		.c_ack(s_ack), .c_data(s_data),
+		.q_valid(s_qv), .q_line(s_ql), .q_ready(rdy_s), .q_rs(rs_s), .q_rs_data(rs_data));
+	always @(posedge clk) begin
+		if (rst) s_flush_p <= 1'b0;
+		else if (we && widx == 3'd1) s_flush_p <= 1'b1;
+		else if (s_flush) s_flush_p <= 1'b0;
+	end
+	wire         wk_ack = s_ack && !raster_mem && !tmem_mem;
+	wire         tl_ack = s_ack && tmem_mem;
 	wire         copy_cycle = om0[21:20] == 2'd2, fill_or_copy = om0[21];
 
 	function signed [26:0] sx28h; input [31:0] v; reg [27:0] t; begin   // sext(v, 28) >> 1
@@ -233,7 +284,7 @@ module n64_rdp2 #(
 		if (wk_ack) wk_req <= 1'b0;
 		if (xb_ack) xb_req <= 1'b0;
 		if (rst) begin
-			start <= 24'd0; endp <= 24'd0; current <= 24'd0; start_valid <= 1'b0; source <= 1'b0;
+			start <= 24'd0; endp <= 24'd0; current <= 24'd0; start_valid <= 1'b0; source <= 1'b0; pend <= 1'b0;
 			freeze <= 1'b0; flush <= 1'b0; start_gclk <= 1'b0; clock <= 24'd0;
 			ws <= W_IDLE; lv <= 1'b0; wk_req <= 1'b0; tmem_mem <= 1'b0; xb_req <= 1'b0; wend <= 1'b0; raster_mem <= 1'b0;
 			cb_n <= 5'd0; cb_need <= 5'd1; dwin_v <= 1'b0;
@@ -251,11 +302,14 @@ module n64_rdp2 #(
 				case (widx)
 				3'd0: begin if (!start_valid) start <= {wd[23:3], 3'b000}; start_valid <= 1'b1; end
 				3'd1: begin
-					endp <= {wd[23:3], 3'b000};
 					// the line held is dropped at every END: a list grows in place, and the
 					// rest of the line it was read from was not written yet
 					lv <= 1'b0; wend <= 1'b1;
-					if (start_valid) begin current <= start; start_valid <= 1'b0; end
+					if (start_valid && (current < endp || pend)) begin
+						pend <= 1'b1; pend_end <= {wd[23:3], 3'b000};      // (the old list first)
+					end else if (start_valid) begin
+						current <= start; endp <= {wd[23:3], 3'b000}; start_valid <= 1'b0;
+					end else endp <= {wd[23:3], 3'b000};
 				end
 				3'd3: begin
 					if (wd[0]) source <= 1'b0;
@@ -280,6 +334,9 @@ module n64_rdp2 #(
 					if (cb_n == 5'd0) cb_need <= cmd_len(dwin[61:56]);
 					cb_n <= cb_n + 5'd1;
 				end
+			end else if (!we && pend && current >= endp) begin
+				// the old list walked to its end: the new one, from its START
+				current <= start; endp <= pend_end; pend <= 1'b0; start_valid <= 1'b0; lv <= 1'b0;
 			end else if (!we && !freeze && current < endp) begin
 				if (source) begin
 					xb_dw <= current[11:3]; xb_req <= 1'b1; ws <= W_WAIT;
@@ -294,8 +351,8 @@ module n64_rdp2 #(
 				// (a line fetched across an END write gives the one doubleword asked for,
 				// which was inside the list, and is not kept)
 				if (!source && wk_ack) begin
-					if (!(wend || we)) begin line <= cf_data; ltag <= current[22:4]; lv <= 1'b1; end
-					dwin <= dw_of(cf_data, current[3]); dwin_v <= 1'b1; current <= current + 24'd8;
+					if (!(wend || we)) begin line <= s_data; ltag <= current[22:4]; lv <= 1'b1; end
+					dwin <= dw_of(s_data, current[3]); dwin_v <= 1'b1; current <= current + 24'd8;
 					ws <= W_IDLE;
 				end
 			end
@@ -387,7 +444,7 @@ module n64_rdp2 #(
 			endcase
 		end
 	end
-	assign idle = ws == W_IDLE && !dwin_v && current >= endp && cb_n == 5'd0;
+	assign idle = ws == W_IDLE && !dwin_v && current >= endp && cb_n == 5'd0 && !pend;
 	wire [63:0]  r_dbg;
 	assign dbg = {ws, cb_n, pr_busy, ld_busy, wk_req, raster_mem, tmem_mem, 3'd0, r_dbg[47:0]};
 	assign dbg2 = {r_dbg[63:48], op0, 2'd0, fb_addr, z_addr[23:8]};
@@ -408,7 +465,7 @@ module n64_rdp2 #(
 		.clk(clk), .rst(rst), .go(ld_go), .busy(ld_busy), .op(op0), .w0(w0), .w1(w1),
 		.t_fmt(tw_l[55:53]), .t_size(tw_l[52:51]), .t_line(tw_l[49:41]), .t_tmem(tw_l[40:32]),
 		.img_addr(timg_addr), .img_width_m1(timg_width_m1), .img_size(timg_size),
-		.mr_req(tl_req), .mr_ack(tl_ack), .mr_line(tl_line), .mr_data(cf_data),
+		.mr_req(tl_req), .mr_ack(tl_ack), .mr_line(tl_line), .mr_data(s_data),
 		.ce(tm_ce),
 		.fa0(tfa0), .fa1(tfa1), .fa2(tfa2), .fa3(tfa3), .fq0(tfq0), .fq1(tfq1), .fq2(tfq2), .fq3(tfq3),
 		.sa0(tsa0), .sa1(tsa1), .sa2(tsa2), .sa3(tsa3), .sq0(tsq0), .sq1(tsq1), .sq2(tsq2), .sq3(tsq3)
@@ -431,7 +488,7 @@ module n64_rdp2 #(
 		.tw_all(tw_all), .tsz_all(tsz_all), .tm_ce(tm_ce),
 		.fa0(tfa0), .fa1(tfa1), .fa2(tfa2), .fa3(tfa3), .fq0(tfq0), .fq1(tfq1), .fq2(tfq2), .fq3(tfq3),
 		.sa0(tsa0), .sa1(tsa1), .sa2(tsa2), .sa3(tsa3), .sq0(tsq0), .sq1(tsq1), .sq2(tsq2), .sq3(tsq3),
-		.rq_valid(rq_valid), .rq_ready(rq_ready), .rq_line(r_rq_line), .rs_valid(rs_valid), .rs_data(rs_data),
+		.rq_valid(r_rq_valid), .rq_ready(rdy_r), .rq_line(r_rq_line), .rs_valid(rs_r), .rs_data(rs_data),
 		.dbg(r_dbg),
 		.mw_req(cw_req), .mw_ack(cw_ack), .mw_line(r_mw_line), .mw_data(cw_data), .mw_mask(cw_mask)
 	);

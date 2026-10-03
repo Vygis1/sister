@@ -1167,6 +1167,7 @@ module n64_top #(
 
 	wire         dp_cpu_we = c_dreq && c_dwe && !c_dcache && c_daddr[31:20] == 12'h041;
 	wire [63:0]  rdp_dbg, rdp_dbg2;
+	wire [87:0]  rdp_log_q;  wire [31:0] rdp_log_n;
 	// --- debugging: RDP writes outside SM64's images (the Z buffer at 0x400, the colour
 	// images from 0x38F800): counted, and the first one kept with the RDP's state then
 	reg  [31:0]  oob_n;
@@ -1190,7 +1191,7 @@ module n64_top #(
 		.rq_valid(rq_valid), .rq_ready(rq_ready), .rq_line(rq_line), .rs_valid(rs_valid), .rs_data(rs_data),
 		.xb_req(xb_req), .xb_dw(xb_dw), .xb_ack(xb_ack), .xb_data(xb_q),
 		.irq(dp_irq), .idle(),
-		.log_stop(1'b0), .log_idx(5'd0), .log_q(), .log_n(), .dbg(rdp_dbg), .dbg2(rdp_dbg2)
+		.log_stop(oob_n != 32'd0), .log_idx(dbg_sel[12:8]), .log_q(rdp_log_q), .log_n(rdp_log_n), .dbg(rdp_dbg), .dbg2(rdp_dbg2)
 	);
 
 	// --- debugging: the last 16 writes to RDRAM below 0x400 (the exception vectors and
@@ -1259,6 +1260,10 @@ module n64_top #(
 		6'd39: dbg_q <= rdp_dbg[63:32];
 		6'd40: dbg_q <= rdp_dbg[31:0];
 		6'd42: dbg_q <= oob_n;
+		6'd50: dbg_q <= rdp_log_n;
+		6'd51: dbg_q <= {8'd0, rdp_log_q[87:64]};
+		6'd52: dbg_q <= rdp_log_q[63:32];
+		6'd53: dbg_q <= rdp_log_q[31:0];
 		6'd43: dbg_q <= {oob_line, 8'd0};
 		6'd44: dbg_q <= {oob_mask, 16'd0};
 		6'd45: dbg_q <= oob_w;
