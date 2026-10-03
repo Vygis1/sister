@@ -131,6 +131,9 @@ def run_frames(m, until_frame, quiet_frames=12, max_steps=400_000_000):
             c.step()
         if m.vi_frames != frame:
             frame = m.vi_frames
+            for f, v in PRESS:
+                if frame == f:
+                    m.joy.pads[0] = v           # (--press: a controller schedule)
             if until_frame is not None and frame >= until_frame:
                 return
             now = (m.rdram_writes, m.rdp.commands)
@@ -140,10 +143,22 @@ def run_frames(m, until_frame, quiet_frames=12, max_steps=400_000_000):
                 return
 
 
-def capture(rom_path, start, nframes, pads):
+PRESS = []                                  # [(VI frame, pad bits)]
+
+
+def capture(rom_path, start, nframes, pads, snap=None):
     os.makedirs(OUT, exist_ok=True)
-    m = n64model.N64(open(rom_path, 'rb').read())
-    m.fast_boot()
+    if snap:
+        # a machine pickled by tools/n64rdpcensus.py (--snap-*), carried on from
+        import pickle
+        import __main__
+        import n64rdpcensus
+        __main__.Census = n64rdpcensus.Census
+        m = pickle.load(open(snap, 'rb'))[0]
+        m.rdp.draw = True
+    else:
+        m = n64model.N64(open(rom_path, 'rb').read())
+        m.fast_boot()
     if pads is not None:
         m.joy.pads[0] = pads
     r = m.rdp
@@ -276,4 +291,10 @@ if __name__ == '__main__':
     if '--check' in sys.argv:
         sys.exit(0 if check('--png' in sys.argv) else 1)
     arg = lambda k, d: int(sys.argv[sys.argv.index(k) + 1], 0) if k in sys.argv else d
-    capture(sys.argv[1], arg('--from', 0), arg('--frames', None), arg('--input', None))
+    if '--press' in sys.argv:
+        # "frame:value,frame:value": the pad from that VI frame on
+        for item in sys.argv[sys.argv.index('--press') + 1].split(','):
+            f, v = item.split(':')
+            PRESS.append((int(f, 0), int(v, 0)))
+    snap = sys.argv[sys.argv.index('--snap') + 1] if '--snap' in sys.argv else None
+    capture(sys.argv[1], arg('--from', 0), arg('--frames', None), arg('--input', None), snap)

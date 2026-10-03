@@ -407,7 +407,7 @@ module n64_rdp2 #(
 		.om0(om0), .om1(om1), .comb0(comb0), .comb1(comb1),
 		.fill_color(fill_color), .fog_color(fog_color), .blend_color(blend_color), .prim_color(prim_color), .env_color(env_color),
 		.key_center({key_r1[15:8], key_gb1[31:24], key_gb1[15:8]}), .key_scale({key_r1[7:0], key_gb1[23:16], key_gb1[7:0]}),
-		.k4(convert[17:9]), .k5(convert[8:0]), .prim_lod_frac(prim_lod_frac), .prim_dz(prim_dz),
+		.k4(convert[17:9]), .k5(convert[8:0]), .prim_lod_frac(prim_lod_frac), .prim_min_level(prim_min_level), .prim_dz(prim_dz),
 		.sc_xlo(sc_xlo), .sc_ylo(sc_ylo), .sc_xhi(sc_xhi), .sc_yhi(sc_yhi), .sc_field(sc_field), .sc_odd(sc_odd),
 		.fb_addr(fb_addr), .fb_width_m1(fb_width_m1), .fb_fmt(fb_fmt), .z_addr(z_addr), .prim_depth(prim_depth),
 		.tsel(tsel), .tw(tw_r), .tsz(tsz_r),

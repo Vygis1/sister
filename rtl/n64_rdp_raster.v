@@ -35,6 +35,7 @@ module n64_rdp_raster (
 	input  wire [23:0]  key_center, key_scale,
 	input  wire [8:0]   k4, k5,
 	input  wire [7:0]   prim_lod_frac,
+	input  wire [4:0]   prim_min_level,
 	input  wire [15:0]  prim_dz,
 	input  wire [11:0]  sc_xlo, sc_ylo, sc_xhi, sc_yhi,
 	input  wire         sc_field, sc_odd,
@@ -87,6 +88,12 @@ module n64_rdp_raster (
 	wire c1_t2 = rd_tex(comb0[8:5], comb1[27:24], comb0[4:0], comb1[8:6], comb1[23:21], comb1[5:3], comb1[20:18], comb1[2:0], 3'd2);
 	wire uses_t0 = multi ? (c0_t1 || c1_t2) : c1_t1;
 	wire uses_t1 = multi ? (c0_t2 || c1_t1) : 1'b0;
+	// LOD_FRAC read (rgb C 13, alpha C 0), or texture LOD on: the LOD is worked out
+	// (in one-cycle mode too: krom's screenshots show the chip doing so)
+	wire c0_lf = comb0[19:15] == 5'd13 || comb0[11:9] == 3'd0;
+	wire c1_lf = comb0[4:0] == 5'd13 || comb1[20:18] == 3'd0;
+	wire tex_lod_en = om0[16], sharpen = om0[17], detail = om0[18];
+	wire uses_lod = (multi ? (c0_lf || c1_lf) : c1_lf) || tex_lod_en;
 
 	// =============================================================================
 	// the per-primitive values the pixels use (loaded from attr at the start)
@@ -94,6 +101,7 @@ module n64_rdp_raster (
 	reg  signed [31:0] d_rgba_dx [0:3], d_rgba_dy [0:3];
 	reg  signed [31:0] dz_dx, dz_dy;
 	reg  signed [31:0] d_st_dx [0:2];    // s, t, w's x slopes (attr 20, 21, 23)
+	reg  signed [31:0] d_st_dy [0:2];    // and y slopes (28, 29, 31), for the LOD
 	reg  [15:0]  dzpix;                   // the primitive's depth slope
 	reg  [3:0]   dz_c;                    // compressed
 	function [15:0] dz_norm; input [16:0] v; integer i; begin
@@ -290,11 +298,12 @@ module n64_rdp_raster (
 	reg  [39:0]  cc_combined;             // the first cycle's result, unclamped
 	reg  [7:0]   shade [0:3];
 	wire [39:0]  cc_out;
+	reg  [39:0]  cc_q;                    // its answer, registered
 	n64_rdp_cc u_cc (.sa(s_a), .sb(s_b), .sc(s_c), .sd(s_d), .aa(s_aa), .ab(s_ab), .ac(s_ac), .ad(s_ad),
 		.combined((multi && cyc) ? cc_combined : 40'd0),
 		.texel0((multi && cyc) ? tex1 : tex0), .texel1((multi && cyc) ? tex0 : tex1),
 		.shade({2'b00, shade[0], 2'b00, shade[1], 2'b00, shade[2], 2'b00, shade[3]}),
-		.lod_frac(9'd0), .noise(9'h020),
+		.lod_frac(lod_frac), .noise(9'h020),
 		.ka(k_a), .kb(k_b), .kc(k_c), .kd(k_d), .kaa(k_aa), .kab(k_ab), .kac(k_ac), .kad(k_ad), .out(cc_out));
 	reg  [7:0]   comb [0:3];              // the combined colour, 8-bit
 	reg  [3:0]   cc;                      // the coverage count
@@ -305,6 +314,11 @@ module n64_rdp_raster (
 	wire signed [16:0] pso, pto;  wire povf;
 	n64_rdp_persp u_persp (.clk(clk), .s(ps), .t(pt), .w(pw), .so(pso), .to(pto), .overflow(povf));
 	reg  signed [16:0] ss, tt;            // the texture coordinates at the pixel
+	reg  signed [16:0] sxd, txd, syd, tyd;  // and one pixel on in x, in y (the LOD)
+	reg  signed [31:0] nx_s, nx_t, nx_w, ny_s, ny_t, ny_w;
+	reg          povf_l;                  // a divide overflowed
+	reg  [8:0]   lod_frac;
+	reg  [2:0]   t0sel, t1sel;
 	reg          tx_go, tx_b1;            // (tx_b1: the sampler's bilerp, by the texel)
 	wire         tx_done;
 	wire [39:0]  tx_out;
@@ -406,9 +420,9 @@ module n64_rdp_raster (
 	                 S_DONE = 5'd12, P_SHADE = 5'd13, P_CC0 = 5'd14, P_CC1 = 5'd15, P_MEM = 5'd16, P_RWAIT = 5'd17,
 	                 P_BL = 5'd18, P_DIV = 5'd19, P_ST = 5'd20, S_LINE = 5'd21,
 	                 S_ZFLUSH = 5'd22, P_ZWAIT = 5'd23, S_ZEND = 5'd24, P_ZT = 5'd25,
-	                 P_TC = 5'd26, P_TX0 = 5'd27, P_TX1 = 5'd28;
+	                 P_TC = 5'd26, P_TX0 = 5'd27, P_TX1 = 5'd28, P_CW = 5'd29;
 	reg  [4:0]   st, st_after;
-	reg  [3:0]   sub;                     // a step within a state
+	reg  [4:0]   sub;                     // a step within a state
 	assign busy = st != S_IDLE;
 	integer      i;
 
@@ -439,11 +453,15 @@ module n64_rdp_raster (
 			case (sub)
 			4'd0: at_ra <= 5'd5;  4'd1: at_ra <= 5'd6;  4'd2: at_ra <= 5'd7;  4'd3: at_ra <= 5'd12;
 			4'd4: at_ra <= 5'd13; 4'd5: at_ra <= 5'd14; 4'd6: at_ra <= 5'd15; 4'd7: at_ra <= 5'd22;
-			4'd8: at_ra <= 5'd30; 4'd9: at_ra <= 5'd20; 4'd10: at_ra <= 5'd21; default: at_ra <= 5'd23;
+			4'd8: at_ra <= 5'd30; 4'd9: at_ra <= 5'd20; 4'd10: at_ra <= 5'd21; 4'd11: at_ra <= 5'd23;
+			5'd12: at_ra <= 5'd28; 5'd13: at_ra <= 5'd29; default: at_ra <= 5'd31;
 			endcase
 			if (sub == 4'd11) d_st_dx[0] <= at_q;
 			if (sub == 4'd12) d_st_dx[1] <= at_q;
-			if (sub == 4'd13) begin d_st_dx[2] <= at_q; st <= S_Y; end
+			if (sub == 4'd13) d_st_dx[2] <= at_q;
+			if (sub == 5'd14) d_st_dy[0] <= at_q;
+			if (sub == 5'd15) d_st_dy[1] <= at_q;
+			if (sub == 5'd16) begin d_st_dy[2] <= at_q; st <= S_Y; end
 			if (sub >= 4'd1 && sub <= 4'd4) d_rgba_dx[sub - 4'd1] <= at_q;
 			if (sub >= 4'd5 && sub <= 4'd8) d_rgba_dy[sub - 4'd5] <= at_q;
 			if (sub == 4'd9) dz_dx <= at_q;
@@ -559,31 +577,91 @@ module n64_rdp_raster (
 			pz <= z_at(acc_z, dz_dx, dz_dy, xoff, yoff);
 			cyc <= !multi;
 			ps <= acc_s[31:16]; pt <= acc_t[31:16]; pw <= acc_w[31:16];
+			// the LOD's neighbours: one pixel on in x (the way the span is walked), one in y
+			begin : nb
+				reg signed [31:0] dsx, dtx, dwx;
+				dsx = d_st_dx[0] & ~32'sh1F; dtx = d_st_dx[1] & ~32'sh1F; dwx = d_st_dx[2] & ~32'sh1F;
+				nx_s <= flip ? acc_s + dsx : acc_s - dsx;
+				nx_t <= flip ? acc_t + dtx : acc_t - dtx;
+				nx_w <= flip ? acc_w + dwx : acc_w - dwx;
+				ny_s <= acc_s + (d_st_dy[0] & ~32'sh7FFF);
+				ny_t <= acc_t + (d_st_dy[1] & ~32'sh7FFF);
+				ny_w <= acc_w + (d_st_dy[2] & ~32'sh7FFF);
+			end
+			lod_frac <= 9'd0;
 			tex0 <= 40'd0; tex1 <= 40'd0; sub <= 4'd0;
-			st <= (uses_t0 || uses_t1) ? P_TC : multi ? P_CC0 : P_CC1;
+			st <= (uses_t0 || uses_t1) ? P_TC : P_CW;
 		end
-		// the texture coordinates: through the divide (two clocks) or straight
+		// the texture coordinates: through the divide (two clocks) or straight; with the
+		// LOD, the two neighbours' too (the divide takes one a clock)
 		P_TC: begin
-			sub <= sub + 4'd1;
-			if (!persp_en) begin ss <= {ps[15], ps}; tt <= {pt[15], pt}; end
-			else begin ss <= pso; tt <= pto; end
-			if (!persp_en || sub == 4'd2) begin
-				tsel <= tile[2:0]; tx_b1 <= bilerp0; tx_go <= 1'b1; st <= P_TX0;
+			sub <= sub + 5'd1;
+			if (sub == 5'd0) begin ps <= nx_s[31:16]; pt <= nx_t[31:16]; pw <= nx_w[31:16]; end
+			if (sub == 5'd1) begin ps <= ny_s[31:16]; pt <= ny_t[31:16]; pw <= ny_w[31:16]; end
+			if (sub == 5'd0 && !persp_en) begin ss <= {ps[15], ps}; tt <= {pt[15], pt}; povf_l <= 1'b0; end
+			if (sub == 5'd1 && !persp_en) begin sxd <= {ps[15], ps}; txd <= {pt[15], pt}; end
+			if (sub == 5'd2 && !persp_en) begin syd <= {ps[15], ps}; tyd <= {pt[15], pt}; end
+			if (sub == 5'd2 && persp_en) begin ss <= pso; tt <= pto; povf_l <= povf; end
+			if (sub == 5'd3 && persp_en) begin sxd <= pso; txd <= pto; povf_l <= povf_l | povf; end
+			if (sub == 5'd4 && persp_en) begin syd <= pso; tyd <= pto; povf_l <= povf_l | povf; end
+			if ((!uses_lod && (!persp_en || sub == 5'd2)) || sub == 5'd5) begin
+				t0sel <= tile[2:0]; t1sel <= tile[2:0] + 3'd1;
+				if (uses_lod) begin : lod
+					// compute_lod
+					reg signed [17:0] d0, d1, d2, d3; reg [16:0] a0, a1, a2, a3, mx; reg [4:0] mb; reg dist, mag;
+					reg [8:0] lf; reg [2:0] toff; reg [2:0] maxl, tl0, tl1; reg [11:0] lf12;
+					d0 = sxd - ss; d1 = txd - tt; d2 = syd - ss; d3 = tyd - tt;
+					a0 = d0[17] ? ~d0[16:0] : d0[16:0]; a1 = d1[17] ? ~d1[16:0] : d1[16:0];
+					a2 = d2[17] ? ~d2[16:0] : d2[16:0]; a3 = d3[17] ? ~d3[16:0] : d3[16:0];
+					mx = a0; if (a1 > mx) mx = a1; if (a2 > mx) mx = a2; if (a3 > mx) mx = a3;
+					maxl = tile[5:3]; toff = 3'd0; mag = 1'b0; dist = 1'b0; lf = 9'd0;
+					if (povf_l) begin dist = 1'b1; lf = 9'h0FF; end
+					else if (mx >= 17'h4000) begin dist = 1'b1; lf = 9'h0FF; toff = maxl; end
+					else if (mx < 17'd32) begin
+						dist = maxl == 3'd0; mag = 1'b1;
+						if (!sharpen && !detail) lf = dist ? 9'h0FF : 9'd0;
+						else begin
+							lf12 = ((({7'd0, prim_min_level} > mx[11:0]) ? {7'd0, prim_min_level} : mx[11:0]) << 3) - (sharpen ? 12'h100 : 12'h000);
+							lf = lf12[8:0];
+						end
+					end else begin
+						mb = msb18({6'd0, mx[16:5]});
+						dist = {2'b00, mb} >= {2'b00, maxl};
+						if (dist && !sharpen && !detail) lf = 9'h0FF;
+						else begin lf = {1'b0, (({mx, 3'b000}) >> mb)} & 9'h0FF; toff = mb[2:0]; end
+					end
+					lod_frac <= lf;
+					if (tex_lod_en) begin
+						if (dist) toff = maxl;
+						if (!detail) begin
+							tl0 = tile[2:0] + toff;
+							tl1 = (dist || (!sharpen && mag)) ? tl0 : tl0 + 3'd1;
+						end else begin
+							tl1 = tile[2:0] + toff + ((dist || mag) ? 3'd1 : 3'd2);
+							tl0 = tile[2:0] + toff + (mag ? 3'd0 : 3'd1);
+						end
+						t0sel <= tl0; t1sel <= tl1;
+						tsel <= tl0;
+					end else tsel <= tile[2:0];
+				end else tsel <= tile[2:0];
+				tx_b1 <= bilerp0; tx_go <= 1'b1; st <= P_TX0;
 			end
 		end
 		P_TX0: if (tx_done) begin
 			tex0 <= tx_out;
-			if (uses_t1) begin tsel <= tile[2:0] + 3'd1; tx_b1 <= bilerp1; tx_go <= 1'b1; st <= P_TX1; end
-			else st <= multi ? P_CC0 : P_CC1;
+			if (uses_t1) begin tsel <= t1sel; tx_b1 <= bilerp1; tx_go <= 1'b1; st <= P_TX1; end
+			else st <= P_CW;
 		end
-		P_TX1: if (tx_done) begin tex1 <= tx_out; st <= multi ? P_CC0 : P_CC1; end
+		P_TX1: if (tx_done) begin tex1 <= tx_out; st <= P_CW; end
+		// (a clock for the combiner: its answer is registered before it is used)
+		P_CW: begin cc_q <= cc_out; st <= (multi && !cyc) ? P_CC0 : P_CC1; end
 		P_CC0: begin
 			// cycle 0 (two-cycle mode): its result, unclamped, for cycle 1; the alpha
 			// compare's reference
-			cc_combined <= cc_out;
+			cc_combined <= cc_q;
 			begin : ref
 				reg [7:0] ca; reg [9:0] ea; reg [13:0] pr;
-				ca = clamp9({{22{cc_out[9]}}, cc_out[9:0]});
+				ca = clamp9({{22{cc_q[9]}}, cc_q[9:0]});
 				ea = {2'b00, ca} + {9'd0, ca == 8'hFF};
 				pr = ({4'd0, ea} * {10'd0, cc} + 14'd4) >> 3;
 				if (acs) ea = cvg_ta ? pr[9:0] : {1'b0, cc, 5'd0};
@@ -591,14 +669,14 @@ module n64_rdp_raster (
 				alpha_ref <= (ea > 10'd255) ? 8'd255 : ea[7:0];
 			end
 			cyc <= 1'b1;
-			st <= P_CC1;
+			st <= P_CW;
 		end
 		P_CC1: begin : c1
 			reg [7:0] c3; reg [9:0] ea, md; reg [3:0] ncc; reg [13:0] pr;
-			comb[0] <= clamp9({{22{cc_out[39]}}, cc_out[39:30]});
-			comb[1] <= clamp9({{22{cc_out[29]}}, cc_out[29:20]});
-			comb[2] <= clamp9({{22{cc_out[19]}}, cc_out[19:10]});
-			c3 = clamp9({{22{cc_out[9]}}, cc_out[9:0]});
+			comb[0] <= clamp9({{22{cc_q[39]}}, cc_q[39:30]});
+			comb[1] <= clamp9({{22{cc_q[29]}}, cc_q[29:20]});
+			comb[2] <= clamp9({{22{cc_q[19]}}, cc_q[19:10]});
+			c3 = clamp9({{22{cc_q[9]}}, cc_q[9:0]});
 			ea = {2'b00, c3} + {9'd0, c3 == 8'hFF};
 			ncc = cc;
 			pr = ({4'd0, ea} * {10'd0, cc} + 14'd4) >> 3;
