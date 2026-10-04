@@ -8,7 +8,9 @@
 // The client asks as it did a one-line port: c_req held with c_line until c_ack (a
 // clock), with c_data. flush drops everything (the command list grows in place: after an
 // END write the lines past the old end are read again); reads already asked for still
-// come back, and are thrown away.
+// come back, and are thrown away. hold: a read of this unit's may be being taken (it is
+// presented, or taken and not yet acknowledged) -- no new run then (nor a flush, the caller
+// sees to it), or that read would be counted in the wrong run.
 //////////////////////////////////////////////////////////////////////////////////
 
 `default_nettype none
@@ -17,6 +19,8 @@ module n64_rdp_stream (
 	input  wire         clk,
 	input  wire         rst,
 	input  wire         flush,
+	input  wire         hold,
+	input  wire         stop,             // a flush is waiting: ask for nothing more (so hold can fall)
 	// the client
 	input  wire         c_req,
 	input  wire [19:0]  c_line,
@@ -33,15 +37,17 @@ module n64_rdp_stream (
 	reg  [19:0]  b, n, r;                 // the run: lines b.. in hand up to r, asked for up to n
 	reg          live;                    // a run is going
 	reg  [3:0]   drop;                    // reads still to come that belong to a dropped run
-	assign q_valid = live && !flush && (n - b) < 20'd4;
+	assign q_valid = live && !stop && (n - b) < 20'd4;
 	assign q_line = n;
 	wire         in_hand = live && c_line >= b && c_line < r;
-	wire         asked = live && c_line >= b && c_line < n;
+	// (in the run's window: asked for, or about to be -- a run just started has n == b, and
+	// was restarted again and again for its own first line)
+	wire         asked = live && c_line >= b && c_line < b + 20'd4;
 	// this clock's events
 	wire         issue = q_valid && q_ready;            // one more asked for, in the run
 	wire         old = q_rs && drop != 4'd0;            // a dropped run's line back
 	wire         got = q_rs && drop == 4'd0;            // the run's next line back
-	wire         restart = c_req && !c_ack && !flush && !in_hand && !asked;
+	wire         restart = c_req && !c_ack && !flush && !hold && !in_hand && !asked;
 	// what is still to come of the run, were it dropped now
 	wire [3:0]   owed = live ? (n[3:0] - r[3:0]) + {3'd0, issue} - {3'd0, got} : 4'd0;
 	always @(posedge clk) begin

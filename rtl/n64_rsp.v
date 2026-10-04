@@ -51,6 +51,7 @@ module n64_rsp #(
 	output wire [2:0]   dp_ridx,
 	// the DMA's lines of RDRAM
 	output reg          dm_rd_req,
+	output reg          dm_new,           // a DMA starts (a clock): read-ahead from before it is stale
 	input  wire         dm_rd_ack,
 	output reg  [23:0]  dm_rd_line,
 	input  wire [127:0] dm_rd_data,
@@ -65,6 +66,7 @@ module n64_rsp #(
 	output wire         halted_o,
 	output wire [287:0] sp_regs_flat,     // the SP's registers 0-7 and SP_PC, for reading
 	output wire [95:0]  dbg,              // {halted, st, pc}, the instruction, the last COP0 read {reg, value[27:0]}
+	output reg  [7:0]   task_type,        // (debugging) DMEM 0xFC3, the OSTask's type, as last written through port B
 	input  wire [7:0]   dlog_idx,         // the DMA log: entry dlog_idx of the last 256 DMAs started
 	output reg  [95:0]  dlog_q,
 	output reg  [31:0]  dlog_n,           // DMAs started
@@ -98,11 +100,14 @@ module n64_rsp #(
 		for (k = 0; k < 8; k = k + 1) if (da_we[k]) dmem[da_addr][63 - 8 * k -: 8] <= da_wd[63 - 8 * k -: 8];
 		da_q <= dmem[da_addr];
 	end
-	always @(posedge clk) ia_q <= imem[ia_addr];
+	// (held while R_EX waits on a vector op's result: the next address is already out)
+	wire        ia_hold;
+	always @(posedge clk) if (!ia_hold) ia_q <= imem[ia_addr];
 	// port B: the CPU, or the DMA
 	reg         b_en, b_imem;  reg [8:0] b_addr; reg [7:0] b_we; reg [63:0] b_wd;
 	reg  [63:0] db_q, ib_q;
 	always @(posedge clk) begin
+		if (b_en && !b_imem && b_addr == 9'h1F8 && b_we[3]) task_type <= b_wd[39:32];
 		if (b_en && !b_imem) begin
 			for (k = 0; k < 8; k = k + 1) if (b_we[k]) dmem[b_addr][63 - 8 * k -: 8] <= b_wd[63 - 8 * k -: 8];
 			db_q <= dmem[b_addr];
@@ -160,6 +165,7 @@ module n64_rsp #(
 	                       {31'd0, dma_full}, {31'd0, dma_busy}, {31'd0, semaphore}};
 	function automatic [31:0] sp_read; input [255:0] all; input [2:0] i; sp_read = all[255 - 32 * i -: 32]; endfunction
 	reg  [11:0] pc, npc;
+	reg  [11:0] ipc;                      // the executing instruction's address
 	reg  [31:0] last_c0;
 	reg  [95:0] dlog [0:255];
 	reg         dlog_stop;
@@ -176,7 +182,7 @@ module n64_rsp #(
 	// =============================================================================
 	localparam [3:0] R_HALT = 4'd0, R_FETCH = 4'd1, R_EX = 4'd2, R_V2 = 4'd3, R_SMEM = 4'd4,
 	                 R_SMEM2 = 4'd5, R_VLD = 4'd6, R_VLD2 = 4'd7, R_VST = 4'd8, R_LFV = 4'd9,
-	                 R_FL1 = 4'd10, R_FL2 = 4'd11, R_FL3 = 4'd12, R_FS1 = 4'd13, R_FS2 = 4'd14;
+	                 R_FL1 = 4'd10, R_FL2 = 4'd11, R_FL3 = 4'd12, R_FS1 = 4'd13, R_FS2 = 4'd14, R_V3 = 4'd15;
 	// the fast loads and stores: aligned, a doubleword at a time on DMEM's port A
 	// (the byte-serial states do every other case). f_op: 0 LB/LH/LW (by ls_idx, ls_n),
 	// 1 LQV, 2 LDV, 3 a scalar store, 4 SQV, 5 SDV, 6 LDV unaligned (two reads),
@@ -196,11 +202,35 @@ module n64_rsp #(
 	wire [5:0]  op = ir[31:26];
 	wire [4:0]  rs = ir[25:21], rt = ir[20:16], rd = ir[15:11], sa = ir[10:6];
 	wire [5:0]  fn = ir[5:0];
-	wire [31:0] a = sr[rs], b = sr[rt];
+	// (an instruction a clock behind the one that wrote a register reads it from the write,
+	// which lands a clock later: the fetch no longer takes a clock of its own)
+	wire [31:0] a = (sr_we && sr_wa == rs && rs != 5'd0) ? sr_wd : sr[rs];
+	wire [31:0] b = (sr_we && sr_wa == rt && rt != 5'd0) ? sr_wd : sr[rt];
+	// R_EX's instruction's successor's successor: npc, or a taken branch's target (R_EX writes
+	// npc the same way; this is that, now, for going straight on to the next instruction)
+	reg  [11:0] npc_ex;
+	always @(*) begin
+		npc_ex = npc;
+		case (op)
+		6'h00: if (fn == 6'h08 || fn == 6'h09) npc_ex = a[11:0] & 12'hFFC;
+		6'h01: if (((rt == 5'h00 || rt == 5'h10) && a[31]) || ((rt == 5'h01 || rt == 5'h11) && !a[31]))
+		           npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
+		6'h02, 6'h03: npc_ex = {ir[9:0], 2'b00};
+		6'h04: if (a == b) npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
+		6'h05: if (a != b) npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
+		6'h06: if ($signed(a) <= 0) npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
+		6'h07: if ($signed(a) > 0) npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
+		default: ;
+		endcase
+	end
+	// the instructions R_EX does not finish (they go on in other states), and the ones that
+	// may stop the RSP (BREAK, a COP0 write): after these the fetch takes its own clock
+	wire        v_rcp = fn >= 6'h30 && fn <= 6'h36;      // VRCP*, VRSQ*, VMOV: their own states
+	wire        ex_multi = (op == 6'h12 && rs[4] && v_rcp) || (op >= 6'h20 && op <= 6'h2F) || op == 6'h32 || op == 6'h3A;
+	wire        ex_stop = (op == 6'h00 && fn == 6'h0D) || (op == 6'h10 && rs == 5'h04);
 	wire [31:0] simm = sx16(ir[15:0]);
 	wire [11:0] ea = a[11:0] + simm[11:0];        // a scalar load or store's address
 	wire [11:0] br_t = pc + 12'd4 + {ir[9:0], 2'b00};     // (pc here is the branch's own: see below)
-	reg  [11:0] ipc;                      // the executing instruction's address
 
 	// the vector operands
 	wire [3:0]  ve = ir[24:21];           // the element of a computational op
@@ -210,8 +240,8 @@ module n64_rsp #(
 	// (read lane by lane: a function reading vb would go stale in simulation, see sp_all)
 	wire [127:0] vtr, vsr;
 	generate for (g = 0; g < 16; g = g + 1) begin : g_vrd
-		assign vtr[127 - 8 * g -: 8] = vb[g][vt];
-		assign vsr[127 - 8 * g -: 8] = vb[g][vs];
+		assign vtr[127 - 8 * g -: 8] = (vw_lane[g] && vw_reg == vt) ? vw_data[127 - 8 * g -: 8] : vb[g][vt];
+		assign vsr[127 - 8 * g -: 8] = (vw_lane[g] && vw_reg == vs) ? vw_data[127 - 8 * g -: 8] : vb[g][vs];
 	end endgenerate
 	// (written without a function call inside another's arguments: xsim 2026.1 returns
 	// the previous call's result for those)
@@ -227,6 +257,15 @@ module n64_rsp #(
 	reg  [127:0] q_vs, q_vte, q_vtraw;
 	reg  [5:0]   q_fn;
 	reg  [4:0]   q_vd, q_vs_n;
+	// A vector op's second clock (v2_pend) runs beside the next instruction, which waits a
+	// clock if it would see that op's result or flags before they are written: a COP2 move
+	// (MFC2/CFC2 read them, MTC2/CTC2 write them), a vector op reading its destination, a
+	// vector store of it. (The accumulator needs no wait: the next op's own second clock
+	// comes after this one's.)
+	reg         v2_pend;
+	wire        v2_haz = v2_pend && ((op == 6'h12 && !rs[4]) || (op == 6'h12 && rs[4] && (vs == q_vd || vt == q_vd))
+	                               || (op == 6'h3A && vt == q_vd));
+	assign ia_hold = st == R_EX && v2_haz;
 	reg  [3:0]   q_e;
 	reg  [2:0]   q_de;
 	reg  signed [33:0] prod [0:7];        // the lanes' products
@@ -237,14 +276,17 @@ module n64_rsp #(
 	wire [15:0]  t_recip, t_rsqrt;
 	wire [8:0]   t_addr;
 	n64_rsp_tables u_tab (.clk(clk), .a(t_addr), .recip(t_recip), .rsqrt(t_rsqrt));
-	// the lookup's index, worked out in R_EX so the table answers in R_V2
+	// the lookup: its input worked out in R_EX, its index in R_V2 (from registers: worked out
+	// in R_EX the path from the instruction through the vector register to the table was
+	// 28 levels and missed timing), the table's answer in R_V3
 	wire [15:0]  rc_el  = el(vtr, ve[2:0]);
 	wire signed [31:0] rc_inp = (fn[0] && divdp) ? {divin, rc_el} : {{16{rc_el[15]}}, rc_el};
 	wire signed [31:0] rc_msk = rc_inp >>> 31;
 	wire signed [31:0] rc_dat = (rc_inp ^ rc_msk) - ((rc_inp > -32'sd32768) ? rc_msk : 32'sd0);
-	wire [31:0]  rc_sh  = clz32(rc_dat);
-	wire [31:0]  rc_idx = ((rc_dat << rc_sh) & 32'h7FC0_0000) >> 22;
-	assign t_addr = fn[2] ? ((rc_idx[8:0] & 9'h1FE) | {8'd0, rc_sh[0]}) : rc_idx[8:0];
+	reg  signed [31:0] q_dat;
+	wire [31:0]  qd_sh  = clz32(q_dat);
+	wire [31:0]  qd_idx = ((q_dat << qd_sh) & 32'h7FC0_0000) >> 22;
+	assign t_addr = q_sqrt ? ((qd_idx[8:0] & 9'h1FE) | {8'd0, qd_sh[0]}) : qd_idx[8:0];
 
 	// the load/store walk
 	reg  [4:0]   ls_kind;                 // the LWC2/SWC2 kind, or 16 + scalar
@@ -258,6 +300,11 @@ module n64_rsp #(
 	reg  [31:0]  ls_acc;                  // a scalar load being assembled
 	reg  [127:0] ls_tmp;                  // LFV's elements
 	reg  [127:0] ls_v;                    // the register being stored (or LTV/STV's, per step)
+	// the byte walk of a vector load, pipelined: a byte's address out on one clock, its
+	// byte taken on the next while the next byte's address goes out. The byte in flight:
+	reg          p_v, p_elem;
+	reg  [3:0]   p_lane, p_shift;
+	reg  [4:0]   p_reg, p_k;
 
 	// the address and lane of a load/store step
 	reg  [11:0]  sa_addr;
@@ -352,11 +399,70 @@ module n64_rsp #(
 	end endfunction
 
 	assign ia_addr = pc[11:3];
+	// The fast loads and stores' first doubleword, from R_EX itself (as the R_EX code below
+	// picks the fast path): a load's read is asked for in R_EX and taken in R_FL2, a store is
+	// written in R_EX. (They each took a clock more from registers.)
+	reg         ex_fl, ex_fs, ex_two;     // a fast load / store; a second doubleword
+	reg         ex_short;                 // LBV/LSV/LLV in one doubleword: n bytes into lanes from e
+	reg  [3:0]  ex_n;
+	reg  [2:0]  ex_da_off;                // the first byte in the doubleword
+	reg  [3:0]  f_n;                      // R_FL2's f_op 2: the bytes taken
+	reg  [8:0]  ex_da;
+	reg  [7:0]  ex_wm;
+	reg  [63:0] ex_wd;
+	always @(*) begin : exmem
+		reg [11:0] va; reg [6:0] i7; reg [3:0] kk;
+		ex_fl = 1'b0; ex_fs = 1'b0; ex_two = 1'b0; ex_da = ea[11:3]; ex_wm = 8'h00; ex_wd = 64'd0;
+		ex_short = 1'b0; ex_n = 4'd0; ex_da_off = 3'd0;
+		i7 = ir[6:0]; kk = ir[14:11];
+		va = (kk == 4'd0) ? a[11:0] + {{5{i7[6]}}, i7} : (kk == 4'd1) ? a[11:0] + {{4{i7[6]}}, i7, 1'b0}
+		   : (kk == 4'd2) ? a[11:0] + {{3{i7[6]}}, i7, 2'b00}
+		   : (kk == 4'd3 || kk == 4'd6 || kk == 4'd7) ? a[11:0] + {{2{i7[6]}}, i7, 3'b000}
+		   : a[11:0] + {i7[6], i7, 4'b0000};
+		if (st == R_EX && !v2_haz) begin
+			case (op)
+			6'h20, 6'h21, 6'h23, 6'h24, 6'h25, 6'h27:
+				if (!(op[1:0] == 2'b11 && (a[1:0] + simm[1:0]) != 2'b00) && !(op[1:0] == 2'b01 && (a[0] ^ simm[0]))) ex_fl = 1'b1;
+			6'h28, 6'h29, 6'h2B:
+				if (!(op[1:0] == 2'b11 && ea[1:0] != 2'b00) && !(op[1:0] == 2'b01 && ea[0])) begin
+					ex_fs = 1'b1;
+					ex_wd = (op[1:0] == 2'b11) ? {2{b}} : (op[1:0] == 2'b01) ? {4{b[15:0]}} : {8{b[7:0]}};
+					ex_wm = (op[1:0] == 2'b11) ? (8'h0F << ea[2:0]) : (op[1:0] == 2'b01) ? (8'h03 << ea[2:0]) : (8'h01 << ea[2:0]);
+				end
+			6'h32: begin
+				ex_da = va[11:3];
+				if (kk == 4'd3 && me <= 4'd8 && va[2:0] != 3'd0) begin ex_fl = 1'b1; ex_two = 1'b1; end
+				if (kk == 4'd5 && {1'b0, va[3:0]} >= {1'b0, me}) begin ex_fl = 1'b1; ex_two = 1'b1; ex_da = {va[11:4], 1'b0}; end
+				if (kk == 4'd4 && va[3:0] == 4'd0 && me == 4'd0) begin ex_fl = 1'b1; ex_two = 1'b1; end
+				if (kk == 4'd3 && va[2:0] == 3'd0 && !me[0] && me <= 4'd8) begin ex_fl = 1'b1; ex_two = 1'b0; end
+				// LBV, LSV, LLV whose bytes are in one doubleword (lanes past 15 are not written)
+				if ((kk == 4'd0) || (kk == 4'd1 && va[2:0] <= 3'd6) || (kk == 4'd2 && va[2:0] <= 3'd4)) begin
+					ex_fl = 1'b1; ex_two = 1'b0; ex_short = 1'b1; ex_da_off = va[2:0];
+					ex_n = (kk == 4'd0) ? 4'd1 : (kk == 4'd1) ? 4'd2 : 4'd4;
+				end
+			end
+			6'h3A: begin
+				ex_da = va[11:3];
+				if (kk == 4'd4 && va[3:0] == 4'd0 && me == 4'd0) begin ex_fs = 1'b1; ex_two = 1'b1; ex_wm = 8'hFF; ex_wd = vtr[127:64]; end
+				if (kk == 4'd3 && va[2:0] == 3'd0 && !me[0] && me <= 4'd8) begin ex_fs = 1'b1; ex_two = 1'b0; ex_wm = 8'hFF; ex_wd = vtr[127 - 8 * me -: 64]; end
+				// SBV, SSV, SLV whose bytes land in one doubleword: the register's bytes e, e+1.. (mod 16)
+				if ((kk == 4'd0) || (kk == 4'd1 && va[2:0] <= 3'd6) || (kk == 4'd2 && va[2:0] <= 3'd4)) begin : sh
+					reg [31:0] w;
+					w = {vtr[127 - 8 * me -: 8], vtr[127 - 8 * (me + 4'd1) -: 8], vtr[127 - 8 * (me + 4'd2) -: 8], vtr[127 - 8 * (me + 4'd3) -: 8]};
+					ex_fs = 1'b1; ex_two = 1'b0;
+					ex_wd = {w, 32'd0} >> (8 * va[2:0]);
+					ex_wm = ((kk == 4'd0) ? 8'h01 : (kk == 4'd1) ? 8'h03 : 8'h0F) << va[2:0];
+				end
+			end
+			default: ;
+			endcase
+		end
+	end
 	wire        fast_st = st == R_FL1 || st == R_FL2 || st == R_FS1 || st == R_FS2;
-	assign da_addr = fast_st ? f_dw : sa_addr[11:3];
-	assign da_we   = (st == R_FS1 || st == R_FS2) ? f_mask
+	assign da_addr = (ex_fl || ex_fs) ? ex_da : fast_st ? f_dw : sa_addr[11:3];
+	assign da_we   = ex_fs ? ex_wm : (st == R_FS1 || st == R_FS2) ? f_mask
 	               : (st == R_VST && ls_k != ls_n) ? (8'h01 << sa_addr[2:0]) : 8'd0;   // bit k = offset k
-	assign da_wd   = (st == R_FS1 || st == R_FS2) ? f_wd : {8{sa_val}};
+	assign da_wd   = ex_fs ? ex_wd : (st == R_FS1 || st == R_FS2) ? f_wd : {8{sa_val}};
 	// the byte a load step brought (the doubleword arrived a clock after its address)
 	reg  [2:0]   ld_off;
 	wire [7:0]   ld_byte = da_q[63 - 8 * ld_off -: 8];
@@ -606,10 +712,11 @@ module n64_rsp #(
 	end
 
 	always @(posedge clk) begin
-		sr_we <= 1'b0; vw_lane <= 16'd0; irq_set <= 1'b0; irq_clr <= 1'b0; dp_we <= 1'b0; tr_valid <= 1'b0;
+		sr_we <= 1'b0; vw_lane <= 16'd0; v2_pend <= 1'b0; irq_set <= 1'b0; irq_clr <= 1'b0; dp_we <= 1'b0; tr_valid <= 1'b0;
 		b_en <= 1'b0; cpu_b <= 1'b0; c_mem_ack <= cpu_b;
 		x_b <= 1'b0; x_b2 <= x_b; x_ack <= x_b2;
 		if (dm_rd_ack) dm_rd_req <= 1'b0;
+		dm_new <= 1'b0;
 		if (dm_wr_ack) dm_wr_req <= 1'b0;
 		if (rst) begin
 			st <= R_HALT; halted <= 1'b1; dlog_n <= 32'd0; dlog_stop <= 1'b0; frozen <= 1'b0; broken <= 1'b0; sstep <= 1'b0; intbreak <= 1'b0; semaphore <= 1'b0; signal <= 8'd0;
@@ -683,6 +790,7 @@ module n64_rsp #(
 				dma_rd <= p_rd; dma_busy <= 1'b1; dma_full <= 1'b0;
 				d_n <= p_len[11:3] + 10'd1; d_lv <= 1'b0; d_wv <= 1'b0;
 				dst <= p_rd ? D_RD : D_WRB;
+				dm_new <= 1'b1;
 			end
 			// RDRAM to DMEM/IMEM: a doubleword a clock out of the line in hand
 			D_RD: begin
@@ -736,6 +844,8 @@ module n64_rsp #(
 			endcase
 
 			// --- the sequencer -----------------------------------------------------------
+			// (an instruction's last state goes straight on to the next: the next word was
+			// asked of IMEM on the clock before, pc having been its address since R_EX)
 			case (st)
 			R_HALT: if (!halted) st <= R_FETCH;
 			R_FETCH: begin
@@ -747,7 +857,7 @@ module n64_rsp #(
 					st <= R_EX;
 				end
 			end
-			R_EX: begin
+			R_EX: if (v2_haz) ; else begin
 				st <= R_FETCH;
 				tr_valid <= 1'b1; tr_pc <= ipc; tr_ir <= ir;
 				case (op)
@@ -834,11 +944,12 @@ module n64_rsp #(
 						// a computational op: operands latched, products registered
 						q_vs <= vsr; q_vte <= vte; q_fn <= fn; q_vd <= vd; q_vs_n <= vs; q_e <= ve; q_de <= ir[13:11];
 						for (k = 0; k < 8; k = k + 1) prod[k] <= mulop(fn, vsr[127 - 16 * k -: 16], vte[127 - 16 * k -: 16]);
-						q_inp <= rc_inp; q_mask <= rc_msk; q_sqrt <= fn[2]; q_shift <= rc_sh[4:0];
+						q_inp <= rc_inp; q_mask <= rc_msk; q_sqrt <= fn[2]; q_dat <= rc_dat;
 						if (rc_dat == 0) begin q_special <= 1'b1; q_data <= 32'h7FFF_FFFF; end
 						else if (rc_inp == -32'sd32768) begin q_special <= 1'b1; q_data <= 32'hFFFF_0000; end
 						else q_special <= 1'b0;
-						st <= R_V2;
+						if (v_rcp) st <= R_V2;
+						else v2_pend <= 1'b1;
 					end
 				end
 				6'h20, 6'h21, 6'h23, 6'h24, 6'h25, 6'h27: begin                // scalar loads
@@ -864,7 +975,7 @@ module n64_rsp #(
 					end
 				end
 				6'h32, 6'h3A: begin                                              // LWC2, SWC2
-					ls_kind <= {1'b0, ir[14:11]}; ls_store <= op[3]; ls_e <= me; ls_t <= vt; ls_k <= 5'd0;
+					ls_kind <= {1'b0, ir[14:11]}; ls_store <= op[3]; ls_e <= me; ls_t <= vt; ls_k <= 5'd0; p_v <= 1'b0;
 					ls_v <= vtr;
 					begin : setup
 						reg [11:0] sc; reg [6:0] i7; reg [3:0] kk;
@@ -907,16 +1018,26 @@ module n64_rsp #(
 				default: ;                                                     // everything else does nothing
 				endcase
 				if (op == 6'h00 && fn == 6'h0D) st <= R_HALT;
+				else if (!ex_multi && !ex_stop) next_ins(npc_ex);
+				// (the fast loads: the first read asked for this clock, the second next; the fast
+				// stores: the first doubleword written this clock)
+				if (ex_fl) begin st <= R_FL2; f_dw <= ex_da + {8'd0, ex_two}; end
+				if (ex_short) begin f_op <= 3'd2; f_off <= ex_da_off; f_e <= me; f_n <= ex_n; end
+				else if (ex_fl) f_n <= 4'd8;
+				if (ex_fs) begin
+					if (ex_two) begin f_dw <= ex_da + 9'd1; f_wd <= vtr[63:0]; st <= R_FS2; end
+					else next_ins(npc);
+				end
 			end
 
 			R_V2: begin
-				st <= R_FETCH;
+				// VRCP/VRSQ: the table asked this clock, its answer in R_V3 (which goes on to the
+				// next instruction); the rest go on from here
 				if (q_fn == 6'h30 || q_fn == 6'h31 || q_fn == 6'h34 || q_fn == 6'h35) begin
-					divdp <= 1'b0; divout <= rq[31:16];
-					for (k = 0; k < 8; k = k + 1) accl[k] <= el(q_vte, k);
-					vw_reg <= q_vd; vw_data <= {8{rq[15:0]}};
-					vw_lane <= 16'h0003 << {q_de, 1'b0};
-				end else if (q_fn == 6'h32 || q_fn == 6'h36) begin           // VRCPH VRSQH
+					q_shift <= qd_sh[4:0]; st <= R_V3;
+				end else next_ins(npc);
+				if (q_fn == 6'h30 || q_fn == 6'h31 || q_fn == 6'h34 || q_fn == 6'h35) ;
+				else if (q_fn == 6'h32 || q_fn == 6'h36) begin           // VRCPH VRSQH
 					for (k = 0; k < 8; k = k + 1) accl[k] <= el(q_vte, k);
 					divdp <= 1'b1; divin <= el(q_vtraw, q_e[2:0]);
 					vw_reg <= q_vd; vw_data <= {8{divout}};
@@ -925,10 +1046,6 @@ module n64_rsp #(
 					for (k = 0; k < 8; k = k + 1) accl[k] <= el(q_vte, k);
 					vw_reg <= q_vd; vw_data <= q_vte;
 					vw_lane <= 16'h0003 << {q_de, 1'b0};
-				end else begin
-					for (k = 0; k < 8; k = k + 1) begin acch[k] <= n_acch[k]; accm[k] <= n_accm[k]; accl[k] <= n_accl[k]; end
-					vcoh <= n_vcoh; vcol <= n_vcol; vcch <= n_vcch; vccl <= n_vccl; vce <= n_vce;
-					if (vout_we) begin vw_reg <= q_vd; vw_data <= vout; vw_lane <= 16'hFFFF; end
 				end
 			end
 
@@ -944,36 +1061,51 @@ module n64_rsp #(
 					5'd2: sr_wd <= ls_idx[1] ? {16'd0, ls_acc[7:0], ld_byte} : {{16{ls_acc[7]}}, ls_acc[7:0], ld_byte};
 					default: sr_wd <= {ls_acc[23:0], ld_byte};
 					endcase
-					st <= R_FETCH;
+					next_ins(npc);
 				end else begin
 					ls_acc <= {ls_acc[23:0], ld_byte}; ls_k <= ls_k + 5'd1; st <= R_SMEM;
 				end
 			end
 
-			// --- a vector load: a byte (or an element) at a time ------------------------------
+			// --- a vector load: a byte (or an element) a clock, pipelined -----------------------
 			R_VLD: begin
-				if (ls_k == ls_n) st <= (ls_kind == 5'h09) ? R_LFV : R_FETCH;
-				else begin ld_off <= sa_addr[2:0]; st <= R_VLD2; end
-			end
-			R_VLD2: begin
-				if (ls_kind == 5'h09) begin
-					ls_tmp[127 - 16 * ls_k[2:0] -: 16] <= {8'd0, ld_byte} << 7;
-				end else begin
-					vw_reg <= sa_reg;
-					if (sa_elem) begin
-						vw_data <= {8{({8'd0, ld_byte} << sa_shift)}};
-						vw_lane <= 16'h0003 << sa_lane;
+				// the byte asked for last clock, into its lane
+				if (p_v) begin
+					if (ls_kind == 5'h09) begin
+						ls_tmp[127 - 16 * p_k[2:0] -: 16] <= {8'd0, ld_byte} << 7;
 					end else begin
-						vw_data <= {16{ld_byte}};
-						vw_lane <= 16'h0001 << sa_lane;
+						vw_reg <= p_reg;
+						if (p_elem) begin
+							vw_data <= {8{({8'd0, ld_byte} << p_shift)}};
+							vw_lane <= 16'h0003 << p_lane;
+						end else begin
+							vw_data <= {16{ld_byte}};
+							vw_lane <= 16'h0001 << p_lane;
+						end
 					end
 				end
-				ls_k <= ls_k + 5'd1; st <= R_VLD;
+				// the next byte asked for (its address is out this clock: sa_addr)
+				if (ls_k != ls_n) begin
+					ld_off <= sa_addr[2:0]; p_v <= 1'b1; p_k <= ls_k;
+					p_reg <= sa_reg; p_elem <= sa_elem; p_shift <= sa_shift; p_lane <= sa_lane;
+					ls_k <= ls_k + 5'd1;
+				end else begin
+					p_v <= 1'b0;
+					if (!p_v) begin if (ls_kind == 5'h09) st <= R_LFV; else next_ins(npc); end
+				end
 			end
 			R_LFV: begin                                                        // LFV: the bytes e..e+7 of the elements
 				vw_reg <= ls_t; vw_data <= ls_tmp;
 				vw_lane <= lfv_mask(ls_e);
-				st <= R_FETCH;
+				next_ins(npc);
+			end
+
+			R_V3: begin                                      // VRCP/VRSQ (L): the table's answer
+				next_ins(npc);
+				divdp <= 1'b0; divout <= rq[31:16];
+				for (k = 0; k < 8; k = k + 1) accl[k] <= el(q_vte, k);
+				vw_reg <= q_vd; vw_data <= {8{rq[15:0]}};
+				vw_lane <= 16'h0003 << {q_de, 1'b0};
 			end
 
 			// --- the fast loads and stores ------------------------------------------------------
@@ -992,12 +1124,13 @@ module n64_rsp #(
 					5'd2: sr_wd <= ls_idx[1] ? {16'd0, h} : {{16{h[15]}}, h};
 					default: sr_wd <= w;
 					endcase
-					st <= R_FETCH;
+					next_ins(npc);
 				end
 				3'd1, 3'd6, 3'd7: begin f_lo <= da_q; st <= R_FL3; end   // (the second doubleword: next clock)
-				default: begin                                // LDV: lanes e .. e + 7
-					vw_reg <= ls_t; vw_data <= {da_q, da_q} >> (8 * f_e); vw_lane <= 16'h00FF << f_e;
-					st <= R_FETCH;
+				default: begin                                // LDV, LBV, LSV, LLV: f_n bytes from f_off into lanes from e
+					vw_reg <= ls_t; vw_data <= ({da_q, 64'd0} << (8 * f_off)) >> (8 * f_e);
+					vw_lane <= (16'hFFFF >> (5'd16 - {1'b0, f_n})) << f_e;
+					next_ins(npc);
 				end
 				endcase
 			end
@@ -1011,23 +1144,37 @@ module n64_rsp #(
 				3'd7: begin vw_data <= q2 >> (8 * f_start); vw_lane <= 16'hFFFF << f_start; end
 				default: begin vw_data <= q2; vw_lane <= 16'hFFFF; end
 				endcase
-				st <= R_FETCH;
+				next_ins(npc);
 			end
 			R_FS1: begin                                     // (written this clock: da_we above)
 				if (f_op == 3'd4) begin f_dw <= f_dw + 9'd1; f_wd <= f_lo; st <= R_FS2; end
-				else st <= R_FETCH;
+				else next_ins(npc);
 			end
-			R_FS2: st <= R_FETCH;
+			R_FS2: next_ins(npc);
 
 			// --- a store: a byte a clock ------------------------------------------------------
 			R_VST: begin
-				if (ls_k == ls_n) st <= R_FETCH;
+				if (ls_k == ls_n) next_ins(npc);
 				else ls_k <= ls_k + 5'd1;                         // (the byte: da_we above)
 			end
 			default: st <= R_HALT;
 			endcase
+
+			// a vector op's second clock, beside the next instruction: the accumulator, the
+			// flags, the result written
+			if (v2_pend) begin
+				for (k = 0; k < 8; k = k + 1) begin acch[k] <= n_acch[k]; accm[k] <= n_accm[k]; accl[k] <= n_accl[k]; end
+				vcoh <= n_vcoh; vcol <= n_vcol; vcch <= n_vcch; vccl <= n_vccl; vce <= n_vce;
+				if (vout_we) begin vw_reg <= q_vd; vw_data <= vout; vw_lane <= 16'hFFFF; end
+			end
 		end
 	end
+
+
+	task next_ins; input [11:0] nn; begin
+		if (halted || frozen) st <= R_FETCH;
+		else begin pc_dw_lo <= pc[2]; ipc <= pc; pc <= nn; npc <= nn + 12'd4; st <= R_EX; end
+	end endtask
 
 	// the bits of the flags in register order (bit n = element n)
 	function automatic [7:0] rbits; input [7:0] v; rbits = v; endfunction

@@ -62,7 +62,15 @@ module tb_n64_rsp;
 	reg [63:0] w;
 	reg [11:0] pc0;
 	always @(posedge clk) if (tr_valid) $fwrite(tf, "%03x %08x\n", tr_pc, tr_ir);
-	always @(posedge clk) if (dut.st == 4'd2 && dut.op == 6'h12 && dut.ir[25]) $display("EX ir %08x ve %0d vt %0d vtr %032x vte %032x", dut.ir, dut.ve, dut.vt, dut.vtr, dut.vte);
+	// the RSP's pace: clocks running, instructions, clocks R_EX waited on a vector op's result,
+	// clocks in each state
+	reg [63:0] pc_run = 0, pc_ins = 0, pc_haz = 0; reg [63:0] pc_st [0:15]; integer pi;
+	initial for (pi = 0; pi < 16; pi = pi + 1) pc_st[pi] = 0;
+	always @(posedge clk) if (!dut.halted) begin
+		pc_run = pc_run + 1; pc_st[dut.st] = pc_st[dut.st] + 1;
+		if (dut.tr_valid) pc_ins = pc_ins + 1;
+		if (dut.st == 4'd2 && dut.v2_haz) pc_haz = pc_haz + 1;
+	end
 
 	task mem_write; input [9:0] dw; input [63:0] v; begin
 		@(negedge clk); c_mem_en = 1; c_mem_we = 8'hFF; c_mem_dw = dw; c_mem_wd = v;
@@ -138,6 +146,9 @@ module tb_n64_rsp;
 			end
 		end
 		$fclose(tf); $fclose(df); $fclose(vf);
+		$display("pace: %0d clocks running, %0d instructions, CPI %0d.%02d, %0d clocks waiting on a vector result", pc_run, pc_ins,
+		         pc_run / (pc_ins ? pc_ins : 1), (pc_run * 100 / (pc_ins ? pc_ins : 1)) % 100, pc_haz);
+		for (pi = 0; pi < 16; pi = pi + 1) if (pc_st[pi] != 0) $display("  state %0d: %0d clocks", pi, pc_st[pi]);
 		$display("tb_n64_rsp: %0d runs done", nruns);
 		$finish;
 	end

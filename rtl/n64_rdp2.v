@@ -257,16 +257,17 @@ module n64_rdp2 #(
 	// the read-ahead's client: a TMEM load, or the walk. It is emptied at every END (the list
 	// grows in place) -- once no request of its own is being presented
 	reg          s_flush_p;
-	wire         s_flush = s_flush_p && !(hs && hs_own);
+	wire         s_hold = s_qv || (hs && hs_own);   // a read of the read-ahead's being presented or taken
+	wire         s_flush = s_flush_p && !s_hold;
 	wire         s_ack;  wire [127:0] s_data;
-	n64_rdp_stream u_stream (.clk(clk), .rst(rst), .flush(s_flush),
+	n64_rdp_stream u_stream (.clk(clk), .rst(rst), .flush(s_flush), .hold(s_hold), .stop(s_flush_p),
 		.c_req(!s_flush_p && !(hs && hs_own) && !raster_mem && (tmem_mem ? tl_req : wk_req)),
 		.c_line(tmem_mem ? tl_line[19:0] : wk_line[19:0] - RDRAM_LINE[19:0]),
 		.c_ack(s_ack), .c_data(s_data),
 		.q_valid(s_qv), .q_line(s_ql), .q_ready(rdy_s), .q_rs(rs_s), .q_rs_data(rs_data));
 	always @(posedge clk) begin
 		if (rst) s_flush_p <= 1'b0;
-		else if (we && widx == 3'd1) s_flush_p <= 1'b1;
+		else if ((we && widx == 3'd1) || ld_go) s_flush_p <= 1'b1;
 		else if (s_flush) s_flush_p <= 1'b0;
 	end
 	wire         wk_ack = s_ack && !raster_mem && !tmem_mem;

@@ -141,6 +141,13 @@ module n64_top #(
 		if (cpu_rst) retired <= 32'd0;
 		else if (tr_valid) begin retired <= retired + 32'd1; last_pc <= tr_pc; end
 	end
+	// (debugging) instructions retired in SM64's idle loop (80246dd0..80246ddf): the rest is
+	// the CPU's real work
+	reg [31:0] retired_idle;
+	always @(posedge clk) begin
+		if (cpu_rst) retired_idle <= 32'd0;
+		else if (tr_valid && tr_pc[31:4] == 28'h80246DD) retired_idle <= retired_idle + 32'd1;
+	end
 	assign dbg_pc = last_pc;
 	assign dbg_retired = retired;
 
@@ -202,8 +209,18 @@ module n64_top #(
 	wire         rq_valid;  wire [23:0] rq_line;
 	reg          rq_ready, rs_valid;
 	reg  [127:0] rs_data;
-	reg  [6:0]   rdp_out;                             // RDP reads outstanding
+	reg  [6:0]   rdp_out;                             // pipelined reads outstanding (the RDP's, the RSP's)
 	wire         rd_ok = rdp_out == 7'd0;              // another client may read
+	// the RSP's DMA reads go through a read-ahead (n64_rdp_stream.v) on the same pipelined
+	// port: it waited a whole DDR3 round trip a line, about 0.5 bytes a clock, and SM64's
+	// microcode spent most of its time in its DMA wait. Each read taken is noted with its
+	// owner (0 the RDP, 1 the RSP), so the lines coming back go to whoever asked.
+	wire         x_qv;  wire [19:0] x_ql;             // the RSP read-ahead's request
+	reg          x_qr, x_rs;                          // taken; a line back for it
+	wire         x_ack;  wire [127:0] x_data;
+	reg          x_flush_p;                           // a DMA started: empty the read-ahead
+	reg          rq_own;                              // the owner of the read in S_RQ
+	reg  [7:0]   rq_tag;  reg [2:0] rq_tw, rq_tr;      // owners of the reads taken, oldest at rq_tr
 	reg  [127:0] rd_rd_data, cf_data;
 	wire [127:0] rd_wr_data;
 	wire [15:0]  rd_wr_mask;
@@ -456,7 +473,7 @@ module n64_top #(
 			fr_pending <= 1'b0; fr_v <= 1'b0; fbr_ack <= 1'b0;
 			pd_rd_ack <= 1'b0; pd_wr_ack <= 1'b0; sd_rd_ack <= 1'b0; sd_wr_ack <= 1'b0; si_we <= 1'b0;
 			ad_rd_ack <= 1'b0; ai_we <= 1'b0; rd_rd_ack <= 1'b0; rd_wr_ack <= 1'b0; cf_ack <= 1'b0; cw_ack <= 1'b0;
-			rq_ready <= 1'b0; rs_valid <= 1'b0; rdp_out <= 7'd0;
+			rq_ready <= 1'b0; rs_valid <= 1'b0; rdp_out <= 7'd0; x_qr <= 1'b0; x_rs <= 1'b0; rq_tw <= 3'd0; rq_tr <= 3'd0;
 			dsp_pend <= 1'b0; isp_pend <= 1'b0;
 			mi_intr <= 6'd0; mi_mask <= 6'd0; mi_mode <= 32'd0;
 			pi_we <= 1'b0;
@@ -466,13 +483,19 @@ module n64_top #(
 			if (!sd_rd_req) sd_rd_ack <= 1'b0;
 			if (!sd_wr_req) sd_wr_ack <= 1'b0;
 			if (!ad_rd_req) ad_rd_ack <= 1'b0;
-			if (!rd_rd_req) rd_rd_ack <= 1'b0;
 			if (!rd_wr_req) rd_wr_ack <= 1'b0;
 			// (the RDP's acks are a clock long: it may ask again on the clock it takes one)
-			cf_ack <= 1'b0; cw_ack <= 1'b0; rq_ready <= 1'b0; rs_valid <= 1'b0;
-			// the RDP's span reads: taken (S_RQ) and returned
+			cf_ack <= 1'b0; cw_ack <= 1'b0; rq_ready <= 1'b0; rs_valid <= 1'b0; x_qr <= 1'b0; x_rs <= 1'b0;
+			// the pipelined reads: taken (S_RQ) and returned, to their owners
 			rdp_out <= rdp_out + {6'd0, st == S_RQ && d_ready} - {6'd0, d_valid && !rd_ok};
-			if (d_valid && !rd_ok) begin rs_valid <= 1'b1; rs_data <= d_rdata; end
+			if (st == S_RQ && d_ready) begin rq_tag[rq_tw] <= rq_own; rq_tw <= rq_tw + 3'd1; end
+			if (d_valid && !rd_ok) begin
+				rs_data <= d_rdata; rq_tr <= rq_tr + 3'd1;
+				if (rq_tag[rq_tr]) x_rs <= 1'b1; else rs_valid <= 1'b1;
+			end
+			// the RSP's DMA reads: its read-ahead answers
+			if (!rd_rd_req) rd_rd_ack <= 1'b0;
+			if (x_ack) begin rd_rd_ack <= 1'b1; rd_rd_data <= x_data; end
 			si_we <= 1'b0; ai_we <= 1'b0;
 			if (ai_irq) mi_intr[2] <= 1'b1;
 			if (si_done) begin mi_intr[1] <= 1'b1; il_v <= 1'b0; dl_v <= 1'b0; end
@@ -664,8 +687,8 @@ module n64_top #(
 				end else if (pd_wr_req && !pd_wr_ack) begin
 					d_addr <= pd_wr_line; d_wdata <= pd_wr_data; d_wmask <= pd_wr_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_PWRITE;
-				end else if (rd_rd_req && !rd_rd_ack && rd_ok) begin
-					d_addr <= rd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RREAD;
+				end else if (1'b0) begin                     // (the RSP's DMA reads: the read-ahead, below)
+					st <= S_RREAD;
 				end else if (rd_wr_req && !rd_wr_ack) begin
 					d_addr <= rd_wr_line; d_wdata <= rd_wr_data; d_wmask <= rd_wr_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_RWRITE;
@@ -674,7 +697,9 @@ module n64_top #(
 				// crossing it looks fuller than it is, by the pops not yet seen. 56 and then 6 both
 				// lost lines and hung the RDP.)
 				end else if (rq_valid && !rq_ready && rdp_out < 7'd4) begin
-					d_addr <= rq_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ;
+					d_addr <= rq_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 1'b0;
+				end else if (x_qv && !x_qr && !x_flush_p && rdp_out < 7'd4) begin
+					d_addr <= RDRAM_LINE + {4'd0, x_ql}; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 1'b1;
 				end else if (cf_req && !cf_ack && rd_ok) begin
 					d_addr <= cf_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_CREAD;
 				end else if (cw_req && !cw_ack) begin
@@ -709,7 +734,8 @@ module n64_top #(
 				d_req <= 1'b0; cw_ack <= 1'b1; st <= S_IDLE;
 			end
 			S_RQ: if (d_ready) begin
-				d_req <= 1'b0; rq_ready <= 1'b1; st <= S_IDLE;
+				d_req <= 1'b0; st <= S_IDLE;
+				if (rq_own) x_qr <= 1'b1; else rq_ready <= 1'b1;
 			end
 			S_WB: if (d_ready) begin
 				d_req <= 1'b0; wb_rp <= wb_rp + 3'd1; st <= S_IDLE;
@@ -1142,6 +1168,48 @@ module n64_top #(
 	wire [31:0]  rsp_dlog_n;
 	wire [63:0]  rsp_dbg_dq;
 	wire         rsp_frozen;
+	// (debugging) the RSP's pace: instructions, clocks running, clocks its DMA is busy
+	wire         rsp_tr;
+	reg  [31:0]  n_rsp_ins, n_rsp_run, n_rsp_dma;
+	// ... by the task's type (1 graphics, 2 audio, other): starts, instructions, clocks running
+	wire [7:0]   rsp_type;
+	reg  [1:0]   cur_t;
+	reg          t_hd;                    // the RSP halted a clock ago
+	wire         rsp_go = t_hd && !rsp_dbg[95];
+	reg  [31:0]  t_go [0:2], t_ins [0:2], t_run [0:2];
+	integer      ti;
+	always @(posedge clk) begin
+		t_hd <= rsp_dbg[95];
+		if (cpu_rst) for (ti = 0; ti < 3; ti = ti + 1) begin t_go[ti] <= 0; t_ins[ti] <= 0; t_run[ti] <= 0; end
+		else begin
+			if (rsp_go) begin
+				cur_t <= (rsp_type == 8'd1) ? 2'd0 : (rsp_type == 8'd2) ? 2'd1 : 2'd2;
+				t_go[(rsp_type == 8'd1) ? 0 : (rsp_type == 8'd2) ? 1 : 2] <= t_go[(rsp_type == 8'd1) ? 0 : (rsp_type == 8'd2) ? 1 : 2] + 1;
+			end
+			if (rsp_tr) t_ins[cur_t] <= t_ins[cur_t] + 1;
+			if (!rsp_dbg[95]) t_run[cur_t] <= t_run[cur_t] + 1;
+		end
+	end
+	always @(posedge clk) begin
+		if (cpu_rst) begin n_rsp_ins <= 0; n_rsp_run <= 0; n_rsp_dma <= 0; end
+		else begin
+			if (rsp_tr) n_rsp_ins <= n_rsp_ins + 1;
+			if (!rsp_dbg[95]) n_rsp_run <= n_rsp_run + 1;
+			if (sp_regs_flat[287 - 32 * 6]) n_rsp_dma <= n_rsp_dma + 1;
+		end
+	end
+	wire         rsp_dm_new;
+	wire         x_hold = x_qv || (st == S_RQ && rq_own) || x_qr;   // a read of the read-ahead's in the arbiter's hands
+	wire         x_flush = x_flush_p && !x_hold;
+	always @(posedge clk) begin
+		if (rst) x_flush_p <= 1'b0;
+		else if (rsp_dm_new) x_flush_p <= 1'b1;
+		else if (x_flush) x_flush_p <= 1'b0;
+	end
+	n64_rdp_stream u_rsp_ra (.clk(clk), .rst(rst), .flush(x_flush), .hold(x_hold), .stop(x_flush_p),
+		.c_req(rd_rd_req && !rd_rd_ack && !x_flush_p), .c_line(rd_rd_line[19:0] - RDRAM_LINE[19:0]),
+		.c_ack(x_ack), .c_data(x_data),
+		.q_valid(x_qv), .q_line(x_ql), .q_ready(x_qr), .q_rs(x_rs), .q_rs_data(rs_data));
 	n64_rsp #(.RDRAM_LINE(RDRAM_LINE), .DEBUG_FREEZE(0)) u_rsp (
 		.clk(clk), .rst(rst || !run),
 		.c_mem_en(sp_go_d || sp_go_i), .c_mem_we(sp_go_d && c_dwe_q ? c_dbe_q : 8'd0),
@@ -1151,12 +1219,12 @@ module n64_top #(
 		.c_reg_idx(sp_reg_wa[19:16] == 4'h8 ? 4'd8 : {1'b0, sp_reg_wa[4:2]}), .c_reg_wd(sp_reg_wv), .c_reg_q(sp_cq),
 		.x_req(xb_req), .x_dw(xb_dw), .x_ack(xb_ack), .x_q(xb_q),
 		.dp_we(dp_we_rsp), .dp_idx(dp_idx_rsp), .dp_wd(dp_wd_rsp), .dp_q(dp_flat[255 - 32 * dp_ridx_rsp -: 32]), .dp_ridx(dp_ridx_rsp),
-		.dm_rd_req(rd_rd_req), .dm_rd_ack(rd_rd_ack), .dm_rd_line(rd_rd_line), .dm_rd_data(rd_rd_data),
+		.dm_rd_req(rd_rd_req), .dm_rd_ack(rd_rd_ack), .dm_rd_line(rd_rd_line), .dm_rd_data(rd_rd_data), .dm_new(rsp_dm_new),
 		.dm_wr_req(rd_wr_req), .dm_wr_ack(rd_wr_ack), .dm_wr_line(rd_wr_line), .dm_wr_data(rd_wr_data), .dm_wr_mask(rd_wr_mask),
 		.irq_set(sp_irq_set), .irq_clr(sp_irq_clr), .halted_o(rsp_halted),
 		.sp_regs_flat(sp_regs_flat), .dbg(rsp_dbg), .dlog_idx(dbg_sel[15:8]), .dlog_q(rsp_dlog), .dlog_n(rsp_dlog_n),
 		.dbg_dw(dbg_sel[25:16]), .dbg_dq(rsp_dbg_dq), .frozen(rsp_frozen),
-		.tr_valid(), .tr_pc(), .tr_ir()
+		.tr_valid(rsp_tr), .tr_pc(), .tr_ir(), .task_type(rsp_type)
 	);
 	genvar gs;
 	generate for (gs = 0; gs < 9; gs = gs + 1) begin : g_spr
@@ -1261,6 +1329,14 @@ module n64_top #(
 		6'd40: dbg_q <= rdp_dbg[31:0];
 		6'd42: dbg_q <= oob_n;
 		6'd50: dbg_q <= rdp_log_n;
+		6'd54: dbg_q <= n_rsp_ins;
+		6'd60: dbg_q <= retired;
+		6'd61: dbg_q <= retired_idle;
+		6'd57: dbg_q <= t_go[dbg_sel[9:8]];
+		6'd58: dbg_q <= t_ins[dbg_sel[9:8]];
+		6'd59: dbg_q <= t_run[dbg_sel[9:8]];
+		6'd55: dbg_q <= n_rsp_run;
+		6'd56: dbg_q <= n_rsp_dma;
 		6'd51: dbg_q <= {8'd0, rdp_log_q[87:64]};
 		6'd52: dbg_q <= rdp_log_q[63:32];
 		6'd53: dbg_q <= rdp_log_q[31:0];

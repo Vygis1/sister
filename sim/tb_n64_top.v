@@ -85,6 +85,19 @@ module tb_n64_top;
 		prev_line <= dut.vi_line;
 		if (dut.vi_line == 10'd0 && prev_line != 10'd0) frames = frames + 1;
 	end
+	// (TRACERQ: every pipelined read taken and every line back, once the RSP has started a DMA)
+	reg trq = 0; integer trq_n = 0;
+	initial trq = $test$plusargs("TRACERQ");
+	reg trq_on = 0;
+	always @(posedge clk) if (dut.rd_rd_req) trq_on <= 1;
+	always @(posedge clk) if (trq && trq_n < 600 && trq_on) begin
+		if (dut.st == 5'd19 && d_ready) begin $display("%0t RQ taken own %0d addr %06x out %0d", $time, dut.rq_own, d_addr, dut.rdp_out); trq_n = trq_n + 1; end
+		if (d_valid) begin $display("%0t line back: out %0d tag %0d st %0d", $time, dut.rdp_out, dut.rq_tag[dut.rq_tr], dut.st); trq_n = trq_n + 1; end
+		if (dut.x_flush) begin $display("%0t flush", $time); trq_n = trq_n + 1; end
+		if (dut.u_rsp_ra.restart) begin $display("%0t restart at %05x (live %0d n %05x r %05x drop %0d)", $time, dut.u_rsp_ra.c_line, dut.u_rsp_ra.live, dut.u_rsp_ra.n, dut.u_rsp_ra.r, dut.u_rsp_ra.drop); trq_n = trq_n + 1; end
+		if (dut.x_ack) begin $display("%0t ack line", $time); trq_n = trq_n + 1; end
+	end
+
 	// an undefined value reaching memory is a bug somewhere before it: say where
 	reg xseen = 0;
 	always @(negedge clk) if (!xseen && dut.c_dreq && dut.c_dwe && (^dut.c_dwdata === 1'bx)) begin
@@ -159,6 +172,9 @@ module tb_n64_top;
 			end
 		end
 		$display("tb_n64_top: done after %0d instructions, VI origin %08x width %0d status %08x", dbg_retired, vi_origin, vi_width, vi_status);
+		$display("tb_n64_top: pipelined reads out %0d, arbiter %0d; RSP read-ahead live %0d b %05x n %05x r %05x drop %0d; DMA busy %0d, RSP halted %0d, rd_rd req %0d ack %0d, flush_p %0d",
+		         dut.rdp_out, dut.st, dut.u_rsp_ra.live, dut.u_rsp_ra.b, dut.u_rsp_ra.n, dut.u_rsp_ra.r, dut.u_rsp_ra.drop,
+		         dut.u_rsp.dma_busy, dut.u_rsp.halted, dut.rd_rd_req, dut.rd_rd_ack, dut.x_flush_p);
 		$display("tb_n64_top: %0d clocks since run, %0d frames", ($time - t_run) / 20, frames);
 		// the frame stream's port: words of the picture, against RDRAM at the VI's origin
 		sbad = 0;
