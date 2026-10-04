@@ -748,6 +748,10 @@ module console_top #(
 		assign char_rdata      = 32'd0;
 	end endgenerate
 
+	// --- the picture for HDMI: the running core's ----------------------------------------
+	wire [23:0] n64_vid_rgb, nes_vid_rgb;
+	assign vid_rgb = n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : 24'd0;
+
 	// --- the NES ---------------------------------------------------------------
 	wire [8:0] nes_px, nes_py;
 	wire       nes_pixel_en, nes_frame_start;
@@ -770,6 +774,8 @@ module console_top #(
 			.dbg_pc(dbg_pc), .dbg_sync(), .dbg_nmi(dbg_nmi)
 		);
 		nes_palette u_pal (.idx(nes_color), .rgb332(nes_rgb));
+		nes_hdmi u_hdmi (.clk(clk), .pixel_en(nes_pixel_en), .px(nes_px), .py(nes_py), .color(nes_color),
+			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(nes_vid_rgb));
 	end else begin : g_nes
 		// Everything the core would have driven, tied off. Not for tidiness:
 		// an undriven wire feeding the pixel mux is an X that propagates into
@@ -783,6 +789,7 @@ module console_top #(
 		assign nes_px = 9'd0; assign nes_py = 9'd0;
 		assign nes_pixel_en = 1'b0; assign nes_frame_start = 1'b0;
 		assign nes_color = 6'd0; assign nes_rgb = 8'd0;
+		assign nes_vid_rgb = 24'd0;
 		assign dbg_pc = 16'd0; assign dbg_nmi = 1'b0;
 	end endgenerate
 
@@ -990,7 +997,7 @@ module console_top #(
 			.fbr_req(from_ddr && sfr), .fbr_word(sfa), .fbr_ack(fbr_ack_w), .fbr_rdata(fbr_rdata_w),   // all 19 bits
 			.fb_words(n64_fb_words), .fb_wpr(n64_fb_wpr), .fb_halve(n64_fb_halve),
 			.audio_lr(audio_lr), .audio_lr_we(audio_lr_we),
-			.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb)
+			.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(n64_vid_rgb)
 		);
 		assign fb_cap_ready = 1'b1;
 	end else begin : g_n64
@@ -999,7 +1006,7 @@ module console_top #(
 		assign n64_vi_yscale = 32'd0; assign n64_dbg_pc = 32'd0; assign n64_retired = 32'd0; assign n64_dbg_q = 32'd0;
 		assign n64_fb_words = 18'd0; assign n64_fb_wpr = 16'd0; assign n64_fb_halve = 1'b0;
 		assign n64_eh_rdata = 8'd0;
-		assign vid_rgb = 24'd0;              // (the other cores: not yet on HDMI)
+		assign n64_vid_rgb = 24'd0;
 	end endgenerate
 
 	// The DDR3 port has exactly one driver: the Mega Drive when its cartridge is

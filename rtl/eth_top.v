@@ -157,6 +157,7 @@ module eth_top #(
 	localparam HAS_DDR3 = MD_DDR3 || CORE_PS1 || CORE_N64;
 	// the HDMI clocks, from the memory's MMCM (below)
 	wire         vid_pclk, vid_pclk5, vid_locked;
+	wire         pclk_raw_w, pclk5_raw_w, hlocked_w;
 	wire [9:0]   vid_x, vid_y;
 	wire         vid_req;
 	wire [23:0]  vid_rgb;
@@ -186,16 +187,7 @@ module eth_top #(
 			.CLKFBOUTB()
 		);
 		BUFG bufg200 (.I(clk200_raw), .O(clk200));
-		BUFG bufgpx  (.I(pclk_raw),   .O(vid_pclk));
-		BUFG bufgpx5 (.I(pclk5_raw),  .O(vid_pclk5));
-		assign vid_locked = mmcm_locked;
-		hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1)) u_hdmi (
-			.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0),
-			.ext_pclk(vid_pclk), .ext_pclk5(vid_pclk5), .ext_locked(vid_locked),
-			.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(),
-			.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
-			.sym_0(), .sym_1(), .sym_2()
-		);
+		assign pclk_raw_w = pclk_raw; assign pclk5_raw_w = pclk5_raw; assign hlocked_w = mmcm_locked;
 
 		wire        ui_clk, ui_rst, calib_done;
 		wire [27:0] app_addr;
@@ -255,11 +247,26 @@ module eth_top #(
 		assign ddr3_ck_p = 1'b0;  assign ddr3_ck_n = 1'b1;
 		assign ddr3_cke = 1'b0;
 		assign ddr3_dm = 2'd0;    assign ddr3_odt = 1'b0;
-		// (no MMCM, no HDMI)
-		assign vid_pclk = 1'b0; assign vid_pclk5 = 1'b0; assign vid_locked = 1'b0;
-		assign vid_x = 10'd0; assign vid_y = 10'd0; assign vid_req = 1'b0;
-		assign hdmi_d_p = 3'd0; assign hdmi_d_n = 3'd0; assign hdmi_ck_p = 1'b0; assign hdmi_ck_n = 1'b0;
+		// (no memory: an MMCM for HDMI alone -- VCO 1000 MHz, /40 25 MHz, /8 125 MHz)
+		wire hfb, p_raw, p5_raw, hl;
+		MMCME2_BASE #(.CLKIN1_PERIOD(20.0), .CLKFBOUT_MULT_F(20.0), .DIVCLK_DIVIDE(1),
+		              .CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8)) u_hmmcm (
+			.CLKIN1(sys_clk), .CLKFBIN(hfb), .CLKFBOUT(hfb), .CLKOUT0(p_raw), .CLKOUT1(p5_raw), .LOCKED(hl),
+			.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
+			.CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .CLKFBOUTB());
+		assign pclk_raw_w = p_raw; assign pclk5_raw_w = p5_raw; assign hlocked_w = hl;
 	end endgenerate
+	// HDMI, in every build: the clocks from whichever MMCM above
+	BUFG bufgpx  (.I(pclk_raw_w),  .O(vid_pclk));
+	BUFG bufgpx5 (.I(pclk5_raw_w), .O(vid_pclk5));
+	assign vid_locked = hlocked_w;
+	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1)) u_hdmi (
+		.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0),
+		.ext_pclk(vid_pclk), .ext_pclk5(vid_pclk5), .ext_locked(vid_locked),
+		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(),
+		.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
+		.sym_0(), .sym_1(), .sym_2()
+	);
 
 	// --- the MDIO bus, and who owns it ----------------------------------------
 	// Two masters: the one that resets the PHY at power-up, on the board's own
