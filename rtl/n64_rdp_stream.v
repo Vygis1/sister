@@ -44,7 +44,10 @@ module n64_rdp_stream (
 	// was restarted again and again for its own first line)
 	wire         asked = live && c_line >= b && c_line < b + 20'd4;
 	// this clock's events
-	wire         issue = q_valid && q_ready;            // one more asked for, in the run
+	// one more asked for, in the run. (q_ready alone: it answers a read of this unit's that
+	// was presented earlier -- counted only while still presented, a read taken just as a
+	// flush stopped the requests went uncounted, and its line came back as another's)
+	wire         issue = q_ready;
 	wire         old = q_rs && drop != 4'd0;            // a dropped run's line back
 	wire         got = q_rs && drop == 4'd0;            // the run's next line back
 	wire         restart = c_req && !c_ack && !flush && !hold && !in_hand && !asked;
