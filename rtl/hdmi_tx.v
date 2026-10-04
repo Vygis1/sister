@@ -24,6 +24,19 @@
 //
 // sym_* are the symbols before the serialisers (for the testbench, and for anything
 // that wants to look).
+//
+// AUDIO = 1: HDMI, not DVI -- 48 kHz stereo L-PCM in data islands, one island in each
+// line's blanking: an 8-clock preamble at 644 (CTL0, CTL2), a 2-clock guard band, two
+// 32-clock packets, a guard band; the active picture gets its own preamble (CTL0) and
+// guard band in the line's last 10 clocks. Packet A carries the audio samples waiting
+// (48 kHz is ~1.5 a line; up to 4), or is a null packet; packet B is the AVI InfoFrame
+// on line 0 (640x480, VIC 1, RGB), the Audio InfoFrame on line 1 (2 channels), and
+// Audio Clock Regeneration otherwise (N 6144, CTS 25000: exact at a 25.000 MHz pixel
+// clock and 48 kHz). Data islands are TERC4 coded; channel 0 carries {1, header bit,
+// VSYNC, HSYNC}, channels 1 and 2 the four subpackets' even and odd bits, each packet
+// part protected by its BCH code (x^8 + x^7 + x^6 + 1, bit 0 first). From the HDMI 1.4
+// data island structure, checked against hdl-util/hdmi (MIT/Apache).
+// Samples come in from any clock: aud_l/aud_r held, aud_tog toggled at 48 kHz.
 //////////////////////////////////////////////////////////////////////////////////
 
 `default_nettype none
@@ -31,7 +44,8 @@
 module hdmi_tx #(
 	parameter SIM = 0,                   // 1: no MMCM/serialisers (pclk comes in on sim_pclk)
 	parameter PSEUDO = 1,                // 1: single-ended + and - (see above); 0: OBUFDS
-	parameter EXT_CLK = 0                // 1: the clocks come in (ext_*), from an MMCM already there
+	parameter EXT_CLK = 0,               // 1: the clocks come in (ext_*), from an MMCM already there
+	parameter AUDIO = 1                  // 1: HDMI with audio; 0: DVI
 )(
 	input  wire        clk50,
 	input  wire        rst,
@@ -51,7 +65,11 @@ module hdmi_tx #(
 	output wire [2:0]  tmds_n,
 	output wire        tmds_clk_p,
 	output wire        tmds_clk_n,
-	output wire [9:0]  sym_0, sym_1, sym_2
+	output wire [9:0]  sym_0, sym_1, sym_2,
+	// audio (any clock): a new sample each time aud_tog changes, held in aud_l/aud_r
+	input  wire [15:0] aud_l,
+	input  wire [15:0] aud_r,
+	input  wire        aud_tog
 );
 	localparam H_ACT = 640, H_FP = 16, H_SYNC = 96, H_BP = 48, H_TOT = 800;
 	localparam V_ACT = 480, V_FP = 10, V_SYNC = 2,  V_BP = 33, V_TOT = 525;
@@ -98,16 +116,119 @@ module hdmi_tx #(
 		x <= hc; y <= vc;
 	end
 	reg de, hs, vs;
+	// hd/vd: where the symbols being made now are (de's position: hc two clocks ago)
+	reg [9:0] h1, hd, v1, vd;
 	always @(posedge pclk) begin
 		de <= req;
 		hs <= !(hc >= H_ACT + H_FP + 1 && hc < H_ACT + H_FP + H_SYNC + 1);     // (a clock behind hc, as req)
 		vs <= !(vc >= V_ACT + V_FP && vc < V_ACT + V_FP + V_SYNC);
+		h1 <= hc; hd <= h1; v1 <= vc; vd <= v1;
 	end
 
-	// --- encoders: blue with the syncs on channel 0 ------------------------------------
-	hdmi_tmds u_e0 (.clk(pclk), .de(de), .d(rgb[7:0]),   .c0(hs),   .c1(vs),   .q(sym_0));
-	hdmi_tmds u_e1 (.clk(pclk), .de(de), .d(rgb[15:8]),  .c0(1'b0), .c1(1'b0), .q(sym_1));
-	hdmi_tmds u_e2 (.clk(pclk), .de(de), .d(rgb[23:16]), .c0(1'b0), .c1(1'b0), .q(sym_2));
+	// --- the periods (AUDIO): video preamble and guard band, data island ------------------
+	wire next_act = (vd == V_TOT - 1) || (vd < V_ACT - 1);           // the next line has a picture
+	wire vpre  = AUDIO && next_act && hd >= 10'd790 && hd < 10'd798;
+	wire vgb   = AUDIO && next_act && hd >= 10'd798;
+	wire dpre  = AUDIO && hd >= 10'd644 && hd < 10'd652;
+	wire dgb   = AUDIO && ((hd >= 10'd652 && hd < 10'd654) || (hd >= 10'd718 && hd < 10'd720));
+	wire ddat  = AUDIO && hd >= 10'd654 && hd < 10'd718;
+
+	// --- encoders: blue with the syncs on channel 0; the preambles' CTL bits on 1 and 2 ----
+	wire [9:0] e0, e1, e2;
+	hdmi_tmds u_e0 (.clk(pclk), .de(de), .d(rgb[7:0]),   .c0(hs),           .c1(vs),   .q(e0));
+	hdmi_tmds u_e1 (.clk(pclk), .de(de), .d(rgb[15:8]),  .c0(vpre || dpre), .c1(1'b0), .q(e1));
+	hdmi_tmds u_e2 (.clk(pclk), .de(de), .d(rgb[23:16]), .c0(dpre),         .c1(1'b0), .q(e2));
+
+	// --- audio in: a toggle per sample from the other clock, into an 8-deep queue ---------
+	reg [2:0] at;  reg [15:0] ql [0:7], qr [0:7];  reg [2:0] qw, qrd;  reg [3:0] qn;
+	always @(posedge pclk) at <= {at[1:0], aud_tog};
+	wire a_new = at[2] != at[1];
+
+	// --- packets ---------------------------------------------------------------------------
+	function [7:0] bch; input [55:0] dbits; input integer n; integer i; reg [7:0] e; reg fb; begin
+		e = 8'd0;
+		for (i = 0; i < 56; i = i + 1) if (i < n) begin
+			fb = e[0] ^ dbits[i];
+			e = (e >> 1) ^ (fb ? 8'h83 : 8'h00);
+		end
+		bch = e;
+	end endfunction
+	function [9:0] terc4; input [3:0] dd; begin
+		case (dd)
+		4'h0: terc4 = 10'b1010011100; 4'h1: terc4 = 10'b1001100011; 4'h2: terc4 = 10'b1011100100; 4'h3: terc4 = 10'b1011100010;
+		4'h4: terc4 = 10'b0101110001; 4'h5: terc4 = 10'b0100011110; 4'h6: terc4 = 10'b0110001110; 4'h7: terc4 = 10'b0100111100;
+		4'h8: terc4 = 10'b1011001100; 4'h9: terc4 = 10'b0100111001; 4'hA: terc4 = 10'b0110011100; 4'hB: terc4 = 10'b1011000110;
+		4'hC: terc4 = 10'b1010001110; 4'hD: terc4 = 10'b1001110001; 4'hE: terc4 = 10'b0101100011; default: terc4 = 10'b1011000011;
+		endcase
+	end endfunction
+	// a sample subpacket: L and R (16 bits, in the top of 24), SB6 = {PR CR UR VR PL CL UL VL}
+	// (V = 0: valid; U = 0; P: even parity over the sample, V, U and C)
+	function [55:0] smp; input [15:0] l, r; input cs; reg pl, pr2; begin
+		pl = ^{l, cs}; pr2 = ^{r, cs};
+		smp = {pr2, cs, 1'b0, 1'b0, pl, cs, 1'b0, 1'b0, r, 8'd0, l, 8'd0};
+	end endfunction
+	// the two packets of this line's island, made the clock before it starts
+	reg [31:0] hdr0, hdr1;                // {ECC, HB2, HB1, HB0}
+	reg [63:0] s00, s01, s02, s03, s10, s11, s12, s13;   // {ECC, SB6 .. SB0}
+	reg [7:0]  fc;                        // the frame (sample) count in the 192-frame channel-status block
+	wire [3:0] take = (qn >= 4'd4) ? 4'd4 : qn;
+	// the subpackets of packet A: sample i if it is there
+	wire [55:0] sa0 = (take > 4'd0) ? smp(ql[qrd],        qr[qrd],        fc == 8'd2 || fc == 8'd25) : 56'd0;
+	wire [7:0]  fc1 = (fc == 8'd191) ? 8'd0 : fc + 8'd1;
+	wire [55:0] sa1 = (take > 4'd1) ? smp(ql[qrd + 3'd1], qr[qrd + 3'd1], fc1 == 8'd2 || fc1 == 8'd25) : 56'd0;
+	wire [7:0]  fc2 = (fc1 == 8'd191) ? 8'd0 : fc1 + 8'd1;
+	wire [55:0] sa2 = (take > 4'd2) ? smp(ql[qrd + 3'd2], qr[qrd + 3'd2], fc2 == 8'd2 || fc2 == 8'd25) : 56'd0;
+	wire [7:0]  fc3 = (fc2 == 8'd191) ? 8'd0 : fc2 + 8'd1;
+	wire [55:0] sa3 = (take > 4'd3) ? smp(ql[qrd + 3'd3], qr[qrd + 3'd3], fc3 == 8'd2 || fc3 == 8'd25) : 56'd0;
+	wire [7:0]  fc4 = (fc3 == 8'd191) ? 8'd0 : fc3 + 8'd1;
+	wire [3:0]  present = (take == 4'd0) ? 4'b0000 : (take == 4'd1) ? 4'b0001 : (take == 4'd2) ? 4'b0011 : (take == 4'd3) ? 4'b0111 : 4'b1111;
+	wire [3:0]  bflag = present & {fc3 == 8'd0, fc2 == 8'd0, fc1 == 8'd0, fc == 8'd0};
+	wire [23:0] ha = (take != 4'd0) ? {bflag, 4'd0, 3'd0, 1'b0, present, 8'h02} : 24'd0;
+	wire [7:0]  fcn = (take == 4'd0) ? fc : (take == 4'd1) ? fc1 : (take == 4'd2) ? fc2 : (take == 4'd3) ? fc3 : fc4;
+	// packet B: AVI InfoFrame {PB6..PB0} = {0, 0, VIC 1, 0, M 4:3 R same, RGB, checksum};
+	// Audio InfoFrame {.., PB1 2 channels, checksum}; or clock regeneration {N, CTS, 0}
+	wire [55:0] avi = {8'h00, 8'h00, 8'h01, 8'h00, 8'h18, 8'h00, 8'h56};   // (PB0: 0x82+0x02+0x0D+0x18+0x01 = 0xAA, -0xAA = 0x56)
+	wire [55:0] aif = {8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h01, 8'h70};
+	wire [55:0] acr = {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00};
+	wire [23:0] hb  = (vd == 10'd0) ? 24'h0D0282 : (vd == 10'd1) ? 24'h0A0184 : 24'h000001;
+	wire [55:0] b0  = (vd == 10'd0) ? avi : (vd == 10'd1) ? aif : acr;
+	wire [55:0] b1  = (vd <= 10'd1) ? 56'd0 : acr;
+	always @(posedge pclk) begin
+		if (pr) begin qw <= 3'd0; qrd <= 3'd0; qn <= 4'd0; fc <= 8'd0; end
+		else begin
+			if (a_new && qn != 4'd8) begin ql[qw] <= aud_l; qr[qw] <= aud_r; qw <= qw + 3'd1; end
+			if (AUDIO && hd == 10'd653) begin
+				s00 <= {bch(sa0, 56), sa0}; s01 <= {bch(sa1, 56), sa1}; s02 <= {bch(sa2, 56), sa2}; s03 <= {bch(sa3, 56), sa3};
+				hdr0 <= {bch({32'd0, ha}, 24), ha};
+				fc <= fcn; qrd <= qrd + take[2:0];
+				s10 <= {bch(b0, 56), b0}; s11 <= {bch(b1, 56), b1}; s12 <= {bch(b1, 56), b1}; s13 <= {bch(b1, 56), b1};
+				hdr1 <= {bch({32'd0, hb}, 24), hb};
+			end
+			qn <= qn + {3'd0, a_new && qn != 4'd8} - ((AUDIO && hd == 10'd653) ? take : 4'd0);
+		end
+	end
+
+	// --- the island's and guard bands' symbols, a clock behind like the encoders' ------------
+	wire [4:0]  kk = hd[4:0] - 5'd14;                        // the clock in the packet (654 = 20 x 32 + 14)
+	wire        pk = hd >= 10'd686;
+	wire [31:0] hh = pk ? hdr1 : hdr0;
+	wire [63:0] q0 = pk ? s10 : s00, q1 = pk ? s11 : s01, q2 = pk ? s12 : s02, q3 = pk ? s13 : s03;
+	reg  [9:0]  t0, t1, t2;  reg tsel;
+	initial begin t0 = 10'd0; t1 = 10'd0; t2 = 10'd0; tsel = 1'b0; hdr0 = 32'd0; hdr1 = 32'd0;
+		s00 = 64'd0; s01 = 64'd0; s02 = 64'd0; s03 = 64'd0; s10 = 64'd0; s11 = 64'd0; s12 = 64'd0; s13 = 64'd0; end
+	always @(posedge pclk) begin
+		tsel <= vgb || dgb || ddat;
+		if (vgb) begin t0 <= 10'b1011001100; t1 <= 10'b0100110011; t2 <= 10'b1011001100; end
+		else if (dgb) begin t0 <= terc4({2'b11, vs, hs}); t1 <= 10'b0100110011; t2 <= 10'b0100110011; end
+		else begin
+			t0 <= terc4({1'b1, hh[kk], vs, hs});
+			t1 <= terc4({q3[{kk, 1'b0}], q2[{kk, 1'b0}], q1[{kk, 1'b0}], q0[{kk, 1'b0}]});
+			t2 <= terc4({q3[{kk, 1'b1}], q2[{kk, 1'b1}], q1[{kk, 1'b1}], q0[{kk, 1'b1}]});
+		end
+	end
+	assign sym_0 = tsel ? t0 : e0;
+	assign sym_1 = tsel ? t1 : e1;
+	assign sym_2 = tsel ? t2 : e2;
 
 	// --- serialisers -----------------------------------------------------------------
 	generate if (!SIM && PSEUDO) begin : g_ser

@@ -39,7 +39,7 @@ module hdmi_test_top (
 		.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0), .ext_pclk(pclk), .ext_pclk5(pclk5), .ext_locked(locked),
 		.pclk(), .x(x), .y(y), .req(req), .rgb(rgb), .frame_start(fs),
 		.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
-		.sym_0(), .sym_1(), .sym_2());
+		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
 
 	// the picture: eight bars (white, yellow, cyan, green, magenta, red, blue, black),
 	// a white border, a square moving across the lower half

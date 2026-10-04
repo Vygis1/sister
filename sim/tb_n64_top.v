@@ -34,7 +34,7 @@ module tb_n64_top;
 	wire [9:0] vid_x, vid_y; wire vid_req; wire [23:0] vid_rgb;
 	hdmi_tx #(.SIM(1)) u_hdmi (.clk50(1'b0), .rst(1'b0), .sim_pclk(pclk), .ext_pclk(1'b0), .ext_pclk5(1'b0), .ext_locked(1'b0),
 		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(), .tmds_p(), .tmds_n(), .tmds_clk_p(), .tmds_clk_n(),
-		.sym_0(), .sym_1(), .sym_2());
+		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
 	integer vid_lines = 0;
 	always @(posedge clk) if (dut.st == 5'd20 && dut.d_valid && dut.head_one) vid_lines = vid_lines + 1;
 	n64_top #(.HALFLINE(11'd1587)) dut (

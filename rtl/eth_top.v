@@ -158,6 +158,7 @@ module eth_top #(
 	// the HDMI clocks, from the memory's MMCM (below)
 	wire         vid_pclk, vid_pclk5, vid_locked;
 	wire         pclk_raw_w, pclk5_raw_w, hlocked_w;
+	wire [15:0]  aud_s;  wire aud_tog;
 	wire [9:0]   vid_x, vid_y;
 	wire         vid_req;
 	wire [23:0]  vid_rgb;
@@ -265,7 +266,7 @@ module eth_top #(
 		.ext_pclk(vid_pclk), .ext_pclk5(vid_pclk5), .ext_locked(vid_locked),
 		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(),
 		.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
-		.sym_0(), .sym_1(), .sym_2()
+		.sym_0(), .sym_1(), .sym_2(), .aud_l(aud_s), .aud_r(aud_s), .aud_tog(aud_tog)
 	);
 
 	// --- the MDIO bus, and who owns it ----------------------------------------
@@ -303,7 +304,8 @@ module eth_top #(
 		.stream_rowlen(stream_rowlen), .stream_stride(stream_stride),
 		.stream_ready(stream_ready), .stream_done_tog(stream_done_tog),
 		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(stream_fvalid), .stream_frd(stream_frd),
-		.pclk(vid_pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb)
+		.pclk(vid_pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb),
+		.aud_s(aud_s), .aud_tog(aud_tog)
 	);
 
 	// --- activity LED --------------------------------------------------------

@@ -98,7 +98,10 @@ module regfile #(
 	input  wire [9:0]  vid_x,
 	input  wire [9:0]  vid_y,
 	input  wire        vid_req,
-	output wire [23:0] vid_rgb
+	output wire [23:0] vid_rgb,
+	// the console's sound for HDMI: 48 kHz, signed, a toggle per sample
+	output reg  [15:0] aud_s,
+	output reg         aud_tog
 );
 
 	localparam PAGE_SYS  = 16'h0000;
@@ -213,6 +216,18 @@ module regfile #(
 
 	wire [31:0] abuf_rdata;
 	wire [15:0] console_audio;
+	// For HDMI: the console's sound (unsigned, centred on 0x8000) low-passed at about
+	// 15.5 kHz -- y += (x - y) / 512 at 50 MHz -- and taken 48000 times a second.
+	reg  signed [24:0] alp;
+	reg  [25:0]        a48;
+	initial begin alp = 25'sd0; a48 = 26'd0; aud_tog = 1'b0; aud_s = 16'd0; end
+	always @(posedge clk) begin
+		alp <= alp + (($signed({1'b0, console_audio ^ 16'h8000, 8'd0}) - alp) >>> 9);
+		if (a48 + 26'd48_000 >= 26'd50_000_000) begin
+			a48 <= a48 + 26'd48_000 - 26'd50_000_000;
+			aud_s <= alp[23:8]; aud_tog <= ~aud_tog;
+		end else a48 <= a48 + 26'd48_000;
+	end
 	wire [31:0] ps1_audio_lr;
 	wire        ps1_audio_lr_we;
 

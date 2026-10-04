@@ -17,7 +17,7 @@ module tb_n64_vid;
 	wire [9:0] x, y; wire req; wire [23:0] rgb;
 	hdmi_tx #(.SIM(1)) u_tx (.clk50(1'b0), .rst(1'b0), .sim_pclk(pclk), .ext_pclk(1'b0), .ext_pclk5(1'b0), .ext_locked(1'b0),
 		.pclk(), .x(x), .y(y), .req(req), .rgb(rgb), .frame_start(), .tmds_p(), .tmds_n(), .tmds_clk_p(), .tmds_clk_n(),
-		.sym_0(), .sym_1(), .sym_2());
+		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
 
 	reg wr_en = 0; reg [7:0] wr_addr = 0; reg [127:0] wr_data = 0;
 	wire [8:0] want;

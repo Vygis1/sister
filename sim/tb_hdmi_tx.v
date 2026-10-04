@@ -19,8 +19,24 @@ module tb_hdmi_tx;
 	wire [9:0] s0, s1, s2;
 	wire fs;
 	hdmi_tx #(.SIM(1)) dut (.clk50(1'b0), .rst(rst), .sim_pclk(clk), .ext_pclk(1'b0), .ext_pclk5(1'b0), .ext_locked(1'b0), .pclk(pclk), .x(x), .y(y), .req(req),
-		.rgb(rgb), .frame_start(fs), .tmds_p(), .tmds_n(), .tmds_clk_p(), .tmds_clk_n(), .sym_0(s0), .sym_1(s1), .sym_2(s2));
+		.rgb(rgb), .frame_start(fs), .tmds_p(), .tmds_n(), .tmds_clk_p(), .tmds_clk_n(), .sym_0(s0), .sym_1(s1), .sym_2(s2), .aud_l(au), .aud_r(~au), .aud_tog(atog));
 
+	reg [15:0] au = 16'h1000; reg atog = 0; integer acnt = 0;
+	always @(posedge clk) begin
+		acnt = acnt + 1;
+		if (acnt == 521) begin acnt = 0; au <= au + 16'd1; atog <= ~atog; end
+	end
+	integer df; initial df = $fopen("../../sim/hdmi_syms.txt", "w");
+	function [4:0] ter;                      // {valid, the 4 bits} of a TERC4 symbol
+		input [9:0] q;
+		case (q)
+		10'b1010011100: ter = 5'h10; 10'b1001100011: ter = 5'h11; 10'b1011100100: ter = 5'h12; 10'b1011100010: ter = 5'h13;
+		10'b0101110001: ter = 5'h14; 10'b0100011110: ter = 5'h15; 10'b0110001110: ter = 5'h16; 10'b0100111100: ter = 5'h17;
+		10'b1011001100: ter = 5'h18; 10'b0100111001: ter = 5'h19; 10'b0110011100: ter = 5'h1A; 10'b1011000110: ter = 5'h1B;
+		10'b1010001110: ter = 5'h1C; 10'b1001110001: ter = 5'h1D; 10'b0101100011: ter = 5'h1E; 10'b1011000011: ter = 5'h1F;
+		default: ter = 5'h00;
+		endcase
+	endfunction
 	function [23:0] pat; input [9:0] px, py; pat = {px[7:0] ^ py[7:0], px[9:2] + py[9:2], px[7:0] * 8'd3 + py[7:0]}; endfunction
 	// the source: a clock behind req, as a line buffer
 	always @(posedge pclk) rgb <= req ? pat(x, y) : $random;
@@ -52,24 +68,33 @@ module tb_hdmi_tx;
 	integer d0 = 0, d1 = 0, d2 = 0, dmax = 0;
 	reg vs_prev = 1, hs_prev = 1, act_line = 0;
 	always @(posedge pclk) if (!rst) begin
-		if (ctl(s0) != 3'b000 && ctl(s1) != 3'b000 && ctl(s2) != 3'b000) begin
-			// blanking: syncs from channel 0
+		if (!r2) begin : blank
+			// blanking: control tokens, a data island (TERC4) or a guard band; the syncs
+			// from channel 0 (a control token, or a TERC4 symbol's bits 0 and 1; a video
+			// guard band carries none)
+			reg [1:0] vh; reg vgbd;
+			vgbd = s0 == 10'b1011001100 && s1 == 10'b0100110011 && s2 == 10'b1011001100;
+			if (ctl(s0) != 3'b000) vh = ctl(s0)[1:0];
+			else if (!vgbd && ter(s0)[4]) vh = ter(s0)[1:0];
+			else vh = {vs_prev, hs_prev};
+			if (ctl(s0) == 3'b000 && !vgbd && !ter(s0)[4]) begin errors = errors + 1; if (errors < 8) $display("tb_hdmi_tx: blanking symbol %03x on channel 0", s0); end
+			$fwrite(df, "%03x %03x %03x\n", s0, s1, s2);
 			d0 = 0; d1 = 0; d2 = 0;
-			if (r2) begin errors = errors + 1; if (errors < 8) $display("tb_hdmi_tx: control symbol where pixel (%0d,%0d) was due", x2, y2); end
-			if (!ctl(s0)[0]) hs_run = hs_run + 1;
+			
+			if (!vh[0]) hs_run = hs_run + 1;
 			else if (hs_run) begin
 				if (hs_run != 96) begin errors = errors + 1; if (errors < 8) $display("tb_hdmi_tx: HSYNC %0d clocks", hs_run); end
 				hs_run = 0;
 			end
-			if (!ctl(s0)[1] && vs_prev) vs_lines = 0;
-			if (!ctl(s0)[1] && hs_run == 1) vs_lines = vs_lines + 1;
-			if (ctl(s0)[1] && !vs_prev) begin
+			if (!vh[1] && vs_prev) vs_lines = 0;
+			if (!vh[1] && hs_run == 1) vs_lines = vs_lines + 1;
+			if (vh[1] && !vs_prev) begin
 				if (vs_lines != 2) begin errors = errors + 1; if (errors < 8) $display("tb_hdmi_tx: VSYNC %0d lines", vs_lines); end
 				frames = frames + 1;
 				if (lines != 480) begin errors = errors + 1; if (errors < 8) $display("tb_hdmi_tx: %0d lines in a frame", lines); end
 				lines = 0;
 			end
-			vs_prev = ctl(s0)[1];
+			vs_prev = vh[1]; hs_prev = vh[0];
 			if (act_line) begin
 				if (px != 640) begin errors = errors + 1; if (errors < 8) $display("tb_hdmi_tx: %0d pixels on a line", px); end
 				lines = lines + 1; px = 0; act_line = 0;
@@ -88,7 +113,7 @@ module tb_hdmi_tx;
 		end
 	end
 	initial begin
-		repeat (4) @(posedge clk); rst = 0;
+		repeat (12) @(posedge clk); @(posedge fs); rst = 0;   // (from a frame's start, the pipelines settled)
 		repeat (800 * 525 * 2 + 3000) @(posedge clk);
 		if (dmax > 20) begin errors = errors + 1; $display("tb_hdmi_tx: running disparity reached %0d", dmax); end
 		$display("tb_hdmi_tx: %0d frames, largest running disparity %0d, %0d errors", frames, dmax, errors);
