@@ -238,10 +238,10 @@ module vr4300_fpu (
 		flags <= r & ~q_en;
 		trap  <= (r & q_en) != 5'd0;
 		res <= v; res32 <= is32; wr <= w && ((r & q_en) == 5'd0);
-		st <= P_DONE;
+		done <= 1'b1; st <= P_IDLE;           // (done with the result: a P_DONE clock cost every operation one)
 	end endtask
 	task unimpl; begin
-		cause <= 6'b100000; flags <= 5'd0; trap <= 1'b1; wr <= 1'b0; st <= P_DONE;
+		cause <= 6'b100000; flags <= 5'd0; trap <= 1'b1; wr <= 1'b0; done <= 1'b1; st <= P_IDLE;
 	end endtask
 
 	wire is_fp = q_fmt == 5'd16 || q_fmt == 5'd17;
@@ -285,7 +285,8 @@ module vr4300_fpu (
 							if (ka == K_ZERO || kb == K_ZERO) finish_with(5'b10000, dnan_of(dbl), !dbl, 1'b1);
 							else finish_with(5'd0, inf_of(sa ^ sb_raw, dbl), !dbl, 1'b1);
 						end else if (ka == K_ZERO || kb == K_ZERO) finish_with(5'd0, zero_of(sa ^ sb_raw, dbl), !dbl, 1'b1);
-						else begin macc <= 106'd0; mstep <= 2'd0; st <= P_MUL; end
+						// (a single's significand is the top 24 bits: its low two 14-bit chunks are zero)
+						else begin macc <= 106'd0; mstep <= dbl ? 2'd0 : 2'd2; st <= P_MUL; end
 					end
 					default: begin
 						if (ka == K_INF) begin
@@ -340,11 +341,11 @@ module vr4300_fpu (
 					if (ka == K_NAN || kb == K_NAN) begin
 						if (((ka == K_NAN) && (q_fn[3] || sna)) || ((kb == K_NAN) && (q_fn[3] || snb))) begin
 							cause <= 6'b010000;
-							if (q_en[BV]) begin trap <= 1'b1; st <= P_DONE; end
-							else begin flags <= 5'b10000; cmp_wr <= 1'b1; cmp_val <= q_fn[0]; st <= P_DONE; end
-						end else begin cmp_wr <= 1'b1; cmp_val <= q_fn[0]; st <= P_DONE; end
+							if (q_en[BV]) begin trap <= 1'b1; done <= 1'b1; st <= P_IDLE; end
+							else begin flags <= 5'b10000; cmp_wr <= 1'b1; cmp_val <= q_fn[0]; done <= 1'b1; st <= P_IDLE; end
+						end else begin cmp_wr <= 1'b1; cmp_val <= q_fn[0]; done <= 1'b1; st <= P_IDLE; end
 					end else begin
-						cmp_wr <= 1'b1; cmp_val <= (q_fn[2] && c_lt) || (q_fn[1] && c_eq); st <= P_DONE;
+						cmp_wr <= 1'b1; cmp_val <= (q_fn[2] && c_lt) || (q_fn[1] && c_eq); done <= 1'b1; st <= P_IDLE;
 					end
 				end else if ((q_fmt == 5'd20 || q_fmt == 5'd21) && (q_fn == 6'h20 || q_fn == 6'h21)) begin
 					// CVT.S / CVT.D from W or L

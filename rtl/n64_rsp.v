@@ -51,7 +51,8 @@ module n64_rsp #(
 	output wire [2:0]   dp_ridx,
 	// the DMA's lines of RDRAM
 	output reg          dm_rd_req,
-	output reg          dm_new,           // a DMA starts (a clock): read-ahead from before it is stale
+	output reg          dm_new,           // a DMA starts (a clock)
+	output wire [1:0]   dm_phase,         // (debugging) the DMA is reading (bit 0) / writing (bit 1) RDRAM
 	input  wire         dm_rd_ack,
 	output reg  [23:0]  dm_rd_line,
 	input  wire [127:0] dm_rd_data,
@@ -88,31 +89,61 @@ module n64_rsp #(
 	// =============================================================================
 	// DMEM and IMEM
 	// =============================================================================
-	reg  [63:0] dmem [0:511];
+	// DMEM in two banks, the even doublewords and the odd: port A reads (and writes) a
+	// doubleword and the one after it in the same clock, so a quadword load or store (LQV,
+	// SQV, LRV, LDV across a doubleword) takes one access, not two
+	reg  [63:0] dm0 [0:255];                // doublewords 0, 2, 4, ..
+	reg  [63:0] dm1 [0:255];                // 1, 3, 5, ..
 	reg  [63:0] imem [0:511];
 	integer k;
-	initial for (k = 0; k < 512; k = k + 1) begin dmem[k] = 64'd0; imem[k] = 64'd0; end
+	initial for (k = 0; k < 512; k = k + 1) imem[k] = 64'd0;
+	initial for (k = 0; k < 256; k = k + 1) begin dm0[k] = 64'd0; dm1[k] = 64'd0; end
 	// port A: the RSP, addressed by what this clock's step wants (a register here
-	// would give the read the address of the step before)
-	wire [8:0]  da_addr;  wire [7:0] da_we; wire [63:0] da_wd; reg [63:0] da_q;
-	wire [8:0]  ia_addr;  reg [63:0] ia_q;
+	// would give the read the address of the step before). da_q: the doubleword at
+	// da_addr, da_q2 the next (wrapping at 4 kB); da_we2/da_wd2 write the next.
+	wire [8:0]  da_addr;  wire [7:0] da_we, da_we2; wire [63:0] da_wd, da_wd2;
+	wire [63:0] da_q, da_q2;
+	wire [8:0]  da_p1 = da_addr + 9'd1;
+	wire [7:0]  a0_idx = da_addr[0] ? da_p1[8:1] : da_addr[8:1];
+	wire [7:0]  a1_idx = da_addr[8:1];
+	wire [7:0]  a0_we = da_addr[0] ? da_we2 : da_we;
+	wire [7:0]  a1_we = da_addr[0] ? da_we : da_we2;
+	wire [63:0] a0_wd = da_addr[0] ? da_wd2 : da_wd;
+	wire [63:0] a1_wd = da_addr[0] ? da_wd : da_wd2;
+	reg  [63:0] a0_q, a1_q;  reg a_odd;
 	always @(posedge clk) begin
-		for (k = 0; k < 8; k = k + 1) if (da_we[k]) dmem[da_addr][63 - 8 * k -: 8] <= da_wd[63 - 8 * k -: 8];
-		da_q <= dmem[da_addr];
+		for (k = 0; k < 8; k = k + 1) if (a0_we[k]) dm0[a0_idx][63 - 8 * k -: 8] <= a0_wd[63 - 8 * k -: 8];
+		a0_q <= dm0[a0_idx];
 	end
+	always @(posedge clk) begin
+		for (k = 0; k < 8; k = k + 1) if (a1_we[k]) dm1[a1_idx][63 - 8 * k -: 8] <= a1_wd[63 - 8 * k -: 8];
+		a1_q <= dm1[a1_idx];
+		a_odd <= da_addr[0];
+	end
+	assign da_q  = a_odd ? a1_q : a0_q;
+	assign da_q2 = a_odd ? a0_q : a1_q;
+	wire [8:0]  ia_addr;  reg [63:0] ia_q;
 	// (held while R_EX waits on a vector op's result: the next address is already out)
 	wire        ia_hold;
 	always @(posedge clk) if (!ia_hold) ia_q <= imem[ia_addr];
 	// port B: the CPU, or the DMA
 	reg         b_en, b_imem;  reg [8:0] b_addr; reg [7:0] b_we; reg [63:0] b_wd;
-	reg  [63:0] db_q, ib_q;
+	reg  [63:0] ib_q, b0_q, b1_q;  reg b_odd;
+	wire [63:0] db_q = b_odd ? b1_q : b0_q;
 	always @(posedge clk) begin
 		if (b_en && !b_imem && b_addr == 9'h1F8 && b_we[3]) task_type <= b_wd[39:32];
-		if (b_en && !b_imem) begin
-			for (k = 0; k < 8; k = k + 1) if (b_we[k]) dmem[b_addr][63 - 8 * k -: 8] <= b_wd[63 - 8 * k -: 8];
-			db_q <= dmem[b_addr];
-		end
+		if (b_en && !b_imem) b_odd <= b_addr[0];
 	end
+	always @(posedge clk)
+		if (b_en && !b_imem && !b_addr[0]) begin
+			for (k = 0; k < 8; k = k + 1) if (b_we[k]) dm0[b_addr[8:1]][63 - 8 * k -: 8] <= b_wd[63 - 8 * k -: 8];
+			b0_q <= dm0[b_addr[8:1]];
+		end
+	always @(posedge clk)
+		if (b_en && !b_imem && b_addr[0]) begin
+			for (k = 0; k < 8; k = k + 1) if (b_we[k]) dm1[b_addr[8:1]][63 - 8 * k -: 8] <= b_wd[63 - 8 * k -: 8];
+			b1_q <= dm1[b_addr[8:1]];
+		end
 	always @(posedge clk) begin
 		if (b_en && b_imem) begin
 			for (k = 0; k < 8; k = k + 1) if (b_we[k]) imem[b_addr][63 - 8 * k -: 8] <= b_wd[63 - 8 * k -: 8];
@@ -265,7 +296,12 @@ module n64_rsp #(
 	reg         v2_pend;
 	wire        v2_haz = v2_pend && ((op == 6'h12 && !rs[4]) || (op == 6'h12 && rs[4] && (vs == q_vd || vt == q_vd))
 	                               || (op == 6'h3A && vt == q_vd));
-	assign ia_hold = st == R_EX && v2_haz;
+	// A fast vector load's write (fl_pend) runs beside the next instruction the same way: it
+	// waits a clock if it reads the register loaded (a vector op's vs/vt, a store of it, or
+	// of a group: STV/SWV), or is a COP2 move (MTC2 writes the registers in its first clock).
+	reg         fl_pend;
+	wire        fl_haz;                   // (after ls_t, below)
+	assign ia_hold = st == R_EX && (v2_haz || fl_haz);
 	reg  [3:0]   q_e;
 	reg  [2:0]   q_de;
 	reg  signed [33:0] prod [0:7];        // the lanes' products
@@ -295,6 +331,8 @@ module n64_rsp #(
 	reg  [11:0]  ls_a;                    // the scaled address (12 bits are all that matter)
 	reg  [3:0]   ls_e;
 	reg  [4:0]   ls_t;
+	assign fl_haz = fl_pend && ((op == 6'h12 && !rs[4]) || (op == 6'h12 && rs[4] && (vs == ls_t || vt == ls_t))
+	                          || (op == 6'h3A && (vt == ls_t || ir[15:11] >= 5'h0A)));
 	reg  [4:0]   ls_start;                // the first byte offset of a ranged kind
 	reg  [3:0]   ls_idx;                  // (index etc., kind by kind)
 	reg  [31:0]  ls_acc;                  // a scalar load being assembled
@@ -419,7 +457,7 @@ module n64_rsp #(
 		   : (kk == 4'd2) ? a[11:0] + {{3{i7[6]}}, i7, 2'b00}
 		   : (kk == 4'd3 || kk == 4'd6 || kk == 4'd7) ? a[11:0] + {{2{i7[6]}}, i7, 3'b000}
 		   : a[11:0] + {i7[6], i7, 4'b0000};
-		if (st == R_EX && !v2_haz) begin
+		if (st == R_EX && !v2_haz && !fl_haz) begin
 			case (op)
 			6'h20, 6'h21, 6'h23, 6'h24, 6'h25, 6'h27:
 				if (!(op[1:0] == 2'b11 && (a[1:0] + simm[1:0]) != 2'b00) && !(op[1:0] == 2'b01 && (a[0] ^ simm[0]))) ex_fl = 1'b1;
@@ -463,6 +501,8 @@ module n64_rsp #(
 	assign da_we   = ex_fs ? ex_wm : (st == R_FS1 || st == R_FS2) ? f_mask
 	               : (st == R_VST && ls_k != ls_n) ? (8'h01 << sa_addr[2:0]) : 8'd0;   // bit k = offset k
 	assign da_wd   = ex_fs ? ex_wd : (st == R_FS1 || st == R_FS2) ? f_wd : {8{sa_val}};
+	assign da_we2  = (ex_fs && ex_two) ? 8'hFF : (st == R_FS1 && f_op == 3'd4) ? 8'hFF : 8'd0;
+	assign da_wd2  = ex_fs ? vtr[63:0] : f_lo;
 	// the byte a load step brought (the doubleword arrived a clock after its address)
 	reg  [2:0]   ld_off;
 	wire [7:0]   ld_byte = da_q[63 - 8 * ld_off -: 8];
@@ -672,6 +712,7 @@ module n64_rsp #(
 	// =============================================================================
 	localparam [2:0] D_IDLE = 3'd0, D_RD = 3'd1, D_RWAIT = 3'd2, D_WRB = 3'd3, D_WRB2 = 3'd4, D_WFLUSH = 3'd5, D_ROW = 3'd6;
 	reg  [2:0]   dst;
+	assign dm_phase = {dst == D_WRB || dst == D_WRB2 || dst == 3'd7 || dst == D_WFLUSH, dst == D_RD || dst == D_RWAIT};
 	reg  [9:0]   d_n;                     // doublewords left in this row
 	reg  [127:0] d_line;  reg [18:0] d_tag; reg d_lv;
 	reg          d_wv;                    // a line being gathered for RDRAM
@@ -709,7 +750,7 @@ module n64_rsp #(
 	end
 
 	always @(posedge clk) begin
-		sr_we <= 1'b0; vw_lane <= 16'd0; v2_pend <= 1'b0; irq_set <= 1'b0; irq_clr <= 1'b0; dp_we <= 1'b0; tr_valid <= 1'b0;
+		sr_we <= 1'b0; vw_lane <= 16'd0; v2_pend <= 1'b0; fl_pend <= 1'b0; irq_set <= 1'b0; irq_clr <= 1'b0; dp_we <= 1'b0; tr_valid <= 1'b0;
 		b_en <= 1'b0; cpu_b <= 1'b0; c_mem_ack <= cpu_b;
 		x_b <= 1'b0; x_b2 <= x_b; x_ack <= x_b2;
 		if (dm_rd_ack) dm_rd_req <= 1'b0;
@@ -854,7 +895,7 @@ module n64_rsp #(
 					st <= R_EX;
 				end
 			end
-			R_EX: if (v2_haz) ; else begin
+			R_EX: if (v2_haz || fl_haz) ; else begin
 				st <= R_FETCH;
 				tr_valid <= 1'b1; tr_pc <= ipc; tr_ir <= ir;
 				case (op)
@@ -1018,13 +1059,13 @@ module n64_rsp #(
 				else if (!ex_multi && !ex_stop) next_ins(npc_ex);
 				// (the fast loads: the first read asked for this clock, the second next; the fast
 				// stores: the first doubleword written this clock)
-				if (ex_fl) begin st <= R_FL2; f_dw <= ex_da + {8'd0, ex_two}; end
+				// (a vector one: its doubleword(s) come next clock and are written beside the next
+				// instruction -- fl_pend; a scalar one waits for them in R_FL2)
+				if (ex_fl && op == 6'h32) begin fl_pend <= 1'b1; next_ins(npc); end
+				else if (ex_fl) begin st <= R_FL2; f_dw <= ex_da + {8'd0, ex_two}; end
 				if (ex_short) begin f_op <= 3'd2; f_off <= ex_da_off; f_e <= me; f_n <= ex_n; end
 				else if (ex_fl) f_n <= 4'd8;
-				if (ex_fs) begin
-					if (ex_two) begin f_dw <= ex_da + 9'd1; f_wd <= vtr[63:0]; st <= R_FS2; end
-					else next_ins(npc);
-				end
+				if (ex_fs) next_ins(npc);                        // (both doublewords written this clock)
 			end
 
 			R_V2: begin
@@ -1123,7 +1164,18 @@ module n64_rsp #(
 					endcase
 					next_ins(npc);
 				end
-				3'd1, 3'd6, 3'd7: begin f_lo <= da_q; st <= R_FL3; end   // (the second doubleword: next clock)
+				3'd1, 3'd6, 3'd7: begin : fl2q                         // both doublewords are here (the banks)
+					reg [127:0] q2; reg [63:0] d8;
+					q2 = {da_q, da_q2};
+					d8 = q2[127 - 8 * f_off -: 64];
+					vw_reg <= ls_t;
+					case (f_op)
+					3'd6: begin vw_data <= {d8, d8} >> (8 * f_e); vw_lane <= 16'h00FF << f_e; end
+					3'd7: begin vw_data <= q2 >> (8 * f_start); vw_lane <= 16'hFFFF << f_start; end
+					default: begin vw_data <= q2; vw_lane <= 16'hFFFF; end
+					endcase
+					next_ins(npc);
+				end
 				default: begin                                // LDV, LBV, LSV, LLV: f_n bytes from f_off into lanes from e
 					vw_reg <= ls_t; vw_data <= ({da_q, 64'd0} << (8 * f_off)) >> (8 * f_e);
 					vw_lane <= (16'hFFFF >> (5'd16 - {1'b0, f_n})) << f_e;
@@ -1144,8 +1196,7 @@ module n64_rsp #(
 				next_ins(npc);
 			end
 			R_FS1: begin                                     // (written this clock: da_we above)
-				if (f_op == 3'd4) begin f_dw <= f_dw + 9'd1; f_wd <= f_lo; st <= R_FS2; end
-				else next_ins(npc);
+				next_ins(npc);                                   // (an SQV's second doubleword too: da_we2)
 			end
 			R_FS2: next_ins(npc);
 
@@ -1157,6 +1208,22 @@ module n64_rsp #(
 			default: st <= R_HALT;
 			endcase
 
+			// a fast vector load's doublewords, beside the next instruction: into the register
+			if (fl_pend) begin : flbg
+				reg [127:0] q2; reg [63:0] d8;
+				q2 = {da_q, da_q2};
+				d8 = q2[127 - 8 * f_off -: 64];
+				vw_reg <= ls_t;
+				case (f_op)
+				3'd6: begin vw_data <= {d8, d8} >> (8 * f_e); vw_lane <= 16'h00FF << f_e; end
+				3'd7: begin vw_data <= q2 >> (8 * f_start); vw_lane <= 16'hFFFF << f_start; end
+				3'd1: begin vw_data <= q2; vw_lane <= 16'hFFFF; end
+				default: begin                                // LDV, LBV, LSV, LLV: f_n bytes from f_off into lanes from e
+					vw_data <= ({da_q, 64'd0} << (8 * f_off)) >> (8 * f_e);
+					vw_lane <= (16'hFFFF >> (5'd16 - {1'b0, f_n})) << f_e;
+				end
+				endcase
+			end
 			// a vector op's second clock, beside the next instruction: the accumulator, the
 			// flags, the result written
 			if (v2_pend) begin
