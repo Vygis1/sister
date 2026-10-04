@@ -76,31 +76,35 @@ module apu (
 		endcase
 	endfunction
 
+	// (the published periods are CPU cycles; the timer counts APU cycles -- every second
+	// CPU cycle -- and reloads with one less: so period / 2 - 1. Was the period itself:
+	// every noise an octave low.)
 	function [11:0] noise_period;
 		input [3:0] i;
 		case (i)
-		4'd0:  noise_period = 12'd4;    4'd1:  noise_period = 12'd8;
-		4'd2:  noise_period = 12'd16;   4'd3:  noise_period = 12'd32;
-		4'd4:  noise_period = 12'd64;   4'd5:  noise_period = 12'd96;
-		4'd6:  noise_period = 12'd128;  4'd7:  noise_period = 12'd160;
-		4'd8:  noise_period = 12'd202;  4'd9:  noise_period = 12'd254;
-		4'd10: noise_period = 12'd380;  4'd11: noise_period = 12'd508;
-		4'd12: noise_period = 12'd762;  4'd13: noise_period = 12'd1016;
-		4'd14: noise_period = 12'd2034; default: noise_period = 12'd4068;
+		4'd0:  noise_period = 12'd1;    4'd1:  noise_period = 12'd3;
+		4'd2:  noise_period = 12'd7;   4'd3:  noise_period = 12'd15;
+		4'd4:  noise_period = 12'd31;   4'd5:  noise_period = 12'd47;
+		4'd6:  noise_period = 12'd63;  4'd7:  noise_period = 12'd79;
+		4'd8:  noise_period = 12'd100;  4'd9:  noise_period = 12'd126;
+		4'd10: noise_period = 12'd189;  4'd11: noise_period = 12'd253;
+		4'd12: noise_period = 12'd380;  4'd13: noise_period = 12'd507;
+		4'd14: noise_period = 12'd1016; default: noise_period = 12'd2033;
 		endcase
 	endfunction
 
+	// (CPU cycles, counted every CPU cycle: reloaded with one less)
 	function [8:0] dmc_period;
 		input [3:0] i;
 		case (i)
-		4'd0:  dmc_period = 9'd428;  4'd1:  dmc_period = 9'd380;
-		4'd2:  dmc_period = 9'd340;  4'd3:  dmc_period = 9'd320;
-		4'd4:  dmc_period = 9'd286;  4'd5:  dmc_period = 9'd254;
-		4'd6:  dmc_period = 9'd226;  4'd7:  dmc_period = 9'd214;
-		4'd8:  dmc_period = 9'd190;  4'd9:  dmc_period = 9'd160;
-		4'd10: dmc_period = 9'd142;  4'd11: dmc_period = 9'd128;
-		4'd12: dmc_period = 9'd106;  4'd13: dmc_period = 9'd84;
-		4'd14: dmc_period = 9'd72;   default: dmc_period = 9'd54;
+		4'd0:  dmc_period = 9'd427;  4'd1:  dmc_period = 9'd379;
+		4'd2:  dmc_period = 9'd339;  4'd3:  dmc_period = 9'd319;
+		4'd4:  dmc_period = 9'd285;  4'd5:  dmc_period = 9'd253;
+		4'd6:  dmc_period = 9'd225;  4'd7:  dmc_period = 9'd213;
+		4'd8:  dmc_period = 9'd189;  4'd9:  dmc_period = 9'd159;
+		4'd10: dmc_period = 9'd141;  4'd11: dmc_period = 9'd127;
+		4'd12: dmc_period = 9'd105;  4'd13: dmc_period = 9'd83;
+		4'd14: dmc_period = 9'd71;   default: dmc_period = 9'd53;
 		endcase
 	endfunction
 
@@ -117,7 +121,7 @@ module apu (
 
 	// --- state -------------------------------------------------------------------
 	reg        fc_mode, fc_inhibit;
-	reg [14:0] fc_count;
+	reg [15:0] fc_count;
 	reg        frame_irq, quarter, half;
 	reg        apu_phase;
 
@@ -188,18 +192,22 @@ module apu (
 	wire [11:0] tgt0 = sweep_target(pul_per[0], swp_shift[0], swp_neg[0], 1'b1);
 	wire [11:0] tgt1 = sweep_target(pul_per[1], swp_shift[1], swp_neg[1], 1'b0);
 
-	// Below eight, the divider is too short for the sequencer to make a waveform.
-	wire mute0 = (pul_per[0] < 11'd8) || tgt0[11];
-	wire mute1 = (pul_per[1] < 11'd8) || tgt1[11];
+	// Below eight, the divider is too short for the sequencer to make a waveform. Past
+	// $7FF mutes only when the sweep ADDS: a negated target never mutes -- games write
+	// $08 to the sweep (negate, shift 0) precisely to keep low notes playing, and pulse
+	// 1's target is then period - period - 1, which wrapped to "past $7FF" here and
+	// silenced the channel.
+	wire mute0 = (pul_per[0] < 11'd8) || (!swp_neg[0] && tgt0[11]);
+	wire mute1 = (pul_per[1] < 11'd8) || (!swp_neg[1] && tgt1[11]);
 
-	wire [14:0] fc_last = fc_mode ? 15'd18640 : 15'd14914;
+	wire [15:0] fc_last = fc_mode ? 16'd37281 : 16'd29829;
 	wire        pidx    = addr[2];       // $4000/$4004 pick pulse 0 or 1
 
 	integer i;
 
 	always @(posedge clk) begin
 		if (rst) begin
-			fc_mode <= 1'b0; fc_inhibit <= 1'b0; fc_count <= 15'd0;
+			fc_mode <= 1'b0; fc_inhibit <= 1'b0; fc_count <= 16'd0;
 			frame_irq <= 1'b0; quarter <= 1'b0; half <= 1'b0; apu_phase <= 1'b0;
 			for (i = 0; i < 3; i = i + 1) begin
 				env_div[i] <= 4'd0; env_vol[i] <= 4'd0; env_start[i] <= 1'b0;
@@ -227,18 +235,22 @@ module apu (
 			half    <= 1'b0;
 
 			// ---- the frame sequencer -------------------------------------------
-			// Boundaries are not evenly spaced, because the real divider is not.
+			// Boundaries are not evenly spaced, because the real divider is not. Counted in
+			// CPU cycles: 7457, 14913, 22371, 29829 (and 37281 in five-step mode). The
+			// published 3728.5, 7456.5... are APU cycles, half the rate -- taken as CPU
+			// cycles they ran the sequencer twice as fast, and every note's length and
+			// decay came out half as long.
 			if (cpu_ce) begin
-				fc_count <= (fc_count >= fc_last) ? 15'd0 : fc_count + 15'd1;
+				fc_count <= (fc_count >= fc_last) ? 16'd0 : fc_count + 16'd1;
 				case (fc_count)
-				15'd3728:  quarter <= 1'b1;
-				15'd7456:  begin quarter <= 1'b1; half <= 1'b1; end
-				15'd11185: quarter <= 1'b1;
-				15'd14914: if (!fc_mode) begin
+				16'd7457:  quarter <= 1'b1;
+				16'd14913: begin quarter <= 1'b1; half <= 1'b1; end
+				16'd22371: quarter <= 1'b1;
+				16'd29829: if (!fc_mode) begin
 						quarter <= 1'b1; half <= 1'b1;
 						if (!fc_inhibit) frame_irq <= 1'b1;
 					end
-				15'd18640: if (fc_mode) begin quarter <= 1'b1; half <= 1'b1; end
+				16'd37281: if (fc_mode) begin quarter <= 1'b1; half <= 1'b1; end
 				default: ;
 				endcase
 			end
@@ -432,7 +444,7 @@ module apu (
 				5'h17: begin
 					fc_mode    <= din[7];
 					fc_inhibit <= din[6];
-					fc_count   <= 15'd0;
+					fc_count   <= 16'd0;
 					if (din[6]) frame_irq <= 1'b0;
 					// Selecting the five-step mode clocks everything at once.
 					if (din[7]) begin quarter <= 1'b1; half <= 1'b1; end

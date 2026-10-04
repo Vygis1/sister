@@ -81,9 +81,15 @@ def main():
             i = t + 2
         else:
             i += 1
-    # the samples: consecutive, R the complement of L
-    bad = 0
+    # the samples: consecutive, R the complement of L -- or the same one again now and then
+    # (hdmi_tx takes the latest sample at 48 kHz on its own clock; the bench's source runs
+    # at 47985 Hz, so one in about 3200 is taken twice)
+    bad = 0; again = 0
     for n in range(1, len(samples)):
+        if samples[n] == samples[n - 1]:
+            again += 1
+            if again * 1000 > len(samples): bad += 1
+            continue
         if samples[n][0] != (samples[n - 1][0] + 1) & 0xFFFF or samples[n][1] != (~samples[n][0]) & 0xFFFF:
             bad += 1
             if bad < 5: print('sample %d: %04X %04X after %04X' % (n, samples[n][0], samples[n][1], samples[n - 1][0]))

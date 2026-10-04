@@ -216,17 +216,38 @@ module regfile #(
 
 	wire [31:0] abuf_rdata;
 	wire [15:0] console_audio;
-	// For HDMI: the console's sound (unsigned, centred on 0x8000) low-passed at about
-	// 15.5 kHz -- y += (x - y) / 512 at 50 MHz -- and taken 48000 times a second.
-	reg  signed [24:0] alp;
+	// For HDMI: the console's sound is UNSIGNED, and not centred -- the NES mixer's silence
+	// is 0 and its loudest 65000 (apu_mix.v). Low-passed at about 15.5 kHz -- y += (x - y)
+	// / 512 at 50 MHz, 8 fraction bits --, its DC taken away by a second, slow average
+	// (dc += (y - dc) / 2^20: corner ~8 Hz, kept with 20 more fraction bits so it settles
+	// exactly), halved so the swing fits 16 signed bits, saturated, and taken 48000 times a
+	// second. (Was: the sample XOR 0x8000 then zero-extended -- silence full-scale negative,
+	// every crossing of 0x8000 a jump of the whole range.)
+	// Then each output sample is the AVERAGE of the ~1042 clocks since the last one, not
+	// one clock picked out: a square wave's harmonics run far past 24 kHz, and picked
+	// samples fold them back down as tones that are not in the music (the boxcar's nulls
+	// sit on every multiple of 48 kHz, where the folding lands). The sum of a period
+	// times 1/1041.67 (2^26 / 1041.67 = 64424) is the mean.
+	reg  signed [25:0] alp;
+	reg  signed [45:0] adc;
 	reg  [25:0]        a48;
-	initial begin alp = 25'sd0; a48 = 26'd0; aud_tog = 1'b0; aud_s = 16'd0; end
+	reg  signed [36:0] asum;
+	wire signed [25:0] aac = alp - $signed(adc[45:20]);
+	wire signed [53:0] amean = asum * $signed(18'sd64424);   // the mean, << 26
+	wire signed [16:0] ah  = amean[51:35];                   // (>> 26, then >> 9 as before)
+	initial begin alp = 26'sd0; adc = 46'sd0; a48 = 26'd0; asum = 37'sd0; aud_tog = 1'b0; aud_s = 16'd0; end
 	always @(posedge clk) begin
-		alp <= alp + (($signed({1'b0, console_audio ^ 16'h8000, 8'd0}) - alp) >>> 9);
+		alp <= alp + (($signed({2'b00, console_audio, 8'd0}) - alp) >>> 9);
+		adc <= adc + {{20{alp[25]}}, alp} - {{20{adc[45]}}, adc[45:20]};
 		if (a48 + 26'd48_000 >= 26'd50_000_000) begin
 			a48 <= a48 + 26'd48_000 - 26'd50_000_000;
-			aud_s <= alp[23:8]; aud_tog <= ~aud_tog;
-		end else a48 <= a48 + 26'd48_000;
+			aud_s <= (ah > 17'sd32767) ? 16'h7FFF : (ah < -17'sd32768) ? 16'h8000 : ah[15:0];
+			aud_tog <= ~aud_tog;
+			asum <= {{11{aac[25]}}, aac};
+		end else begin
+			a48 <= a48 + 26'd48_000;
+			asum <= asum + {{11{aac[25]}}, aac};
+		end
 	end
 	wire [31:0] ps1_audio_lr;
 	wire        ps1_audio_lr_we;
@@ -279,11 +300,15 @@ module regfile #(
 	wire [8:0]  nes_px_x, nes_px_y;
 	wire [7:0]  nes_px_rgb;
 
-	reg [3:0] nes_div;
-	wire nes_ce = (nes_div == 4'd8);       // ~5.5 MHz from 50 MHz
+	// The NTSC dot rate exactly: 5,369,318 Hz from 50 MHz, a dot every 9 or 10 clocks
+	// (was every 9: 5.56 MHz, the music 3.5% sharp and the game 3.5% fast).
+	reg [25:0] nes_div;
+	wire nes_ce = nes_div + 26'd5_369_318 >= 26'd50_000_000;
+	initial nes_div = 26'd0;
 	always @(posedge clk) begin
-		if (rst) nes_div <= 4'd0;
-		else     nes_div <= nes_ce ? 4'd0 : nes_div + 4'd1;
+		if (rst)         nes_div <= 26'd0;
+		else if (nes_ce) nes_div <= nes_div + 26'd5_369_318 - 26'd50_000_000;
+		else             nes_div <= nes_div + 26'd5_369_318;
 	end
 
 	wire [31:0] con_rdata;

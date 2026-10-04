@@ -184,11 +184,48 @@ module tb_apu;
 		cycles(30000);
 		check(dut.pul_per[0] != k[10:0], "the sweep moved the pulse period");
 
+		// $08 in the sweep register (off, negate, shift 0) is how games keep low notes
+		// playing: pulse 1's target is then period - period - 1, and a negated target
+		// must never mute. (It did: the melody channel went silent in most songs.)
+		wr(5'h01, 8'h08);
+		wr(5'h02, 8'h40);
+		wr(5'h03, 8'h08);
+		cycles(80000);
+		measure(4000);
+		check(hi - lo > 1000, "pulse 1 plays with the sweep at $08 (negate, shift 0)");
+
+		// --- the noise period is in CPU cycles ----------------------------------------
+		// Index 4 is 64 CPU cycles a step: the shift register moves every 64th cycle.
+		wr(5'h0E, 8'h04);
+		begin : nper
+			integer c, first, second; reg [14:0] l0;
+			c = 0; first = -1; second = -1; l0 = dut.lfsr;
+			while (second < 0 && c < 1000) begin
+				@(posedge clk);
+				if (cpu_ce) c = c + 1;
+				if (dut.lfsr != l0) begin
+					l0 = dut.lfsr;
+					if (first < 0) first = c; else second = c;
+				end
+			end
+			check(second - first == 64, "noise index 4 steps every 64 CPU cycles");
+			if (second - first != 64) $display("       (every %0d)", second - first);
+		end
+
 		// --- the frame counter's interrupt ------------------------------------------
 		$display(" frame counter:");
 		wr(5'h17, 8'h00);          // four-step mode, interrupt allowed
 		cycles(30000);             // more than one full sequence
 		check(irq === 1'b1, "frame interrupt raised in four-step mode");
+		// at the real rate: 29829 CPU cycles after the $4017 write, not half that
+		rd_status = 1;
+		@(posedge clk); while (!cpu_ce) @(posedge clk);
+		@(posedge clk); #1 rd_status = 0;
+		wr(5'h17, 8'h00);
+		cycles(29000);
+		check(irq === 1'b0, "no frame interrupt before 29000 CPU cycles");
+		cycles(1000);
+		check(irq === 1'b1, "the frame interrupt by 30000");
 		rd_status = 1;
 		@(posedge clk); while (!cpu_ce) @(posedge clk);
 		@(posedge clk); #1 rd_status = 0;

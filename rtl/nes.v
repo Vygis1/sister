@@ -260,7 +260,9 @@ module nes #(
 	wire [15:0] apu_sample;
 
 	apu u_apu (
-		.clk(clk), .rst(rst), .cpu_ce(cpu_ce),
+		// (every CPU cycle, the ones the CPU spends halted for DMA too: the sound chip does
+		// not stop for them -- stopping it each frame wobbled every note at 60 Hz)
+		.clk(clk), .rst(rst), .cpu_ce(cpu_tick),
 		.addr(cpu_addr[4:0]), .din(cpu_dout),
 		.we(cpu_ce && cpu_we && sel_apu),
 		.rd_status(cpu_ce && !cpu_we && sel_stat),

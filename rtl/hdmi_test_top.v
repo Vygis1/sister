@@ -10,7 +10,12 @@
 
 `default_nettype none
 
-module hdmi_test_top (
+module hdmi_test_top #(
+	parameter AUD = 0,                    // (bring-up) HDMI mode with data islands
+	parameter NULLPK = 0,                 // (bring-up) and all its packets null
+	parameter PKMASK = 15,                // (bring-up) which packets (see hdmi_tx)
+	parameter TONE = 0                    // (bring-up) a 440 Hz square wave as the sound, 48 kHz
+)(
 	input  wire        sys_clk,          // 50 MHz
 	output wire [2:0]  hdmi_d_p,
 	output wire [2:0]  hdmi_d_n,
@@ -35,11 +40,20 @@ module hdmi_test_top (
 
 	wire [9:0] x, y; wire req, fs;
 	reg  [23:0] rgb;
-	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1)) u_tx (
+	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .AUDIO(AUD), .NULLPK(NULLPK), .PKMASK(PKMASK)) u_tx (
 		.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0), .ext_pclk(pclk), .ext_pclk5(pclk5), .ext_locked(locked),
 		.pclk(), .x(x), .y(y), .req(req), .rgb(rgb), .frame_start(fs),
 		.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
-		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
+		.sym_0(), .sym_1(), .sym_2(), .aud_l(tone), .aud_r(tone), .aud_tog(ttog));
+	// the tone: 48000 samples a second from the 50 MHz clock, a square wave of 440 Hz
+	reg [25:0] t48 = 26'd0; reg ttog = 1'b0; reg [15:0] tone = 16'd0; reg [6:0] tph = 7'd0;
+	always @(posedge sys_clk) if (TONE) begin
+		if (t48 + 26'd48_000 >= 26'd50_000_000) begin
+			t48 <= t48 + 26'd48_000 - 26'd50_000_000; ttog <= ~ttog;
+			tph <= (tph == 7'd108) ? 7'd0 : tph + 7'd1;               // 48000 / 109 = 440 Hz
+			tone <= (tph < 7'd55) ? 16'd6000 : -16'd6000;
+		end else t48 <= t48 + 26'd48_000;
+	end
 
 	// the picture: eight bars (white, yellow, cyan, green, magenta, red, blue, black),
 	// a white border, a square moving across the lower half

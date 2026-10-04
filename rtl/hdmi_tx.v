@@ -45,7 +45,9 @@ module hdmi_tx #(
 	parameter SIM = 0,                   // 1: no MMCM/serialisers (pclk comes in on sim_pclk)
 	parameter PSEUDO = 1,                // 1: single-ended + and - (see above); 0: OBUFDS
 	parameter EXT_CLK = 0,               // 1: the clocks come in (ext_*), from an MMCM already there
-	parameter AUDIO = 1                  // 1: HDMI with audio; 0: DVI
+	parameter AUDIO = 1,                 // 1: HDMI with audio; 0: DVI
+	parameter NULLPK = 0,                // (bring-up) 1: every packet a null packet
+	parameter PKMASK = 4'b1111           // (bring-up) packets sent: [0] audio, [1] ACR, [2] AVI, [3] Audio InfoFrame
 )(
 	input  wire        clk50,
 	input  wire        rst,
@@ -139,10 +141,20 @@ module hdmi_tx #(
 	hdmi_tmds u_e1 (.clk(pclk), .de(de), .d(rgb[15:8]),  .c0(vpre || dpre), .c1(1'b0), .q(e1));
 	hdmi_tmds u_e2 (.clk(pclk), .de(de), .d(rgb[23:16]), .c0(dpre),         .c1(1'b0), .q(e2));
 
-	// --- audio in: a toggle per sample from the other clock, into an 8-deep queue ---------
+	// --- audio in: a toggle per sample from the other clock; the latest sample is taken
+	// into an 8-deep queue 48000 times a second counted on THIS clock -- the rate the sink
+	// rebuilds from the ACR packets (25 MHz x 6144 / 25000 / 128). Pushing at the source's
+	// rate instead, on a clock that drifts against this one, over- or under-runs the queue
+	// every few seconds: a click each time.
 	reg [2:0] at;  reg [15:0] ql [0:7], qr [0:7];  reg [2:0] qw, qrd;  reg [3:0] qn;
-	always @(posedge pclk) at <= {at[1:0], aud_tog};
-	wire a_new = at[2] != at[1];
+	reg [15:0] hl, hr;  reg [14:0] a48;  reg a_new;
+	initial begin hl = 16'd0; hr = 16'd0; a48 = 15'd0; a_new = 1'b0; end
+	always @(posedge pclk) begin
+		at <= {at[1:0], aud_tog};
+		if (at[2] != at[1]) begin hl <= aud_l; hr <= aud_r; end
+		a_new <= a48 + 15'd48 >= 15'd25000;
+		a48 <= (a48 + 15'd48 >= 15'd25000) ? a48 + 15'd48 - 15'd25000 : a48 + 15'd48;
+	end
 
 	// --- packets ---------------------------------------------------------------------------
 	function [7:0] bch; input [55:0] dbits; input integer n; integer i; reg [7:0] e; reg fb; begin
@@ -163,24 +175,36 @@ module hdmi_tx #(
 	end endfunction
 	// a sample subpacket: L and R (16 bits, in the top of 24), SB6 = {PR CR UR VR PL CL UL VL}
 	// (V = 0: valid; U = 0; P: even parity over the sample, V, U and C)
-	function [55:0] smp; input [15:0] l, r; input cs; reg pl, pr2; begin
-		pl = ^{l, cs}; pr2 = ^{r, cs};
-		smp = {pr2, cs, 1'b0, 1'b0, pl, cs, 1'b0, 1'b0, r, 8'd0, l, 8'd0};
+	function [55:0] smp; input [15:0] l, r; input csl, csr; reg pl, pr2; begin
+		pl = ^{l, csl}; pr2 = ^{r, csr};
+		smp = {pr2, csr, 1'b0, 1'b0, pl, csl, 1'b0, 1'b0, r, 8'd0, l, 8'd0};
 	end endfunction
 	// the two packets of this line's island, made the clock before it starts
 	reg [31:0] hdr0, hdr1;                // {ECC, HB2, HB1, HB0}
 	reg [63:0] s00, s01, s02, s03, s10, s11, s12, s13;   // {ECC, SB6 .. SB0}
 	reg [7:0]  fc;                        // the frame (sample) count in the 192-frame channel-status block
-	wire [3:0] take = (qn >= 4'd4) ? 4'd4 : qn;
-	// the subpackets of packet A: sample i if it is there
-	wire [55:0] sa0 = (take > 4'd0) ? smp(ql[qrd],        qr[qrd],        fc == 8'd2 || fc == 8'd25) : 56'd0;
+	// (whole packets of four, as hdl-util/hdmi sends them)
+	wire [3:0] take = (qn >= 4'd4) ? 4'd4 : 4'd0;
+	// a channel's status bit for frame f: copying permitted (2), channel 1 left / 2 right (20/21),
+	// 48 kHz (25), 16-bit words (33)
+	function cst; input [7:0] f; input right; begin
+		cst = f == 8'd2 || f == 8'd25 || f == 8'd33 || f == (right ? 8'd21 : 8'd20);
+	end endfunction
+	// the frame count of each sample in the packet, and its channel-status bits (as wires:
+	// a function call inside another's arguments simulates wrong in xsim)
 	wire [7:0]  fc1 = (fc == 8'd191) ? 8'd0 : fc + 8'd1;
-	wire [55:0] sa1 = (take > 4'd1) ? smp(ql[qrd + 3'd1], qr[qrd + 3'd1], fc1 == 8'd2 || fc1 == 8'd25) : 56'd0;
 	wire [7:0]  fc2 = (fc1 == 8'd191) ? 8'd0 : fc1 + 8'd1;
-	wire [55:0] sa2 = (take > 4'd2) ? smp(ql[qrd + 3'd2], qr[qrd + 3'd2], fc2 == 8'd2 || fc2 == 8'd25) : 56'd0;
 	wire [7:0]  fc3 = (fc2 == 8'd191) ? 8'd0 : fc2 + 8'd1;
-	wire [55:0] sa3 = (take > 4'd3) ? smp(ql[qrd + 3'd3], qr[qrd + 3'd3], fc3 == 8'd2 || fc3 == 8'd25) : 56'd0;
 	wire [7:0]  fc4 = (fc3 == 8'd191) ? 8'd0 : fc3 + 8'd1;
+	wire        csl_fc = cst(fc, 1'b0), csr_fc = cst(fc, 1'b1);
+	wire        csl_fc1 = cst(fc1, 1'b0), csr_fc1 = cst(fc1, 1'b1);
+	wire        csl_fc2 = cst(fc2, 1'b0), csr_fc2 = cst(fc2, 1'b1);
+	wire        csl_fc3 = cst(fc3, 1'b0), csr_fc3 = cst(fc3, 1'b1);
+	// the subpackets of packet A: sample i if it is there
+	wire [55:0] sa0 = (take > 4'd0) ? smp(ql[qrd],        qr[qrd],        csl_fc, csr_fc) : 56'd0;
+	wire [55:0] sa1 = (take > 4'd1) ? smp(ql[qrd + 3'd1], qr[qrd + 3'd1], csl_fc1, csr_fc1) : 56'd0;
+	wire [55:0] sa2 = (take > 4'd2) ? smp(ql[qrd + 3'd2], qr[qrd + 3'd2], csl_fc2, csr_fc2) : 56'd0;
+	wire [55:0] sa3 = (take > 4'd3) ? smp(ql[qrd + 3'd3], qr[qrd + 3'd3], csl_fc3, csr_fc3) : 56'd0;
 	wire [3:0]  present = (take == 4'd0) ? 4'b0000 : (take == 4'd1) ? 4'b0001 : (take == 4'd2) ? 4'b0011 : (take == 4'd3) ? 4'b0111 : 4'b1111;
 	wire [3:0]  bflag = present & {fc3 == 8'd0, fc2 == 8'd0, fc1 == 8'd0, fc == 8'd0};
 	wire [23:0] ha = (take != 4'd0) ? {bflag, 4'd0, 3'd0, 1'b0, present, 8'h02} : 24'd0;
@@ -190,19 +214,22 @@ module hdmi_tx #(
 	wire [55:0] avi = {8'h00, 8'h00, 8'h01, 8'h00, 8'h18, 8'h00, 8'h56};   // (PB0: 0x82+0x02+0x0D+0x18+0x01 = 0xAA, -0xAA = 0x56)
 	wire [55:0] aif = {8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h01, 8'h70};
 	wire [55:0] acr = {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00};
-	wire [23:0] hb  = (vd == 10'd0) ? 24'h0D0282 : (vd == 10'd1) ? 24'h0A0184 : 24'h000001;
-	wire [55:0] b0  = (vd == 10'd0) ? avi : (vd == 10'd1) ? aif : acr;
-	wire [55:0] b1  = (vd <= 10'd1) ? 56'd0 : acr;
+	// (clock regeneration on every 32nd line, ~980 a second as hdl-util/hdmi sends it -- not
+	// every line; a null packet on the others)
+	wire        acr_line = vd[4:0] == 5'd2;
+	wire [23:0] hb  = (vd == 10'd0) ? 24'h0D0282 : (vd == 10'd1) ? 24'h0A0184 : acr_line ? 24'h000001 : 24'h000000;
+	wire [55:0] b0  = (vd == 10'd0) ? avi : (vd == 10'd1) ? aif : acr_line ? acr : 56'd0;
+	wire [55:0] b1  = (vd > 10'd1 && acr_line) ? acr : 56'd0;
 	always @(posedge pclk) begin
 		if (pr) begin qw <= 3'd0; qrd <= 3'd0; qn <= 4'd0; fc <= 8'd0; end
 		else begin
-			if (a_new && qn != 4'd8) begin ql[qw] <= aud_l; qr[qw] <= aud_r; qw <= qw + 3'd1; end
+			if (a_new && qn != 4'd8) begin ql[qw] <= hl; qr[qw] <= hr; qw <= qw + 3'd1; end
 			if (AUDIO && hd == 10'd653) begin
 				s00 <= {bch(sa0, 56), sa0}; s01 <= {bch(sa1, 56), sa1}; s02 <= {bch(sa2, 56), sa2}; s03 <= {bch(sa3, 56), sa3};
-				hdr0 <= {bch({32'd0, ha}, 24), ha};
+				hdr0 <= (NULLPK || !PKMASK[0]) ? 32'd0 : {bch({32'd0, ha}, 24), ha};
 				fc <= fcn; qrd <= qrd + take[2:0];
 				s10 <= {bch(b0, 56), b0}; s11 <= {bch(b1, 56), b1}; s12 <= {bch(b1, 56), b1}; s13 <= {bch(b1, 56), b1};
-				hdr1 <= {bch({32'd0, hb}, 24), hb};
+				hdr1 <= (NULLPK || (vd == 10'd0 ? !PKMASK[2] : vd == 10'd1 ? !PKMASK[3] : !PKMASK[1])) ? 32'd0 : {bch({32'd0, hb}, 24), hb};
 			end
 			qn <= qn + {3'd0, a_new && qn != 4'd8} - ((AUDIO && hd == 10'd653) ? take : 4'd0);
 		end
