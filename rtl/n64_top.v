@@ -557,6 +557,9 @@ module n64_top #(
 			i_replay <= 1'b0; d_replay <= 1'b0; pi_we <= 1'b0;
 			// a DMA has finished: the PI's interrupt; the uncached lines may be stale
 			if (pi_done) begin mi_intr[4] <= 1'b1; il_v <= 1'b0; dl_v <= 1'b0; end
+			// (the uncached reads' lines too: dropped when another writer writes them)
+			if (d_req && d_ready && d_we && st != S_WB && d_addr == dl_tag) dl_v <= 1'b0;
+			if (d_req && d_ready && d_we && st != S_WB && d_addr == il_tag) il_v <= 1'b0;
 			// --- the host's fill (only while the CPU is held) --------------------------------
 			if (host_we) begin
 				fill_line <= host_windex[21:2];
@@ -724,7 +727,7 @@ module n64_top #(
 					// by index, or by index when the tag matches (the hit forms)
 					// (the invalidate itself: the tag arrays' write ports below; an op by index
 					// goes over the four lines that share the chip's index, a clock each)
-					if (cop_idx && cop_k != (dpcop[1:0] == 2'd1 ? 3'd7 : 3'd3)) cop_k <= cop_k + 3'd1;
+					if (cop_idx && dpcop[1:0] == 2'd0 && cop_k != 3'd3) cop_k <= cop_k + 3'd1;   // (the I-cache's)
 					else begin dp_cop <= 1'b0; d_ready_r <= 1'b1; cop_k <= 3'd0; end
 				end else if (dp && !c_dreq && rd_ok) begin
 					d_addr <= line_of(dpa); d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1;
@@ -978,7 +981,9 @@ module n64_top #(
 	// the D-cache holds (byte enables), or each half of an I-cache line's fill
 	// (the fill's own line: a pipelined read's may come back while it waits -- head_one)
 	wire         dw_fill = !rst && st == S_DFILL && d_valid && head_one;
-	wire         dw_hit  = !rst && c_dreq && !c_dcache && c_dwe && is_rdram(c_daddr) && d_cacheable && d_hit_now;
+	// (a store through the uncached window updates a line the D-cache holds too: the cache
+	// always equals memory, see dsn_w)
+	wire         dw_hit  = !rst && c_dreq && !c_dcache && c_dwe && is_rdram(c_daddr) && d_hit_now;
 	wire [11:0]  dw_idx  = dw_fill ? d_for[15:4] : d_idx;
 	wire [15:0]  dw_be   = dw_fill ? 16'hFFFF : dw_hit ? c_mask : 16'h0000;
 	wire [127:0] dw_data = dw_fill ? d_rdata : c_line;
@@ -1002,15 +1007,25 @@ module n64_top #(
 	assign       cop_idx  = dpcop[4:2] == 3'd0 || dpcop[4:2] == 3'd2 || (dpcop[1:0] == 2'd1 && dpcop[4:2] == 3'd3);
 	wire         cop_hit  = dpcop[4:2] == 3'd4 || (dpcop[1:0] == 2'd1 && dpcop[4:2] == 3'd5);
 	wire         icop_w   = cop_go && dpcop[1:0] == 2'd0 && (cop_idx || cop_hit);
-	wire         dcop_w   = cop_go && dpcop[1:0] == 2'd1 && (cop_idx || cop_hit);
+	// The D-cache is kept equal to memory: it writes through, a store updates a line it holds
+	// (cached or not), and every other writer's line is dropped (dsn_w). So its CACHE ops have
+	// nothing to do: SM64 wrote back and invalidated the whole cache by index before every RSP
+	// task, and the board filled 9.7 lines a 1000 instructions where the model, keeping them,
+	// filled 1.8.
+	wire         dcop_w   = 1'b0;
+	// a write to RDRAM by anyone but the CPU (the RSP's DMA, the RDP, the PI, the SI), taken
+	// this clock: the D-cache's line for it, if it holds that line, is dropped
+	wire [23:0]  sn_rel   = d_addr - RDRAM_LINE;
+	wire         dsn_w    = !rst && d_req && d_ready && d_we && st != S_WB && st != S_FILL && sn_rel[23:19] == 5'd0
+	                        && dtag[sn_rel[11:0]] == {1'b1, sn_rel[18:12]};
 	wire [10:0]  icop_ix  = cop_idx ? {cop_k[1:0], dpa[13:5]} : dpa[15:5];
 	wire [11:0]  dcop_ix  = cop_idx ? {cop_k, dpa[12:4]} : dpa[15:4];
 	wire         ifill_w  = !rst && st == S_IFILL1 && d_valid && head_one;
 	wire         itw_en   = tw_sweep || ifill_w || icop_w;
 	wire [10:0]  itw_idx  = tw_sweep ? sweep[10:0] : ifill_w ? i_for[15:5] : icop_ix;
 	wire [7:0]   itw_val  = (!tw_sweep && ifill_w) ? {1'b1, i_for[22:16]} : 8'd0;
-	wire         dtw_en   = tw_sweep || dw_fill || dcop_w;
-	wire [11:0]  dtw_idx  = tw_sweep ? sweep : dw_fill ? d_for[15:4] : dcop_ix;
+	wire         dtw_en   = tw_sweep || dw_fill || dsn_w;
+	wire [11:0]  dtw_idx  = tw_sweep ? sweep : dw_fill ? d_for[15:4] : sn_rel[11:0];
 	wire [7:0]   dtw_val  = (!tw_sweep && dw_fill) ? {1'b1, d_for[22:16]} : 8'd0;
 	always @(posedge clk) begin
 		if (itw_en) itag[itw_idx] <= itw_val;
