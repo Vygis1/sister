@@ -261,6 +261,7 @@ module n64_rdp2 #(
 	wire         s_flush = s_flush_p && !s_hold;
 	wire         s_ack;  wire [127:0] s_data;
 	n64_rdp_stream u_stream (.clk(clk), .rst(rst), .flush(s_flush), .hold(s_hold), .stop(s_flush_p),
+		.s_v(1'b0), .s_line(24'd0), .s_hit(),
 		.c_req(!s_flush_p && !(hs && hs_own) && !raster_mem && (tmem_mem ? tl_req : wk_req)),
 		.c_line(tmem_mem ? tl_line[19:0] : wk_line[19:0] - RDRAM_LINE[19:0]),
 		.c_ack(s_ack), .c_data(s_data),

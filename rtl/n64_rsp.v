@@ -226,6 +226,7 @@ module n64_rsp #(
 	reg  [7:0]  f_mask;                   // a store's bytes (bit k = offset k)
 	reg  [4:0]  f_vt;
 	reg  [4:0]  f_start;                  // LRV: the first byte of the register written
+	reg  [1:0]  f_x;                      // fast loads past f_op: 1 LQV from inside its quadword, 2 LPV, 3 LUV
 	reg  [3:0]  st;
 	reg         pc_dw_lo;
 	wire [31:0] ir = pc_dw_lo ? ia_q[31:0] : ia_q[63:32];
@@ -444,6 +445,8 @@ module n64_rsp #(
 	reg         ex_short;                 // LBV/LSV/LLV in one doubleword: n bytes into lanes from e
 	reg  [3:0]  ex_n;
 	reg  [2:0]  ex_da_off;                // the first byte in the doubleword
+	reg  [1:0]  ex_x;                     // (f_x for a fast load)
+	reg  [3:0]  ex_off4;                  // an LQV's offset in its quadword
 	reg  [3:0]  f_n;                      // R_FL2's f_op 2: the bytes taken
 	reg  [8:0]  ex_da;
 	reg  [7:0]  ex_wm;
@@ -451,7 +454,7 @@ module n64_rsp #(
 	always @(*) begin : exmem
 		reg [11:0] va; reg [6:0] i7; reg [3:0] kk;
 		ex_fl = 1'b0; ex_fs = 1'b0; ex_two = 1'b0; ex_da = ea[11:3]; ex_wm = 8'h00; ex_wd = 64'd0;
-		ex_short = 1'b0; ex_n = 4'd0; ex_da_off = 3'd0;
+		ex_short = 1'b0; ex_n = 4'd0; ex_da_off = 3'd0; ex_x = 2'd0; ex_off4 = 4'd0;
 		i7 = ir[6:0]; kk = ir[14:11];
 		va = (kk == 4'd0) ? a[11:0] + {{5{i7[6]}}, i7} : (kk == 4'd1) ? a[11:0] + {{4{i7[6]}}, i7, 1'b0}
 		   : (kk == 4'd2) ? a[11:0] + {{3{i7[6]}}, i7, 2'b00}
@@ -473,6 +476,15 @@ module n64_rsp #(
 				if (kk == 4'd5 && {1'b0, va[3:0]} >= {1'b0, me}) begin ex_fl = 1'b1; ex_two = 1'b1; ex_da = {va[11:4], 1'b0}; end
 				if (kk == 4'd4 && va[3:0] == 4'd0 && me == 4'd0) begin ex_fl = 1'b1; ex_two = 1'b1; end
 				if (kk == 4'd3 && va[2:0] == 3'd0 && !me[0] && me <= 4'd8) begin ex_fl = 1'b1; ex_two = 1'b0; end
+				// LQV from inside its quadword (element 0: its bytes up to the quadword's end into
+				// the register's first), the whole quadword read at once (the banks)
+				if (kk == 4'd4 && va[3:0] != 4'd0 && me == 4'd0) begin
+					ex_fl = 1'b1; ex_two = 1'b1; ex_da = {va[11:4], 1'b0}; ex_x = 2'd1; ex_off4 = va[3:0];
+				end
+				// LPV, LUV, 8-aligned, element 0: a doubleword's bytes into the eight elements
+				if ((kk == 4'd6 || kk == 4'd7) && va[2:0] == 3'd0 && me == 4'd0) begin
+					ex_fl = 1'b1; ex_two = 1'b0; ex_x = (kk == 4'd6) ? 2'd2 : 2'd3;
+				end
 				// LBV, LSV, LLV whose bytes are in one doubleword (lanes past 15 are not written)
 				if ((kk == 4'd0) || (kk == 4'd1 && va[2:0] <= 3'd6) || (kk == 4'd2 && va[2:0] <= 3'd4)) begin
 					ex_fl = 1'b1; ex_two = 1'b0; ex_short = 1'b1; ex_da_off = va[2:0];
@@ -483,6 +495,13 @@ module n64_rsp #(
 				ex_da = va[11:3];
 				if (kk == 4'd4 && va[3:0] == 4'd0 && me == 4'd0) begin ex_fs = 1'b1; ex_two = 1'b1; ex_wm = 8'hFF; ex_wd = vtr[127:64]; end
 				if (kk == 4'd3 && va[2:0] == 3'd0 && !me[0] && me <= 4'd8) begin ex_fs = 1'b1; ex_two = 1'b0; ex_wm = 8'hFF; ex_wd = vtr[127 - 8 * me -: 64]; end
+				// SPV, SUV, 8-aligned, element 0: each element's byte (bits 15:8, or 14:7) into a doubleword
+				if ((kk == 4'd6 || kk == 4'd7) && va[2:0] == 3'd0 && me == 4'd0) begin : pu
+					integer j;
+					ex_fs = 1'b1; ex_two = 1'b0; ex_wm = 8'hFF;
+					for (j = 0; j < 8; j = j + 1)
+						ex_wd[63 - 8 * j -: 8] = (kk == 4'd6) ? vtr[127 - 16 * j -: 8] : vtr[126 - 16 * j -: 8];
+				end
 				// SBV, SSV, SLV whose bytes land in one doubleword: the register's bytes e, e+1.. (mod 16)
 				if ((kk == 4'd0) || (kk == 4'd1 && va[2:0] <= 3'd6) || (kk == 4'd2 && va[2:0] <= 3'd4)) begin : sh
 					reg [31:0] w;
@@ -1061,7 +1080,7 @@ module n64_rsp #(
 				// stores: the first doubleword written this clock)
 				// (a vector one: its doubleword(s) come next clock and are written beside the next
 				// instruction -- fl_pend; a scalar one waits for them in R_FL2)
-				if (ex_fl && op == 6'h32) begin fl_pend <= 1'b1; next_ins(npc); end
+				if (ex_fl && op == 6'h32) begin fl_pend <= 1'b1; f_x <= ex_x; f_start <= {1'b0, ex_off4}; next_ins(npc); end
 				else if (ex_fl) begin st <= R_FL2; f_dw <= ex_da + {8'd0, ex_two}; end
 				if (ex_short) begin f_op <= 3'd2; f_off <= ex_da_off; f_e <= me; f_n <= ex_n; end
 				else if (ex_fl) f_n <= 4'd8;
@@ -1214,6 +1233,13 @@ module n64_rsp #(
 				q2 = {da_q, da_q2};
 				d8 = q2[127 - 8 * f_off -: 64];
 				vw_reg <= ls_t;
+				if (f_x == 2'd1) begin vw_data <= q2 << (8 * f_start[3:0]); vw_lane <= 16'hFFFF >> f_start[3:0]; end
+				else if (f_x[1]) begin : pu
+					integer j;
+					for (j = 0; j < 8; j = j + 1)
+						vw_data[127 - 16 * j -: 16] <= f_x[0] ? {1'b0, da_q[63 - 8 * j -: 8], 7'd0} : {da_q[63 - 8 * j -: 8], 8'd0};
+					vw_lane <= 16'hFFFF;
+				end else
 				case (f_op)
 				3'd6: begin vw_data <= {d8, d8} >> (8 * f_e); vw_lane <= 16'h00FF << f_e; end
 				3'd7: begin vw_data <= q2 >> (8 * f_start); vw_lane <= 16'hFFFF << f_start; end
@@ -1298,7 +1324,7 @@ module n64_rsp #(
 		endcase
 	end endtask
 
-	assign dbg = {halted, 11'd0, st, 4'd0, pc, ir, last_c0};
+	assign dbg = {halted, v2_haz && st == R_EX, fl_haz && st == R_EX, 9'd0, st, 4'd0, pc, ir, last_c0};
 endmodule
 
 `default_nettype wire

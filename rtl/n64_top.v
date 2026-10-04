@@ -232,7 +232,8 @@ module n64_top #(
 	wire         x_qv;  wire [19:0] x_ql;             // the RSP read-ahead's request
 	reg          x_qr, x_rs;                          // taken; a line back for it
 	wire         x_ack;  wire [127:0] x_data;
-	reg          x_flush_p;                           // a DMA started: empty the read-ahead
+	reg          x_flush_p;                           // a write landed in the read-ahead: empty it
+	wire         x_snoop_hit;
 	reg          rq_own;                              // the owner of the read in S_RQ
 	reg  [1:0]   rq_tag [0:15];  reg [3:0] rq_tw, rq_tr;  // owners of the reads taken, oldest at rq_tr
 	assign q_head = rq_tag[rq_tr];
@@ -1233,6 +1234,11 @@ module n64_top #(
 	wire         rsp_dm_new;
 	reg  [31:0]  n_rsp_ins, n_rsp_run, n_rsp_dma;
 	reg  [31:0]  n_dma_go, n_dma_rl, n_dma_wl;          // its DMAs started; lines read, lines written
+	reg  [31:0]  n_dma_rc, n_dma_wc;                    // clocks it spent reading RDRAM, writing it
+	// (debugging) clocks the running RSP spent in state dbg_sel[11:8]; with dbg_sel[12], in R_EX
+	// held by a hazard (dbg_sel[8]: 0 a vector op's result, 1 a vector load's)
+	reg  [31:0]  n_rsp_st;
+	wire [1:0]   rsp_dm_phase;
 	// ... by the task's type (1 graphics, 2 audio, other): starts, instructions, clocks running
 	wire [7:0]   rsp_type;
 	reg  [1:0]   cur_t;
@@ -1253,10 +1259,13 @@ module n64_top #(
 		end
 	end
 	always @(posedge clk) begin
-		if (cpu_rst) begin n_rsp_ins <= 0; n_rsp_run <= 0; n_rsp_dma <= 0; n_dma_go <= 0; n_dma_rl <= 0; n_dma_wl <= 0; end
+		if (cpu_rst) begin n_rsp_ins <= 0; n_rsp_run <= 0; n_rsp_dma <= 0; n_dma_go <= 0; n_dma_rl <= 0; n_dma_wl <= 0; n_dma_rc <= 0; n_dma_wc <= 0; n_rsp_st <= 0; end
 		else begin
 			if (rsp_tr) n_rsp_ins <= n_rsp_ins + 1;
 			if (rsp_dm_new) n_dma_go <= n_dma_go + 1;
+			if (rsp_dm_phase[0]) n_dma_rc <= n_dma_rc + 1;
+			if (!rsp_dbg[95] && (dbg_sel[12] ? rsp_dbg[94 - dbg_sel[8]] : rsp_dbg[83:80] == dbg_sel[11:8])) n_rsp_st <= n_rsp_st + 1;
+			if (rsp_dm_phase[1]) n_dma_wc <= n_dma_wc + 1;
 			if (x_ack) n_dma_rl <= n_dma_rl + 1;
 			if (st == S_RWRITE && d_ready) n_dma_wl <= n_dma_wl + 1;
 			if (!rsp_dbg[95]) n_rsp_run <= n_rsp_run + 1;
@@ -1267,10 +1276,14 @@ module n64_top #(
 	wire         x_flush = x_flush_p && !x_hold;
 	always @(posedge clk) begin
 		if (rst) x_flush_p <= 1'b0;
-		else if (rsp_dm_new) x_flush_p <= 1'b1;
+		// (not at every DMA's start: then every DMA paid a DDR3 round trip, even one going on
+		// where the last left off -- the display list, 64 bytes at a time. A line goes stale
+		// only when something writes it: every write to RDRAM, whoever's, is snooped)
+		else if (x_snoop_hit) x_flush_p <= 1'b1;
 		else if (x_flush) x_flush_p <= 1'b0;
 	end
 	n64_rdp_stream u_rsp_ra (.clk(clk), .rst(rst), .flush(x_flush), .hold(x_hold), .stop(x_flush_p),
+		.s_v(d_req && d_ready && d_we), .s_line(d_addr - RDRAM_LINE), .s_hit(x_snoop_hit),
 		.c_req(rd_rd_req && !rd_rd_ack && !x_flush_p), .c_line(rd_rd_line[19:0] - RDRAM_LINE[19:0]),
 		.c_ack(x_ack), .c_data(x_data),
 		.q_valid(x_qv), .q_line(x_ql), .q_ready(x_qr), .q_rs(x_rs), .q_rs_data(rs_data));
@@ -1283,7 +1296,7 @@ module n64_top #(
 		.c_reg_idx(sp_reg_wa[19:16] == 4'h8 ? 4'd8 : {1'b0, sp_reg_wa[4:2]}), .c_reg_wd(sp_reg_wv), .c_reg_q(sp_cq),
 		.x_req(xb_req), .x_dw(xb_dw), .x_ack(xb_ack), .x_q(xb_q),
 		.dp_we(dp_we_rsp), .dp_idx(dp_idx_rsp), .dp_wd(dp_wd_rsp), .dp_q(dp_flat[255 - 32 * dp_ridx_rsp -: 32]), .dp_ridx(dp_ridx_rsp),
-		.dm_rd_req(rd_rd_req), .dm_rd_ack(rd_rd_ack), .dm_rd_line(rd_rd_line), .dm_rd_data(rd_rd_data), .dm_new(rsp_dm_new),
+		.dm_rd_req(rd_rd_req), .dm_rd_ack(rd_rd_ack), .dm_rd_line(rd_rd_line), .dm_rd_data(rd_rd_data), .dm_new(rsp_dm_new), .dm_phase(rsp_dm_phase),
 		.dm_wr_req(rd_wr_req), .dm_wr_ack(rd_wr_ack), .dm_wr_line(rd_wr_line), .dm_wr_data(rd_wr_data), .dm_wr_mask(rd_wr_mask),
 		.irq_set(sp_irq_set), .irq_clr(sp_irq_clr), .halted_o(rsp_halted),
 		.sp_regs_flat(sp_regs_flat), .dbg(rsp_dbg), .dlog_idx(dbg_sel[15:8]), .dlog_q(rsp_dlog), .dlog_n(rsp_dlog_n),
@@ -1382,6 +1395,9 @@ module n64_top #(
 		6'd60: dbg_q <= retired;
 		6'd42: dbg_q <= n_ipw;
 		6'd46: dbg_q <= n_stall;
+		6'd49: dbg_q <= n_dma_rc;
+		6'd51: dbg_q <= n_rsp_st;
+		6'd50: dbg_q <= n_dma_wc;
 		6'd47: dbg_q <= n_ifill;
 		6'd48: dbg_q <= n_dfill;
 		6'd43: dbg_q <= n_dpw;

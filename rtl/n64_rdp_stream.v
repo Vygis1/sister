@@ -21,6 +21,11 @@ module n64_rdp_stream (
 	input  wire         flush,
 	input  wire         hold,
 	input  wire         stop,             // a flush is waiting: ask for nothing more (so hold can fall)
+	// a write to memory, taken this clock (snooping): s_hit if its line is one this unit holds
+	// or has asked for -- [b, n) -- so the caller can flush rather than hand out a stale line
+	input  wire         s_v,
+	input  wire [23:0]  s_line,
+	output wire         s_hit,
 	// the client
 	input  wire         c_req,
 	input  wire [19:0]  c_line,
@@ -40,6 +45,7 @@ module n64_rdp_stream (
 	assign q_valid = live && !stop && (n - b) < 20'd8;
 	assign q_line = n;
 	wire         in_hand = live && c_line >= b && c_line < r;
+	assign s_hit = live && s_v && s_line[23:20] == 4'd0 && s_line[19:0] >= b && s_line[19:0] < n;
 	// (in the run's window: asked for, or about to be -- a run just started has n == b, and
 	// was restarted again and again for its own first line)
 	wire         asked = live && c_line >= b && c_line < b + 20'd8;
