@@ -54,6 +54,15 @@ module fb_ddr #(
 	// capture control
 	input  wire        cap_go,
 	output reg         cap_ready,
+	// HDMI: capture every frame, and fetch the line the picture wants next into its
+	// line buffer (n64_vid with PS1=1): lf_words 128-bit words of line lf_want, written
+	// to {line[0], word}
+	input  wire        hdmi_on,
+	input  wire [8:0]  lf_want,
+	input  wire [6:0]  lf_words,
+	output reg         lf_we,
+	output reg  [7:0]  lf_addr,
+	output reg  [127:0] lf_data,
 
 	// host read-back: a word of the frame
 	input  wire [17:0] hr_addr,
@@ -118,6 +127,9 @@ module fb_ddr #(
 	wire [15:0] hr_line = hr_addr[17:2];
 	wire        hr_hit  = rc_v && (rc_line == {8'd0, hr_line});
 	reg         wr_busy;            // a write is presented to the arbiter
+	reg  [8:0]  lf_have, lf_line;   // the line in the buffer / being fetched
+	reg  [6:0]  lf_w;
+	reg         lf_on, lf_wait;     // fetching / a read of it is out
 
 	always @(posedge clk) begin
 		if (rst) begin
@@ -127,11 +139,18 @@ module fb_ddr #(
 			m_req <= 1'b0; m_we <= 1'b0; m_addr <= 24'd0; m_wdata <= 128'd0;
 			rs <= R_IDLE; rc_v <= 1'b0; rc_line <= 24'd0; rc_data <= 128'd0;
 			hr_ack <= 1'b0; hr_rdata <= 32'd0; wr_busy <= 1'b0;
+			lf_have <= 9'h1FF; lf_line <= 9'd0; lf_w <= 7'd0; lf_on <= 1'b0; lf_wait <= 1'b0; lf_we <= 1'b0;
 		end else begin
 			hr_ack <= 1'b0;
+			lf_we  <= 1'b0;
 
 			// --- capture control ------------------------------------------------
-			if (cap_go) begin armed <= 1'b1; cap_ready <= 1'b0; finishing <= 1'b0; end
+			// (HDMI: the next frame is armed as soon as this one is in)
+			if (cap_go || (hdmi_on && !armed && !capturing && !finishing)) begin armed <= 1'b1; cap_ready <= 1'b0; finishing <= 1'b0; end
+			// a line wanted that is not in the buffer: fetch it
+			if (hdmi_on && !lf_on && lf_want != lf_have && lf_want < 9'd240) begin
+				lf_on <= 1'b1; lf_line <= lf_want; lf_w <= 7'd0;
+			end
 			if (frame_start) begin
 				if (armed) begin capturing <= 1'b1; armed <= 1'b0; rc_v <= 1'b0; end
 				else if (capturing) begin capturing <= 1'b0; finishing <= 1'b1; end   // the frame is complete
@@ -176,10 +195,20 @@ module fb_ddr #(
 					m_addr  <= q_addr[q_rp[QB-1:0]];
 					m_wdata <= q_data[q_rp[QB-1:0]];
 					m_we <= 1'b1; m_req <= 1'b1; wr_busy <= 1'b1;
-				end else if (rs == R_IDLE && hr_req && !hr_hit && q_empty) begin
+				end else if (lf_on && !lf_wait && rs == R_IDLE) begin
+					// (before the host's reads: the picture cannot wait)
+					m_addr <= FB_LINE + lf_line * STRIDE + {17'd0, lf_w}; m_we <= 1'b0; m_req <= 1'b1;
+					lf_wait <= 1'b1;
+				end else if (rs == R_IDLE && hr_req && !hr_hit && q_empty && !lf_wait) begin
 					m_addr <= FB_LINE + {8'd0, hr_line}; m_we <= 1'b0; m_req <= 1'b1;
 					rs <= R_WAIT;
 				end
+			end
+			if (lf_wait && m_valid) begin
+				lf_we <= 1'b1; lf_addr <= {lf_line[0], lf_w}; lf_data <= m_rdata;
+				lf_wait <= 1'b0;
+				if (lf_w + 7'd1 >= lf_words) begin lf_on <= 1'b0; lf_have <= lf_line; end
+				else lf_w <= lf_w + 7'd1;
 			end
 
 			// --- host reads ----------------------------------------------------------
@@ -189,7 +218,7 @@ module fb_ddr #(
 					hr_ack <= 1'b1;
 					rs <= R_DONE;
 				end
-			R_WAIT: if (m_valid) begin
+			R_WAIT: if (m_valid && !lf_wait) begin
 					rc_data <= m_rdata; rc_line <= {8'd0, hr_line}; rc_v <= 1'b1;
 					hr_rdata <= m_rdata[hr_addr[1:0]*32 +: 32];
 					hr_ack <= 1'b1;

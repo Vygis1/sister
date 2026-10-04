@@ -45,7 +45,17 @@
 //   GPIO12 -> esp_sclk   U2 pin 7       GPIO11 -> esp_mosi   U2 pin 8
 //   GPIO13 <- esp_miso   U2 pin 9       GPIO10 -> esp_cs_n   U2 pin 10
 //   3V3 and GND          U2 pins 3, 61  -- NOT 63/64, those are VIN
+#if CONFIG_IDF_TARGET_ESP32S3
 static const int PIN_SCK = 12, PIN_MOSI = 11, PIN_MISO = 13, PIN_CS = 10;
+#else
+// The classic ESP32 (the LilyGO T8: ESP32-WROVER, Bluetooth Classic for the pads). Its
+// PSRAM has GPIO 16/17 and the board's microSD slot GPIO 12/14/27/33, so the FPGA goes on
+// VSPI's own pins:
+//   GPIO18 -> esp_sclk   U2 pin 7       GPIO23 -> esp_mosi   U2 pin 8
+//   GPIO19 <- esp_miso   U2 pin 9       GPIO5  -> esp_cs_n   U2 pin 10
+//   GPIO32 -> PROGRAM_B                 GND -> U2 pin 61
+static const int PIN_SCK = 18, PIN_MOSI = 23, PIN_MISO = 19, PIN_CS = 5;
+#endif
 
 // PROGRAM_B is soldered to the non-ground side of SW1, the core board's own
 // program button -- it is not on any header. Pulling it low and releasing it
@@ -58,15 +68,27 @@ static const int PIN_SCK = 12, PIN_MOSI = 11, PIN_MISO = 13, PIN_CS = 10;
 //
 // DONE is still -1. It is the FPGA_DONE net at the R1/D1 indicator LED; wiring
 // it replaces a fixed wait with actually knowing configuration finished.
+#if CONFIG_IDF_TARGET_ESP32S3
 static const int PIN_PROG_B = 14, PIN_DONE = -1;
+#else
+static const int PIN_PROG_B = 32, PIN_DONE = -1;
+#endif
 
 // The card, when there is one. Well clear of the flash and PSRAM pins.
+#if CONFIG_IDF_TARGET_ESP32S3
 static const int PIN_SD_SCK = 5, PIN_SD_MISO = 6, PIN_SD_MOSI = 4, PIN_SD_CS = 7;
+#else
+static const int PIN_SD_SCK = 27, PIN_SD_MISO = 12, PIN_SD_MOSI = 14, PIN_SD_CS = 33;   // the T8's own slot
+#endif
 
 static const char *AP_SSID = "console";
 static const char *AP_PASS = "cartridge";     // WPA2 wants eight characters
 
+#if CONFIG_IDF_TARGET_ESP32S3
 SPIClass fpgaBus(FSPI), sdBus(HSPI);
+#else
+SPIClass fpgaBus(VSPI), sdBus(HSPI);
+#endif
 FpgaLink fpga(fpgaBus, PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_PROG_B, PIN_DONE);
 WebServer server(80);
 Preferences prefs;
@@ -1128,6 +1150,7 @@ static void onUpload() {
 extern const char PAGE_HTML[] PROGMEM;
 
 #include "menu.h"
+#include "pads.h"
 
 void setup() {
   Serial.begin(115200);
@@ -1329,6 +1352,7 @@ void setup() {
   server.begin();
   Serial.println("web server up");
   menu::begin();
+  pads::begin();
 }
 
 // --- the same commands, over USB --------------------------------------------------
@@ -1394,12 +1418,14 @@ static void serialCommand(String c) {
     File f = haveCard ? SD.open(was.length() ? was : String("/discs/crash2.bin")) : File();
     if (!f) { Serial.println("  cannot open the image" + String(haveCard ? "" : " (the card did not mount)")); }
     else {
-      static uint8_t buf[8 * 2352];
+      // (on the heap: static, it was 18 kB of the RAM the Bluetooth stack needs)
+      static uint8_t *buf = (uint8_t *)malloc(8 * 2352);
+      static const size_t BUFSZ = 8 * 2352;
       uint32_t crc = 0xFFFFFFFF, got = 0, shorts = 0, fails = 0, t0 = millis();
       bool seekOk = f.seek((uint64_t)lba * 2352);
       uint32_t left = n * 2352;
       while (seekOk && left) {
-        uint32_t want = left > sizeof(buf) ? sizeof(buf) : left;
+        uint32_t want = left > BUFSZ ? BUFSZ : left;
         int r = f.read(buf, want);
         if (r <= 0) { if (++fails > 20) break; continue; }
         if ((uint32_t)r < want) shorts++;
@@ -1492,6 +1518,7 @@ static void serialCommand(String c) {
 
 void loop() {
   server.handleClient();
+  pads::poll();
 
   static String line;
   while (Serial.available()) {

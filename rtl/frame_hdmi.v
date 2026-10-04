@@ -11,6 +11,7 @@
 // FMT picks what a colour word is:
 //   1  Master System: 6 bits, --BBGGRR (two bits each)
 //   2  Mega Drive:    9 bits, BBBGGGRRR (three bits each)
+//   3  PlayStation:  15 bits, BBBBBGGGGGRRRRR (five bits each)
 //////////////////////////////////////////////////////////////////////////////////
 
 `default_nettype none
@@ -56,7 +57,10 @@ module frame_hdmi #(
 
 	// the colour word, to 24 bits (each field's bits repeated down to fill eight)
 	wire [23:0] c;
-	generate if (FMT == 2) begin : g_md
+	generate if (FMT == 3) begin : g_ps1
+		wire [4:0] r = q[4:0], g = q[9:5], b = q[14:10];
+		assign c = {r, r[4:2], g, g[4:2], b, b[4:2]};
+	end else if (FMT == 2) begin : g_md
 		wire [2:0] r = q[2:0], g = q[5:3], b = q[8:6];
 		assign c = {r, r, r[2:1], g, g, g[2:1], b, b, b[2:1]};
 	end else begin : g_sms

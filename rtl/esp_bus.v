@@ -36,7 +36,8 @@ module esp_bus #(
 	output reg         bus_we,
 	output reg         bus_re,
 	input  wire [31:0] bus_rdata,
-	input  wire        bus_ack
+	input  wire        bus_ack,
+	output reg  [7:0]  cmd               // this frame's command (another slave on the wires answers some)
 );
 	wire        frame_start, frame_end, rx_stb;
 	wire [7:0]  rx_byte;
@@ -51,7 +52,6 @@ module esp_bus #(
 	);
 	localparam [7:0] CMD_PING = 8'h01, CMD_STATUS = 8'h02, CMD_BUS_WRITE = 8'h40, CMD_BUS_READ = 8'h41;
 
-	reg [7:0]  cmd;
 	reg [15:0] rn;                       // bytes received this frame (saturating)
 	reg [31:0] sh;                       // bytes gathering
 	reg [31:0] rword;                    // the word read

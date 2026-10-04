@@ -16,7 +16,10 @@
 
 `default_nettype none
 
-module n64_vid (
+module n64_vid #(
+	parameter PS1 = 0                  // 1: the PlayStation's frame (fb_ddr): RGB555, R in the low
+	                                   // bits, pixel n of a word at bits 16n+15:16n
+)(
 	// the fetch side (clk)
 	input  wire         clk,
 	input  wire         wr_en,
@@ -54,7 +57,9 @@ module n64_vid (
 	// pixel n of the word: bytes 2n, 2n+1 (16-bit) or 4n..4n+3 (32-bit), big-endian
 	wire [15:0] p16 = {q[8 * {sel, 1'b0} +: 8], q[8 * {sel, 1'b1} +: 8]};
 	wire [31:0] p32 = {q[8 * {sel[1:0], 2'd0} +: 8], q[8 * {sel[1:0], 2'd1} +: 8], q[8 * {sel[1:0], 2'd2} +: 8], q[8 * {sel[1:0], 2'd3} +: 8]};
+	wire [15:0] ps = q[16 * sel +: 16];
 	assign rgb = !vis ? 24'd0
+	           : PS1 ? {ps[4:0], ps[4:2], ps[9:5], ps[9:7], ps[14:10], ps[14:12]}
 	           : b2 ? p32[31:8]
 	           : {p16[15:11], p16[15:13], p16[10:6], p16[10:8], p16[5:1], p16[5:3]};
 

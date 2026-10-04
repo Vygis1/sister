@@ -37,8 +37,10 @@ static const Machine MACHINES[] = {
   { "Master System", "sms", 'S', 256 * 1024 },
   { "Mega Drive",    "md",  'M', 4 * 1024 * 1024 },
   { "Nintendo 64",   "n64", '6', 16 * 1024 * 1024 },
+  { "PlayStation",   "ps1", 'P', 0xFFFFFFFF },          // a disc image: any size
 };
-static const int NMACH = 4;
+static const int NMACH = 5;
+static const uint32_t CARD_CTL = NES + 0x134;
 
 static int machineOfName(const String &n) {
   String l = n; l.toLowerCase();
@@ -57,10 +59,10 @@ struct Game { String path, name; int8_t m; uint32_t size; };
 
 // --- the screen: 40 x 30 cells -------------------------------------------------
 static const int COLS = 40, ROWS = 30;
-static uint32_t cells[COLS * ROWS];
+static uint32_t *cells = (uint32_t *)calloc(COLS * ROWS, 4);   // (heap: static RAM is short beside Bluetooth)
 enum { WHITE = 0, YELLOW = 1, GREY = 2, GREEN = 3 };
 
-static void clear() { for (auto &c : cells) c = ' '; }
+static void clear() { for (int i = 0; i < COLS * ROWS; i++) cells[i] = ' '; }
 static void put(int col, int row, const String &s, int colour = WHITE, bool hl = false, int width = -1) {
   if (row < 0 || row >= ROWS) return;
   int n = width < 0 ? s.length() : width;
@@ -96,6 +98,7 @@ static int machineOfFolder(String n) {
   if (n == "sms" || n == "mastersystem" || n == "master system") return 1;
   if (n == "md" || n == "genesis" || n == "megadrive" || n == "mega drive") return 2;
   if (n == "n64") return 3;
+  if (n == "ps1" || n == "psx" || n == "playstation" || n == "discs") return 4;
   return -1;
 }
 static String baseName(File &e) {
@@ -126,19 +129,30 @@ static void scan() {
   consoles.clear();
   if (!haveCard) return;
   tidy();
+  // every console folder in /roms, and /discs (the PlayStation's, where the disc
+  // feed has always taken its images from)
+  std::vector<String> dirs;
   File d = SD.open("/roms");
   while (d) {
     File e = d.openNextFile();
     if (!e) break;
-    int m = e.isDirectory() ? machineOfFolder(baseName(e)) : -1;
-    if (m >= 0) {
-      String dir = "/roms/" + baseName(e);
+    if (e.isDirectory() && machineOfFolder(baseName(e)) >= 0) dirs.push_back("/roms/" + baseName(e));
+    e.close();
+  }
+  if (d) d.close();
+  if (SD.exists("/discs")) dirs.push_back("/discs");
+  for (auto &dir : dirs) {
+    int m = machineOfFolder(dir.substring(dir.lastIndexOf('/') + 1));
+    {
       File g = SD.open(dir);
       while (g) {
         File f = g.openNextFile();
         if (!f) break;
         String n = baseName(f);
-        if (!f.isDirectory() && n.length() && n[0] != '.') {
+        String lo = n; lo.toLowerCase();
+        // (a PlayStation's are its raw 2352-byte .bin images; its BIOS is not a game)
+        bool ok = m != 4 || (lo.endsWith(".bin") && !lo.startsWith("scph"));
+        if (!f.isDirectory() && n.length() && n[0] != '.' && ok) {
           int dot = n.lastIndexOf('.');
           lists[m].push_back({ dir + "/" + n, dot > 0 ? n.substring(0, dot) : n, (int8_t)m, (uint32_t)f.size() });
         }
@@ -146,9 +160,7 @@ static void scan() {
       }
       if (g) g.close();
     }
-    e.close();
   }
-  if (d) d.close();
   for (int m = 0; m < NMACH; m++) {
     std::sort(lists[m].begin(), lists[m].end(), [](const Game &a, const Game &b) {
       String x = a.name, y = b.name; x.toLowerCase(); y.toLowerCase(); return x < y;
@@ -217,6 +229,12 @@ static uint8_t pad() {
     if (v & 16) o |= B_B;   if (v & 32) o |= B_SEL; if (v & 64) o |= B_A;   if (v & 128) o |= B_START;
     return o;
   }
+  if (c == 3) {          // the PlayStation's order (pc/server.py _PS1_BITS): cross 14, circle 13, select 0, start 3, up 4, right 5, down 6, left 7
+    uint8_t o = 0;
+    if (v & 0x4000) o |= B_A; if (v & 0x2000) o |= B_B; if (v & 0x0001) o |= B_SEL; if (v & 0x0008) o |= B_START;
+    if (v & 0x0010) o |= B_UP; if (v & 0x0040) o |= B_DOWN; if (v & 0x0080) o |= B_LEFT; if (v & 0x0020) o |= B_RIGHT;
+    return o;
+  }
   if (c == 4) {          // the N64's order (pc/server.py _N64_BITS): the pad's a 15, b 2, select 1, start 12, up 11, down 10, left 9, right 8
     uint8_t o = 0;
     if (v & 0x8000) o |= B_A; if (v & 0x0004) o |= B_B; if (v & 0x0002) o |= B_SEL; if (v & 0x1000) o |= B_START;
@@ -256,6 +274,24 @@ static bool streamBanks(File &f, uint32_t n, int swap = 0) {
   }
   fpga.busWrite(NES_FILL_END, 1);
   return true;
+}
+
+// The PlayStation's BIOS: SCPH*.BIN in /bios, /roms/ps1 or /roms.
+static String findBios() {
+  const char *dirs[] = { "/bios", "/roms/ps1", "/roms" };
+  for (const char *dn : dirs) {
+    File d = SD.open(dn);
+    while (d) {
+      File e = d.openNextFile();
+      if (!e) break;
+      String n = baseName(e), lo = n; lo.toLowerCase();
+      bool hit = !e.isDirectory() && lo.startsWith("scph") && e.size() == 512 * 1024;
+      e.close();
+      if (hit) { d.close(); return String(dn) + "/" + n; }
+    }
+    if (d) d.close();
+  }
+  return "";
 }
 
 static String load(const Game &g) {
@@ -298,6 +334,22 @@ static String load(const Game &g) {
     if (!streamBanks(f, size)) err = "the file ended early";
     fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);
+  } else if (g.m == 4) {                             // PlayStation: the BIOS, then the disc
+    f.close();
+    String bios = findBios();
+    if (!bios.length()) return "no PlayStation BIOS on the card (SCPH*.BIN in /roms or /bios)";
+    File b = SD.open(bios);
+    if (!b) return "cannot open " + bios;
+    fpga.busWrite(NES_CONSOLE, 3);
+    fpga.busWrite(CARD_CTL, 0);                      // (the fill is the BIOS's; no memory card yet)
+    message("loading", "the BIOS");
+    bool ok = streamBanks(b, b.size());
+    b.close();
+    if (!ok) return "the BIOS file ended early";
+    if (!discInsert(g.path)) return "cannot open the disc " + g.path;
+    fpga.busWrite(VID_CTRL, 3);
+    fpga.busWrite(NES_CTRL, 1);
+    return "";
   } else {                                           // N64: big-endian (.z64) whatever the file
     uint8_t m4[4]; f.read(m4, 4); f.seek(0);
     int swap = (m4[0] == 0x37 && m4[1] == 0x80) ? 1 : (m4[0] == 0x40 && m4[1] == 0x12) ? 2 : 0;
@@ -440,8 +492,10 @@ static void begin() {
     for (int tries = 0; tries < 2; tries++) {
       fpga.boot(true);
       uint32_t t0 = millis();
-      while (millis() - t0 < 4000 && fpga.status().core == 0) delay(100);
-      if (fpga.status().core != 0) break;
+      // (255 while it configures: wait for a real answer)
+      while (millis() - t0 < 5000) { uint8_t c = fpga.status().core; if (c != 0 && c != 255) break; delay(100); }
+      uint8_t c = fpga.status().core;
+      if (c != 0 && c != 255) break;
     }
     Serial.printf("menu: booted the slot's core (%u)\n", fpga.status().core);
   }

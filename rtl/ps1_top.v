@@ -212,6 +212,13 @@ module ps1_top (
 	output wire        fb_cap_ready,
 	output wire [9:0]  fb_width,
 	output wire [8:0]  fb_height,
+	// HDMI: the scanout runs every frame (each flip, for a double-buffered game) and
+	// its pixels -- RGB555, at half width in the wide modes -- go out here too
+	input  wire        hdmi_on,
+	input  wire [8:0]  lf_want,        // the line HDMI's line buffer wants next (n64_vid)
+	output wire        lf_we,
+	output wire [7:0]  lf_addr,
+	output wire [127:0] lf_data,
 	input  wire [17:0] fbr_addr,
 	input  wire        fbr_req,
 	output wire [31:0] fbr_rdata,
@@ -637,7 +644,7 @@ module ps1_top (
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
 		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_popword(dbg_gpu_popword), .dbg_disp(dbg_disp), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
-		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : fb_want), .disp_w(gpu_disp_w),
+		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w),
 		.scan_lines(fb_want && !fs_en),
 		.fl_valid(gfl_valid), .fl_data(gfl_data), .fl_x(gfl_x), .fl_y(gfl_y)
 	);
@@ -673,7 +680,9 @@ module ps1_top (
 		.cap_go(fb_cap_go), .cap_ready(fb_cap_ready),
 		.hr_addr(fbr_addr), .hr_req(fbr_req), .hr_rdata(fbr_rdata), .hr_ack(fbr_ack),
 		.m_addr(fb_m_addr), .m_req(fb_m_req), .m_we(fb_m_we), .m_wdata(fb_m_wdata),
-		.m_ready(fb_m_ready), .m_rdata(fb_m_rdata), .m_valid(fb_m_valid)
+		.m_ready(fb_m_ready), .m_rdata(fb_m_rdata), .m_valid(fb_m_valid),
+		.hdmi_on(hdmi_on), .lf_want(lf_want), .lf_words(fb_width[9:3] + {6'd0, fb_width[2:0] != 3'd0}),
+		.lf_we(lf_we), .lf_addr(lf_addr), .lf_data(lf_data)
 	);
 	// Wide modes are captured at half width: the scanout emits every other
 	// pixel, so a 512-wide display is 256 columns and 640 is 320. Reporting 320

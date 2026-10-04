@@ -159,7 +159,7 @@ module eth_top #(
 	// the HDMI clocks, from the memory's MMCM (below)
 	wire         vid_pclk, vid_pclk5, vid_locked;
 	wire         pclk_raw_w, pclk5_raw_w, hlocked_w;
-	wire [15:0]  aud_s;  wire aud_tog;
+	wire [15:0]  aud_s, aud_r;  wire aud_tog;
 	wire [9:0]   vid_x, vid_y;
 	wire         vid_req;
 	wire [23:0]  vid_rgb;
@@ -262,12 +262,12 @@ module eth_top #(
 	BUFG bufgpx  (.I(pclk_raw_w),  .O(vid_pclk));
 	BUFG bufgpx5 (.I(pclk5_raw_w), .O(vid_pclk5));
 	assign vid_locked = hlocked_w;
-	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1)) u_hdmi (
+	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .FS441(CORE_PS1 != 0)) u_hdmi (
 		.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0),
 		.ext_pclk(vid_pclk), .ext_pclk5(vid_pclk5), .ext_locked(vid_locked),
 		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(),
 		.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
-		.sym_0(), .sym_1(), .sym_2(), .aud_l(aud_s), .aud_r(aud_s), .aud_tog(aud_tog)
+		.sym_0(), .sym_1(), .sym_2(), .aud_l(aud_s), .aud_r(aud_r), .aud_tog(aud_tog)
 	);
 
 	// --- the MDIO bus, and who owns it ----------------------------------------
@@ -289,21 +289,18 @@ module eth_top #(
 	assign eth_mdio = mdio_oe ? mdio_out : 1'bz;
 
 	// --- the ESP32: a second master on the bus ------------------------------------
-	// Except in the PlayStation image, whose disc feed (cd_feed, in console_top) has
-	// the same four wires. A turn is one transfer: a master holds its request until
-	// the acknowledge, and the one that did not go last goes first when both ask.
-	wire rf_esp_miso, e_miso;
-	generate if (!CORE_PS1) begin : g_espbus
-		esp_bus #(.CORE_ID(CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
-			.clk(refclk), .rst(rst),
-			.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(e_miso), .spi_cs_n(esp_cs_n),
-			.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
-			.bus_rdata(bus_rdata), .bus_ack(e_ack));
-		assign esp_miso = e_miso;
-	end else begin : g_espbus
-		assign e_addr = 32'd0; assign e_wdata = 32'd0; assign e_we = 1'b0; assign e_re = 1'b0;
-		assign esp_miso = rf_esp_miso;
-	end endgenerate
+	// A turn is one transfer: a master holds its request until the acknowledge, and
+	// the one that did not go last goes first when both ask. In the PlayStation image
+	// the disc feed (cd_feed, in console_top) listens on the same four wires: both
+	// take every frame, and the command byte says which one answers (0x3x the drive,
+	// everything else this). Byte 0 out is the signature from both alike.
+	wire rf_esp_miso, e_miso; wire [7:0] e_cmd;
+	esp_bus #(.CORE_ID(CORE_PS1 ? 8'h50 : CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
+		.clk(refclk), .rst(rst),
+		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(e_miso), .spi_cs_n(esp_cs_n),
+		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
+		.bus_rdata(bus_rdata), .bus_ack(e_ack), .cmd(e_cmd));
+	assign esp_miso = (CORE_PS1 && e_cmd[7:4] == 4'h3) ? rf_esp_miso : e_miso;
 	wire [31:0] bus_addr, bus_wdata;
 	wire        bus_we, bus_re;
 	bus_arb u_arb (.clk(refclk), .rst(rst),
@@ -334,7 +331,7 @@ module eth_top #(
 		.stream_ready(stream_ready), .stream_done_tog(stream_done_tog),
 		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(stream_fvalid), .stream_frd(stream_frd),
 		.pclk(vid_pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb),
-		.aud_s(aud_s), .aud_tog(aud_tog)
+		.aud_s(aud_s), .aud_r(aud_r), .aud_tog(aud_tog)
 	);
 
 	// --- activity LED --------------------------------------------------------

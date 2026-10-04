@@ -100,7 +100,8 @@ module regfile #(
 	input  wire        vid_req,
 	output wire [23:0] vid_rgb,
 	// the console's sound for HDMI: 48 kHz, signed, a toggle per sample
-	output reg  [15:0] aud_s,
+	output reg  [15:0] aud_s,           // (left, or both)
+	output reg  [15:0] aud_r,           // right
 	output reg         aud_tog
 );
 
@@ -217,6 +218,8 @@ module regfile #(
 
 	wire [31:0] abuf_rdata;
 	wire [15:0] console_audio;
+	wire [31:0] ps1_audio_lr;
+	wire        ps1_audio_lr_we;
 	// For HDMI: the console's sound is UNSIGNED, and not centred -- the NES mixer's silence
 	// is 0 and its loudest 65000 (apu_mix.v). Low-passed at about 15.5 kHz -- y += (x - y)
 	// / 512 at 50 MHz, 8 fraction bits --, its DC taken away by a second, slow average
@@ -236,13 +239,21 @@ module regfile #(
 	wire signed [25:0] aac = alp - $signed(adc[45:20]);
 	wire signed [53:0] amean = asum * $signed(18'sd64424);   // the mean, << 26
 	wire signed [16:0] ah  = amean[51:35];                   // (>> 26, then >> 9 as before)
-	initial begin alp = 26'sd0; adc = 46'sd0; a48 = 26'd0; asum = 37'sd0; aud_tog = 1'b0; aud_s = 16'd0; end
-	always @(posedge clk) begin
+	initial begin alp = 26'sd0; adc = 46'sd0; a48 = 26'd0; asum = 37'sd0; aud_tog = 1'b0; aud_s = 16'd0; aud_r = 16'd0; end
+	// The PlayStation, the N64 and the Mega Drive are stereo, and their samples come
+	// ready-made from their own sound hardware (the SPU at 44.1 kHz; the N64's AI at the
+	// game's rate; the Mega Drive's mixer, taken at 48 kHz in console_top): each one goes
+	// to hdmi_tx as it is, which takes the latest at its own rate.
+	localparam STEREO = (CORE_PS1 != 0) || (CORE_N64 != 0) || (CORE_MD != 0 && CORE_NES == 0 && CORE_SMS == 0);
+	always @(posedge clk) if (STEREO) begin
+		if (ps1_audio_lr_we) begin aud_s <= ps1_audio_lr[15:0]; aud_r <= ps1_audio_lr[31:16]; aud_tog <= ~aud_tog; end
+	end else begin
 		alp <= alp + (($signed({2'b00, console_audio, 8'd0}) - alp) >>> 9);
 		adc <= adc + {{20{alp[25]}}, alp} - {{20{adc[45]}}, adc[45:20]};
 		if (a48 + 26'd48_000 >= 26'd50_000_000) begin
 			a48 <= a48 + 26'd48_000 - 26'd50_000_000;
 			aud_s <= (ah > 17'sd32767) ? 16'h7FFF : (ah < -17'sd32768) ? 16'h8000 : ah[15:0];
+			aud_r <= (ah > 17'sd32767) ? 16'h7FFF : (ah < -17'sd32768) ? 16'h8000 : ah[15:0];
 			aud_tog <= ~aud_tog;
 			asum <= {{11{aac[25]}}, aac};
 		end else begin
@@ -250,8 +261,6 @@ module regfile #(
 			asum <= asum + {{11{aac[25]}}, aac};
 		end
 	end
-	wire [31:0] ps1_audio_lr;
-	wire        ps1_audio_lr_we;
 
 	// NOT IN A PLAYSTATION OR N64 IMAGE: the PlayStation has its own SPU (ps1_spu.v),
 	// which is stereo at 44.1 kHz and gets its own ring (ps1_aring.v) at the same

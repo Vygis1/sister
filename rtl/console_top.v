@@ -749,8 +749,8 @@ module console_top #(
 	end endgenerate
 
 	// --- the picture for HDMI: the running core's ----------------------------------------
-	wire [23:0] n64_vid_rgb, nes_vid_rgb, sms_vid_rgb, md_vid_rgb;
-	assign vid_rgb = n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : sms_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : 24'd0;
+	wire [23:0] n64_vid_rgb, nes_vid_rgb, sms_vid_rgb, md_vid_rgb, ps1_vid_rgb;
+	assign vid_rgb = n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : sms_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : ps1_sel ? ps1_vid_rgb : 24'd0;
 
 	// --- the NES ---------------------------------------------------------------
 	wire [8:0] nes_px, nes_py;
@@ -1094,6 +1094,7 @@ module console_top #(
 
 	// --- the PlayStation ----------------------------------------------------------
 	generate if (CORE_PS1) begin : g_ps1
+		wire ps1_lf_we; wire [7:0] ps1_lf_addr; wire [127:0] ps1_lf_data; wire [8:0] ps1_lf_want;
 		ps1_top u_ps1 (
 			.clk(clk), .rst(rst),
 			// The CPU runs when the PlayStation is selected AND the host has
@@ -1124,6 +1125,7 @@ module console_top #(
 			.hr_go(hr_go), .hr_line(hr_line), .hr_done(hr_done), .hr_data(hr_data),
 			.dbg_node_v(ps1_node_v), .dbg_node_addr(ps1_node_addr), .dbg_node_hdr(ps1_node_hdr),
 			.fb_cap_go(fb_cap_go), .fb_cap_ready(fb_cap_ready), .fb_width(fb_width), .fb_height(fb_height),
+			.hdmi_on(1'b1), .lf_want(ps1_lf_want), .lf_we(ps1_lf_we), .lf_addr(ps1_lf_addr), .lf_data(ps1_lf_data),
 			.fbr_addr(from_ddr ? sfa[17:0] : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
 			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
 			.spu_out(audio_lr), .spu_out_we(audio_lr_we),
@@ -1135,8 +1137,22 @@ module console_top #(
 			.xa_lba(xa_lba), .xa_count(xa_count), .xa_pop(xa_pop),
 			.xa_we(xa_we), .xa_wdata(wdata), .xa_level(xa_level), .xa_gen(xa_gen), .xa_filt(xa_filt)
 		);
+		// HDMI: the frame fb_ddr keeps in DDR3 (captured every frame), a line at a time
+		// into a two-line buffer, doubled -- block RAM is the PlayStation's scarcest thing
+		n64_vid #(.PS1(1)) u_hdmi (.clk(clk), .wr_en(ps1_lf_we), .wr_addr(ps1_lf_addr), .wr_data(ps1_lf_data), .want(ps1_lf_want),
+			.width({2'd0, fb_width}), .bpp32(1'b0), .on(1'b1),
+			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(ps1_vid_rgb));
 	end else begin : g_ps1
-		if (!CORE_N64) begin : g_no_lr      // the N64 drives it when it is the core
+		assign ps1_vid_rgb = 24'd0;
+		if (!CORE_N64 && CORE_MD && !CORE_NES && !CORE_SMS) begin : g_md_lr
+			// the Mega Drive's two channels, for HDMI's stereo: 48000 times a second
+			reg [25:0] lr_div = 26'd0; reg lr_we = 1'b0;
+			always @(posedge clk) begin
+				lr_we <= lr_div + 26'd48_000 >= 26'd50_000_000;
+				lr_div <= (lr_div + 26'd48_000 >= 26'd50_000_000) ? lr_div + 26'd48_000 - 26'd50_000_000 : lr_div + 26'd48_000;
+			end
+			assign audio_lr = {md_audio_r, md_audio_l}; assign audio_lr_we = lr_we;
+		end else if (!CORE_N64) begin : g_no_lr      // the N64 drives it when it is the core
 			assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
 		end
 		assign ps1_ev_data = 32'd0; assign ps1_ev_wp = 6'd0;

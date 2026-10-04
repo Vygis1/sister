@@ -47,7 +47,8 @@ module hdmi_tx #(
 	parameter EXT_CLK = 0,               // 1: the clocks come in (ext_*), from an MMCM already there
 	parameter AUDIO = 1,                 // 1: HDMI with audio; 0: DVI
 	parameter NULLPK = 0,                // (bring-up) 1: every packet a null packet
-	parameter PKMASK = 4'b1111           // (bring-up) packets sent: [0] audio, [1] ACR, [2] AVI, [3] Audio InfoFrame
+	parameter PKMASK = 4'b1111,          // (bring-up) packets sent: [0] audio, [1] ACR, [2] AVI, [3] Audio InfoFrame
+	parameter FS441 = 0                  // 1: 44.1 kHz audio (the PlayStation's), else 48 kHz
 )(
 	input  wire        clk50,
 	input  wire        rst,
@@ -147,13 +148,16 @@ module hdmi_tx #(
 	// rate instead, on a clock that drifts against this one, over- or under-runs the queue
 	// every few seconds: a click each time.
 	reg [2:0] at;  reg [15:0] ql [0:7], qr [0:7];  reg [2:0] qw, qrd;  reg [3:0] qn;
-	reg [15:0] hl, hr;  reg [14:0] a48;  reg a_new;
-	initial begin hl = 16'd0; hr = 16'd0; a48 = 15'd0; a_new = 1'b0; end
+	// (44.1 kHz: 441 a time against 250000 -- 25 MHz / 44100 -- as the ACR says: N 7056,
+	// CTS 31250, exact at 25 MHz)
+	localparam [17:0] A_ADD = FS441 ? 18'd441 : 18'd48, A_TOP = FS441 ? 18'd250000 : 18'd25000;
+	reg [15:0] hl, hr;  reg [17:0] a48;  reg a_new;
+	initial begin hl = 16'd0; hr = 16'd0; a48 = 18'd0; a_new = 1'b0; end
 	always @(posedge pclk) begin
 		at <= {at[1:0], aud_tog};
 		if (at[2] != at[1]) begin hl <= aud_l; hr <= aud_r; end
-		a_new <= a48 + 15'd48 >= 15'd25000;
-		a48 <= (a48 + 15'd48 >= 15'd25000) ? a48 + 15'd48 - 15'd25000 : a48 + 15'd48;
+		a_new <= a48 + A_ADD >= A_TOP;
+		a48 <= (a48 + A_ADD >= A_TOP) ? a48 + A_ADD - A_TOP : a48 + A_ADD;
 	end
 
 	// --- packets ---------------------------------------------------------------------------
@@ -188,7 +192,7 @@ module hdmi_tx #(
 	// a channel's status bit for frame f: copying permitted (2), channel 1 left / 2 right (20/21),
 	// 48 kHz (25), 16-bit words (33)
 	function cst; input [7:0] f; input right; begin
-		cst = f == 8'd2 || f == 8'd25 || f == 8'd33 || f == (right ? 8'd21 : 8'd20);
+		cst = f == 8'd2 || (f == 8'd25 && !FS441) || f == 8'd33 || f == (right ? 8'd21 : 8'd20);   // (44.1 kHz: bits 24-27 0000)
 	end endfunction
 	// the frame count of each sample in the packet, and its channel-status bits (as wires:
 	// a function call inside another's arguments simulates wrong in xsim)
@@ -213,7 +217,8 @@ module hdmi_tx #(
 	// Audio InfoFrame {.., PB1 2 channels, checksum}; or clock regeneration {N, CTS, 0}
 	wire [55:0] avi = {8'h00, 8'h00, 8'h01, 8'h00, 8'h18, 8'h00, 8'h56};   // (PB0: 0x82+0x02+0x0D+0x18+0x01 = 0xAA, -0xAA = 0x56)
 	wire [55:0] aif = {8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h01, 8'h70};
-	wire [55:0] acr = {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00};
+	wire [55:0] acr = FS441 ? {8'h90, 8'h1B, 8'h00, 8'h12, 8'h7A, 8'h00, 8'h00}    // N 7056, CTS 31250
+	                        : {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00};   // N 6144, CTS 25000
 	// (clock regeneration on every 32nd line, ~980 a second as hdl-util/hdmi sends it -- not
 	// every line; a null packet on the others)
 	wire        acr_line = vd[4:0] == 5'd2;
