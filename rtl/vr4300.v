@@ -111,7 +111,10 @@ module vr4300 #(
 	output reg  [4:0]  tr_rd,
 	output reg  [63:0] tr_val,
 	output reg         tr_exc,       // an exception was taken in E this clock
-	output reg  [4:0]  tr_code
+	output reg  [4:0]  tr_code,
+	// (debugging) why the pipeline waits this clock: {TLB for F, the fetch, W's data, E's TLB op,
+	// the FPU busy, an FP register in flight, HI/LO or the multiplier, a load in M}
+	output wire [7:0]  dbg_stall
 );
 
 	// =============================================================================
@@ -279,6 +282,7 @@ module vr4300 #(
 	wire stall_e   = e_hazard || e_muldiv_wait || e_fp_wait || e_fpu_wait || e_tlb_wait;   // E holds; a bubble goes to M
 	wire adv       = !stall_all && !stall_e;             // F, D, E advance
 	wire adv_mw    = !stall_all;                         // M, W advance
+	assign dbg_stall = {f_tlb_wait, d_wait, w_wait, e_tlb_wait, e_fpu_wait, e_fp_wait, e_muldiv_wait, e_hazard};
 
 	// =============================================================================
 	// D: decode what arrived, read the registers

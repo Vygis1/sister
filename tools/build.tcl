@@ -159,6 +159,7 @@ if {$crit > 0} {
 
 write_checkpoint -force $outdir/post_synth.dcp
 report_utilization -file $outdir/post_synth_util.rpt
+report_utilization -hierarchical -hierarchical_depth 5 -file $outdir/post_synth_hier.rpt
 
 set luts [llength [get_cells -hier -filter {PRIMITIVE_GROUP == LUT} -quiet]]
 set ffs  [llength [get_cells -hier -filter {PRIMITIVE_GROUP == FLOP_LATCH} -quiet]]

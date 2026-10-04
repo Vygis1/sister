@@ -237,15 +237,15 @@ module n64_rdp2 #(
 	assign rq_line = hs ? hs_line : RDRAM_LINE + (own_now ? {4'd0, s_ql} : r_rq_line);
 	wire         rdy_r = rq_ready && hs && !hs_own;
 	wire         rdy_s = rq_ready && hs && hs_own;
-	reg  [7:0]   tagq;  reg [2:0] tq_w, tq_r;   // the owners of the reads taken, oldest at tq_r
+	reg          tagq [0:15];  reg [3:0] tq_w, tq_r;   // the owners of the reads taken, oldest at tq_r
 	wire         rs_s = rs_valid && tagq[tq_r];
 	wire         rs_r = rs_valid && !tagq[tq_r];
 	always @(posedge clk) begin
-		if (rst) begin hs <= 1'b0; tq_w <= 3'd0; tq_r <= 3'd0; end
+		if (rst) begin hs <= 1'b0; tq_w <= 4'd0; tq_r <= 4'd0; end
 		else begin
 			if (!hs && (r_rq_valid || s_qv)) begin hs <= 1'b1; hs_own <= own_now; hs_line <= rq_line; end
-			if (hs && rq_ready) begin hs <= 1'b0; tagq[tq_w] <= hs_own; tq_w <= tq_w + 3'd1; end
-			if (rs_valid) tq_r <= tq_r + 3'd1;
+			if (hs && rq_ready) begin hs <= 1'b0; tagq[tq_w] <= hs_own; tq_w <= tq_w + 4'd1; end
+			if (rs_valid) tq_r <= tq_r + 4'd1;
 		end
 	end
 	reg          tmem_mem;                 // (or a TMEM load's)

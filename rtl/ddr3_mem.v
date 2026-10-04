@@ -116,7 +116,9 @@ module ddr3_mem #(
 	wire [127:0] rs_dout;
 	reg          rs_pop;
 
-	async_fifo #(.WIDTH(128), .AW(3)) u_rspq (
+	// (32 deep: a client may keep a dozen reads out -- the queue's full flag lags the reader by
+	// the crossing, and a line arriving while it shows full is lost)
+	async_fifo #(.WIDTH(128), .AW(5)) u_rspq (
 		.wr_clk(ui_clk), .wr_rst(ui_rst), .wr_en(app_rd_data_valid && !rs_full),
 		.wr_data(app_rd_data), .wr_full(rs_full),
 		.rd_clk(clk),    .rd_rst(rst),    .rd_en(rs_pop),

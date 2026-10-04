@@ -475,113 +475,113 @@ module n64_rsp #(
 	reg  [7:0]   n_vcoh, n_vcol, n_vcch, n_vccl, n_vce;
 	reg          vout_we;
 	integer n;
-	reg  signed [49:0] acc, sum, prd;
-	reg  [15:0] av, bv;
-	reg  signed [16:0] as, bs;
-	reg  [16:0] usum;
-	reg  [31:0] r32;
-	reg         c;
+	// Per lane, as the RSP is built: ONE accumulator adder (base + addend, both chosen by the
+	// opcode) with one clamp of its result, and ONE 18-bit adder for the add/compare/select
+	// family. (Each opcode with its own 50-bit adder and clamp was a dozen of them a lane:
+	// 11,000 LUTs, most of the RSP.)
+	reg  [47:0] acc48, mb, ma, ms, prd;
+	reg  [15:0] h, m, l, av, bv, nb, satS, satL, satQ;
+	reg  [30:0] q31;
+	reg  [31:0] hm;
+	reg  [17:0] sx, sy, s18;
+	reg         ssg, ssub, scin, eq, lt, c;
 	always @(*) begin
 		vout = 128'd0; vout_we = 1'b1;
 		n_vcoh = vcoh; n_vcol = vcol; n_vcch = vcch; n_vccl = vccl; n_vce = vce;
 		for (n = 0; n < 8; n = n + 1) begin
 			n_acch[n] = acch[n]; n_accm[n] = accm[n]; n_accl[n] = accl[n];
-			av = el(q_vs, n); bv = el(q_vte, n);
-			as = {av[15], av}; bs = {bv[15], bv};
-			acc = {{2{acch[n][15]}}, acch[n], accm[n], accl[n]};   // signed 48 in 50
-			prd = {{16{prod[n][33]}}, prod[n]};
-			sum = 50'sd0; r32 = 32'd0; c = 1'b0; usum = 17'd0;
+			av = q_vs[127 - 16 * n -: 16]; bv = q_vte[127 - 16 * n -: 16];
+			acc48 = {acch[n], accm[n], accl[n]};
+			prd = {{14{prod[n][33]}}, prod[n]};
+			hm = {acch[n], accm[n]};
+			// --- the accumulator's adder ----------------------------------------------------
 			case (q_fn)
-			6'h00, 6'h01, 6'h08, 6'h09: begin                                        // VMULF VMULU VMACF VMACU
-				sum = (q_fn[3] ? acc : 50'sd0) + prd * 2 + (q_fn[3] ? 50'sd0 : 50'sd32768);
-				{n_acch[n], n_accm[n], n_accl[n]} = sum[47:0];
-				if (!q_fn[0]) vout[127 - 16 * n -: 16] = sat(n_acch[n], n_accm[n], n_accl[n], 1'b1, 16'h8000, 16'h7FFF);
-				else if (q_fn[3])                                                    // VMACU
-					vout[127 - 16 * n -: 16] = n_acch[n][15] ? 16'h0000 : (n_acch[n] != 16'd0 || n_accm[n][15]) ? 16'hFFFF : n_accm[n];
-				else                                                                  // VMULU
-					vout[127 - 16 * n -: 16] = n_acch[n][15] ? 16'h0000 : (n_acch[n][15] ^ n_accm[n][15]) ? 16'hFFFF : n_accm[n];
-			end
+			6'h00, 6'h01: begin mb = 48'h8000; ma = prd << 1; end                   // VMULF VMULU (rounding)
+			6'h08, 6'h09: begin mb = acc48;    ma = prd << 1; end                   // VMACF VMACU
 			6'h02, 6'h0A: begin                                                      // VRNDP VRNDN
-				sum = q_vs_n[0] ? ({{18{bv[15]}}, bv, 16'd0}) : {{34{bv[15]}}, bv};
-				if ((q_fn == 6'h0A && acc < 0) || (q_fn == 6'h02 && acc >= 0)) acc = acc + sum;
-				acc = {{2{acc[47]}}, acc[47:0]};
-				{n_acch[n], n_accm[n], n_accl[n]} = acc[47:0];
-				vout[127 - 16 * n -: 16] = sclamp16(acc >>> 16);
+				mb = acc48;
+				ma = ((q_fn == 6'h0A && acch[n][15]) || (q_fn == 6'h02 && !acch[n][15]))
+				   ? (q_vs_n[0] ? {{16{bv[15]}}, bv, 16'd0} : {{32{bv[15]}}, bv}) : 48'd0;
 			end
-			6'h03: begin                                                             // VMULQ
-				sum = prd + ((prd < 0) ? 50'sd31 : 50'sd0);
-				n_acch[n] = sum[31:16]; n_accm[n] = sum[15:0]; n_accl[n] = 16'd0;
-				vout[127 - 16 * n -: 16] = sclamp16(sum >>> 1) & 16'hFFF0;
+			6'h03: begin mb = prod[n][33] ? {32'd31, 16'd0} : 48'd0; ma = prd << 16; end   // VMULQ: (prd, +31 if negative) << 16
+			6'h0B: begin                                                             // VMACQ: {h,m} +- 32
+				mb = acc48;
+				ma = (hm[31] && !hm[5]) ? {32'd32, 16'd0}
+				   : (!hm[31] && hm[31:6] != 26'd0 && !hm[5]) ? {32'hFFFF_FFE0, 16'd0} : 48'd0;
 			end
-			6'h0B: begin                                                             // VMACQ
-				sum = {{18{acch[n][15]}}, acch[n], accm[n]};
-				if (sum < 0 && !sum[5]) sum = sum + 50'sd32;
-				else if (sum >= 32 && !sum[5]) sum = sum - 50'sd32;
-				n_acch[n] = sum[31:16]; n_accm[n] = sum[15:0];
-				vout[127 - 16 * n -: 16] = sclamp16(sum >>> 1) & 16'hFFF0;
+			6'h04: begin mb = 48'd0; ma = {32'd0, prod[n][31:16]}; end              // VMUDL
+			6'h0C: begin mb = acc48; ma = {32'd0, prod[n][31:16]}; end              // VMADL
+			6'h05, 6'h06: begin mb = 48'd0; ma = prd; end                            // VMUDM VMUDN
+			6'h0D, 6'h0E: begin mb = acc48; ma = prd; end                            // VMADM VMADN
+			6'h07: begin mb = 48'd0; ma = prd << 16; end                             // VMUDH
+			6'h0F: begin mb = acc48; ma = prd << 16; end                             // VMADH
+			default: begin mb = acc48; ma = 48'd0; end
+			endcase
+			ms = mb + ma;
+			h = ms[47:32]; m = ms[31:16]; l = ms[15:0];
+			satS = h[15] ? ((h != 16'hFFFF || !m[15]) ? 16'h8000 : m) : ((h != 16'h0000 || m[15]) ? 16'h7FFF : m);
+			satL = h[15] ? ((h != 16'hFFFF || !m[15]) ? 16'h0000 : l) : ((h != 16'h0000 || m[15]) ? 16'hFFFF : l);
+			q31 = ms[47:17];
+			satQ = ((q31[30:15] == 16'h0000 || q31[30:15] == 16'hFFFF) ? q31[15:0] : q31[30] ? 16'h8000 : 16'h7FFF) & 16'hFFF0;
+			// --- the 18-bit adder: a +- b + carry, signed or not ----------------------------
+			case (q_fn)
+			6'h10: begin ssg = 1'b1; ssub = 1'b0; scin = vcol[n]; end               // VADD
+			6'h11: begin ssg = 1'b1; ssub = 1'b1; scin = !vcol[n]; end              // VSUB: a - b - carry
+			6'h14: begin ssg = 1'b0; ssub = 1'b0; scin = 1'b0; end                  // VADDC
+			6'h15: begin ssg = 1'b0; ssub = 1'b1; scin = 1'b1; end                  // VSUBC
+			6'h20, 6'h21, 6'h22, 6'h23: begin ssg = 1'b1; ssub = 1'b1; scin = 1'b1; end   // the compares: a - b
+			6'h24: begin ssg = 1'b0; ssub = !vcol[n]; scin = !vcol[n]; end          // VCL: a + b, or a >= b
+			6'h25: begin ssg = 1'b0; ssub = !(av[15] ^ bv[15]); scin = !(av[15] ^ bv[15]); end   // VCH
+			6'h26: begin ssg = 1'b1; ssub = !(av[15] ^ bv[15]); scin = 1'b1; end    // VCR: a + b + 1, or a - b
+			default: begin ssg = 1'b0; ssub = 1'b0; scin = 1'b0; end                // VZERO and the rest: a + b
+			endcase
+			sx = ssg ? {{2{av[15]}}, av} : {2'b00, av};
+			sy = ssg ? {{2{bv[15]}}, bv} : {2'b00, bv};
+			s18 = sx + (ssub ? ~sy : sy) + {17'd0, scin};
+			nb = 16'd0 - bv;
+			eq = av == bv;
+			lt = s18[17];                                                            // (signed, for the compares)
+			c = 1'b0;
+			case (q_fn)
+			6'h00, 6'h02, 6'h07, 6'h08, 6'h0A, 6'h0D, 6'h0F: begin                   // a signed clamp of {h,m}
+				{n_acch[n], n_accm[n], n_accl[n]} = ms;
+				vout[127 - 16 * n -: 16] = satS;
 			end
-			6'h04: begin                                                             // VMUDL
-				{n_acch[n], n_accm[n], n_accl[n]} = {32'd0, prod[n][31:16]};
-				vout[127 - 16 * n -: 16] = prod[n][31:16];
-			end
-			6'h05, 6'h06: begin                                                      // VMUDM VMUDN
-				{n_acch[n], n_accm[n], n_accl[n]} = prd[47:0];
-				vout[127 - 16 * n -: 16] = (q_fn == 6'h05) ? prd[31:16] : prd[15:0];
-			end
-			6'h07: begin                                                             // VMUDH
-				sum = prd <<< 16;
-				{n_acch[n], n_accm[n], n_accl[n]} = sum[47:0];
-				vout[127 - 16 * n -: 16] = sat(n_acch[n], n_accm[n], n_accl[n], 1'b1, 16'h8000, 16'h7FFF);
-			end
-			6'h0C: begin                                                             // VMADL
-				sum = acc + {34'd0, prod[n][31:16]};
-				{n_acch[n], n_accm[n], n_accl[n]} = sum[47:0];
-				vout[127 - 16 * n -: 16] = sat(n_acch[n], n_accm[n], n_accl[n], 1'b0, 16'h0000, 16'hFFFF);
-			end
-			6'h0D, 6'h0E: begin                                                      // VMADM VMADN
-				sum = acc + prd;
-				{n_acch[n], n_accm[n], n_accl[n]} = sum[47:0];
-				vout[127 - 16 * n -: 16] = (q_fn == 6'h0D) ? sat(n_acch[n], n_accm[n], n_accl[n], 1'b1, 16'h8000, 16'h7FFF)
-				                                          : sat(n_acch[n], n_accm[n], n_accl[n], 1'b0, 16'h0000, 16'hFFFF);
-			end
-			6'h0F: begin                                                             // VMADH
-				r32 = {acch[n], accm[n]} + prod[n][31:0];
-				n_acch[n] = r32[31:16]; n_accm[n] = r32[15:0];
-				vout[127 - 16 * n -: 16] = sat(n_acch[n], n_accm[n], accl[n], 1'b1, 16'h8000, 16'h7FFF);
-			end
+			6'h01: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = h[15] ? 16'h0000 : m[15] ? 16'hFFFF : m; end
+			6'h09: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = h[15] ? 16'h0000 : (h != 16'd0 || m[15]) ? 16'hFFFF : m; end
+			6'h0C, 6'h0E: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = satL; end
+			6'h04, 6'h06: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = l; end
+			6'h05: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = m; end
+			6'h03, 6'h0B: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = satQ; end
 			6'h10, 6'h11: begin                                                      // VADD VSUB
-				sum = (q_fn == 6'h10) ? ({{34{av[15]}}, av} + {{34{bv[15]}}, bv} + vcol[n])
-				                      : ({{34{av[15]}}, av} - {{34{bv[15]}}, bv} - vcol[n]);
-				n_accl[n] = sum[15:0];
-				vout[127 - 16 * n -: 16] = sclamp16(sum);
+				n_accl[n] = s18[15:0];
+				vout[127 - 16 * n -: 16] = (s18[17:15] == 3'b000 || s18[17:15] == 3'b111) ? s18[15:0] : s18[17] ? 16'h8000 : 16'h7FFF;
 				n_vcol[n] = 1'b0; n_vcoh[n] = 1'b0;
 			end
 			6'h13: begin                                                             // VABS
 				if (av[15]) begin
 					if (bv == 16'h8000) begin n_accl[n] = 16'h8000; vout[127 - 16 * n -: 16] = 16'h7FFF; end
-					else begin n_accl[n] = -bv; vout[127 - 16 * n -: 16] = -bv; end
+					else begin n_accl[n] = nb; vout[127 - 16 * n -: 16] = nb; end
 				end else if (av != 16'd0) begin n_accl[n] = bv; vout[127 - 16 * n -: 16] = bv; end
 				else begin n_accl[n] = 16'd0; vout[127 - 16 * n -: 16] = 16'd0; end
 			end
 			6'h14: begin                                                             // VADDC
-				usum = {1'b0, av} + {1'b0, bv};
-				n_accl[n] = usum[15:0]; n_vcol[n] = usum[16]; n_vcoh[n] = 1'b0;
-				vout[127 - 16 * n -: 16] = usum[15:0];
+				n_accl[n] = s18[15:0]; n_vcol[n] = s18[16]; n_vcoh[n] = 1'b0;
+				vout[127 - 16 * n -: 16] = s18[15:0];
 			end
 			6'h15: begin                                                             // VSUBC
-				usum = {1'b0, av} - {1'b0, bv};
-				n_accl[n] = usum[15:0]; n_vcol[n] = usum[16]; n_vcoh[n] = usum != 17'd0;
-				vout[127 - 16 * n -: 16] = usum[15:0];
+				n_accl[n] = s18[15:0]; n_vcol[n] = s18[16]; n_vcoh[n] = s18[16:0] != 17'd0;
+				vout[127 - 16 * n -: 16] = s18[15:0];
 			end
 			6'h1D: begin                                                             // VSAR
 				vout[127 - 16 * n -: 16] = (q_e == 4'd8) ? acch[n] : (q_e == 4'd9) ? accm[n] : (q_e == 4'd10) ? accl[n] : 16'd0;
 			end
 			6'h20, 6'h21, 6'h22, 6'h23: begin                                        // VLT VEQ VNE VGE
 				case (q_fn[1:0])
-				2'd0: c = ($signed(av) < $signed(bv)) || (av == bv && vcol[n] && vcoh[n]);
-				2'd1: c = !vcoh[n] && av == bv;
-				2'd2: c = av != bv || vcoh[n];
-				default: c = ($signed(av) > $signed(bv)) || (av == bv && (!vcol[n] || !vcoh[n]));
+				2'd0: c = lt || (eq && vcol[n] && vcoh[n]);
+				2'd1: c = !vcoh[n] && eq;
+				2'd2: c = !eq || vcoh[n];
+				default: c = (!lt && !eq) || (eq && (!vcol[n] || !vcoh[n]));
 				endcase
 				n_vccl[n] = c; n_accl[n] = c ? av : bv;
 				n_vcch[n] = 1'b0; n_vcol[n] = 1'b0; n_vcoh[n] = 1'b0;
@@ -589,16 +589,15 @@ module n64_rsp #(
 			end
 			6'h24: begin                                                             // VCL
 				if (vcol[n]) begin
-					if (vcoh[n]) n_accl[n] = vccl[n] ? -bv : av;
+					if (vcoh[n]) n_accl[n] = vccl[n] ? nb : av;
 					else begin
-						usum = {1'b0, av} + {1'b0, bv};
-						c = vce[n] ? (usum[15:0] == 16'd0 || !usum[16]) : (usum[15:0] == 16'd0 && !usum[16]);
-						n_vccl[n] = c; n_accl[n] = c ? -bv : av;
+						c = vce[n] ? (s18[15:0] == 16'd0 || !s18[16]) : (s18[15:0] == 16'd0 && !s18[16]);
+						n_vccl[n] = c; n_accl[n] = c ? nb : av;
 					end
 				end else begin
 					if (vcoh[n]) n_accl[n] = vcch[n] ? bv : av;
 					else begin
-						c = av >= bv;
+						c = !s18[17];                                               // a >= b, unsigned
 						n_vcch[n] = c; n_accl[n] = c ? bv : av;
 					end
 				end
@@ -607,18 +606,16 @@ module n64_rsp #(
 			end
 			6'h25: begin                                                             // VCH
 				if (av[15] ^ bv[15]) begin
-					usum = {1'b0, av} + {1'b0, bv};                                 // (the low 16 bits are the s16 sum)
-					c = $signed(usum[15:0]) <= 0;
-					n_accl[n] = c ? -bv : av;
+					c = s18[15] || s18[15:0] == 16'd0;                              // the s16 sum <= 0
+					n_accl[n] = c ? nb : av;
 					n_vccl[n] = c; n_vcch[n] = bv[15]; n_vcol[n] = 1'b1;
-					n_vcoh[n] = usum[15:0] != 16'd0 && av != (bv ^ 16'hFFFF);
-					n_vce[n] = usum[15:0] == 16'hFFFF;
+					n_vcoh[n] = s18[15:0] != 16'd0 && av != (bv ^ 16'hFFFF);
+					n_vce[n] = s18[15:0] == 16'hFFFF;
 				end else begin
-					usum = {1'b0, av} - {1'b0, bv};
-					c = $signed(usum[15:0]) >= 0;
+					c = !s18[15];                                                   // the s16 difference >= 0
 					n_accl[n] = c ? bv : av;
 					n_vccl[n] = bv[15]; n_vcch[n] = c; n_vcol[n] = 1'b0;
-					n_vcoh[n] = usum[15:0] != 16'd0 && av != (bv ^ 16'hFFFF);
+					n_vcoh[n] = s18[15:0] != 16'd0 && av != (bv ^ 16'hFFFF);
 					n_vce[n] = 1'b0;
 				end
 				vout[127 - 16 * n -: 16] = n_accl[n];
@@ -626,11 +623,11 @@ module n64_rsp #(
 			6'h26: begin                                                             // VCR
 				if (av[15] ^ bv[15]) begin
 					n_vcch[n] = bv[15];
-					c = $signed({av[15], av}) + $signed({bv[15], bv}) + 18'sd1 <= 0;
+					c = s18[17] || s18 == 18'd0;                                    // a + b + 1 <= 0
 					n_vccl[n] = c; n_accl[n] = c ? ~bv : av;
 				end else begin
 					n_vccl[n] = bv[15];
-					c = $signed({av[15], av}) - $signed({bv[15], bv}) >= 0;
+					c = !s18[17];                                                   // a - b >= 0
 					n_vcch[n] = c; n_accl[n] = c ? bv : av;
 				end
 				n_vcol[n] = 1'b0; n_vcoh[n] = 1'b0; n_vce[n] = 1'b0;
@@ -653,7 +650,7 @@ module n64_rsp #(
 			end
 			6'h37, 6'h3F: vout_we = 1'b0;                                           // VNOP VNULL
 			default: begin                                                           // VZERO
-				n_accl[n] = av + bv;
+				n_accl[n] = s18[15:0];
 				vout[127 - 16 * n -: 16] = 16'd0;
 			end
 			endcase
@@ -782,7 +779,7 @@ module n64_rsp #(
 			end else if (dma_full && !frozen && !(cwe && (ci == 3'd2 || ci == 3'd3))) begin
 				// (the log stops at the first read from below 0x1000, which no microcode does:
 				// what went before it is what is wanted)
-				if (!dlog_stop) begin
+				if (DEBUG_FREEZE && !dlog_stop) begin
 					dlog[dlog_n[7:0]] <= {halted, p_rd, p_region, 5'd0, p_dram, ipc, p_pbus, p_count, p_skip, p_len, 8'd0};
 					dlog_n <= dlog_n + 32'd1;
 				end
