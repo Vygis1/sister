@@ -28,6 +28,15 @@ module tb_n64_top;
 	reg  [15:0]  joy1 = 16'd0, stick1 = 16'd0;    // controller 1 (the bench's +JOY/+STICK can set them)
 	wire         fbr_ack; wire [31:0] fbr_rdata; wire [17:0] fb_words; wire [15:0] fb_wpr; wire fb_halve;
 
+	// HDMI: a pixel clock of its own (unrelated to clk, as on the board) and the transmitter
+	// asking for pixels; the video lines fetched are counted
+	reg pclk = 0; always #20 pclk = ~pclk;
+	wire [9:0] vid_x, vid_y; wire vid_req; wire [23:0] vid_rgb;
+	hdmi_tx #(.SIM(1)) u_hdmi (.clk50(1'b0), .rst(1'b0), .sim_pclk(pclk), .ext_pclk(1'b0), .ext_pclk5(1'b0), .ext_locked(1'b0),
+		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(), .tmds_p(), .tmds_n(), .tmds_clk_p(), .tmds_clk_n(),
+		.sym_0(), .sym_1(), .sym_2());
+	integer vid_lines = 0;
+	always @(posedge clk) if (dut.st == 5'd20 && dut.d_valid && dut.head_one) vid_lines = vid_lines + 1;
 	n64_top #(.HALFLINE(11'd1587)) dut (
 		.clk(clk), .rst(rst), .run(run),
 		.host_windex(host_windex), .host_we(host_we), .host_wdata(host_wdata), .fill_end(fill_end),
@@ -40,7 +49,8 @@ module tb_n64_top;
 		.fb_words(fb_words), .fb_wpr(fb_wpr), .fb_halve(fb_halve),
 		.stick1(stick1), .pad_present(4'b0001), .eep_size(2'd0),
 		.eh_we(1'b0), .eh_addr(11'd0), .eh_wdata(8'd0), .eh_rdata(),
-		.audio_lr(), .audio_lr_we()
+		.audio_lr(), .audio_lr_we(),
+		.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb)
 	);
 
 	// --- DDR3: RDRAM (8 MB) at line 0, the cartridge (16 MB) at line 0x100000 -----------
@@ -175,7 +185,7 @@ module tb_n64_top;
 		$display("tb_n64_top: pipelined reads out %0d, arbiter %0d; RSP read-ahead live %0d b %05x n %05x r %05x drop %0d; DMA busy %0d, RSP halted %0d, rd_rd req %0d ack %0d, flush_p %0d",
 		         dut.rdp_out, dut.st, dut.u_rsp_ra.live, dut.u_rsp_ra.b, dut.u_rsp_ra.n, dut.u_rsp_ra.r, dut.u_rsp_ra.drop,
 		         dut.u_rsp.dma_busy, dut.u_rsp.halted, dut.rd_rd_req, dut.rd_rd_ack, dut.x_flush_p);
-		$display("tb_n64_top: %0d clocks since run, %0d frames", ($time - t_run) / 20, frames);
+		$display("tb_n64_top: %0d clocks since run, %0d frames; %0d video lines fetched", ($time - t_run) / 20, frames, vid_lines);
 		// the frame stream's port: words of the picture, against RDRAM at the VI's origin
 		sbad = 0;
 		for (i = 0; i < (fb_words != 0 ? 3000 : 0); i = i + 1) begin

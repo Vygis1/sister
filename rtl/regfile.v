@@ -92,7 +92,13 @@ module regfile #(
 	input  wire        esp_sclk,
 	input  wire        esp_mosi,
 	output wire        esp_miso,
-	input  wire        esp_cs_n
+	input  wire        esp_cs_n,
+	// the picture for HDMI: hdmi_tx asks for a pixel a clock ahead, in its pixel clock
+	input  wire        pclk,
+	input  wire [9:0]  vid_x,
+	input  wire [9:0]  vid_y,
+	input  wire        vid_req,
+	output wire [23:0] vid_rgb
 );
 
 	localparam PAGE_SYS  = 16'h0000;
@@ -326,6 +332,7 @@ module regfile #(
 		.stream_rowlen(stream_rowlen), .stream_stride(stream_stride),
 		.stream_ready(stream_ready), .stream_done_tog(stream_done_tog),
 		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(stream_fvalid), .stream_frd(stream_frd),
+		.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb),
 		.prog_we(new_req && bus_we && in_prg),
 		.char_we(new_req && bus_we && in_chr),
 		.wdata(bus_wdata),

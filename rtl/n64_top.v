@@ -92,6 +92,12 @@ module n64_top #(
 	input  wire [18:0]  fbr_word,
 	output reg          fbr_ack,
 	output reg  [31:0]  fbr_rdata,
+	// the picture for HDMI (hdmi_tx asks for a pixel a clock ahead, in its pixel clock)
+	input  wire         pclk,
+	input  wire [9:0]   vid_x,
+	input  wire [9:0]   vid_y,
+	input  wire         vid_req,
+	output wire [23:0]  vid_rgb,
 	output wire [17:0]  fb_words,        // the frame, in words
 	output wire [15:0]  fb_wpr,          // a row, in words
 	output wire         fb_halve,        // too big for the stream: every other row is sent
@@ -455,10 +461,10 @@ module n64_top #(
 	localparam S_IDLE = 4'd0, S_FILL = 4'd1, S_WB = 4'd2, S_DREAD = 4'd3, S_DFILL = 4'd4,
 	           S_IREAD = 4'd5, S_IFILL0 = 4'd6, S_IFILL1 = 4'd7, S_HREAD = 4'd8,
 	           S_PREAD = 4'd9, S_PWRITE = 4'd10, S_FREAD = 4'd11, S_SREAD = 4'd12, S_SWRITE = 4'd13, S_AREAD = 4'd14,
-	           S_RREAD = 5'd15, S_RWRITE = 5'd16, S_CREAD = 5'd17, S_CWRITE = 5'd18, S_RQ = 5'd19;
+	           S_RREAD = 5'd15, S_RWRITE = 5'd16, S_CREAD = 5'd17, S_CWRITE = 5'd18, S_RQ = 5'd19, S_VREAD = 5'd20;
 	reg  [4:0]   st;
 	// the single read taken: its state requesting, the memory taking it
-	wire         one_take = d_req && d_ready && (st == S_DREAD || st == S_DFILL || st == S_IREAD || st == S_IFILL0 || st == S_IFILL1
+	wire         one_take = d_req && d_ready && (st == S_DREAD || st == S_DFILL || st == S_IREAD || st == S_IFILL0 || st == S_IFILL1 || st == S_VREAD
 	                     || st == S_HREAD || st == S_PREAD || st == S_FREAD || st == S_SREAD || st == S_AREAD || st == S_RREAD || st == S_CREAD);
 	// the host's fill: four words to a line. A finished line moves to its own
 	// buffer for the write, so the next line's first word can arrive while that
@@ -468,6 +474,21 @@ module n64_top #(
 	reg  [1:0]   fill_cnt;
 	reg          fill_pending;
 	reg          hr_pending;
+	// --- the picture for HDMI: VI's framebuffer lines into n64_vid's two-line buffer ---------
+	// When the pixel side wants a new source line, its DDR3 lines are read one at a time
+	// (S_VREAD) at VI_ORIGIN + line x stride; a line is up to 80 of them.
+	wire [8:0]   hv_want;
+	reg  [8:0]   hv_line;             // the line fetched last (or being fetched)
+	reg          hv_busy;             // fetching it
+	reg  [6:0]   hv_k, hv_n;          // the DDR3 line next / how many a source line has
+	reg  [23:0]  hv_base;             // its first byte in RDRAM
+	reg          hv_we;  reg [7:0] hv_wa;  reg [127:0] hv_wd;
+	wire         hv_bpp32 = vi[0][1:0] == 2'd3;
+	wire [13:0]  hv_stride = hv_bpp32 ? {vi[2][11:0], 2'b00} : {1'b0, vi[2][11:0], 1'b0};
+	wire         hv_go = hv_busy && hv_k != hv_n;
+	n64_vid u_vid (.clk(clk), .wr_en(hv_we), .wr_addr(hv_wa), .wr_data(hv_wd), .want(hv_want),
+		.width(vi[2][11:0]), .bpp32(hv_bpp32), .on(vi[0][1:0] != 2'd0),
+		.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb));
 	reg  [11:0]  sweep;               // while held: the caches are invalidated, a line a clock
 	reg  [2:0]   cop_k;               // a CACHE op by index: which of the lines (4 I, 8 D) it is on
 	wire         cop_idx;
@@ -514,6 +535,7 @@ module n64_top #(
 			fill_pending <= 1'b0; fill_cnt <= 2'd0; fill_buf <= 128'd0; fill_line <= 20'd0;
 			hr_pending <= 1'b0; hr_done <= 1'b0; sweep <= 12'd0; cop_k <= 3'd0;
 			fr_pending <= 1'b0; fr_v <= 1'b0; fbr_ack <= 1'b0;
+			hv_busy <= 1'b0; hv_line <= 9'h1FF; hv_we <= 1'b0; hv_k <= 7'd0; hv_n <= 7'd0;
 			pd_rd_ack <= 1'b0; pd_wr_ack <= 1'b0; sd_rd_ack <= 1'b0; sd_wr_ack <= 1'b0; si_we <= 1'b0;
 			ad_rd_ack <= 1'b0; ai_we <= 1'b0; rd_rd_ack <= 1'b0; rd_wr_ack <= 1'b0; cf_ack <= 1'b0; cw_ack <= 1'b0;
 			rq_ready <= 1'b0; rs_valid <= 1'b0; rdp_out <= 7'd0; x_qr <= 1'b0; x_rs <= 1'b0; rq_tw <= 4'd0; rq_tr <= 4'd0;
@@ -577,6 +599,15 @@ module n64_top #(
 			if (hr_go) begin hr_pending <= 1'b1; hr_done <= 1'b0; end
 			// the streamer's word: out of the line in hand, or the line fetched
 			fbr_ack <= 1'b0;
+			// the picture: a new source line wanted (none being fetched) -- where it is, how long
+			hv_we <= 1'b0;
+			if (!hv_busy && hv_want != hv_line) begin : hv_start
+				reg [14:0] bytes;
+				bytes = hv_bpp32 ? {1'b0, vi[2][11:0], 2'b00} : {2'b00, vi[2][11:0], 1'b0};
+				hv_line <= hv_want; hv_k <= 7'd0; hv_busy <= 1'b1;
+				hv_n <= (bytes + 15'd15 > 15'd1280) ? 7'd80 : bytes[10:4] + {6'd0, bytes[3:0] != 4'd0};
+				hv_base <= vi[1][23:0] + hv_want * hv_stride;
+			end else if (hv_busy && hv_k == hv_n && st != S_VREAD) hv_busy <= 1'b0;
 			if (fbr_req && !fbr_ack) begin
 				if (fr_v && fr_tag == fr_lidx) begin
 					fbr_rdata <= {fr_line[8 * {fr_byte[3:2], 2'd0} +: 8], fr_line[8 * {fr_byte[3:2], 2'd1} +: 8],
@@ -736,6 +767,10 @@ module n64_top #(
 					d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; i_for <= ipa;
 					if (ip_fill) begin d_addr <= line_of({ipa[31:5], 5'd0}); st <= S_IFILL0; if_b <= 1'b0; end
 					else begin d_addr <= line_of(ipa); st <= S_IREAD; end
+				end else if (hv_go && rd_ok) begin
+					// (the picture next: it has a deadline the others do not)
+					d_addr <= RDRAM_LINE + {4'd0, hv_base[22:4]} + {17'd0, hv_k}; d_we <= 1'b0; d_wmask <= 16'hFFFF;
+					d_req <= 1'b1; st <= S_VREAD;
 				end else if (pd_rd_req && !pd_rd_ack && rd_ok) begin
 					d_addr <= pd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_PREAD;
 				end else if (pd_wr_req && !pd_wr_ack) begin
@@ -794,7 +829,7 @@ module n64_top #(
 			S_WB: if (d_ready) begin
 				d_req <= 1'b0; wb_rp <= wb_rp + 3'd1; st <= S_IDLE;
 			end
-			S_DREAD, S_DFILL, S_IREAD, S_IFILL0, S_IFILL1, S_HREAD, S_PREAD, S_FREAD, S_SREAD, S_AREAD, S_RREAD, S_CREAD: begin
+			S_DREAD, S_DFILL, S_IREAD, S_IFILL0, S_IFILL1, S_HREAD, S_PREAD, S_FREAD, S_SREAD, S_AREAD, S_RREAD, S_CREAD, S_VREAD: begin
 				if (d_ready) d_req <= 1'b0;
 				// an I-cache line: the second half asked for the clock the first is taken (two
 				// round trips one after the other were 18% of the CPU's clocks)
@@ -834,6 +869,7 @@ module n64_top #(
 					S_AREAD: begin ad_rd_data <= d_rdata; ad_rd_ack <= 1'b1; end
 					S_RREAD: begin rd_rd_data <= d_rdata; rd_rd_ack <= 1'b1; end
 					S_CREAD: begin cf_data <= d_rdata; cf_ack <= 1'b1; end
+					S_VREAD: begin hv_we <= 1'b1; hv_wa <= {hv_line[0], hv_k}; hv_wd <= d_rdata; hv_k <= hv_k + 7'd1; end
 					// a frame line: in hand now
 					S_FREAD: begin fr_line <= d_rdata; fr_tag <= fr_for; fr_v <= 1'b1; fr_pending <= 1'b0; end
 					default: begin hr_data <= d_rdata; hr_done <= 1'b1; hr_pending <= 1'b0; end

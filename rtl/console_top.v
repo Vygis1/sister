@@ -156,7 +156,13 @@ module console_top #(
 	input  wire [17:0] fbr_addr,
 	input  wire        fbr_req,
 	output wire [31:0] fbr_rdata,
-	output wire        fbr_ack
+	output wire        fbr_ack,
+	// the picture for HDMI: hdmi_tx asks for a pixel a clock ahead, in its pixel clock
+	input  wire        pclk,
+	input  wire [9:0]  vid_x,
+	input  wire [9:0]  vid_y,
+	input  wire        vid_req,
+	output wire [23:0] vid_rgb
 );
 
 	// Which cores this bitstream actually contains. The host reads this rather
@@ -983,7 +989,8 @@ module console_top #(
 			// the picture: straight out of RDRAM, no capture step
 			.fbr_req(from_ddr && sfr), .fbr_word(sfa), .fbr_ack(fbr_ack_w), .fbr_rdata(fbr_rdata_w),   // all 19 bits
 			.fb_words(n64_fb_words), .fb_wpr(n64_fb_wpr), .fb_halve(n64_fb_halve),
-			.audio_lr(audio_lr), .audio_lr_we(audio_lr_we)
+			.audio_lr(audio_lr), .audio_lr_we(audio_lr_we),
+			.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb)
 		);
 		assign fb_cap_ready = 1'b1;
 	end else begin : g_n64
@@ -992,6 +999,7 @@ module console_top #(
 		assign n64_vi_yscale = 32'd0; assign n64_dbg_pc = 32'd0; assign n64_retired = 32'd0; assign n64_dbg_q = 32'd0;
 		assign n64_fb_words = 18'd0; assign n64_fb_wpr = 16'd0; assign n64_fb_halve = 1'b0;
 		assign n64_eh_rdata = 8'd0;
+		assign vid_rgb = 24'd0;              // (the other cores: not yet on HDMI)
 	end endgenerate
 
 	// The DDR3 port has exactly one driver: the Mega Drive when its cartridge is

@@ -51,6 +51,16 @@ module eth_top #(
 	output wire       esp_miso,
 	input  wire       esp_cs_n,
 
+	// --- HDMI, a bare connector breakout on header U4 pins 7-26 (boards/qmtech_a100t/
+	// HEADERS.md): TMDS single-ended (+ and - driven opposite), the shields, ground,
+	// CEC, DDC and hot-plug held low, the +5V pin held at 3.3 V
+	output wire [2:0] hdmi_d_p,
+	output wire [2:0] hdmi_d_n,
+	output wire       hdmi_ck_p,
+	output wire       hdmi_ck_n,
+	output wire [10:0] hdmi_lo,
+	output wire       hdmi_5v,
+
 	// --- DDR3, present only in a build that uses it ---------------------------
 	inout  wire [15:0] ddr3_dq,
 	inout  wire [1:0]  ddr3_dqs_p,
@@ -145,25 +155,47 @@ module eth_top #(
 	wire         d_ready, d_valid, d_calibrated;
 
 	localparam HAS_DDR3 = MD_DDR3 || CORE_PS1 || CORE_N64;
+	// the HDMI clocks, from the memory's MMCM (below)
+	wire         vid_pclk, vid_pclk5, vid_locked;
+	wire [9:0]   vid_x, vid_y;
+	wire         vid_req;
+	wire [23:0]  vid_rgb;
+	assign hdmi_lo = 11'd0;
+	assign hdmi_5v = 1'b1;
 	generate if (HAS_DDR3) begin : g_ddr3
 		// MIG wants 200 MHz for both its system clock and its IDELAY reference,
 		// and the board has a 50 MHz oscillator. One MMCM: 50 x 16 = 800 MHz in
 		// the VCO, divided by four.
-		wire mmcm_fb, clk200_raw, clk200, mmcm_locked;
+		// (and HDMI's: VCO 50 x 20 = 1000 MHz; /5 = 200 MHz for MIG, /40 = 25.000 MHz
+		// pixel clock -- 640x480's is 25.175, monitors take this -- /8 = 125 MHz, five
+		// times it for the serialisers, which must be exactly five times, one MMCM)
+		wire mmcm_fb, clk200_raw, clk200, mmcm_locked, pclk_raw, pclk5_raw;
 		MMCME2_BASE #(
 			.CLKIN1_PERIOD(20.0),          // 50 MHz
-			.CLKFBOUT_MULT_F(16.0),        // 800 MHz VCO
+			.CLKFBOUT_MULT_F(20.0),        // 1000 MHz VCO
 			.DIVCLK_DIVIDE(1),
-			.CLKOUT0_DIVIDE_F(4.0)         // 200 MHz
+			.CLKOUT0_DIVIDE_F(5.0),        // 200 MHz
+			.CLKOUT1_DIVIDE(40),           // 25 MHz
+			.CLKOUT2_DIVIDE(8)             // 125 MHz
 		) u_mmcm (
 			.CLKIN1(sys_clk), .CLKFBIN(mmcm_fb), .CLKFBOUT(mmcm_fb),
 			.CLKOUT0(clk200_raw), .LOCKED(mmcm_locked),
 			.RST(1'b0), .PWRDWN(1'b0),
-			.CLKOUT0B(), .CLKOUT1(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(),
+			.CLKOUT0B(), .CLKOUT1(pclk_raw), .CLKOUT1B(), .CLKOUT2(pclk5_raw), .CLKOUT2B(),
 			.CLKOUT3(), .CLKOUT3B(), .CLKOUT4(), .CLKOUT5(), .CLKOUT6(),
 			.CLKFBOUTB()
 		);
 		BUFG bufg200 (.I(clk200_raw), .O(clk200));
+		BUFG bufgpx  (.I(pclk_raw),   .O(vid_pclk));
+		BUFG bufgpx5 (.I(pclk5_raw),  .O(vid_pclk5));
+		assign vid_locked = mmcm_locked;
+		hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1)) u_hdmi (
+			.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0),
+			.ext_pclk(vid_pclk), .ext_pclk5(vid_pclk5), .ext_locked(vid_locked),
+			.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(),
+			.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
+			.sym_0(), .sym_1(), .sym_2()
+		);
 
 		wire        ui_clk, ui_rst, calib_done;
 		wire [27:0] app_addr;
@@ -223,6 +255,10 @@ module eth_top #(
 		assign ddr3_ck_p = 1'b0;  assign ddr3_ck_n = 1'b1;
 		assign ddr3_cke = 1'b0;
 		assign ddr3_dm = 2'd0;    assign ddr3_odt = 1'b0;
+		// (no MMCM, no HDMI)
+		assign vid_pclk = 1'b0; assign vid_pclk5 = 1'b0; assign vid_locked = 1'b0;
+		assign vid_x = 10'd0; assign vid_y = 10'd0; assign vid_req = 1'b0;
+		assign hdmi_d_p = 3'd0; assign hdmi_d_n = 3'd0; assign hdmi_ck_p = 1'b0; assign hdmi_ck_n = 1'b0;
 	end endgenerate
 
 	// --- the MDIO bus, and who owns it ----------------------------------------
@@ -259,7 +295,8 @@ module eth_top #(
 		.stream_en(stream_en), .stream_port(stream_port), .stream_base(stream_base), .stream_words(stream_words),
 		.stream_rowlen(stream_rowlen), .stream_stride(stream_stride),
 		.stream_ready(stream_ready), .stream_done_tog(stream_done_tog),
-		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(stream_fvalid), .stream_frd(stream_frd)
+		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(stream_fvalid), .stream_frd(stream_frd),
+		.pclk(vid_pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb)
 	);
 
 	// --- activity LED --------------------------------------------------------
