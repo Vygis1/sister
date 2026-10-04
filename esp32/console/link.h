@@ -26,6 +26,8 @@ enum : uint8_t {
   CMD_CD_STATUS    = 0x30,   // what sector the drive wants next, and how much room it has
   CMD_CD_SECTOR    = 0x31,   // 3 bytes of LBA, then the raw 2352-byte sector
   CMD_CD_DISC      = 0x32,   // 1 byte: 1 = a disc is in the drive, 0 = the tray is empty
+  CMD_BUS_WRITE    = 0x40,   // a console image's register bus: address, then words
+  CMD_BUS_READ     = 0x41,   // address, 4 bytes while it reads, the word
 };
 
 static const uint8_t CORE_PS1_ID = 0x50;   // 'P': the byte the PlayStation image answers as its core
@@ -226,6 +228,40 @@ public:
     spi_.endTransaction();
     xSemaphoreGive(lock_);
     return true;
+  }
+
+  // --- the console image's register bus (rtl/esp_bus.v) ------------------------
+  // The same bus the PC drives over Ethernet: cartridges, pads, the menu's text.
+  // A write frame carries any number of words to consecutive addresses; a read is
+  // one word, after four bytes in which the board fetches it.
+  void busWrite(uint32_t addr, const uint32_t *w, size_t n) {
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    spi_.beginTransaction(settings_);
+    digitalWrite(cs_, LOW);
+    spi_.transfer(CMD_BUS_WRITE);
+    spi_.transfer(addr >> 24); spi_.transfer(addr >> 16); spi_.transfer(addr >> 8); spi_.transfer(addr);
+    for (size_t i = 0; i < n; i++) {
+      spi_.transfer(w[i]); spi_.transfer(w[i] >> 8); spi_.transfer(w[i] >> 16); spi_.transfer(w[i] >> 24);
+    }
+    digitalWrite(cs_, HIGH);
+    spi_.endTransaction();
+    xSemaphoreGive(lock_);
+  }
+  void busWrite(uint32_t addr, uint32_t v) { busWrite(addr, &v, 1); }
+
+  uint32_t busRead(uint32_t addr) {
+    uint8_t r[4];
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    spi_.beginTransaction(settings_);
+    digitalWrite(cs_, LOW);
+    spi_.transfer(CMD_BUS_READ);
+    spi_.transfer(addr >> 24); spi_.transfer(addr >> 16); spi_.transfer(addr >> 8); spi_.transfer(addr);
+    for (int i = 0; i < 4; i++) spi_.transfer(0);
+    for (int i = 0; i < 4; i++) r[i] = spi_.transfer(0);
+    digitalWrite(cs_, HIGH);
+    spi_.endTransaction();
+    xSemaphoreGive(lock_);
+    return r[0] | (r[1] << 8) | (r[2] << 16) | ((uint32_t)r[3] << 24);
   }
 
   // No reply is possible: the chip stops being the thing that was listening.

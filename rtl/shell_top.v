@@ -104,7 +104,15 @@ module shell_top (
 	output wire       flash_mosi,     // R14  D00
 	input  wire       flash_miso,     // R15  D01
 	output wire       flash_wp_n,     // P14  D02, held high
-	output wire       flash_hold_n    // N14  D03, held high
+	output wire       flash_hold_n,   // N14  D03, held high
+
+	// HDMI (the breakout on U4, as eth_top): a picture while a core is installed
+	output wire [2:0] hdmi_d_p,
+	output wire [2:0] hdmi_d_n,
+	output wire       hdmi_ck_p,
+	output wire       hdmi_ck_n,
+	output wire [10:0] hdmi_lo,
+	output wire       hdmi_5v
 );
 
 	wire clk;
@@ -460,6 +468,29 @@ module shell_top (
 		.PACK(1'b0), .USRCCLKO(flash_sck), .USRCCLKTS(1'b0),
 		.USRDONEO(1'b1), .USRDONETS(1'b1)
 	);
+
+	// --- the picture -------------------------------------------------------------
+	// 640 x 480 from the board oscillator (VCO 1000 MHz: /40 25 MHz, /8 125 MHz, as
+	// eth_top), DVI (no sound); what the flash is doing, as text and a bar.
+	assign hdmi_lo = 11'd0;
+	assign hdmi_5v = 1'b1;
+	wire hfb, hp_raw, hp5_raw, hpclk, hpclk5, hlocked;
+	MMCME2_BASE #(.CLKIN1_PERIOD(20.0), .CLKFBOUT_MULT_F(20.0), .DIVCLK_DIVIDE(1),
+	              .CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8)) u_hmmcm (
+		.CLKIN1(sys_clk), .CLKFBIN(hfb), .CLKFBOUT(hfb), .CLKOUT0(hp_raw), .CLKOUT1(hp5_raw), .LOCKED(hlocked),
+		.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
+		.CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .CLKFBOUTB());
+	BUFG u_hb0 (.I(hp_raw), .O(hpclk));
+	BUFG u_hb1 (.I(hp5_raw), .O(hpclk5));
+	wire [9:0] hx, hy; wire [23:0] hrgb;
+	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .AUDIO(0)) u_hdmi (
+		.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0), .ext_pclk(hpclk), .ext_pclk5(hpclk5), .ext_locked(hlocked),
+		.pclk(), .x(hx), .y(hy), .req(), .rgb(hrgb), .frame_start(),
+		.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
+		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
+	shell_screen u_screen (.clk(clk), .rst(rst),
+		.op_start(fl_start), .op(fl_op), .offset(fl_offset), .boot_go(boot_go),
+		.pclk(hpclk), .x(hx), .y(hy), .rgb(hrgb));
 
 	// --- lights ----------------------------------------------------------------
 	// The heartbeat runs on the BOARD oscillator, not the PHY's, so that a dead

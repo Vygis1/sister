@@ -111,6 +111,7 @@ module regfile #(
 	localparam PAGE_ABUF = 16'h0004;
 	localparam PAGE_MDIO = 16'h0005;
 	localparam PAGE_VID  = 16'h0006;
+	localparam PAGE_OSD  = 16'h0007;        // the menu's text over the HDMI picture (osd.v)
 	localparam PAGE_NES  = 16'h0008;
 	// The cartridge is bigger than a 64 KB page, so it spans several: PRG covers
 	// 0x0009-0x000C and CHR 0x000D-0x000E. The page number becomes the top of
@@ -312,6 +313,7 @@ module regfile #(
 	end
 
 	wire [31:0] con_rdata;
+	wire [23:0] con_vid_rgb;               // the console's HDMI pixel, before the menu's text
 	wire in_prg = (page >= PAGE_PRG) && (page < PAGE_PRG + PRG_PAGES);
 	wire in_chr = (page >= PAGE_CHR) && (page < PAGE_CHR + CHR_PAGES);
 	wire [1:0] prg_pg = page[1:0] - PAGE_PRG[1:0];
@@ -372,7 +374,7 @@ module regfile #(
 		.stream_rowlen(stream_rowlen), .stream_stride(stream_stride),
 		.stream_ready(stream_ready), .stream_done_tog(stream_done_tog),
 		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(stream_fvalid), .stream_frd(stream_frd),
-		.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb),
+		.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(con_vid_rgb),
 		.prog_we(new_req && bus_we && in_prg),
 		.char_we(new_req && bus_we && in_chr),
 		.wdata(bus_wdata),
@@ -383,6 +385,15 @@ module regfile #(
 		.char_rdata(nes_chr_rdata),
 		.px_valid(nes_px_valid), .px_x(nes_px_x), .px_y(nes_px_y), .px_rgb(nes_px_rgb),
 		.fbr_addr(con_fb_addr), .fbr_req(con_fb_req), .fbr_rdata(con_fb_rdata), .fbr_ack(con_fb_ack)
+	);
+
+	// --- the menu's text, over the console's HDMI picture ------------------------
+	wire [31:0] osd_rdata; wire osd_err;
+	osd u_osd (
+		.clk(clk), .rst(rst),
+		.we(new_req && bus_we && (bus_addr[31:16] == PAGE_OSD)), .off(off), .wdata(bus_wdata),
+		.rdata(osd_rdata), .err(osd_err),
+		.pclk(pclk), .x(vid_x), .y(vid_y), .rgb_in(con_vid_rgb), .rgb(vid_rgb)
 	);
 
 	// --- scratch -------------------------------------------------------------
@@ -431,6 +442,7 @@ module regfile #(
 			16'h0004: if (req_we) bus_err = 2'd2; else bus_rdata = GATEWARE_VERSION;
 			16'h0008: bus_rdata = scratch;
 			16'h000C: if (req_we) bus_err = 2'd2; else bus_rdata = uptime_ms;
+			16'h0014: ;                       // REBOOT: 0xB0070000 restarts into the shell (eth_top's icap_reboot)
 			// MEM: whether this image has DDR3 in it, and whether the controller
 			// finished training. Without this a memory that never calibrates and
 			// a console that was never going to draw look identical from the
@@ -462,6 +474,7 @@ module regfile #(
 
 
 		PAGE_NES: bus_rdata = nes_ctrl_rdata;
+		PAGE_OSD: begin bus_rdata = osd_rdata; if (osd_err) bus_err = 2'd1; end
 		PAGE_CON: if (req_we) bus_err = 2'd2; else bus_rdata = con_rdata;
 
 		PAGE_MDIO: case (off)

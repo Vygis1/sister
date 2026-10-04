@@ -506,7 +506,7 @@ module console_top #(
 
 	// --- control registers ----------------------------------------------------
 	reg        run;
-	reg        cpu_halt;    // ctrl 0x04 bit 2: stop the processor where it stands
+	reg        cpu_halt;    // ctrl 0x04 bit 2: stop the processor where it stands (the PlayStation's; the NES's and Master System's whole machine)
 	reg        mirror_v;
 	reg [3:0]  mapper_id;
 	reg        chr_is_ram;      // the cartridge has tile RAM, not tile ROM
@@ -749,8 +749,8 @@ module console_top #(
 	end endgenerate
 
 	// --- the picture for HDMI: the running core's ----------------------------------------
-	wire [23:0] n64_vid_rgb, nes_vid_rgb;
-	assign vid_rgb = n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : 24'd0;
+	wire [23:0] n64_vid_rgb, nes_vid_rgb, sms_vid_rgb, md_vid_rgb;
+	assign vid_rgb = n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : sms_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : 24'd0;
 
 	// --- the NES ---------------------------------------------------------------
 	wire [8:0] nes_px, nes_py;
@@ -761,7 +761,7 @@ module console_top #(
 
 	generate if (CORE_NES) begin : g_nes
 		nes #(.PRG_AW(PROG_AW), .CHR_AW(CHAR_AW)) u_nes (
-			.clk(clk), .rst(nes_rst), .ce(ce),
+			.clk(clk), .rst(nes_rst), .ce(ce && !cpu_halt),        // (halt: the menu pauses the game)
 			.prg_addr(prog_addr), .prg_din(prog_din),
 			.chr_addr(char_addr), .chr_din(char_din),
 			.chr_dout(nes_chr_dout), .chr_we(nes_chr_we),
@@ -823,7 +823,7 @@ module console_top #(
 		);
 
 		sms #(.ROM_AW(PROG_AW)) u_sms (
-			.clk(clk), .rst(z80_rst || raw_z80), .ce(ce),
+			.clk(clk), .rst(z80_rst || raw_z80), .ce(ce && !cpu_halt),
 			.rom_addr(sms_rom_addr), .rom_data(prog_din),
 			.joy1(joy1[7:0]), .joy2(joy2[7:0]),
 			.px(sms_px), .py(sms_py), .pixel_en(sms_pixel_en),
@@ -831,7 +831,17 @@ module console_top #(
 			.audio(sms_audio),
 			.dbg_pc(sms_pc)
 		);
+		// HDMI: the picture at its own 6-bit colour, 256 across and as many lines as the
+		// last frame had (192, or 224 / 240 in the taller modes), doubled
+		reg [8:0] sms_h = 9'd192, sms_hmax = 9'd0;
+		always @(posedge clk)
+			if (sms_frame_start) begin sms_h <= (sms_hmax >= 9'd192 && sms_hmax <= 9'd240) ? sms_hmax : 9'd192; sms_hmax <= 9'd0; end
+			else if (sms_pixel_en && ce && sms_py + 9'd1 > sms_hmax && sms_py < 9'd240) sms_hmax <= sms_py + 9'd1;
+		frame_hdmi #(.FMT(1), .DW(6)) u_hdmi (.clk(clk), .we(sms_pixel_en && ce && !raw_z80), .wx(sms_px), .wy(sms_py), .wd(sms_color),
+			.w(9'd256), .h(sms_h),
+			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(sms_vid_rgb));
 	end else begin : g_sms
+		assign sms_vid_rgb = 24'd0;
 		assign bare_addr = 16'd0; assign bare_dout = 8'd0;
 		assign bare_we = 1'b0;    assign bare_io = 1'b0;
 		assign bare_pc = 16'd0;
@@ -956,17 +966,23 @@ module console_top #(
 		end
 		assign md_dbg_mem = {req_n, val_n};
 
+		wire [8:0] md_px_col; wire md_h40;
 		md_console u_md (
 			.clk(clk), .rst(md_rst),
 			.mem_addr(md_m_addr), .mem_req(md_m_req), .mem_ready(md_m_ready),
 			.mem_data(md_m_data), .mem_valid(md_m_valid),
 			.joy1(joy1[7:0]), .joy2(joy2[7:0]),
 			.px_valid(md_px_valid), .px_x(md_px_x), .px_y(md_px_y),
-			.px_rgb(md_px_rgb),
+			.px_rgb(md_px_rgb), .px_col(md_px_col), .h40(md_h40),
 			.audio_l(md_audio_l), .audio_r(md_audio_r),
 			.dbg_pc(md_dbg_pc)
 		);
+		// HDMI: the picture at its own 9-bit colour, 256 or 320 x 224, doubled
+		frame_hdmi #(.FMT(2), .DW(9)) u_hdmi (.clk(clk), .we(md_px_valid), .wx(md_px_x), .wy(md_px_y), .wd(md_px_col),
+			.w(md_h40 ? 9'd320 : 9'd256), .h(9'd224),
+			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(md_vid_rgb));
 	end else begin : g_md
+		assign md_vid_rgb = 24'd0;
 		// Tied off for the same reason the NES is: an undriven wire into the
 		// pixel mux is an X in simulation and an unpredictable constant on the
 		// board, neither of which announces itself.

@@ -52,6 +52,8 @@ module md_console (
 	output wire [8:0]  px_x,
 	output wire [8:0]  px_y,
 	output wire [7:0]  px_rgb,
+	output wire [8:0]  px_col,         // the same pixel's full colour word, BBBGGGRRR (for HDMI)
+	output wire        h40,            // 320 across (else 256)
 
 	// --- audio ------------------------------------------------------------------------
 	output wire signed [15:0] audio_l,
@@ -123,6 +125,8 @@ module md_console (
 	assign px_x     = vx[8:0];
 	assign px_y     = vy[8:0];
 	assign px_rgb   = (vx < active_w) ? {vcol[2:0], vcol[5:3], vcol[8:7]} : 8'h00;
+	assign px_col   = (vx < active_w) ? vcol : 9'd0;
+	assign h40      = md_h40;
 
 endmodule
 

@@ -684,6 +684,59 @@ static bool installFrom(Stream &src, uint32_t length) {
   return true;
 }
 
+// From the card, where the image can be read again: a 64 kB sector at a time --
+// erased, its 256 pages written, every one read back and compared with the file, and
+// the whole sector done again (up to three times) if any page is wrong. Seen on the
+// board: one page in ten thousand never programmed, or programmed with a few bits
+// wrong (some 0 -> 1, which a program cannot do: the bytes arrived wrong). Either way
+// a whole install used to fail its CRC at the end and leave the board in the shell
+// with no picture; now the bad sector is simply written again.
+static bool installCard(File &f) {
+  static uint8_t want[PAGE], got[PAGE];
+  uint32_t length = f.size();
+  if (length == 0 || length > SLOT_SIZE) {
+    job.error = "that image is " + String(length) + " bytes; the slot is 6 MB";
+    return false;
+  }
+  uint32_t pages = (length + PAGE - 1) / PAGE;
+  uint32_t sectors = (length + SECTOR - 1) / SECTOR, redone = 0;
+  const uint32_t per = SECTOR / PAGE;
+  job.stage = "writing"; job.total = pages; job.done = 0;
+  for (uint32_t sec = 0; sec < sectors; sec++) {
+    uint32_t p0 = sec * per, p1 = min(pages, p0 + per);
+    bool good = false;
+    for (int tries = 0; tries < 3 && !good; tries++) {
+      if (tries) redone++;
+      if (!fpga.eraseSector(sec * SECTOR) && !fpga.eraseSector(sec * SECTOR)) continue;
+      f.seek(p0 * PAGE);
+      for (uint32_t i = p0; i < p1; i++) {
+        size_t r = f.read(want, PAGE);
+        for (size_t k = r; k < PAGE; k++) want[k] = 0xFF;
+        fpga.writePage(i * PAGE, want, PAGE);
+      }
+      f.seek(p0 * PAGE);
+      good = true;
+      for (uint32_t i = p0; i < p1 && good; i++) {
+        size_t r = f.read(want, PAGE);
+        for (size_t k = r; k < PAGE; k++) want[k] = 0xFF;
+        if (!fpga.readPage(SLOT_BASE + i * PAGE, got) && !fpga.readPage(SLOT_BASE + i * PAGE, got)) good = false;
+        else if (memcmp(want, got, PAGE)) {
+          good = false;
+          Serial.printf("install: page %u wrong, sector %u again\n", i, sec);
+        }
+      }
+    }
+    if (!good) {
+      job.error = "sector " + String(sec) + " would not write right three times -- the core is NOT installed";
+      return false;
+    }
+    job.done = p1;
+  }
+  if (redone) Serial.printf("install: %u sector(s) written again\n", redone);
+  job.stage = "verified";
+  return true;
+}
+
 // --- the SD card --------------------------------------------------------------
 // Games live beside the cores. A console that can change which machine it is
 // but cannot hold a single cartridge is only half an appliance, and the card has
@@ -880,7 +933,11 @@ static void installTask(void *) {
   File f = SD.open("/cores/" + cardCore + ".bin");
   if (!f) job.error = "no such core on the card";
   else {
-    if (installFrom(f, f.size())) job.stage = "done";
+    if (installCard(f)) {
+      job.stage = "done";
+      // (what the slot holds, for the menu: it installs only when this differs)
+      prefs.begin("menu", false); prefs.putString("slot", cardCore); prefs.putUInt("size", f.size()); prefs.end();
+    }
     f.close();
   }
   job.busy = false;
@@ -907,6 +964,7 @@ static void apiInstallCard() {
 // PC and carrying it back -- which rather undoes the point of the thing being
 // standalone.
 static File    libFile;
+static uint32_t libBytes;               // this upload's own count (job.done is shared)
 static bool    libFailed;
 static String  libName;
 static String  libPath;
@@ -936,7 +994,7 @@ static void onLibraryUpload() {
     libFile = SD.open(libPath, FILE_WRITE);
     if (!libFile) { libFailed = true; job.error = "could not create " + libPath; }
     job.stage = libIsRom ? "saving the game to the card" : "saving to the card";
-    job.done = 0; job.total = 0;
+    job.done = 0; job.total = 0; libBytes = 0;
 
   } else if (u.status == UPLOAD_FILE_WRITE && !libFailed) {
     // A short write is not necessarily a failure. The card disappears into an
@@ -958,11 +1016,11 @@ static void onLibraryUpload() {
       SD.remove(libPath);
       return;
     }
-    job.done += u.currentSize;
+    job.done += u.currentSize; libBytes += u.currentSize;
     // Every 64 kB. FatFs keeps a sector buffer and a dirty FAT; left alone
     // across a megabyte of streaming those turn into one enormous flush at the
     // end, and the writes before it start failing short.
-    if ((job.done & 0xFFFF) < u.currentSize) libFile.flush();
+    if ((libBytes & 0xFFFF) < u.currentSize) libFile.flush();
 
   } else if (u.status == UPLOAD_FILE_END) {
     listsStale = true;                                   // a file came or went
@@ -973,9 +1031,9 @@ static void onLibraryUpload() {
       // A core that is short is a core that will not configure, and it looks
       // exactly like a good one in a directory listing. Delete it rather than
       // leave something installable that cannot work.
-      if (wrote != job.done) {
+      if (wrote != libBytes) {
         libFailed = true;
-        job.error = "wrote " + String(wrote) + " of " + String((uint32_t)job.done) +
+        job.error = "wrote " + String(wrote) + " of " + String(libBytes) +
                     " bytes - removed the partial file";
         SD.remove(libPath);
       }
@@ -1068,6 +1126,8 @@ static void onUpload() {
 }
 
 extern const char PAGE_HTML[] PROGMEM;
+
+#include "menu.h"
 
 void setup() {
   Serial.begin(115200);
@@ -1268,6 +1328,7 @@ void setup() {
             onUpload);
   server.begin();
   Serial.println("web server up");
+  menu::begin();
 }
 
 // --- the same commands, over USB --------------------------------------------------
@@ -1290,6 +1351,9 @@ void setup() {
 static void serialCommand(String c) {
   c.trim();
   if (c == "state") {
+    // (not while a core is being installed: a status frame in the middle of the
+    // flash traffic is the one thing seen to spoil an install's read-back)
+    if (job.busy) { Serial.println("  job: " + job.stage + " " + job.done + "/" + job.total); return; }
     Status st = fpga.status();
     Serial.println("  FPGA " + String(st.alive ? "answering" : "SILENT") +
                    ", protocol " + st.version + ", core " + st.core +
@@ -1352,6 +1416,26 @@ static void serialCommand(String c) {
       f.close();
     }
     if (was.length()) discInsert(was);
+  } else if (c.startsWith("verify ")) {
+    // verify <core>: every page of the slot against the card's file, and where they differ
+    String n = c.substring(7); n.trim();
+    File f = SD.open("/cores/" + n + ".bin");
+    if (!f) { Serial.println("  no such core on the card"); return; }
+    static uint8_t want[PAGE], got[PAGE];
+    uint32_t pages = (f.size() + PAGE - 1) / PAGE, bad = 0, bytes = 0, failed = 0;
+    for (uint32_t i = 0; i < pages; i++) {
+      size_t r = f.read(want, PAGE);
+      for (size_t k = r; k < PAGE; k++) want[k] = 0xFF;
+      if (!fpga.readPage(SLOT_BASE + i * PAGE, got)) { failed++; continue; }
+      int diff = 0, first = -1;
+      for (int k = 0; k < (int)PAGE; k++) if (want[k] != got[k]) { if (first < 0) first = k; diff++; }
+      if (diff) {
+        bad++; bytes += diff;
+        if (bad <= 12) Serial.printf("  page %u: %d bytes differ, first at %d: wrote %02X read %02X\n", i, diff, first, want[first], got[first]);
+      }
+    }
+    f.close();
+    Serial.printf("  %u pages, %u differ (%u bytes), %u reads failed\n", pages, bad, bytes, failed);
   } else if (c.startsWith("install ")) {
     if (job.busy)  { Serial.println("  already busy"); return; }
     if (!haveCard) { Serial.println("  no card"); return; }

@@ -103,8 +103,9 @@ module eth_top #(
 	assign led0 = hb[24];
 
 	// --- register bus --------------------------------------------------------
-	wire [31:0] bus_addr, bus_wdata, bus_rdata;
-	wire        bus_we, bus_re, bus_ack;
+	// net_core's bus (n_*) and the ESP32's (e_*), taking turns onto regfile's (bus_*)
+	wire [31:0] n_addr, n_wdata, e_addr, e_wdata, bus_rdata;
+	wire        n_we, n_re, e_we, e_re, bus_ack, n_ack, e_ack;
 	wire [1:0]  bus_err;
 	wire        rx_frame, tx_frame;
 
@@ -125,9 +126,9 @@ module eth_top #(
 		.clk(refclk), .rst(rst),
 		.rmii_rxd(eth_rxd), .rmii_crs_dv(eth_crs_dv),
 		.rmii_txd(eth_txd), .rmii_tx_en(eth_tx_en),
-		.bus_addr(bus_addr), .bus_wdata(bus_wdata),
-		.bus_we(bus_we), .bus_re(bus_re),
-		.bus_rdata(bus_rdata), .bus_ack(bus_ack), .bus_err(bus_err),
+		.bus_addr(n_addr), .bus_wdata(n_wdata),
+		.bus_we(n_we), .bus_re(n_re),
+		.bus_rdata(bus_rdata), .bus_ack(n_ack), .bus_err(bus_err),
 		.rx_frame(rx_frame), .tx_frame(tx_frame),
 		.stream_en(stream_en), .stream_port(stream_port), .stream_base(stream_base), .stream_words(stream_words),
 		.stream_rowlen(stream_rowlen), .stream_stride(stream_stride),
@@ -287,6 +288,34 @@ module eth_top #(
 	wire   mdio_out = pr_done ? rf_mdio_o  : pr_mdio_o;
 	assign eth_mdio = mdio_oe ? mdio_out : 1'bz;
 
+	// --- the ESP32: a second master on the bus ------------------------------------
+	// Except in the PlayStation image, whose disc feed (cd_feed, in console_top) has
+	// the same four wires. A turn is one transfer: a master holds its request until
+	// the acknowledge, and the one that did not go last goes first when both ask.
+	wire rf_esp_miso, e_miso;
+	generate if (!CORE_PS1) begin : g_espbus
+		esp_bus #(.CORE_ID(CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
+			.clk(refclk), .rst(rst),
+			.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(e_miso), .spi_cs_n(esp_cs_n),
+			.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
+			.bus_rdata(bus_rdata), .bus_ack(e_ack));
+		assign esp_miso = e_miso;
+	end else begin : g_espbus
+		assign e_addr = 32'd0; assign e_wdata = 32'd0; assign e_we = 1'b0; assign e_re = 1'b0;
+		assign esp_miso = rf_esp_miso;
+	end endgenerate
+	wire [31:0] bus_addr, bus_wdata;
+	wire        bus_we, bus_re;
+	bus_arb u_arb (.clk(refclk), .rst(rst),
+		.a_addr(n_addr), .a_wdata(n_wdata), .a_we(n_we), .a_re(n_re), .a_ack(n_ack),
+		.b_addr(e_addr), .b_wdata(e_wdata), .b_we(e_we), .b_re(e_re), .b_ack(e_ack),
+		.bus_addr(bus_addr), .bus_wdata(bus_wdata), .bus_we(bus_we), .bus_re(bus_re), .bus_ack(bus_ack));
+
+	// Back to the shell: 0xB0070000 written to SYS 0x0014 (by the ESP32, to switch
+	// consoles; regfile takes the write as a no-op).
+	icap_reboot u_reboot (.clk(refclk), .rst(rst),
+		.go(bus_we && bus_ack && bus_addr == 32'h0000_0014 && bus_wdata == 32'hB007_0000));
+
 	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
 	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64)) u_regs (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wdata_wmask),
@@ -299,7 +328,7 @@ module eth_top #(
 		.bus_rdata(bus_rdata), .bus_ack(bus_ack), .bus_err(bus_err),
 		.eth_mdc(rf_mdc),
 		.mdio_o(rf_mdio_o), .mdio_oe(rf_mdio_oe), .mdio_i(eth_mdio),
-		.esp_sclk(esp_sclk), .esp_mosi(esp_mosi), .esp_miso(esp_miso), .esp_cs_n(esp_cs_n),
+		.esp_sclk(esp_sclk), .esp_mosi(esp_mosi), .esp_miso(rf_esp_miso), .esp_cs_n(CORE_PS1 ? esp_cs_n : 1'b1),
 		.stream_en(stream_en), .stream_port(stream_port), .stream_base(stream_base), .stream_words(stream_words),
 		.stream_rowlen(stream_rowlen), .stream_stride(stream_stride),
 		.stream_ready(stream_ready), .stream_done_tog(stream_done_tog),
