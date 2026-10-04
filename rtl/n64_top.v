@@ -380,23 +380,24 @@ module n64_top #(
 	endfunction
 
 	// --- the caches' arrays -------------------------------------------------------------
-	// Four times the VR4300's: a 64 kB I-cache and a 32 kB D-cache, still direct-mapped with
+	// Four and eight times the VR4300's: a 64 kB I-cache and a 64 kB D-cache, direct-mapped with
 	// its line sizes. Only the timing differs (SM64 missed 8.3 and 17.2 times a 1000
 	// instructions in the chip's sizes, 2.1 and 6.3 in these -- the misses were a third of
 	// the CPU's clocks). A CACHE op by index names a line of the chip's cache: it acts on
-	// the four lines here that share that index (see cop_k).
-	// Only RDRAM is cached (below 8 MB): tags are {valid, address [22:16]} / [22:15].
+	// the lines here that share that index, four or eight (see cop_k).
+	// Only RDRAM is cached (below 8 MB): tags are {valid, address [22:16]}.
 	(* ram_style = "distributed" *) reg [7:0] itag [0:2047];      // 2048 lines of 32 bytes
-	(* ram_style = "distributed" *) reg [8:0] dtag [0:2047];      // 2048 lines of 16 bytes
+	(* ram_style = "distributed" *) reg [7:0] dtag [0:4095];      // 4096 lines of 16 bytes
 	(* ram_style = "block" *) reg [127:0] idata [0:4095];         // 64 kB
-	(* ram_style = "block" *) reg [127:0] ddata [0:2047];         // 32 kB
-	initial for (k = 0; k < 2048; k = k + 1) begin itag[k] = 8'd0; dtag[k] = 9'd0; end
+	(* ram_style = "block" *) reg [127:0] ddata [0:4095];         // 64 kB
+	initial for (k = 0; k < 2048; k = k + 1) itag[k] = 8'd0;
+	initial for (k = 0; k < 4096; k = k + 1) dtag[k] = 8'd0;
 	wire        i_cacheable = i_cached && is_rdram(i_addr);
 	wire        d_cacheable = c_dcached && is_rdram(c_daddr);
 	wire [10:0] i_idx = i_addr[15:5];
-	wire [10:0] d_idx = c_daddr[14:4];
+	wire [11:0] d_idx = c_daddr[15:4];
 	wire        i_hit_now = itag[i_idx] == {1'b1, i_addr[22:16]};
-	wire        d_hit_now = dtag[d_idx] == {1'b1, c_daddr[22:15]};
+	wire        d_hit_now = dtag[d_idx] == {1'b1, c_daddr[22:16]};
 
 	// the CPU's lanes into a line (byte k of the doubleword is byte 8*a[3]+k of the line)
 	wire [127:0] c_line;
@@ -467,8 +468,8 @@ module n64_top #(
 	reg  [1:0]   fill_cnt;
 	reg          fill_pending;
 	reg          hr_pending;
-	reg  [10:0]  sweep;               // while held: the caches are invalidated, a line a clock
-	reg  [1:0]   cop_k;               // a CACHE op by index: which of the four lines it is on
+	reg  [11:0]  sweep;               // while held: the caches are invalidated, a line a clock
+	reg  [2:0]   cop_k;               // a CACHE op by index: which of the lines (4 I, 8 D) it is on
 	wire         cop_idx;
 	// (debugging) where the CPU's clocks go: clocks a fetch / a data access waited for DDR3,
 	// and how many times one began to
@@ -498,7 +499,7 @@ module n64_top #(
 	// with the fill's write that is three: more than a block RAM has, and the
 	// synthesis quietly built 24 kB of cache out of LUTs instead.
 	wire [11:0] i_ridx = i_req ? i_addr[15:4] : ipa[15:4];
-	wire [10:0] d_ridx = c_dreq ? d_idx : dpa[14:4];
+	wire [11:0] d_ridx = c_dreq ? d_idx : dpa[15:4];
 	integer bk;
 	always @(posedge clk) begin
 		if (i_req || i_replay) i_bram <= idata[i_ridx];
@@ -511,7 +512,7 @@ module n64_top #(
 			i_ready_r <= 1'b0; d_ready_r <= 1'b0; i_from_cache <= 1'b0; d_from_cache <= 1'b0;
 			wb_wp <= 3'd0; wb_rp <= 3'd0;
 			fill_pending <= 1'b0; fill_cnt <= 2'd0; fill_buf <= 128'd0; fill_line <= 20'd0;
-			hr_pending <= 1'b0; hr_done <= 1'b0; sweep <= 11'd0; cop_k <= 2'd0;
+			hr_pending <= 1'b0; hr_done <= 1'b0; sweep <= 12'd0; cop_k <= 3'd0;
 			fr_pending <= 1'b0; fr_v <= 1'b0; fbr_ack <= 1'b0;
 			pd_rd_ack <= 1'b0; pd_wr_ack <= 1'b0; sd_rd_ack <= 1'b0; sd_wr_ack <= 1'b0; si_we <= 1'b0;
 			ad_rd_ack <= 1'b0; ai_we <= 1'b0; rd_rd_ack <= 1'b0; rd_wr_ack <= 1'b0; cf_ack <= 1'b0; cw_ack <= 1'b0;
@@ -585,7 +586,7 @@ module n64_top #(
 			if (vi_hit) mi_intr[3] <= 1'b1;
 			// held: the caches go empty, so a new cartridge never meets an old line
 			if (!run) begin
-				sweep <= sweep + 11'd1;                          // (the tags: their write ports below)
+				sweep <= sweep + 12'd1;                          // (the tags: their write ports below)
 				il_v <= 1'b0; dl_v <= 1'b0;
 			end
 
@@ -723,8 +724,8 @@ module n64_top #(
 					// by index, or by index when the tag matches (the hit forms)
 					// (the invalidate itself: the tag arrays' write ports below; an op by index
 					// goes over the four lines that share the chip's index, a clock each)
-					if (cop_idx && cop_k != 2'd3) cop_k <= cop_k + 2'd1;
-					else begin dp_cop <= 1'b0; d_ready_r <= 1'b1; cop_k <= 2'd0; end
+					if (cop_idx && cop_k != (dpcop[1:0] == 2'd1 ? 3'd7 : 3'd3)) cop_k <= cop_k + 3'd1;
+					else begin dp_cop <= 1'b0; d_ready_r <= 1'b1; cop_k <= 3'd0; end
 				end else if (dp && !c_dreq && rd_ok) begin
 					d_addr <= line_of(dpa); d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1;
 					d_for <= dpa; st <= dp_fill ? S_DFILL : S_DREAD;
@@ -978,7 +979,7 @@ module n64_top #(
 	// (the fill's own line: a pipelined read's may come back while it waits -- head_one)
 	wire         dw_fill = !rst && st == S_DFILL && d_valid && head_one;
 	wire         dw_hit  = !rst && c_dreq && !c_dcache && c_dwe && is_rdram(c_daddr) && d_cacheable && d_hit_now;
-	wire [10:0]  dw_idx  = dw_fill ? d_for[14:4] : d_idx;
+	wire [11:0]  dw_idx  = dw_fill ? d_for[15:4] : d_idx;
 	wire [15:0]  dw_be   = dw_fill ? 16'hFFFF : dw_hit ? c_mask : 16'h0000;
 	wire [127:0] dw_data = dw_fill ? d_rdata : c_line;
 	wire         iw_en   = !rst && (st == S_IFILL0 || st == S_IFILL1) && d_valid && head_one;
@@ -1002,15 +1003,15 @@ module n64_top #(
 	wire         cop_hit  = dpcop[4:2] == 3'd4 || (dpcop[1:0] == 2'd1 && dpcop[4:2] == 3'd5);
 	wire         icop_w   = cop_go && dpcop[1:0] == 2'd0 && (cop_idx || cop_hit);
 	wire         dcop_w   = cop_go && dpcop[1:0] == 2'd1 && (cop_idx || cop_hit);
-	wire [10:0]  icop_ix  = cop_idx ? {cop_k, dpa[13:5]} : dpa[15:5];
-	wire [10:0]  dcop_ix  = cop_idx ? {cop_k, dpa[12:4]} : dpa[14:4];
+	wire [10:0]  icop_ix  = cop_idx ? {cop_k[1:0], dpa[13:5]} : dpa[15:5];
+	wire [11:0]  dcop_ix  = cop_idx ? {cop_k, dpa[12:4]} : dpa[15:4];
 	wire         ifill_w  = !rst && st == S_IFILL1 && d_valid && head_one;
 	wire         itw_en   = tw_sweep || ifill_w || icop_w;
-	wire [10:0]  itw_idx  = tw_sweep ? sweep : ifill_w ? i_for[15:5] : icop_ix;
+	wire [10:0]  itw_idx  = tw_sweep ? sweep[10:0] : ifill_w ? i_for[15:5] : icop_ix;
 	wire [7:0]   itw_val  = (!tw_sweep && ifill_w) ? {1'b1, i_for[22:16]} : 8'd0;
 	wire         dtw_en   = tw_sweep || dw_fill || dcop_w;
-	wire [10:0]  dtw_idx  = tw_sweep ? sweep : dw_fill ? d_for[14:4] : dcop_ix;
-	wire [8:0]   dtw_val  = (!tw_sweep && dw_fill) ? {1'b1, d_for[22:15]} : 9'd0;
+	wire [11:0]  dtw_idx  = tw_sweep ? sweep : dw_fill ? d_for[15:4] : dcop_ix;
+	wire [7:0]   dtw_val  = (!tw_sweep && dw_fill) ? {1'b1, d_for[22:16]} : 8'd0;
 	always @(posedge clk) begin
 		if (itw_en) itag[itw_idx] <= itw_val;
 		if (dtw_en) dtag[dtw_idx] <= dtw_val;

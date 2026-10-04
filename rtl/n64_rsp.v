@@ -157,7 +157,13 @@ module n64_rsp #(
 	reg  [31:0] sr [0:31];
 	initial for (k = 0; k < 32; k = k + 1) sr[k] = 32'd0;
 	reg         sr_we; reg [4:0] sr_wa; reg [31:0] sr_wd;
-	always @(posedge clk) if (sr_we && sr_wa != 5'd0) sr[sr_wa] <= sr_wd;
+	// a second write port: a scalar load's register, written beside the next instruction's own
+	// (sl_pend below); on the same register the younger instruction's (port 1) wins
+	reg         sr_we2; reg [4:0] sr_wa2; reg [31:0] sr_wd2;
+	always @(posedge clk) begin
+		if (sr_we2 && sr_wa2 != 5'd0) sr[sr_wa2] <= sr_wd2;
+		if (sr_we && sr_wa != 5'd0) sr[sr_wa] <= sr_wd;
+	end
 
 	// the vector registers: sixteen byte lanes
 	reg  [7:0]  vb [0:15][0:31];
@@ -236,8 +242,8 @@ module n64_rsp #(
 	wire [5:0]  fn = ir[5:0];
 	// (an instruction a clock behind the one that wrote a register reads it from the write,
 	// which lands a clock later: the fetch no longer takes a clock of its own)
-	wire [31:0] a = (sr_we && sr_wa == rs && rs != 5'd0) ? sr_wd : sr[rs];
-	wire [31:0] b = (sr_we && sr_wa == rt && rt != 5'd0) ? sr_wd : sr[rt];
+	wire [31:0] a = (sr_we && sr_wa == rs && rs != 5'd0) ? sr_wd : (sr_we2 && sr_wa2 == rs && rs != 5'd0) ? sr_wd2 : sr[rs];
+	wire [31:0] b = (sr_we && sr_wa == rt && rt != 5'd0) ? sr_wd : (sr_we2 && sr_wa2 == rt && rt != 5'd0) ? sr_wd2 : sr[rt];
 	// R_EX's instruction's successor's successor: npc, or a taken branch's target (R_EX writes
 	// npc the same way; this is that, now, for going straight on to the next instruction)
 	reg  [11:0] npc_ex;
@@ -332,7 +338,11 @@ module n64_rsp #(
 	reg  [11:0]  ls_a;                    // the scaled address (12 bits are all that matter)
 	reg  [3:0]   ls_e;
 	reg  [4:0]   ls_t;
-	assign fl_haz = fl_pend && ((op == 6'h12 && !rs[4]) || (op == 6'h12 && rs[4] && (vs == ls_t || vt == ls_t))
+	// a fast scalar load's data the same way (sl_pend): the next instruction waits a clock if it
+	// names the register (rs or rt) the load writes
+	reg          sl_pend;
+	wire         sl_haz = sl_pend && ls_t != 5'd0 && (rs == ls_t || rt == ls_t);
+	assign fl_haz = sl_haz || fl_pend && ((op == 6'h12 && !rs[4]) || (op == 6'h12 && rs[4] && (vs == ls_t || vt == ls_t))
 	                          || (op == 6'h3A && (vt == ls_t || ir[15:11] >= 5'h0A)));
 	reg  [4:0]   ls_start;                // the first byte offset of a ranged kind
 	reg  [3:0]   ls_idx;                  // (index etc., kind by kind)
@@ -769,7 +779,7 @@ module n64_rsp #(
 	end
 
 	always @(posedge clk) begin
-		sr_we <= 1'b0; vw_lane <= 16'd0; v2_pend <= 1'b0; fl_pend <= 1'b0; irq_set <= 1'b0; irq_clr <= 1'b0; dp_we <= 1'b0; tr_valid <= 1'b0;
+		sr_we <= 1'b0; vw_lane <= 16'd0; v2_pend <= 1'b0; fl_pend <= 1'b0; sl_pend <= 1'b0; sr_we2 <= 1'b0; irq_set <= 1'b0; irq_clr <= 1'b0; dp_we <= 1'b0; tr_valid <= 1'b0;
 		b_en <= 1'b0; cpu_b <= 1'b0; c_mem_ack <= cpu_b;
 		x_b <= 1'b0; x_b2 <= x_b; x_ack <= x_b2;
 		if (dm_rd_ack) dm_rd_req <= 1'b0;
@@ -1081,7 +1091,7 @@ module n64_rsp #(
 				// (a vector one: its doubleword(s) come next clock and are written beside the next
 				// instruction -- fl_pend; a scalar one waits for them in R_FL2)
 				if (ex_fl && op == 6'h32) begin fl_pend <= 1'b1; f_x <= ex_x; f_start <= {1'b0, ex_off4}; next_ins(npc); end
-				else if (ex_fl) begin st <= R_FL2; f_dw <= ex_da + {8'd0, ex_two}; end
+				else if (ex_fl) begin sl_pend <= 1'b1; next_ins(npc); end   // (a scalar load: sl_pend)
 				if (ex_short) begin f_op <= 3'd2; f_off <= ex_da_off; f_e <= me; f_n <= ex_n; end
 				else if (ex_fl) f_n <= 4'd8;
 				if (ex_fs) next_ins(npc);                        // (both doublewords written this clock)
@@ -1227,6 +1237,17 @@ module n64_rsp #(
 			default: st <= R_HALT;
 			endcase
 
+			// a fast scalar load's data, beside the next instruction: into its register (port 2)
+			if (sl_pend) begin : slbg
+				reg [31:0] w; reg [15:0] h; reg [7:0] by;
+				w = da_q[63 - 8 * f_off -: 32]; h = da_q[63 - 8 * f_off -: 16]; by = da_q[63 - 8 * f_off -: 8];
+				sr_we2 <= 1'b1; sr_wa2 <= ls_t;
+				case (ls_n)
+				5'd1: sr_wd2 <= ls_idx[1] ? {24'd0, by} : {{24{by[7]}}, by};
+				5'd2: sr_wd2 <= ls_idx[1] ? {16'd0, h} : {{16{h[15]}}, h};
+				default: sr_wd2 <= w;
+				endcase
+			end
 			// a fast vector load's doublewords, beside the next instruction: into the register
 			if (fl_pend) begin : flbg
 				reg [127:0] q2; reg [63:0] d8;
