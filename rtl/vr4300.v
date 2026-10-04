@@ -316,6 +316,8 @@ module vr4300 #(
 	wire        fw_m_b = m_valid && m_we_rf && !m_load && m_rd == rt && rt != 5'd0;
 	wire        fw_w_b = w_valid && w_we_rf && !w_load && w_rd == rt && rt != 5'd0;
 	wire        fw_x_b = x_valid && x_rd == rt && rt != 5'd0;
+	// (a load's data is not forwarded from W: from the D-cache's block RAM through E's address
+	// and exception logic is 30 levels, 0.5 ns over -- it waits for X)
 	wire [63:0] a = fw_m_a ? m_res : fw_w_a ? w_res : fw_x_a ? x_val : e_a;
 	wire [63:0] b = fw_m_b ? m_res : fw_w_b ? w_res : fw_x_b ? x_val : e_b;
 
