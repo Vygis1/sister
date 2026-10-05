@@ -59,7 +59,8 @@ module md_console (
 	output wire signed [15:0] audio_l,
 	output wire signed [15:0] audio_r,
 
-	output wire [31:0] dbg_pc
+	output wire [31:0] dbg_pc,
+	output wire [15:0] dbg_z80_pc
 );
 
 	// --- the four enables ---------------------------------------------------------------
@@ -103,7 +104,7 @@ module md_console (
 		.audio_l(audio_l), .audio_r(audio_r),
 		.joy1(joy1), .joy2(joy2),
 		.h40(md_h40),
-		.dbg_pc(dbg_pc), .dbg_halted()
+		.dbg_pc(dbg_pc), .dbg_z80_pc(dbg_z80_pc), .dbg_halted()
 	);
 
 	// --- to the framebuffer -------------------------------------------------------------------

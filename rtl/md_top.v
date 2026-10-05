@@ -69,6 +69,7 @@ module md_top (
 	// --- for a testbench to look at -------------------------------------------------
 	output wire        h40,
 	output wire [31:0] dbg_pc,
+	output wire [15:0] dbg_z80_pc,      // the sound CPU's, for the debug window
 	output wire        dbg_halted
 );
 
@@ -208,7 +209,7 @@ module md_top (
 		.busreq(z80_busreq), .z_reset_n(z80_reset_n), .busack(z80_busack),
 		.win_addr(z_win_addr), .win_req(z_win_req),
 		.win_data(cart_b_data), .win_ready(cart_b_ready),
-		.sample_l(audio_l), .sample_r(audio_r), .dbg_pc()
+		.sample_l(audio_l), .sample_r(audio_r), .dbg_pc(dbg_z80_pc)
 	);
 
 	// --- the VDP --------------------------------------------------------------------------

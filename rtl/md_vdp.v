@@ -304,7 +304,8 @@ module md_vdp (
 	// the ratio between the clock and the pixel rate happens to be.
 	reg  [14:0] r_addr;
 	reg  [15:0] r_data;
-	always @(posedge clk) if (ce) r_data <= vram[r_addr];
+	// (the port itself is below the sprite engine's address: it reads on every clock,
+	// for the planes on a ce clock and for the sprite engine on the others)
 
 	// --- which cell is being fetched ---------------------------------------------------------
 	// Always the one eight pixels ahead of the one being shown, which at the end
@@ -581,6 +582,27 @@ module md_vdp (
 	                                 : cpu_vwr;
 	wire        pa_en   = dma_active ? 1'b1 : cpu_data;
 
+	// --- the sprite attribute cache ------------------------------------------------------------
+	// As the real chip has: the first two words of each of the 80 entries -- Y, then size
+	// and link -- kept inside, updated by every VRAM write that lands on them (by the CPU
+	// or by DMA, a byte at a time as the write is), so walking the list costs a clock an
+	// entry and no VRAM at all. (Moving the table with register 5 leaves the cache as it
+	// was until those words are written again -- which is the real chip's behaviour too.)
+	wire [14:0] sat_off = pa_addr - sat_base;
+	wire        sat_hit = sat_off < 15'd320 && !sat_off[1];
+	wire [6:0]  sat_ent = sat_off[8:2];
+	reg  [7:0]  satc_y_lo [0:127];  reg [1:0] satc_y_hi [0:127];
+	reg  [7:0]  satc_s_lo [0:127];  reg [7:0] satc_s_hi [0:127];
+	always @(posedge clk) if (sat_hit) begin
+		if (!sat_off[0]) begin
+			if (pa_hi) satc_y_hi[sat_ent] <= pa_data[9:8];
+			if (pa_lo) satc_y_lo[sat_ent] <= pa_data[7:0];
+		end else begin
+			if (pa_hi) satc_s_hi[sat_ent] <= pa_data[15:8];
+			if (pa_lo) satc_s_lo[sat_ent] <= pa_data[7:0];
+		end
+	end
+
 	reg  [15:0] cpu_q;
 	always @(posedge clk) begin
 		if (pa_hi) vram[pa_addr][15:8] <= pa_data[15:8];
@@ -620,7 +642,6 @@ module md_vdp (
 	// by then the plane fetch has put its own answer on the bus. That is
 	// invisible during the blanking, where nothing else is reading, and wrong
 	// everywhere else.
-	reg [1:0]  sp_wait;
 	reg [6:0]  sp_ix;               // which sprite in the list
 	reg [6:0]  sp_seen;
 	reg [4:0]  sp_online;
@@ -647,13 +668,20 @@ module md_vdp (
 	wire [9:0] sp_dy    = next_line + 10'd128 - sp_y;
 	wire       sp_onrow = (sp_dy < ({6'd0, sp_h, 3'd0} + 10'd8));
 
-	// Which slots may be read in. The plane fetch uses six of every eight and
-	// needs the last two groups of the line to prime the next one.
-	wire plane_busy = ((hc < h_active) || (hc >= h_total - 10'd17))
-	                  && (fslot < 3'd6);
-	wire hs_busy    = (hc >= h_active + 10'd2) && (hc <= h_active + 10'd5);
-	wire sp_slot    = !plane_busy && !hs_busy;
-	wire sp_go      = sp_rd && sp_slot;
+	// The render port reads on every clock: on a ce clock for the planes (and the
+	// horizontal scroll) as the schedule below has it -- their word is held in r_data
+	// until their next read, so they see it exactly a slot later as they always did --
+	// and on the three clocks between for the sprite engine, which runs on every clock.
+	// It used to share the planes' ce clocks, taking the slots they left free, and
+	// walking the list one pixel at a time: a long list ran out of line before its
+	// end, and what was left was not drawn -- the eyes and mouths of a game's
+	// character screens, extra sprites late in the list, vanished for frames.
+	reg  [15:0] vq;  reg vq_ce;
+	always @(posedge clk) begin
+		vq    <= vram[ce ? r_addr : sp_addr];
+		vq_ce <= ce;
+		if (vq_ce) r_data <= vq;
+	end
 
 	// The per-line limits the real part has, and the reason a Mega Drive game
 	// flickers its sprites when it is asked for too many.
@@ -692,17 +720,17 @@ module md_vdp (
 	wire       sb_clr  = (hc < h_active);
 	wire [6:0] sb_fill = {sp_at[15], sp_at[14:13], sp_nib};
 
-	wire       a_clr = sb_clr && !rbank;
+	wire       a_clr = sb_clr && !rbank && ce;
 	wire       a_we  = a_clr || (sp_wr && !wbank);
 	wire [8:0] a_wa  = a_clr ? hc[8:0] : sp_dx[8:0];
 	wire [6:0] a_wd  = a_clr ? 7'd0    : sb_fill;
 
-	wire       b_clr = sb_clr && rbank;
+	wire       b_clr = sb_clr && rbank && ce;
 	wire       b_we  = b_clr || (sp_wr && wbank);
 	wire [8:0] b_wa  = b_clr ? hc[8:0] : sp_dx[8:0];
 	wire [6:0] b_wd  = b_clr ? 7'd0    : sb_fill;
 
-	always @(posedge clk) if (ce) begin
+	always @(posedge clk) begin
 		if (a_we) sba[a_wa] <= a_wd;
 		if (b_we) sbb[b_wa] <= b_wd;
 	end
@@ -712,7 +740,6 @@ module md_vdp (
 	always @(posedge clk) begin
 		if (rst) begin
 			sp_st     <= SP_IDLE;
-			sp_wait   <= 2'd0;
 			sp_ix     <= 7'd0;
 			sp_seen   <= 7'd0;
 			sp_online <= 5'd0;
@@ -726,38 +753,22 @@ module md_vdp (
 		end else begin
 			if (status_read) spr_overflow <= 1'b0;
 
-			if (ce) begin
-				if (sp_go) sp_rd <= 1'b0;
-
-				if (line_end) begin
+			begin
+				if (ce && line_end) begin
 					// Start again for the next line, whatever the last pass got to.
 					sp_st     <= SP_RD0;
 					sp_ix     <= 7'd0;
 					sp_seen   <= 7'd0;
 					sp_online <= 5'd0;
 					sp_budget <= h_active;
-					sp_wait   <= 2'd0;
 					sp_rd     <= 1'b0;
-				end else if (sp_wait != 2'd0) begin
-					sp_wait <= sp_wait - 2'd1;
 				end else case (sp_st)
-				SP_RD0: if (!sp_rd) begin
-						sp_addr <= sat_base + {5'd0, sp_ix, 2'd0};
-						sp_rd   <= 1'b1;
-					end else if (sp_go) begin
-						sp_wait <= 2'd1;
-						sp_st   <= SP_GET0;
+				// Y and size/link out of the cache: a clock an entry
+				SP_RD0: begin
+						sp_y  <= {satc_y_hi[sp_ix], satc_y_lo[sp_ix]};
+						sp_sz <= {satc_s_hi[sp_ix], satc_s_lo[sp_ix]};
+						sp_st <= SP_TEST;
 					end
-				SP_GET0: begin sp_y <= r_data[9:0]; sp_st <= SP_RD1; end
-
-				SP_RD1: if (!sp_rd) begin
-						sp_addr <= sat_base + {5'd0, sp_ix, 2'd0} + 15'd1;
-						sp_rd   <= 1'b1;
-					end else if (sp_go) begin
-						sp_wait <= 2'd1;
-						sp_st   <= SP_GET1;
-					end
-				SP_GET1: begin sp_sz <= r_data; sp_st <= SP_TEST; end
 
 				SP_TEST: begin
 						sp_seen <= sp_seen + 7'd1;
@@ -774,22 +785,22 @@ module md_vdp (
 				SP_RD2: if (!sp_rd) begin
 						sp_addr <= sat_base + {5'd0, sp_ix, 2'd0} + 15'd2;
 						sp_rd   <= 1'b1;
-					end else if (sp_go) begin
-						sp_wait <= 2'd1;
-						sp_st   <= SP_GET2;
+					end else if (!ce) begin
+						sp_rd <= 1'b0;
+						sp_st <= SP_GET2;
 					end
-				SP_GET2: begin sp_at <= r_data; sp_st <= SP_RD3; end
+				SP_GET2: begin sp_at <= vq; sp_st <= SP_RD3; end
 
 				SP_RD3: if (!sp_rd) begin
 						sp_addr <= sat_base + {5'd0, sp_ix, 2'd0} + 15'd3;
 						sp_rd   <= 1'b1;
-					end else if (sp_go) begin
-						sp_wait <= 2'd1;
-						sp_st   <= SP_GET3;
+					end else if (!ce) begin
+						sp_rd <= 1'b0;
+						sp_st <= SP_GET3;
 					end
 				SP_GET3: begin
 						// The position is offset by 128 the same way Y is.
-						sp_px     <= {2'd0, r_data[9:0]} - 12'd128;
+						sp_px     <= {2'd0, vq[9:0]} - 12'd128;
 						sp_col    <= 2'd0;
 						sp_half   <= 1'b0;
 						sp_online <= sp_online + 5'd1;
@@ -804,12 +815,12 @@ module md_vdp (
 				SP_PAT: if (!sp_rd) begin
 						sp_addr <= sp_pat;
 						sp_rd   <= 1'b1;
-					end else if (sp_go) begin
-						sp_wait <= 2'd1;
-						sp_st   <= SP_GETP;
+					end else if (!ce) begin
+						sp_rd <= 1'b0;
+						sp_st <= SP_GETP;
 					end
 				SP_GETP: begin
-						sp_word <= r_data;
+						sp_word <= vq;
 						sp_k    <= 2'd0;
 						sp_st   <= SP_PIX;
 					end
@@ -942,10 +953,6 @@ module md_vdp (
 			else if (hc == h_active + 10'd3) r_addr <= hs_base + hs_off + 15'd1;
 			else if (hc == h_active + 10'd4) hs_a <= r_data[9:0];
 			else if (hc == h_active + 10'd5) hs_b <= r_data[9:0];
-			// The sprite engine asks; this is where it is answered. It only ever
-			// asks in a slot the schedule above has left alone, so this overriding
-			// the case is not a conflict -- it is the whole arrangement.
-			else if (sp_go) r_addr <= sp_addr;
 
 			// --- the two interrupts, both decided at the end of a line ----------
 			if (line_end) begin

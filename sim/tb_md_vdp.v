@@ -473,6 +473,23 @@ module tb_md_vdp;
 		expect_pixel(10'd248, 10'd0, 6'h15, "and its second, from the next tile");
 
 		// ==================================================================
+		// A busy line. The engine walks the WHOLE list for every line, so a long
+		// list costs time even when most of it is off screen -- and what it has not
+		// reached when the line ends is not drawn. A game's character screens put
+		// the eyes and mouths on as extra sprites late in the list: they vanished
+		// for frames at a time on the board. 59 sprites off the screen, then 21 on
+		// line 0 (where the planes are empty, x 64 to 255): the twentieth must show (H40
+		// allows twenty to a line) and the twenty-first must not (the real chip's
+		// limit, which games rely on).
+		// ==================================================================
+		setup_busy_line;
+
+		$display(" a busy line:");
+		expect_pixel(10'd64,  10'd0, 6'h13, "the first of the line's sprites");
+		expect_pixel(10'd242, 10'd0, 6'h13, "the twentieth, the 79th entry of the list");
+		expect_pixel(10'd251, 10'd0, 6'h00, "and not the twenty-first: twenty to a line in H40");
+
+		// ==================================================================
 		// The window.
 		//
 		// It is not a layer on top of plane A, it is plane A's REPLACEMENT in the
@@ -565,7 +582,10 @@ module tb_md_vdp;
 			for (k = 0; k < 16; k = k + 1) wr(0, 16'h5555);
 
 			// The attribute table. Y and X are both offset by 128, so 128 is the
-			// top left corner of the picture.
+			// top left corner of the picture. Where it is (register 5) is set FIRST,
+			// as a game does: the chip keeps each entry's first two words in a cache
+			// filled by the writes that land on the table where it is at the time.
+			setreg(5'd5, 8'h78);  // the table is at $F000, which is $78 * $200
 			command(CD_VRAM_WR, SAT);
 			wr(0, 16'd128);       // sprite 0: at the top
 			wr(0, 16'h0001);      //   one cell each way, linked to sprite 1
@@ -582,11 +602,26 @@ module tb_md_vdp;
 			wr(0, 16'h2003);      //   palette 1, tiles 3 and 4
 			wr(0, 16'd368);       //   x = 240
 
-			setreg(5'd5, 8'h78);  // the table is at $F000, which is $78 * $200
 			setreg(5'd1, 8'h44);  // display on
 
 			// Let a whole frame go by, so the buffer being read was filled with
 			// all of this rather than half of it.
+			wait_pixel(10'd0, 10'd240);
+			wait_pixel(10'd0, 10'd240);
+		end
+	endtask
+
+	// --- a busy line: 80 entries, the last 21 on line 0 -------------------------------------
+	task setup_busy_line;
+		integer k;
+		begin
+			command(CD_VRAM_WR, SAT);
+			for (k = 0; k < 80; k = k + 1) begin
+				wr(0, k < 59 ? 16'd0 : 16'd128);              // off the top, or line 0
+				wr(0, k == 79 ? 16'h0000 : k + 1);              // 8 x 8, linked to the next
+				wr(0, 16'h2003);                                // palette 1, tile 3
+				wr(0, k < 59 ? 16'd0 : 16'd128 + 64 + 9 * (k - 59));   // x 64, 73, 82 ... 244
+			end
 			wait_pixel(10'd0, 10'd240);
 			wait_pixel(10'd0, 10'd240);
 		end

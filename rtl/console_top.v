@@ -501,6 +501,7 @@ module console_top #(
 	wire [7:0]  z80_dout;
 	wire        z80_we, z80_io;
 	wire [15:0] z80_pc;
+	wire [15:0] md_z80_pc;
 	reg  [31:0] con_count;
 	reg         test_mode;      // slot 1 is a bare CPU rather than a console
 
@@ -609,7 +610,7 @@ module console_top #(
 		16'h001C: ctrl_rdata = {17'd0, chr_is_ram, prg_last, 4'd0, mapper_id};
 		16'h0020: ctrl_rdata = {8'd0, CORES_BUILT, 7'd0, test_mode, 4'd0, console_sel};
 		16'h0024: ctrl_rdata = con_count;
-		16'h0028: ctrl_rdata = {16'd0, z80_pc};
+		16'h0028: ctrl_rdata = {16'd0, md_sel ? md_z80_pc : z80_pc};   // the Z80's PC (the Mega Drive's sound CPU when it runs)
 		// Lines the Mega Drive's cache asked for, and lines it got. Equal and
 		// rising means the cartridge is feeding it; asking and not receiving
 		// means the memory behind it is not answering; not asking at all means
@@ -975,7 +976,7 @@ module console_top #(
 			.px_valid(md_px_valid), .px_x(md_px_x), .px_y(md_px_y),
 			.px_rgb(md_px_rgb), .px_col(md_px_col), .h40(md_h40),
 			.audio_l(md_audio_l), .audio_r(md_audio_r),
-			.dbg_pc(md_dbg_pc)
+			.dbg_pc(md_dbg_pc), .dbg_z80_pc(md_z80_pc)
 		);
 		// HDMI: the picture at its own 9-bit colour, 256 or 320 x 224, doubled
 		frame_hdmi #(.FMT(2), .DW(9)) u_hdmi (.clk(clk), .we(md_px_valid), .wx(md_px_x), .wy(md_px_y), .wd(md_px_col),
@@ -989,7 +990,7 @@ module console_top #(
 		assign md_px_valid = 1'b0;
 		assign md_px_x = 9'd0; assign md_px_y = 9'd0; assign md_px_rgb = 8'd0;
 		assign md_audio_l = 16'sd0; assign md_audio_r = 16'sd0;
-		assign md_dbg_pc = 32'd0;
+		assign md_dbg_pc = 32'd0; assign md_z80_pc = 16'd0;
 		assign md_host_rdata = 32'd0;
 		assign md_dbg_mem = 32'd0;
 	end endgenerate
