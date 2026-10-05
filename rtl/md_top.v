@@ -206,7 +206,7 @@ module md_top (
 		.clk(clk), .rst(rst), .z_ce(snd_ce), .fm_ce(fm_ce),
 		.m_sel(z_sel), .m_addr(cpu_addr[15:0]), .m_wr(cpu_we),
 		.m_din(z_wdata), .m_dout(z_dout),
-		.busreq(z80_busreq), .z_reset_n(z80_reset_n), .busack(z80_busack),
+		.busreq(z80_busreq), .z_reset_n(z80_reset_n), .busack(z80_busack), .z_int(z80_int),
 		.win_addr(z_win_addr), .win_req(z_win_req),
 		.win_data(cart_b_data), .win_ready(cart_b_ready),
 		.sample_l(audio_l), .sample_r(audio_r), .dbg_pc(dbg_z80_pc)
@@ -243,13 +243,14 @@ module md_top (
 
 	// The 68000 acknowledging an interrupt is what lets the VDP drop it.
 	wire cpu_iack;
+	wire z80_int;                 // the VDP's interrupt for the Z80 (vertical blank, a line long)
 	wire int_ack = cpu_iack && cpu_en;
 
 	md_vdp vdp (
 		.clk(clk), .rst(rst), .ce(vdp_ce),
 		.cpu_sel(vdp_sel), .cpu_ctrl(vdp_ctrl), .cpu_wr(cpu_we),
 		.cpu_din(cpu_dout), .cpu_dout(vdp_dout),
-		.ipl_n(ipl_n), .int_ack(int_ack),
+		.ipl_n(ipl_n), .int_ack(int_ack), .zint(z80_int),
 		.dma_req(vdp_dma_req), .dma_addr(vdp_dma_addr),
 		.dma_din(vdp_dma_din), .dma_ack(vdp_dma_ack),
 		.dma_busy_out(dma_busy),

@@ -49,6 +49,7 @@ module md_sound (
 
 	input  wire        busreq,       // the 68000 is asking for the bus
 	input  wire        z_reset_n,
+	input  wire        z_int,        // the VDP's interrupt (vertical blank, a line long)
 	output wire        busack,       // and has it
 
 	// --- the window into the 68000's memory ----------------------------------------
@@ -94,7 +95,7 @@ module md_sound (
 		.clk(clk), .rst(rst || !z_reset_n), .ce(z_run),
 		.addr(z_addr), .din(z_din), .dout(z_dout),
 		.we(z_we), .io(z_io), .m1(z_m1),
-		.int_n(1'b1), .nmi_n(1'b1),
+		.int_n(!z_int), .nmi_n(1'b1),
 		.dbg_pc(dbg_pc), .dbg_sp(), .dbg_af(), .dbg_bc(), .dbg_de(),
 		.dbg_hl(), .dbg_m1()
 	);
@@ -105,20 +106,26 @@ module md_sound (
 	// saying so with a mux rather than with two conditional writes is what keeps
 	// this as block RAM instead of eight thousand flip-flops.
 	reg [7:0] zram [0:8191];
-	reg [7:0] zram_q;
+	reg [7:0] zram_q, m_q;
 
 	// The 68000 reaches the RAM only while the Z80 is stopped, and only for the
 	// part of the window that IS the RAM.
 	wire m_ram = m_sel && (m_addr[15:14] == 2'b00);
 	wire m_ym  = m_sel && (m_addr[15:13] == 3'b010);
 
-	wire        zr_we = stopped ? (m_ram && m_wr) : (z_run && z_we && z_ram);
-	wire [12:0] zr_a  = stopped ? m_addr[12:0]    : z_addr[12:0];
-	wire [7:0]  zr_d  = stopped ? m_din           : z_dout;
-
+	// Two ports, the Z80's and the 68000's. They were one, its address switched to the
+	// 68000's while the Z80 was stopped -- so a Z80 stopped in the middle of a read came
+	// back to the 68000's byte instead of its own. Battletoads' driver, stopped in the
+	// operand of its JR $, jumped into its interrupt handler instead, returned off an
+	// empty stack and ran off into the cartridge: no sound. Now the Z80's read register
+	// holds its own byte however long it is stopped.
 	always @(posedge clk) begin
-		if (zr_we) zram[zr_a] <= zr_d;
-		zram_q <= zram[zr_a];
+		if (z_run && z_we && z_ram) zram[z_addr[12:0]] <= z_dout;
+		zram_q <= zram[z_addr[12:0]];
+	end
+	always @(posedge clk) begin
+		if (stopped && m_ram && m_wr) zram[m_addr[12:0]] <= m_din;
+		m_q <= zram[m_addr[12:0]];
 	end
 
 	// --- the bank register ------------------------------------------------------------------
@@ -159,7 +166,7 @@ module md_sound (
 	);
 
 	// What the 68000 reads out of the window: the RAM, or the FM chip's status.
-	assign m_dout = m_ym ? ym_do : zram_q;
+	assign m_dout = m_ym ? ym_do : m_q;
 
 	// --- mixing ---------------------------------------------------------------------------------
 	// The PSG's samples are unsigned around $8000 and the FM chip's are signed

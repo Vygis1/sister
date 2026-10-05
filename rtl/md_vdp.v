@@ -74,6 +74,7 @@ module md_vdp (
 	// Active low and three bits wide, because that is the shape the 68000 wants.
 	// VBlank is level 6 and the line counter is level 4.
 	output wire [2:0]  ipl_n,
+	output reg         zint,         // the Z80's interrupt: one line long, from the vertical blank's start
 	input  wire        int_ack,     // the 68000 has taken one
 
 	// --- the way out to the 68000's memory, for the DMA that reads it -----------
@@ -874,7 +875,7 @@ module md_vdp (
 			hc     <= 10'd0;
 			vc     <= 10'd0;
 			hcnt   <= 8'd0;
-			vint_pending <= 1'b0;
+			vint_pending <= 1'b0; zint <= 1'b0;
 			hint_pending <= 1'b0;
 			fslot  <= 3'd0;
 			fbase  <= 10'd0;
@@ -968,8 +969,11 @@ module md_vdp (
 					hcnt <= r[10];
 				end
 
-				// The VBlank interrupt happens once, as the picture ends.
+				// The VBlank interrupt happens once, as the picture ends. The Z80 has
+				// one too, at the same moment, held for a line (it is a level, and
+				// unlike the 68000's nothing acknowledges it).
 				if (next_line == v_active) vint_pending <= 1'b1;
+				zint <= (next_line == v_active);
 			end
 		end
 
