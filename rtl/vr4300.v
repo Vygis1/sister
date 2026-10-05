@@ -310,12 +310,17 @@ module vr4300 #(
 	reg         x_valid;
 	reg  [4:0]  x_rd;
 	reg  [63:0] x_val;
-	wire        fw_m_a = m_valid && m_we_rf && !m_load && m_rd == rs && rs != 5'd0;
-	wire        fw_w_a = w_valid && w_we_rf && !w_load && w_rd == rs && rs != 5'd0;
-	wire        fw_x_a = x_valid && x_rd == rs && rs != 5'd0;
-	wire        fw_m_b = m_valid && m_we_rf && !m_load && m_rd == rt && rt != 5'd0;
-	wire        fw_w_b = w_valid && w_we_rf && !w_load && w_rd == rt && rt != 5'd0;
-	wire        fw_x_b = x_valid && x_rd == rt && rt != 5'd0;
+	// The register-number compares are worked out a clock ahead, for the instruction that
+	// will be in E against what M, W and X will hold (cf_*, below), and registered: from
+	// e_ir through the compares, the forwarding mux, the address adder and the exception
+	// logic to the commit was the CPU's longest path (20.3 ns, 0.4 over at 50 MHz).
+	reg         c_ma, c_wa, c_xa, c_mb, c_wb, c_xb, c_nza, c_nzb;
+	wire        fw_m_a = m_valid && m_we_rf && !m_load && c_ma && c_nza;
+	wire        fw_w_a = w_valid && w_we_rf && !w_load && c_wa && c_nza;
+	wire        fw_x_a = x_valid && c_xa && c_nza;
+	wire        fw_m_b = m_valid && m_we_rf && !m_load && c_mb && c_nzb;
+	wire        fw_w_b = w_valid && w_we_rf && !w_load && c_wb && c_nzb;
+	wire        fw_x_b = x_valid && c_xb && c_nzb;
 	// (a load's data is not forwarded from W: from the D-cache's block RAM through E's address
 	// and exception logic is 30 levels, 0.5 ns over -- it waits for X)
 	wire [63:0] a = fw_m_a ? m_res : fw_w_a ? w_res : fw_x_a ? x_val : e_a;
@@ -332,8 +337,27 @@ module vr4300 #(
 	               || (op == 6'h11 && rs == 5'h06);
 	wire ld_in_m = m_valid && m_load && m_we_rf && m_rd != 5'd0;
 	wire ld_in_w = w_valid && w_load && w_we_rf && w_rd != 5'd0;
-	assign e_hazard = e_valid && ((ld_in_m && ((uses_rs && m_rd == rs) || (uses_rt && m_rd == rt)))
-	                           || (ld_in_w && ((uses_rs && w_rd == rs) || (uses_rt && w_rd == rt))));
+	// A load in W goes on to E's ALU alone, and to a store's data: what reaches neither the
+	// address, nor a branch, nor anything that can raise an exception (fa, fb, res_f below).
+	// So an instruction that uses a load's register only that way waits one clock less.
+	// SM64's code leaves one instruction between a load and its use: that one waited, and
+	// a third of those uses are ALU operands or store data (tools/n64/n64loaduse.py).
+	// (decoded in D and registered with the instruction: decoded here from e_ir it lengthened
+	// the commit decision, the CPU's longest path, by five levels)
+	function [2:0] fw_class; input [31:0] w; reg [5:0] o, f; begin
+		o = w[31:26]; f = w[5:0];
+		fw_class[0] = o == 6'h00 && (f == 6'h00 || f == 6'h02 || f == 6'h03 || f == 6'h04 || f == 6'h06 || f == 6'h07
+		              || f == 6'h21 || f == 6'h23 || f == 6'h24 || f == 6'h25 || f == 6'h26 || f == 6'h27 || f == 6'h2A || f == 6'h2B);
+		fw_class[1] = o == 6'h09 || o == 6'h0A || o == 6'h0B || o == 6'h0C || o == 6'h0D || o == 6'h0E;
+		fw_class[2] = o == 6'h28 || o == 6'h29 || o == 6'h2B || o == 6'h3F;
+	end endfunction
+	reg  [2:0]  e_fw = 3'd0;                  // fw_class of the instruction in E
+	wire fw_alu_r = e_fw[0], fw_alu_i = e_fw[1], fw_st = e_fw[2];
+	wire fw_alu   = fw_alu_r || fw_alu_i;
+	wire [63:0] fa, fb;                       // the operands with a load in W forwarded (assigned below)
+	reg  [63:0] res_f, st_data_f;             // fw_alu's result, and a store's data, from them
+	assign e_hazard = e_valid && ((ld_in_m && ((uses_rs && c_ma) || (uses_rt && c_mb)))
+	                           || (ld_in_w && ((uses_rs && c_wa && !fw_alu) || (uses_rt && c_wb && !fw_alu_r && !fw_st))));
 
 	// =============================================================================
 	// E: the FP registers. With Status.FR clear the registers pair up: fs reads
@@ -860,6 +884,8 @@ module vr4300 #(
 
 	// D's word: the fault, if the fetch was not issued, carries a dummy (a NOP)
 	reg         d_noissue;               // the fetch for D was not sent (it faults)
+	wire [4:0]  dn_rs = d_noissue ? 5'd0 : ir[25:21];   // the registers of what E takes next
+	wire [4:0]  dn_rt = d_noissue ? 5'd0 : ir[20:16];
 
 	always @(posedge clk) begin
 		tr_valid <= 1'b0; tr_exc <= 1'b0;
@@ -867,7 +893,19 @@ module vr4300 #(
 			f_pc <= RESET_PC; f_valid <= 1'b1;
 			d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0;
 			d_noissue <= 1'b0; m_xmark <= 1'b0; w_xmark <= 1'b0; m_fpl <= 1'b0; w_fpl <= 1'b0; x_valid <= 1'b0;
+			c_ma <= 1'b0; c_wa <= 1'b0; c_xa <= 1'b0; c_mb <= 1'b0; c_wb <= 1'b0; c_xb <= 1'b0; c_nza <= 1'b0; c_nzb <= 1'b0;
 		end else begin
+			// --- the forwarding compares for next clock (see fw_m_a) -------------------------
+			// all advance: E takes D's instruction, M E's, W M's, X W's; E held: M a bubble,
+			// W and X advance; all held: as they are
+			c_ma <= adv ? (dn_rs == dst)  : adv_mw ? (rs == dst)  : (rs == m_rd);
+			c_wa <= adv ? (dn_rs == m_rd) : adv_mw ? (rs == m_rd) : (rs == w_rd);
+			c_xa <= adv ? (dn_rs == w_rd) : adv_mw ? (rs == w_rd) : (rs == x_rd);
+			c_mb <= adv ? (dn_rt == dst)  : adv_mw ? (rt == dst)  : (rt == m_rd);
+			c_wb <= adv ? (dn_rt == m_rd) : adv_mw ? (rt == m_rd) : (rt == w_rd);
+			c_xb <= adv ? (dn_rt == w_rd) : adv_mw ? (rt == w_rd) : (rt == x_rd);
+			c_nza <= adv ? (dn_rs != 5'd0) : (rs != 5'd0);
+			c_nzb <= adv ? (dn_rt != 5'd0) : (rt != 5'd0);
 			// --- F and D ---------------------------------------------------------------
 			if (adv) begin
 				f_pc <= next_pc;
@@ -884,6 +922,7 @@ module vr4300 #(
 				e_valid <= d_valid && !(e_redir_exc || e_eret || e_skip || e_replay);
 				e_pc    <= d_pc;
 				e_ir    <= d_noissue ? 32'd0 : ir;
+				e_fw    <= d_noissue ? 3'd0 : fw_class(ir);
 				e_fexc  <= d_fexc;
 				e_frefill <= d_frefill;
 				e_a     <= rf_a;
@@ -909,7 +948,7 @@ module vr4300 #(
 				m_cop    <= rt;
 				m_we_rf  <= we_rf && dst != 5'd0;
 				m_rd     <= dst;
-				m_res    <= res;
+				m_res    <= fw_alu ? res_f : res;
 				m_pc     <= e_pc;
 				m_lsel   <= lsel;
 				m_off    <= va[2:0];
@@ -917,7 +956,7 @@ module vr4300 #(
 				m_paddr  <= {pa[31:3], 3'b000};
 				m_cached <= pa_cached;
 				m_be     <= is_load ? 8'hFF : st_be;
-				m_wdata  <= st_data;
+				m_wdata  <= fw_st ? st_data_f : st_data;
 				m_kind   <= (is_load && lsel == 3'd7) ? {1'b1, mkind[1:0]} : 3'd0;
 				m_fpl     <= fp_load && e_ok;
 				m_fpl_d   <= fp_ld_d;
@@ -1010,6 +1049,48 @@ module vr4300 #(
 		end
 	end
 	assign w_value = w_load ? ld : w_res;
+
+	// the load in W, forwarded to the ALU alone (see e_hazard): M's result is newer when it
+	// writes the same register; X's and the rest are in a and b already
+	assign fa = (w_valid && w_we_rf && w_load && c_wa && c_nza && !fw_m_a) ? ld : a;
+	assign fb = (w_valid && w_we_rf && w_load && c_wb && c_nzb && !fw_m_b) ? ld : b;
+	wire [4:0]  f_sh   = fn[2] ? fa[4:0] : sa;
+	wire [31:0] f_sum  = fa[31:0] + fb[31:0];
+	wire [31:0] f_dif  = fa[31:0] - fb[31:0];
+	wire [31:0] f_sumi = fa[31:0] + simm[31:0];
+	wire [63:0] f_sra  = $signed(fb) >>> f_sh;
+	always @(*) begin
+		res_f = 64'd0;
+		case (op)
+		6'h00: case (fn)
+			6'h00, 6'h04: res_f = sx32(fb[31:0] << f_sh);
+			6'h02, 6'h06: res_f = sx32(fb[31:0] >> f_sh);
+			6'h03, 6'h07: res_f = sx32(f_sra[31:0]);
+			6'h21: res_f = sx32(f_sum);
+			6'h23: res_f = sx32(f_dif);
+			6'h24: res_f = fa & fb;
+			6'h25: res_f = fa | fb;
+			6'h26: res_f = fa ^ fb;
+			6'h27: res_f = ~(fa | fb);
+			6'h2A: res_f = {63'd0, $signed(fa) < $signed(fb)};
+			6'h2B: res_f = {63'd0, fa < fb};
+			default: ;
+			endcase
+		6'h09: res_f = sx32(f_sumi);
+		6'h0A: res_f = {63'd0, $signed(fa) < $signed(simm)};
+		6'h0B: res_f = {63'd0, fa < simm};
+		6'h0C: res_f = fa & zimm;
+		6'h0D: res_f = fa | zimm;
+		6'h0E: res_f = fa ^ zimm;
+		default: ;
+		endcase
+		case (op)
+		6'h28: st_data_f = {8{fb[7:0]}};
+		6'h29: st_data_f = {4{fb[15:0]}};
+		6'h2B: st_data_f = {2{fb[31:0]}};
+		default: st_data_f = fb;
+		endcase
+	end
 
 	// =============================================================================
 	// the TLB: TLBWI/TLBWR, TLBP's search, the micro-TLBs
