@@ -1,15 +1,15 @@
 //////////////////////////////////////////////////////////////////////////////////
 // n64_rdp_tmem.v - the RDP's texture memory and its loads (LOAD_BLOCK, LOAD_TILE,
 // LOAD_TLUT), done forward, a source doubleword at a time, as the chip does them.
-// tools/n64rdp.py (from parallel-RDP) works the same loads out backwards (which
+// tools/n64/n64rdp.py (from parallel-RDP) works the same loads out backwards (which
 // source writes each TMEM word last); the two are checked against each other on
-// TMEM's contents (tools/n64rdpsim.py, sim/tb_n64_rdp.v).
+// TMEM's contents (tools/n64/n64rdpsim.py, sim/tb_n64_rdp.v).
 //
-// TMEM is 2048 16-bit words (tools/n64rdp.py's indexing: word i is bytes 2i,
+// TMEM is 2048 16-bit words (tools/n64/n64rdp.py's indexing: word i is bytes 2i,
 // 2i+1), kept as four banks of 512 by the word's index & 3, so a doubleword is
 // written in one clock and four words can be read at once.
 //
-// The loads (tools/n64rdp.py RDP.load, load_iteration, tmem_word_*):
+// The loads (tools/n64/n64rdp.py RDP.load, load_iteration, tmem_word_*):
 //   LOAD_BLOCK: the texels from (sl, tl) on, in a line, into consecutive TMEM
 //     doublewords from the tile's address. A line counter t adds dxt for each
 //     doubleword: where its integer part ((i * dxt) >> 11) is odd, the

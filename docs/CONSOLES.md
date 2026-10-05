@@ -24,7 +24,7 @@ user guide is [GUIDE.md](GUIDE.md).)
 ### Mega Drive — `rtl/md_console.v`, `m68k.v`, `md_vdp.v`, `md_sound.v`, `ym2612.v`
 
 - **68000:** checked by a self-checking test program assembled in this tree
-  (`tools/m68kasm.py`), which covers results, condition codes and addressing
+  (`tools/md/m68kasm.py`), which covers results, condition codes and addressing
   modes separately.
 - **VDP:** planes, sprites and all three DMA modes.
 - **Z80 sound CPU:** with its bus handover and bank register.
@@ -138,7 +138,7 @@ The whole sound processor:
 - the four capture buffers (CD left and right, voices 1 and 3), which raise
   the IRQ like any other SPU RAM address.
 
-`tools/spu_ref.py` is a Python model built from DuckStation and psx-spx. The
+`tools/ps1/spu_ref.py` is a Python model built from DuckStation and psx-spx. The
 testbench checks the hardware against it bit for bit. On the board, the boot
 chime and Crash's music match DuckStation's output (a spectral correlation of
 0.98 and 0.993).
@@ -190,7 +190,7 @@ DuckStation's do.
   current even if the power goes.
 - **Checked:** in simulation, and on the board with Crash's load screen and the
   BIOS's own card manager. Slot 2's pad and card are checked on the board by
-  `tools/ps1slot2test.py`.
+  `tools/ps1/ps1slot2test.py`.
 
 ### The rest
 
@@ -198,4 +198,4 @@ DuckStation's do.
 - **Timers**, the interrupt controller, and the scratchpad.
 
 A frame-event profiler records flips, display-list DMA and GPU idle times,
-readable from the PC (`tools/ps1frameevents.py`).
+readable from the PC (`tools/ps1/ps1frameevents.py`).

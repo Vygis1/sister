@@ -4,7 +4,7 @@
 // It hangs off the R3000's coprocessor-2 port. Register moves land in one of two
 // banks -- data (MTC2/MFC2) and control (CTC2/CFC2) -- and a COP2 command runs
 // an operation over some cycles, holding `busy` so the CPU stalls where the real
-// pair interlocks. The maths is checked against tools/gte.py by tb_gte.
+// pair interlocks. The maths is checked against tools/ps1/gte.py by tb_gte.
 //
 // --- one datapath, many commands ---------------------------------------------------
 //

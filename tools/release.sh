@@ -8,7 +8,7 @@
 # shell|nes|sms|md|ps1|n64; EFFORT=1 for ps1, AREA=1 for n64) and try each one on the board. It
 # refuses to run with uncommitted changes, because the source archive is the
 # COMMIT and the images must have been built from exactly that; and it refuses
-# an image older than the newest RTL, the same guard tools/ps1flash.py has --
+# an image older than the newest RTL, the same guard tools/ps1/ps1flash.py has --
 # an interrupted build leaves the previous image in place, and shipping that
 # looks exactly like shipping the new one.
 set -e

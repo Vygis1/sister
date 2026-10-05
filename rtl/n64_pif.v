@@ -2,7 +2,7 @@
 // n64_pif.v - the PIF's RAM and its joybus: the controllers and the cartridge's
 // EEPROM, as the CPU reaches them through PIF RAM and the SI.
 //
-// Behaviour is tools/n64pif.py's (after ares, ISC). Our boot skips IPL3, so the
+// Behaviour is tools/n64/n64pif.py's (after ares, ISC). Our boot skips IPL3, so the
 // PIF starts running, its boot handshake done, and only the joybus matters:
 //   - a write into PIF RAM (the CPU's, or the SI's DMA) that leaves bit 0 of the
 //     command byte (RAM[63]) set clears it -- at once, in the same write -- and

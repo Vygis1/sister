@@ -2,7 +2,7 @@
 // n64_rdp_pix.v - the RDP's pixel pipeline: a span's pixels, one a clock (one every two
 // in two-cycle mode, where each pixel samples two texels), through the stages the
 // RDP has (the N64 Programming Manual's RS -> TX/TF -> CC -> BL -> MI). The arithmetic
-// is tools/n64rdp.py's, as the per-pixel state machine before it did it, one stage
+// is tools/n64/n64rdp.py's, as the per-pixel state machine before it did it, one stage
 // each:
 //
 //   A  the pixel: its coverage; the running sums (interpolate_*) step on

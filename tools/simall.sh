@@ -31,11 +31,11 @@ TESTS="tb_cpu6502 tb_ppu tb_apu tb_mapper tb_nes tb_z80_unit tb_z80 tb_vdp tb_sm
 # to be current. A test ROM that is stale is a test that passes for the wrong
 # reason, and the assembler that builds it checks itself first.
 printf "%-16s " "m68kasm"
-python tools/m68kasm.py || exit 1
+python tools/md/m68kasm.py || exit 1
 printf "%-16s " "m68ktest"
-python tools/m68ktest.py sim/roms/m68k/m68ktest.hex | head -1
+python tools/md/m68ktest.py sim/roms/m68k/m68ktest.hex | head -1
 printf "%-16s " "mdtest"
-python tools/mdtest.py sim/roms/md/mdtest.hex
+python tools/md/mdtest.py sim/roms/md/mdtest.hex
 
 fail=0
 for t in $TESTS; do

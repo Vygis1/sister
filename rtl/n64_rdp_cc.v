@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////////
 // n64_rdp_cc.v - one cycle of the RDP's colour combiner, (A - B) * C + D on the
-// four channels, as tools/n64rdp.py combiner_raw does it (combiner.h).
+// four channels, as tools/n64/n64rdp.py combiner_raw does it (combiner.h).
 //
 // Combinational: the selectors (SET_COMBINE's fields for this cycle), the
 // inputs (9-bit where the model's are; COMBINED is the last cycle's unclamped

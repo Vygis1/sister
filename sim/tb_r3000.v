@@ -1,5 +1,5 @@
 //////////////////////////////////////////////////////////////////////////////////
-// tb_r3000 - the CPU against the program tools/mipstest.py generates.
+// tb_r3000 - the CPU against the program tools/ps1/mipstest.py generates.
 //
 // The program knows its own answers; this only has to run it, raise one
 // interrupt when asked, and read the four result words. A failing case prints

@@ -42,7 +42,7 @@
 // attenuation. So applying an envelope to an oscillator is an ADD, and the only
 // conversion back to a linear number happens once, at the very end, through an
 // exponential table. Both tables are in rtl/ym_tables.vh, generated from their
-// definitions by tools/ymtables.py.
+// definitions by tools/md/ymtables.py.
 //
 // --- what is exact here, and what is not ------------------------------------------------
 //

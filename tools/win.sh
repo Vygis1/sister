@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run a command in its own window instead of in a terminal nobody is watching.
 #
-#   ./tools/win.sh "flash the board" python tools/ps1flash.py
+#   ./tools/win.sh "flash the board" python tools/ps1/ps1flash.py
 #   ./tools/win.sh --also build/core_ps1.log "build" ./tools/core.sh ps1
 #
 # The command goes into a temp script and bash is handed the script. Passing it

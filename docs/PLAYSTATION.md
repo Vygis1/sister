@@ -44,7 +44,7 @@ because the first version wrote the register one fetch too early. A CPU that
 interlocks loads runs PlayStation code wrongly in ways that take a long time to
 find, because the code was written for the one that does not.
 
-Verified by `tools/mipstest.py` against `tools/mipsasm.py`: a Python model of
+Verified by `tools/ps1/mipstest.py` against `tools/mipsasm.py`: a Python model of
 the instruction set generates a 28,159-word program that computes every case
 twice and stops at the first disagreement. **2,251 checks**, `sim/tb_r3000.v`:
 the ALU on the flag boundaries, both immediate extensions, shifts by immediate
@@ -62,7 +62,7 @@ replacement is right.
 ## First light
 
 The R3000, the GPU, the VRAM cache and the register fabric run together
-(`rtl/ps1_top.v`, `sim/tb_ps1.v`): the CPU executes tools/ps1demo.py's program
+(`rtl/ps1_top.v`, `sim/tb_ps1.v`): the CPU executes tools/ps1/ps1demo.py's program
 out of a boot ROM, writes GPU commands itself, and draws a boot screen -- a
 Gouraud-shaded diamond and a menu bar, rendered to VRAM in DDR3 and scanned out
 320x240. `docs/ps1_boot.png` is that frame, straight off the simulated display.
@@ -140,7 +140,7 @@ Everything above is history; this is where the machine stands.
 * **It plays.** The BIOS boots from reset to its menu or to a disc, and Crash
   Bandicoot runs at 30 fps in its levels. The GTE is done, and so are the GPU
   (a 2-pixel-a-clock rasteriser with a tiled texture cache), the SPU (24 voices,
-  ADSR, reverb, bit-exact against `tools/spu_ref.py`), DMA, the timers, and the
+  ADSR, reverb, bit-exact against `tools/ps1/spu_ref.py`), DMA, the timers, and the
   CD-ROM controller.
 * **The CPU runs on every 50 MHz clock** by default (ctrl 0xEC bit 12 holds it
   to 33.8688 MHz instead). It takes three clocks for a load where the R3000
@@ -201,18 +201,18 @@ Everything above is history; this is where the machine stands.
   DDR3 9 MB + 128 kB. The save queue (ctrl 0x138) carries the slot in sector
   bit 10.
 * **On the board:**
-  * `tools/ps1cdtest.py` plays channel 3 of eight interleaved XA channels at
+  * `tools/ps1/ps1cdtest.py` plays channel 3 of eight interleaved XA channels at
     700 Hz, and none of the others. It then plays an MP3 track at 880 Hz.
   * The real BIOS opens its CD player for an MP3+WAV audio CD
-    (`tools/mktestdisc.py audio`), and one press of Play gives both tracks in
+    (`tools/ps1/mktestdisc.py audio`), and one press of Play gives both tracks in
     full: 440/660 Hz, then 330 Hz, then a stop at the lead-out.
-  * `tools/ps1slot2test.py` passes.
-  * Crash still runs its levels at 30 fps (`tools/ps1frameevents.py`: 298
+  * `tools/ps1/ps1slot2test.py` passes.
+  * Crash still runs its levels at 30 fps (`tools/ps1/ps1frameevents.py`: 298
     frames in 10 s, every one two vsyncs).
   * Area: 55.8k LUTs (88%), 99.4% of slices, slack 0.077 ns. The worst path
     is the CPU's address into an SPU register's write enable, 21 levels and
     76% routing. A register stage on the SPU's register writes is the next
     step if it gets thinner.
-* **`tools/ps1bench.py` undercounts.** It takes flips from ctrl 0x6C, the
+* **`tools/ps1/ps1bench.py` undercounts.** It takes flips from ctrl 0x6C, the
   GPU's display area, and keeps only the X start. Crash's two buffers are
-  stacked in Y, so X never changes. Use `tools/ps1frameevents.py`.
+  stacked in Y, so X never changes. Use `tools/ps1/ps1frameevents.py`.

@@ -3,9 +3,9 @@
 // host's port into DDR3, the run bit raised, our boot ROM copying the game into
 // RDRAM and jumping to it, the program running to its end. Then the screen.
 //
-//   python tools/n64sim.py ROM.N64 --system        (writes sim/n64/cart.hex)
+//   python tools/n64/n64sim.py ROM.N64 --system        (writes sim/n64/cart.hex)
 //   ./tools/sim.sh tb_n64_top
-//   python tools/n64sim.py --system-check          (the screen against the model's)
+//   python tools/n64/n64sim.py --system-check          (the screen against the model's)
 //
 // DDR3 is a model with latency and back-pressure. The VI runs at the board's
 // rate (1587 clocks a half-line): with no caches yet a frame is only ~67k
@@ -121,14 +121,14 @@ module tb_n64_top;
 		         $time, dut.dpa, dut.dpa[12:4], dut.cpu.w_pc);
 	end
 
-	// every sample the AI takes, for tools/n64aitest.py's comparison with the model
+	// every sample the AI takes, for tools/n64/n64aitest.py's comparison with the model
 	integer af;
 	initial af = $fopen("../../sim/n64/ai.trace", "w");
 	always @(posedge clk)
 		if (dut.ai_pend && !dut.ai_we && dut.ai_count != 2'd0 && dut.ai_len0 != 18'd0 && dut.ai_enable
 		    && dut.al_v && dut.al_tag == dut.ai_a[22:4]) $fwrite(af, "%08x\n", dut.ai_word);
 
-	// the retire trace, in tools/n64sim.py's format, for comparison with the model
+	// the retire trace, in tools/n64/n64sim.py's format, for comparison with the model
 	integer f, tf, sbad, sw, maxf, maxi;
 	reg [31:0] pjoy;
 	reg [23:0] sa; reg [31:0] sexp;

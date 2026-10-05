@@ -2,7 +2,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 // tb_mapper - does bank switching actually switch banks?
 //
-// The cartridge from tools/uxtest.py walks its seven switchable banks, calling
+// The cartridge from tools/nes/uxtest.py walks its seven switchable banks, calling
 // a routine in each that writes its own number to memory. If banking works the
 // numbers 0..6 appear in order. If it does not -- if every window read comes
 // from the same place -- the same number appears seven times, which is exactly

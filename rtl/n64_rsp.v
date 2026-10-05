@@ -2,7 +2,7 @@
 // n64_rsp.v - the N64's RSP: the scalar unit, its COP0 (the SP's DMA and status;
 // the DP's registers are passed out), and the vector unit (COP2).
 //
-// Behaviour is tools/n64rsp.py's, which follows ares (ISC) operation for
+// Behaviour is tools/n64/n64rsp.py's, which follows ares (ISC) operation for
 // operation; this is written to be checked against it, not to be fast yet:
 //
 //   - an instruction takes two clocks: the fetch, then the execution from the

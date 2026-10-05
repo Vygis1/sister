@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 // vr4300.v - the Nintendo 64's CPU: a NEC VR4300, MIPS III, 64-bit, big-endian.
 //
-// Behaviour is tools/n64model.py's, which follows ares (ISC licence) instruction
+// Behaviour is tools/n64/n64model.py's, which follows ares (ISC licence) instruction
 // for instruction, including the chip's odd corners: MULT multiplies rs as 64
 // bits by rt as 35, DIV divides rs as 32 bits sign-extended by rt as 64, SRA
 // shifts the whole register before taking the low word, LWR sign-extends only a

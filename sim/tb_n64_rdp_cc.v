@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////////
-// tb_n64_rdp_cc - the RDP's combiner (n64_rdp_cc.v) against tools/n64rdp.py's,
-// on random vectors: python tools/n64rdpvec.py cc N, then ./tools/sim.sh tb_n64_rdp_cc
+// tb_n64_rdp_cc - the RDP's combiner (n64_rdp_cc.v) against tools/n64/n64rdp.py's,
+// on random vectors: python tools/n64/n64rdpvec.py cc N, then ./tools/sim.sh tb_n64_rdp_cc
 //////////////////////////////////////////////////////////////////////////////////
 `timescale 1ns/1ps
 `default_nettype none

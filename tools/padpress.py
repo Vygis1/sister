@@ -5,7 +5,7 @@ survive pc/pad.py's half-second refresh: each press is rewritten every 20 ms for
     from padpress import press;  press(0x40)
 """
 import sys, time, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'n64'))   # n64dbg: the register accessor
 import n64dbg
 
 JOY1 = 0x00080008

@@ -135,10 +135,10 @@ slot 1 with the cartridge's program memory as its 64 kB of RAM -- there is not
 enough spare block RAM on the part for a second 64 kB, and there does not need
 to be, because only one core runs at a time.
 
-`tools/z80hw.py` uploads a .COM file like any other cartridge, selects the Z80,
+`tools/sms/z80hw.py` uploads a .COM file like any other cartridge, selects the Z80,
 and reads the console output back over the same register bus the NES uses.
 There is no operating system: the handful of things a CP/M program needs are
-assembled as Z80 code in `tools/z80shim.py` and dropped into low memory --
+assembled as Z80 code in `tools/sms/z80shim.py` and dropped into low memory --
 a bootstrap that sets the stack and enters at $0100, a BDOS handler at $0005
 that sends characters to an I/O port, and a flag so that a finished program
 returning to $0000 stops instead of starting again.

@@ -1,9 +1,9 @@
 //////////////////////////////////////////////////////////////////////////////////
-// tb_vr4300 - the N64 CPU against tools/n64model.py, instruction by instruction.
+// tb_vr4300 - the N64 CPU against tools/n64/n64model.py, instruction by instruction.
 //
-//   python tools/n64sim.py ROM.N64 --steps 200000      (RDRAM image, boot stub, model trace)
+//   python tools/n64/n64sim.py ROM.N64 --steps 200000      (RDRAM image, boot stub, model trace)
 //   ./tools/sim.sh tb_vr4300 STEPS200000 [WAITS1]
-//   python tools/n64sim.py --compare
+//   python tools/n64/n64sim.py --compare
 //
 // RDRAM (8 MB) is preloaded with what the model's boot put there; the boot stub
 // sits at the reset address. Both ports answer with a clock of latency, or,
@@ -58,7 +58,7 @@ module tb_vr4300;
 		else fetch32 = 32'd0;
 	endfunction
 	// --- the VI, as far as a test needs it: its registers, and a line counter -----------
-	// a half-line every 200 clocks (the model's pace: tools/n64model.py HALFLINE)
+	// a half-line every 200 clocks (the model's pace: tools/n64/n64model.py HALFLINE)
 	reg  [31:0] vi_reg [0:15];
 	reg  [31:0] hl_clk = 0;
 	reg  [9:0]  vi_line = 0;

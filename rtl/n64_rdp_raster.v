@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////////
 // n64_rdp_raster.v - the RDP's rasteriser: a primitive's scanlines (span setup), as
-// tools/n64rdp.py's span_setup does it, handed a span at a time to the pixel pipeline
+// tools/n64/n64rdp.py's span_setup does it, handed a span at a time to the pixel pipeline
 // (n64_rdp_pix.v), which draws a pixel a clock. FILL mode is drawn here, a line (16
 // bytes) at a time: the fill colour repeats every four bytes, so a line is that pattern
 // and a byte mask.
@@ -12,7 +12,7 @@
 // different scanlines, so nothing a span reads was written by the spans before it in
 // the same primitive; between primitives the pipeline is emptied first and every line
 // it wrote was taken, so the next primitive's reads see them. RDRAM's ninth bits are
-// not kept (the board's DDR3 has none): they read as 3, as tools/n64rdpsim.py runs the
+// not kept (the board's DDR3 has none): they read as 3, as tools/n64/n64rdpsim.py runs the
 // model. Addresses wrap at 8 MB, as the model's RDRAM does.
 //////////////////////////////////////////////////////////////////////////////////
 
@@ -23,7 +23,7 @@ module n64_rdp_raster (
 	input  wire         rst,
 	input  wire         go,
 	output wire         busy,
-	// the primitive (tools/n64rdp.py Tri): x in s.15, y in s.11.2
+	// the primitive (tools/n64/n64rdp.py Tri): x in s.15, y in s.11.2
 	input  wire signed [26:0] xh, xm, xl, dxhdy, dxmdy, dxldy,
 	input  wire signed [13:0] yh, ym, yl,
 	input  wire [2:0]   tflags,           // {skip_xfrac, do_offset, flip}

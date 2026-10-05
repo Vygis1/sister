@@ -2,7 +2,7 @@
 // vr4300_fpu.v - the VR4300's floating-point arithmetic (COP1), one operation at
 // a time: the CPU holds the instruction in E from `start` until `done`.
 //
-// Behaviour is tools/n64fpu.py's, which follows ares (ISC): IEEE single and
+// Behaviour is tools/n64/n64fpu.py's, which follows ares (ISC): IEEE single and
 // double in the four rounding modes, with the VR4300's limits -- a subnormal
 // operand or a quiet NaN traps as Unimplemented Operation, and so does a
 // subnormal result unless FCR31.FS flushes it; a signalling NaN (quiet bit SET,

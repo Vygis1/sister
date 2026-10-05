@@ -55,7 +55,7 @@ local.env
 # tools/release.sh builds these from cores/ and the commit
 dist/
 
-# N64 bench inputs and outputs, generated from test ROMs (tools/n64sim.py)
+# N64 bench inputs and outputs, generated from test ROMs (tools/n64/n64sim.py)
 sim/n64/
 sim/n64b/
 sim/n64r/

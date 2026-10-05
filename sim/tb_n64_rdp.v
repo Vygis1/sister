@@ -1,9 +1,9 @@
 //////////////////////////////////////////////////////////////////////////////////
 // tb_n64_rdp - the RDP by itself, repeating a window of the model's RDP work.
 //
-//   python tools/n64rdpsim.py ROM [...]     (writes sim/n64d/)
+//   python tools/n64/n64rdpsim.py ROM [...]     (writes sim/n64d/)
 //   ./tools/sim.sh tb_n64_rdp
-//   python tools/n64rdpsim.py --check [--png]
+//   python tools/n64/n64rdpsim.py --check [--png]
 //
 // RDRAM is 8 MB of 128-bit lines (sim/n64d/rdram.hex), read with a few clocks of
 // latency and written with byte enables; TMEM starts as the model's did

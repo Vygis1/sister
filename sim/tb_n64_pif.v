@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////////////////
-// tb_n64_pif - the PIF's joybus against tools/n64pif.py, case by case.
+// tb_n64_pif - the PIF's joybus against tools/n64/n64pif.py, case by case.
 //
-//   python tools/n64pifvec.py 500 > sim/n64/pif_vectors.hex
+//   python tools/n64/n64pifvec.py 500 > sim/n64/pif_vectors.hex
 //   ./tools/sim.sh tb_n64_pif
 //
 // Each case: the devices, a PIF RAM image written in as the SI's DMA writes it

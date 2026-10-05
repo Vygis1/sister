@@ -61,9 +61,9 @@ from the card, the console switched by writing its image into the flash.
 - **Fixed:** the table of contents was built as flip-flops (2,800 LUTs), and
   the image stopped routing. It is LUT RAM again.
 - **Checked on the board:**
-  - `tools/ps1cdtest.py` plays one XA channel out of eight, then an MP3 track;
+  - `tools/ps1/ps1cdtest.py` plays one XA channel out of eight, then an MP3 track;
   - the BIOS's CD player plays an MP3 track and a WAV track in full;
-  - `tools/ps1slot2test.py` checks the second pad and card.
+  - `tools/ps1/ps1slot2test.py` checks the second pad and card.
 - **Known:**
   - XA and audio tracks need the disc served by the PC; the ESP32 serves a
     single `.bin`.

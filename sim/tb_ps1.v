@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 // tb_ps1 - the whole PlayStation, running the boot demo.
 //
-// Loads tools/ps1demo.py's program into the boot ROM, gives VRAM a DDR3-shaped
+// Loads tools/ps1/ps1demo.py's program into the boot ROM, gives VRAM a DDR3-shaped
 // line memory, and lets the R3000 run: it should set the drawing environment,
 // clear the screen to a gradient, draw the diamond and the bar, and turn the
 // display on -- all by writing GP0/GP1 itself, with no help from the testbench.

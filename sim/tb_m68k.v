@@ -5,7 +5,7 @@
 // The programs here are hex words written into memory by hand rather than
 // assembled by a tool. That is right at this size and will stop being right
 // quickly: once there is an ALU group and condition codes to check, the tests
-// move to a tools/m68ktest.py that assembles them, the way the Z80 and NES tests
+// move to a tools/md/m68ktest.py that assembles them, the way the Z80 and NES tests
 // already do.
 //
 // Two things get checked separately throughout, because they fail separately:

@@ -291,7 +291,7 @@ Still ahead of a running Mega Drive, in the order they have to happen:
    against the actual DRAM, so it says the pinout is right on all 47 signals and
    the rail really is 1.35 V.
 
-   Then the whole path: `tools/mdtest.py`'s cartridge loaded into DDR3 over
+   Then the whole path: `tools/md/mdtest.py`'s cartridge loaded into DDR3 over
    fpgalink and run. The 68000 fetched its reset vector and every instruction
    after it out of DDR3 through cart_cache, cleared VRAM by DMA, set the VDP up
    and drew its tile -- a solid red cell top left on black, captured back off the

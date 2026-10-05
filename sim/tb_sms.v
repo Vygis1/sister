@@ -8,7 +8,7 @@
 // the interrupt line, and whether a program's writes to two ports actually turn
 // into pixels.
 //
-// The cartridge is tools/smstest.py, which draws a screen whose every pixel is
+// The cartridge is tools/sms/smstest.py, which draws a screen whose every pixel is
 // known in advance. That is the point of writing one rather than finding a
 // game: the test can check the picture instead of a person squinting at it.
 //////////////////////////////////////////////////////////////////////////////////

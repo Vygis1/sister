@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////////
 // n64_rdp_persp.v - the RDP's perspective divide: (s, t) / w with a table
-// reciprocal, as tools/n64rdp.py perspective_divide does it (perspective.h,
+// reciprocal, as tools/n64/n64rdp.py perspective_divide does it (perspective.h,
 // parallel-RDP, MIT): 17-bit results and an overflow flag. Two clocks; held while ce is low.
 //////////////////////////////////////////////////////////////////////////////////
 

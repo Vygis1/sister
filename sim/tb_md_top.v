@@ -4,7 +4,7 @@
 //
 // Everything below this has its own tests and passes them. This is the one that
 // says they agree with each other: a real program, assembled by
-// tools/m68kasm.py, running out of a cartridge at address zero, reaching the
+// tools/md/m68kasm.py, running out of a cartridge at address zero, reaching the
 // VDP through the memory map and putting a picture on the screen.
 //
 // The picture is deliberately trivial -- one red cell in the corner of a black

@@ -1,9 +1,9 @@
 //////////////////////////////////////////////////////////////////////////////////
 // tb_n64_rsp - the RSP by itself, repeating the model's runs of it.
 //
-//   python tools/n64rspsim.py ROM          (writes sim/n64r/runs.hex and the model's results)
+//   python tools/n64/n64rspsim.py ROM          (writes sim/n64r/runs.hex and the model's results)
 //   ./tools/sim.sh tb_n64_rsp
-//   python tools/n64rspsim.py --check
+//   python tools/n64/n64rspsim.py --check
 //
 // For each run: DMEM and IMEM are loaded through the RSP's CPU port, SP_PC set,
 // the halt cleared, and the RSP left to run until it halts again. Its instruction
@@ -130,7 +130,7 @@ module tb_n64_rsp;
 			while (!halted && t < 2000000) begin @(negedge clk); t = t + 1; end
 			if (!halted) $display("tb_n64_rsp: run %0d did not halt", r);
 			repeat (4) @(negedge clk);
-			// the vector unit's state, as tools/n64rspsim.py writes the model's
+			// the vector unit's state, as tools/n64/n64rspsim.py writes the model's
 			$fwrite(vf, "RUN %0d\n", r);
 			for (i = 0; i < 32; i = i + 1) begin
 				$fwrite(vf, "v%02d ", i);

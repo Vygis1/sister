@@ -4,7 +4,7 @@
 //
 // tb_m68k.v checks instructions one at a time, by hand, and is where a new
 // instruction group gets its first test. This one is the other half: a program
-// built by tools/m68ktest.py that sweeps thousands of operand pairs against a
+// built by tools/md/m68ktest.py that sweeps thousands of operand pairs against a
 // model of the 68000 written in Python from the manual. Two independent
 // descriptions of the same rules, disagreeing loudly when either is wrong.
 //
@@ -54,7 +54,7 @@ module tb_m68krom;
 	end
 
 	// Where the program leaves its answer. These have to match the constants at
-	// the top of tools/m68ktest.py.
+	// the top of tools/md/m68ktest.py.
 	localparam RESULT = 20'h81000 >> 1;
 	localparam COUNT  = 20'h81002 >> 1;
 	localparam ACTUAL = 20'h81004 >> 1;

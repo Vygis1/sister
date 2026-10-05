@@ -23,7 +23,7 @@ module tb_game;
 	reg  [7:0]  prg_din, chr_din;
 	reg  [7:0]  joy1 = 8'h00;
 	// Which cartridge chip, how it mirrors and how big it is: written by
-	// tools/nes2hex.py alongside the ROM image, so one testbench runs any game.
+	// tools/nes/nes2hex.py alongside the ROM image, so one testbench runs any game.
 	reg         mirror_v;
 	reg [3:0]   mapper_id;
 	reg [5:0]   prg_last;

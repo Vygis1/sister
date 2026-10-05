@@ -2,7 +2,7 @@
 // n64_rdp2.v - the N64's RDP, being built: its registers, the command walk, every
 // SET_* command's state, and the primitives handed to n64_rdp_raster.v. (It
 // replaces the stand-in, n64_rdp.v, once it draws what SM64 draws.) The behaviour
-// is tools/n64rdp.py's (derived from parallel-RDP, MIT); tools/n64rdpsim.py and
+// is tools/n64/n64rdp.py's (derived from parallel-RDP, MIT); tools/n64/n64rdpsim.py and
 // sim/tb_n64_rdp.v check it against that model.
 //
 // The registers are ares's (ares/n64/rdp/io.cpp, ISC): START is taken only while
@@ -106,7 +106,7 @@ module n64_rdp2 #(
 	end endfunction
 
 	// =============================================================================
-	// the state the commands set (tools/n64rdp.py RDP.execute)
+	// the state the commands set (tools/n64/n64rdp.py RDP.execute)
 	// =============================================================================
 	reg  [31:0] om0, om1;                 // SET_OTHER_MODES
 	reg  [31:0] comb0, comb1;             // SET_COMBINE, as sent
@@ -137,7 +137,7 @@ module n64_rdp2 #(
 	reg  [2:0]   t_flags;                 // {skip_xfrac, do_offset, flip}
 	reg  [5:0]   t_tile;
 	// the attributes, 32 of 32 bits: rgba, drgba_dx, drgba_de, drgba_dy, stzw,
-	// dstzw_dx, dstzw_de, dstzw_dy, four each (tools/n64rdp.py Attr)
+	// dstzw_dx, dstzw_de, dstzw_dy, four each (tools/n64/n64rdp.py Attr)
 	reg  [31:0]  attr [0:31];
 	wire [4:0]   at_ra;
 	reg  [31:0]  at_q;
@@ -146,7 +146,7 @@ module n64_rdp2 #(
 	wire         pr_busy;
 
 	// attribute k (group k[4:2], component k[1:0]) from the command in cbuf:
-	// tools/n64rdp.py decode_shade/texture/z. Its integer half is a 16-bit half of
+	// tools/n64/n64rdp.py decode_shade/texture/z. Its integer half is a 16-bit half of
 	// word wi, its fraction a half of word wj (high halves for even components);
 	// texture's w is component 3 but third in its block; z is whole, from the Z
 	// block. (Called from the clocked executor only: it reads cbuf.)
@@ -172,7 +172,7 @@ module n64_rdp2 #(
 		attr_value = !have ? 32'd0 : whole ? vi : !cc[0] ? {vi[31:16], vj[31:16]} : {vi[15:0], vj[15:0]};
 	end endfunction
 
-	// a texture rectangle's attributes (tools/n64rdp.py texture_rectangle): s, t from
+	// a texture rectangle's attributes (tools/n64/n64rdp.py texture_rectangle): s, t from
 	// its second doubleword (<< 16); dsdx, dtdy (<< 11) as s's x slope and t's e and y
 	// slopes, or flipped, t's x slope and s's
 	function [31:0] texrect_attr; input [4:0] k; reg [31:0] w3; reg signed [31:0] dsdx, dtdy; reg fl; begin
@@ -417,7 +417,7 @@ module n64_rdp2 #(
 					ws <= X_ATTR;                                                     // (all zero)
 				end
 				6'h30, 6'h33, 6'h34: begin                                            // LOAD_TLUT, _BLOCK, _TILE
-					// (the load's tile takes its bounds, as tools/n64rdp.py load_iteration's does)
+					// (the load's tile takes its bounds, as tools/n64/n64rdp.py load_iteration's does)
 					tile_sz[w1[26:24]] <= {w0[23:12], w0[11:0], w1[23:12], w1[11:0]};
 					ld_go <= 1'b1; tmem_mem <= 1'b1; ws <= X_LOAD;
 				end

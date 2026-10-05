@@ -261,7 +261,7 @@ SN76489 the Master System core already drives, the bank register, and the window
 through which a sound driver reads its music out of the cartridge. The Z80
 itself is the one that already passes ZEXDOC and ZEXALL on hardware.
 
-The part worth testing is not the Z80, it is the handover. `tools/mdtest.py`
+The part worth testing is not the Z80, it is the handover. `tools/md/mdtest.py`
 does the whole dance a real game does to load its sound driver: ask for the bus
 at $A11100 and spin until bit 8 clears, hold the Z80 in reset at $A11200, write
 a program into its RAM a byte at a time, let it out of reset, give the bus back,
@@ -285,7 +285,7 @@ full scale that point of a sine is; the envelope is also an attenuation. So
 applying an envelope to an oscillator is an add, and the only conversion back to
 a linear number happens once, at the very end, through an exponential table.
 Both tables are generated from their mathematical definitions by
-`tools/ymtables.py` rather than transcribed, because a table one entry out
+`tools/md/ymtables.py` rather than transcribed, because a table one entry out
 sounds almost right and cannot be eyeballed.
 
 Twenty-four operators share one datapath, four clocks each -- the same
@@ -330,7 +330,7 @@ from one module to the other, and two clock enables at different rates --
 deliberately not the same rate, because a design that only works when both sides
 tick together works in exactly one testbench.
 
-The program is built by `tools/mdtest.py` out of the same assembler the 68000's
+The program is built by `tools/md/mdtest.py` out of the same assembler the 68000's
 own tests use.
 
 The cartridge in that test is not a ROM. It is `cart_cache` in front of a memory
@@ -431,7 +431,7 @@ while the thing is being written, and it is worth being able to see exactly what
 the processor is being asked to do.
 
 `sim/tb_m68krom.v` is the other half, and it is where the coverage actually
-comes from. `tools/m68ktest.py` holds a model of the 68000's arithmetic written
+comes from. `tools/md/m68ktest.py` holds a model of the 68000's arithmetic written
 in Python from the manual, and generates a program that sweeps operand pairs
 against it -- every combination of signs, both directions of carry and borrow,
 the values where adding one flips the sign, shift counts of 0 and 68 as well as
@@ -440,11 +440,11 @@ the program stops and records the case number, what the processor produced and
 what the model expected; `sim/roms/m68k/m68ktest.txt` says what that case number
 was.
 
-The programs are built by `tools/m68kasm.py`, a small assembler in the same
-shape as `tools/smstest.py` -- Python calls rather than text to parse, so the
+The programs are built by `tools/md/m68kasm.py`, a small assembler in the same
+shape as `tools/sms/smstest.py` -- Python calls rather than text to parse, so the
 thing that writes the test is in the same language as the thing that checks it.
 It verifies itself against 93 encodings worked out by hand (`python
-tools/m68kasm.py`), which is what stops "the assembler and the CPU agree"
+tools/md/m68kasm.py`), which is what stops "the assembler and the CPU agree"
 meaning "they are wrong together".
 
 Both sweeps were checked against deliberate damage before being believed: an
@@ -459,7 +459,7 @@ The same way the 6502 and the Z80 did, because it is the only approach that has
 worked here: a reference that disagrees loudly.
 
 - **A self-checking test program**, assembled by a tool in this tree the way
-  `tools/smstest.py` and `tools/uxtest.py` already do. Every instruction form
+  `tools/sms/smstest.py` and `tools/nes/uxtest.py` already do. Every instruction form
   computes something whose answer is known, and writes a byte saying so.
 - **Condition codes checked separately from results.** Half of what goes wrong
   in a 68000 is X, N, Z, V and C after an operation that produced the right

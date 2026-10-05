@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////////////////
-// tb_vr4300_fpu - the FPU unit against tools/n64fpu.py, vector by vector.
+// tb_vr4300_fpu - the FPU unit against tools/n64/n64fpu.py, vector by vector.
 //
-//   python tools/n64fpuvec.py 20000 > sim/n64/fpu_vectors.hex
+//   python tools/n64/n64fpuvec.py 20000 > sim/n64/fpu_vectors.hex
 //   ./tools/sim.sh tb_vr4300_fpu
 //
 // Each vector is an operation and the model's answer: whether fd is written and

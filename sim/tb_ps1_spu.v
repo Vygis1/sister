@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 // tb_ps1_spu - the SPU against its reference model, sample for sample.
 //
-// tools/spu_ref.py writes sim/spu_test/: a sample bank (ram.hex), a register
+// tools/ps1/spu_ref.py writes sim/spu_test/: a sample bank (ram.hex), a register
 // script (script.hex: {tick, offset, value}), and every output sample the model
 // makes (expect.hex) plus ENDX at the end. This uploads the bank the way a game
 // does -- TSA, transfer mode "DMA write", words through the DMA port -- into a
@@ -11,7 +11,7 @@
 // The bank goes in through the FIFO and the write-combiner, so the transfer path
 // is tested by the sound coming out right, not by peeking at memory.
 //
-//   python tools/spu_ref.py && ./tools/sim.sh tb_ps1_spu
+//   python tools/ps1/spu_ref.py && ./tools/sim.sh tb_ps1_spu
 //////////////////////////////////////////////////////////////////////////////////
 `timescale 1ns/1ps
 `default_nettype none

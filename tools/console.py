@@ -1,7 +1,7 @@
 """A window that runs one command and shows its output as it happens.
 
     pythonw tools/console.py "build the PS1 core" -- ./tools/core.sh ps1
-    pythonw tools/console.py "flash" -- python tools/ps1flash.py
+    pythonw tools/console.py "flash" -- python tools/ps1/ps1flash.py
 
 Everything long -- a build, a simulation run, a flash -- goes in one of these
 instead of into a terminal that has already scrolled away. The window shows the

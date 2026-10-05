@@ -68,7 +68,8 @@ rtl/        the consoles and the board: nes, sms (z80, vdp), md_* (m68k, ym2612)
             ps1_* (r3000), n64_* (vr4300, rsp, rdp); hdmi_tx, osd, shell_top, esp_bus
 esp32/      the ESP32 firmware: the menu, game loading, Bluetooth pads
 sim/        testbenches (tb_*.v) and models
-tools/      build, flash and simulation scripts, models, board debugging
+tools/      build, flash, simulation and release scripts; per console (nes/ sms/ md/
+            ps1/ n64/) the reference models, tests and board debugging (tools/README.md)
 boards/     constraints for the QMTECH board, HDMI, the LAN8720, DDR3
 pc/ web/    the development server and page (docs/DEVELOPMENT.md)
 docs/       the guide, and design notes for each part

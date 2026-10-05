@@ -337,7 +337,7 @@ module tb_ps1_tex;
 	localparam TEX_X = 512, TEX_Y = 0, TW = 64, TH = 64;
 	function [15:0] texel_g;                       // red = u, green = v, bits 12:10 = generation
 		input [9:0] tu; input [9:0] tv; input [2:0] tg;
-		texel_g = {1'b0, tu[5], tv[5], tg, tv[4:0], tu[4:0]};   // as tools/ps1texcheck.py encodes it
+		texel_g = {1'b0, tu[5], tv[5], tg, tv[4:0], tu[4:0]};   // as tools/ps1/ps1texcheck.py encodes it
 	endfunction
 	task upload;                                   // A0: the whole texture, one word every clock
 		input integer g;

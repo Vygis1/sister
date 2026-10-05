@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////////
 // n64_rdp_tex.v - the RDP's texture sampler: a texel of a tile at (s, t), as
-// tools/n64rdp.py sample_texture does it (texture.h): the coordinates shifted,
+// tools/n64/n64rdp.py sample_texture does it (texture.h): the coordinates shifted,
 // clamped, wrapped and mirrored; up to four texels read from TMEM at once (one
 // per copy, n64_rdp_tmem.v), through the TLUT where there is one; and the
 // filter: 3-tap bilinear, the mid-texel average, or the one texel.

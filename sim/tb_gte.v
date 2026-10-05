@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 // tb_gte - the GTE against its model.
 //
-// tools/gtetest.py runs random register states and commands through the Python
+// tools/ps1/gtetest.py runs random register states and commands through the Python
 // model and writes sim/roms/gte_vectors.hex: 129 words a case -- 32 data and 32
 // control registers to load, the command, then what every register reads back
 // afterwards. This loads the same state into the RTL, runs the same command,
@@ -9,12 +9,12 @@
 // both values, and the run stops at the first, because one wrong flag bit is a
 // GTE that will draw something subtly wrong forever.
 //
-//   python tools/gtetest.py 2000 > sim/roms/gte_vectors.hex
+//   python tools/ps1/gtetest.py 2000 > sim/roms/gte_vectors.hex
 //   ./tools/sim.sh tb_gte
 //
 // AND against a real machine. sim/roms/gte_hw_vectors.hex is 1100 cases read
 // off hardware (JaCzekanski's ps1-tests, gte-fuzz), converted by
-// tools/gtehw.py. The model is only as right as the documentation it was
+// tools/ps1/gtehw.py. The model is only as right as the documentation it was
 // written from -- these caught three things the model and the RTL had agreed
 // on and both had wrong: the read-back widths, a projection that must saturate
 // rather than wrap, and IR saturating off the 32-bit MAC register instead of

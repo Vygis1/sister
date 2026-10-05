@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////////
 // n64_rdp_texp.v - the RDP's texture sampler, pipelined: a texel a clock. The same
-// arithmetic as tools/n64rdp.py sample_texture (texture.h) -- the coordinates
+// arithmetic as tools/n64/n64rdp.py sample_texture (texture.h) -- the coordinates
 // shifted, clamped, wrapped and mirrored; four texels read from TMEM at once (one
 // per copy, n64_rdp_tmem.v), through the TLUT where there is one; and the filter
 // (3-tap bilinear, the mid-texel average, or the one texel) -- in eight stages:
