@@ -60,6 +60,8 @@ case "${1:-nes}" in
 esac
 
 LOG="build/core_$NAME.log"
+# each core in a folder of its own, so two can build at once
+OUT="build/core_$NAME"
 # A marker older than anything this run produces, so the check below can tell
 # a fresh image from the one the previous run left behind.
 STAMP="build/.core_$NAME.start"
@@ -71,20 +73,20 @@ python tools/srcstamp.py --snapshot > "build/.core_$NAME.hashes"
 # about twice the runtime and are worth it for a design that is close, which the
 # PlayStation now is: at 99.99% of the part's slices its critical path is 75%
 # ROUTING, and the default directives left 0.003 ns -- too thin to flash.
-tools/vivado.sh build -top "$TOP" -xdc "$XDC" $GEN $EXTRA ${EFFORT:+-effort} 2>&1 | tee "$LOG" | \
+tools/vivado.sh build -top "$TOP" -xdc "$XDC" $GEN $EXTRA ${EFFORT:+-effort} -out "$OUT" 2>&1 | tee "$LOG" | \
   grep -E "^ *(ERROR|CRITICAL)|TIMING:|raw image:|generics:" || true
 
 bad=0
 grep -qE "^ERROR" "$LOG"            && { echo " *** errors"; bad=1; }
 grep -qE "^CRITICAL WARNING:" "$LOG" && { echo " *** critical warnings"; bad=1; }
 grep -qi "multi-driven" "$LOG"      && { echo " *** multi-driven nets"; bad=1; }
-[ -f "build/$TOP/$TOP.bin" ]        || { echo " *** no .bin produced"; bad=1; }
+[ -f "$OUT/$TOP.bin" ]        || { echo " *** no .bin produced"; bad=1; }
 # The image has to be newer than the marker above. A build that is interrupted
 # -- killed, or out of memory -- leaves the PREVIOUS bitstream sitting in
 # build/, and copying that into cores/ publishes a stale image that looks
 # exactly like your change not working. It cost an install and a measurement
 # to notice.
-[ "build/$TOP/$TOP.bin" -nt "$STAMP" ] || { echo " *** build/$TOP/$TOP.bin is older than this run: the build did not finish"; bad=1; }
+[ "$OUT/$TOP.bin" -nt "$STAMP" ] || { echo " *** $OUT/$TOP.bin is older than this run: the build did not finish"; bad=1; }
 # An image that misses timing is not an image. It will be flashed, it will
 # run, and it will do something different every time it warms up -- which
 # reads as a logic bug and is chased as one.
@@ -95,7 +97,7 @@ grep -qE "^ TIMING: FAILS" "$LOG"    && { echo " *** timing failed: this image w
 # that does not fit would be written anyway and fail to load later, which is a
 # much worse place to find out.
 SLOT_KB=6144
-SIZE=$(stat -c %s "build/$TOP/$TOP.bin")
+SIZE=$(stat -c %s "$OUT/$TOP.bin")
 if [ "$NAME" != "shell" ] && [ "$SIZE" -gt $((SLOT_KB*1024)) ]; then
   echo " *** $((SIZE/1024)) kB will not fit the ${SLOT_KB} kB slot"
   exit 1
@@ -107,9 +109,9 @@ if [ "$NAME" = "shell" ] && [ "$SIZE" -gt 2097152 ]; then
 fi
 
 mkdir -p cores
-cp "build/$TOP/$TOP.bin" "cores/$NAME.bin"
+cp "$OUT/$TOP.bin" "cores/$NAME.bin"
 python tools/srcstamp.py "$LOG" "build/.core_$NAME.hashes" > "cores/$NAME.src" || echo " *** no source stamp: tools/release.sh will refuse this image"
 # the shell as a bitstream too: the first programming writes it over JTAG
-[ "$NAME" = shell ] && cp "build/$TOP/$TOP.bit" cores/shell.bit
+[ "$NAME" = shell ] && cp "$OUT/$TOP.bit" cores/shell.bit
 grep -E "Slice LUTs|Block RAM Tile" "build/$TOP/post_route_util.rpt" | head -2
 echo " cores/$NAME.bin  $((SIZE/1024)) kB"

@@ -45,7 +45,8 @@ module regfile #(
 	parameter        CORE_MD  = 0,
 	parameter        MD_DDR3  = 0,
 	parameter        CORE_PS1 = 0,
-	parameter        CORE_N64 = 0
+	parameter        CORE_N64 = 0,
+	parameter        WEBVID   = 0     // the picture to the web page as well (see eth_top)
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -280,6 +281,11 @@ module regfile #(
 	wire        vid_err;
 	wire        vid_we = new_req && bus_we && (bus_addr[31:16] == PAGE_VID);
 
+	// The web page's copy of the picture: 320 x 240 in block RAM for the NES, Master
+	// System and Mega Drive (24 of them, and 5k LUTs), or the PlayStation's slow
+	// read of its DDR3 frame. HDMI has its own; without WEBVID only the latter stays
+	// (a few dozen LUTs, and the one way left to read a picture over the network).
+	generate if (WEBVID || FB_DDR) begin : g_video
 	video #(.FB_DDR(FB_DDR)) u_video (
 		.clk(clk), .rst(rst),
 		.off(off), .we(vid_we), .wdata(bus_wdata),
@@ -290,6 +296,9 @@ module regfile #(
 		.ext_y(nes_px_y), .ext_rgb(nes_px_rgb),
 		.frame_count()
 	);
+	end else begin : g_novideo
+		assign vid_rdata = 32'd0; assign vid_err = 1'b1; assign fb_rdata = 32'd0;
+	end endgenerate
 
 	// --- NES ------------------------------------------------------------------
 	// The console runs at one PPU dot per system clock here. Real NTSC timing is
@@ -349,7 +358,7 @@ module regfile #(
 	localparam MD_ONLY = (CORE_MD && !CORE_NES && !CORE_SMS);
 
 	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64),
+	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),

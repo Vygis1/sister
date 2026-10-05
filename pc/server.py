@@ -651,6 +651,16 @@ VID_PATTERN = VID + 0x14
 # longer fit the single page it used to live in -- so it moved up to 0x0010 and
 # spans two.
 VID_FB = 0x0010_0000
+
+
+def vid_on():
+    """Turn the web page's framebuffer on -- where there is one: a core built
+    without WEBVID (the default; the picture is on HDMI) has no video registers."""
+    try:
+        talk(link.write, VID_CTRL, 0b11)
+    except fl.LinkError as e:
+        if "not mapped" not in str(e):
+            raise
 FB_W, FB_H = 320, 240
 FB_WORDS = FB_W * FB_H // 4
 
@@ -679,7 +689,13 @@ def running_console():
 
 @app.route("/api/vid/state")
 def api_vid_state():
-    ctrl = talk(link.read, VID_CTRL)
+    try:
+        ctrl = talk(link.read, VID_CTRL)
+    except fl.LinkError as e:
+        if "not mapped" not in str(e):
+            raise
+        # built without WEBVID: no web picture (it is on HDMI)
+        return jsonify(enabled=False, webvid=False, error="this core sends its picture to HDMI only")
     return jsonify(
         enabled=bool(ctrl & 1),
         external=bool(ctrl & 2),
@@ -697,6 +713,13 @@ def api_vid_state():
 @app.route("/api/vid/config", methods=["POST"])
 def api_vid_config():
     body = request.json or {}
+    if not frame_is_ddr():
+        try:
+            talk(link.read, VID_CTRL)
+        except fl.LinkError as e:
+            if "not mapped" not in str(e):
+                raise
+            return jsonify(ok=False, error="this core sends its picture to HDMI only"), 404
     if "enable" in body or "external" in body:
         ctrl = talk(link.read, VID_CTRL)
         if "enable" in body:
@@ -904,6 +927,11 @@ class FrameStream:
             ddr = True                     # the N64's frame is only ever read out of RDRAM
         self.from_ddr = ddr
         talk(link.write, STREAM_CTL, (0xC800_0000 if ddr else 0xC000_0000) | STREAM_PORT)
+        # A core built without WEBVID has no streamer and reads the register back as
+        # 0: the picture is on HDMI, and /api/vid/frame falls back to reading it slowly.
+        if talk(link.read, STREAM_CTL) == 0:
+            self.unsupported = True
+            return
         talk(link.write, FB_CAP, 1)         # the first capture; the streamer re-arms after each frame
         self.mismatch = 0
         self.enabled = True
@@ -1173,6 +1201,13 @@ def api_vid_frame():
     if frame_is_ddr():
         try:
             frame_stream.last_want = time.time()
+            if getattr(frame_stream, "unsupported", False):
+                data, w, h = ddr_frame()       # no streamer in this build: the slow read
+                resp = Response(data, mimetype="application/octet-stream")
+                resp.headers["X-Format"] = "rgb555"
+                resp.headers["X-Width"] = str(w)
+                resp.headers["X-Height"] = str(h)
+                return resp
             if (not frame_stream.enabled or frame_stream.mismatch > 3
                     or time.time() - frame_stream.last_rx > 2.0):
                 # ARM THE BOARD FIRST, from a register read rather than a
@@ -1202,7 +1237,13 @@ def api_vid_frame():
         resp.headers["X-Frame"] = str(frame_stream.count)
         return resp
 
-    words = talk(link.read_block, VID_FB, FB_WORDS)
+    try:
+        words = talk(link.read_block, VID_FB, FB_WORDS)
+    except fl.LinkError as e:
+        if "not mapped" not in str(e):
+            raise
+        # built without WEBVID: the NES, Master System and Mega Drive keep no copy
+        return jsonify(error="this core sends its picture to HDMI only (built without WEBVID)"), 404
     frame = bytearray(b"".join(struct.pack("<I", w) for w in words))
 
     # Blank the rows the running machine does not draw.
@@ -1719,7 +1760,7 @@ def ps1_load_bios(rom):
             upload_toc(lambda a, v: talk(link.write, a, v))
         except (fl.LinkError, TimeoutError):
             pass
-    talk(link.write, VID_CTRL, 0b11)
+    vid_on()
     talk(link.write, NES_CTRL, 1)          # release the CPU from the reset vector
 
 
@@ -2190,7 +2231,7 @@ def api_nes_load():
         # that works until something reads the very end of the cartridge.
         talk(link.write, NES_FILL_END, 1)
 
-        talk(link.write, VID_CTRL, 0b11)
+        vid_on()
         syn_source(True)
         talk(link.write, NES_CTRL, 1)
         name = rom[0x120:0x150].decode("ascii", "replace").strip()
@@ -2295,7 +2336,7 @@ def api_nes_load():
         talk(link.write, NES_MAPPER,
              (mapper & 0xF) | (prg_last << 8) | (0x4000 if chr_is_ram else 0))
         talk(link.write, NES_CONSOLE, 0)
-        talk(link.write, VID_CTRL, 0b11)
+        vid_on()
         syn_source(True)
         talk(link.write, NES_CTRL, 1 | (2 if mirror_v else 0))
 
@@ -2313,7 +2354,7 @@ def api_nes_load():
     prg = rom.ljust((len(rom) + 3) // 4 * 4, b"\x00")
     write_pages(NES_PRG, list(struct.unpack(f"<{len(prg)//4}I", prg)))
     talk(link.write, NES_CONSOLE, 1)
-    talk(link.write, VID_CTRL, 0b11)
+    vid_on()
     syn_source(True)
     talk(link.write, NES_CTRL, 1)
     return jsonify(ok=True, console="Master System", prg=len(prg), chr=0,

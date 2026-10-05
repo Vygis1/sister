@@ -76,7 +76,8 @@ module console_top #(
 	parameter CORE_PS1 = 0,
 	// The Nintendo 64 (n64_top.v). Its own image, like the PlayStation's; RDRAM
 	// and the cartridge are in DDR3.
-	parameter CORE_N64 = 0
+	parameter CORE_N64 = 0,
+	parameter WEBVID   = 0     // the picture to the web page as well (see eth_top); without it the stream registers read 0
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -314,7 +315,8 @@ module console_top #(
 	reg  [31:0]  snap_a0, snap_a1, snap_ra, snap_sp, snap_pc;   // the CPU's registers when the watchpoint hit
 	wire [31:0]  ps1_dbg_fill;
 	reg  [23:0]  hr_line;
-	reg  [31:0]  stream_ctl, stream_base_r, stream_words_r;   // ctrl 0xF0 {en, .., port}, 0xF4 base, 0xF8 words
+	reg  [31:0]  stream_ctl = 32'd0;                          // ctrl 0xF0 {en, .., port} (only with WEBVID)
+	reg  [31:0]  stream_base_r, stream_words_r;               // 0xF4 base, 0xF8 words
 	reg  [31:0]  stream_row_r;                                // ctrl 0xFC {row pitch, words per row}
 	reg  [1:0]   sdt_sync; reg sdt_seen;                      // the streamer's done toggle, edge-detected
 	wire         stream_rearm = (sdt_sync[1] != sdt_seen);
@@ -468,7 +470,7 @@ module console_top #(
 		if (rst) begin sdt_seen <= 1'b0; stream_kick <= 1'b0; end
 		else begin
 			if (stream_rearm) begin sdt_seen <= sdt_sync[1]; stream_kick <= 1'b0; end   // the frame went out
-			if (ctrl_we && off == 16'h00F0 && wdata[28]) stream_kick <= 1'b1;
+			if (WEBVID && ctrl_we && off == 16'h00F0 && wdata[28]) stream_kick <= 1'b1;
 		end
 	end
 	wire         ps1_node_v; wire [23:0] ps1_node_addr; wire [31:0] ps1_node_hdr;
@@ -559,7 +561,7 @@ module console_top #(
 			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14]; end
 			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
 			16'h0134: begin card_in <= wdata[0]; card_fill <= wdata[1]; card2_in <= wdata[2]; card2_fill <= wdata[3]; end
-			16'h00F0: stream_ctl <= wdata;
+			16'h00F0: if (WEBVID) stream_ctl <= wdata;
 			16'h00F4: stream_base_r <= wdata;
 			16'h00F8: stream_words_r <= wdata;
 			16'h00FC: stream_row_r <= wdata;

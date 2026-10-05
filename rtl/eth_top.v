@@ -29,7 +29,11 @@ module eth_top #(
 	// with CORE_MD, and it brings the whole memory controller in with it.
 	parameter MD_DDR3  = 0,
 	parameter CORE_PS1 = 0,
-	parameter CORE_N64 = 0
+	parameter CORE_N64 = 0,
+	// 1: the picture to the web page too, as a UDP stream (net_core's streamer, the
+	// NES / Master System / Mega Drive framebuffer in regfile, the console's stream
+	// registers). The picture is on HDMI; the network keeps only the register API.
+	parameter WEBVID   = 0
 )(
 	input  wire       sys_clk,       // 50 MHz onboard oscillator, ball U22
 	input  wire       eth_refclk,    // 50 MHz from the LAN8720, U4 pin 47
@@ -130,10 +134,11 @@ module eth_top #(
 		.bus_we(n_we), .bus_re(n_re),
 		.bus_rdata(bus_rdata), .bus_ack(n_ack), .bus_err(bus_err),
 		.rx_frame(rx_frame), .tx_frame(tx_frame),
-		.stream_en(stream_en), .stream_port(stream_port), .stream_base(stream_base), .stream_words(stream_words),
+		// (without WEBVID the streamer never starts, and synthesis removes it)
+		.stream_en(WEBVID ? stream_en : 1'b0), .stream_port(stream_port), .stream_base(stream_base), .stream_words(stream_words),
 		.stream_rowlen(stream_rowlen), .stream_stride(stream_stride),
-		.stream_ready(stream_ready), .stream_done_tog(stream_done_tog),
-		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(stream_fvalid), .stream_frd(stream_frd)
+		.stream_ready(WEBVID ? stream_ready : 1'b0), .stream_done_tog(stream_done_tog),
+		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(WEBVID ? stream_fvalid : 1'b0), .stream_frd(stream_frd)
 	);
 
 	// What the analyser watches. Pointing it at the RMII pins makes the board
@@ -314,7 +319,7 @@ module eth_top #(
 		.go(bus_we && bus_ack && bus_addr == 32'h0000_0014 && bus_wdata == 32'hB007_0000));
 
 	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64)) u_regs (
+	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID)) u_regs (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wdata_wmask),
 		.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid),
 		.d_calibrated(d_calibrated),

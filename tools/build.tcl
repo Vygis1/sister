@@ -206,14 +206,15 @@ if {$incr && [file exists $incr_dcp]} {
     read_checkpoint -incremental $incr_dcp
 }
 
-# -effort asks for the timing-driven directives rather than the defaults. They
-# cost roughly twice the runtime and are worth it only for a design that is
-# actually close, which is why they are not on by default.
+# -effort asks for the Explore directives rather than the defaults, for a design
+# that is actually close. (It was ExtraTimingOpt placement and AggressiveExplore:
+# on 2026-10-05 that left the PlayStation at -0.907 ns after two hours, where
+# Explore, from the same netlist, passed at +0.248 in twenty minutes.)
 if {$effort} {
-    puts " (timing-driven directives)"
-    place_design     -directive ExtraTimingOpt
-    phys_opt_design  -directive AggressiveExplore
-    route_design     -directive AggressiveExplore
+    puts " (Explore directives)"
+    place_design     -directive Explore
+    phys_opt_design  -directive Explore
+    route_design     -directive Explore
 } else {
     place_design
     phys_opt_design
