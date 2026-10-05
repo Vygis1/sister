@@ -2,10 +2,10 @@
 // eth_top.v - the Ethernet endpoint, wired to real pins.
 //
 // The console runs from the board's own oscillator, through the MMCM (cclk,
-// 1000 MHz / CLK_DIV). The LAN8720 module is optional: its RMII logic (net_core)
-// runs on the 50 MHz REF_CLK the module drives, and reaches the register bus through
-// net_bridge. Without the module that side sits in reset and the ESP32 is the only
-// master on the bus.
+// 1000 MHz / CLK_DIV). The ESP32 is the board's one way in (esp_bus). The network
+// (NET = 1: the LAN8720 module's RMII logic, net_core, on the 50 MHz REF_CLK the
+// module drives, onto the register bus through net_bridge) is not built: the board has
+// no LAN module. Its pins stay in the constraints, driven low.
 //
 // led0  heartbeat off the board oscillator - always blinks if configured
 // led1  network activity - flashes on every frame we accept or answer
@@ -29,6 +29,8 @@ module eth_top #(
 	parameter MD_DDR3  = 0,
 	parameter CORE_PS1 = 0,
 	parameter CORE_N64 = 0,
+	// 1: the network (see the top). 0: none -- the ESP32 alone.
+	parameter NET      = 0,
 	// 1: the picture to the web page too, as a UDP stream (net_core's streamer, the
 	// NES / Master System / Mega Drive framebuffer in regfile, the console's stream
 	// registers). The picture is on HDMI; the network keeps only the register API.
@@ -93,10 +95,8 @@ module eth_top #(
 );
 
 	// --- clocks -------------------------------------------------------------
-	// refclk: the LAN module's, for net_core alone. cclk: the console's, from the
-	// board oscillator through the MMCM below (cclk_raw, cclk_locked).
-	wire refclk;
-	BUFG bufg_ref (.I(eth_refclk), .O(refclk));
+	// cclk: the console's, from the board oscillator through the MMCM below (cclk_raw,
+	// cclk_locked). (The LAN module's REF_CLK only with NET, for net_core.)
 	wire cclk_raw, cclk_locked, cclk;
 	BUFG bufg_con (.I(cclk_raw), .O(cclk));
 
@@ -107,13 +107,6 @@ module eth_top #(
 		if (!cclk_locked)             begin rst_cnt <= 16'd0; rst <= 1'b1; end
 		else if (rst_cnt == 16'hFFFF) rst <= 1'b0;
 		else                          rst_cnt <= rst_cnt + 16'd1;
-	end
-	// and net_core's, on the module's clock (which may never come)
-	reg [15:0] nrst_cnt = 16'd0;
-	reg        nrst = 1'b1;
-	always @(posedge refclk) begin
-		if (nrst_cnt == 16'hFFFF) nrst <= 1'b0;
-		else                      nrst_cnt <= nrst_cnt + 16'd1;
 	end
 
 	// --- heartbeat, deliberately on the other clock --------------------------
@@ -129,6 +122,7 @@ module eth_top #(
 	wire [1:0]  bus_err, n_err;
 	wire        n_frd;
 	wire        rx_frame, tx_frame;
+	wire        rf_mdc, rf_mdio_o, rf_mdio_oe;     // the register file's MDIO master (NET)
 
 	// the frame streamer's settings come from the console's registers
 	wire        stream_en, stream_ready, stream_done_tog;
@@ -139,6 +133,16 @@ module eth_top #(
 	wire        stream_direct, stream_fvalid, stream_frd;
 	wire [31:0] stream_fdata;
 
+	generate if (NET) begin : g_net
+	wire refclk;
+	BUFG bufg_ref (.I(eth_refclk), .O(refclk));
+	// net_core's reset, on the module's clock (which may never come)
+	reg [15:0] nrst_cnt = 16'd0;
+	reg        nrst = 1'b1;
+	always @(posedge refclk) begin
+		if (nrst_cnt == 16'hFFFF) nrst <= 1'b0;
+		else                      nrst_cnt <= nrst_cnt + 16'd1;
+	end
 	net_core #(
 		.MAC_ADDR (48'h02_00_5E_10_00_01),
 		.IP_ADDR  ({8'd192, 8'd168, 8'd178, 8'd50}),
@@ -165,6 +169,34 @@ module eth_top #(
 		.c_clk(cclk), .c_rst(rst),
 		.c_addr(b_addr), .c_wdata(b_wdata), .c_we(b_we), .c_re(b_re),
 		.c_rdata(bus_rdata), .c_err(bus_err), .c_ack(b_ack));
+	// the activity LED: a frame is over in microseconds; stretched to ~80 ms
+	reg [21:0] act;
+	always @(posedge refclk) begin
+		if (nrst)                       act <= 22'd0;
+		else if (rx_frame || tx_frame)  act <= 22'h3F_FFFF;
+		else if (act != 22'd0)          act <= act - 22'd1;
+	end
+	assign led1 = (act != 22'd0);
+	// the MDIO bus: the PHY's reset at power-up (on the board's oscillator), then the
+	// register file's
+	wire pr_mdc, pr_mdio_o, pr_mdio_oe, pr_done;
+	phy_reset u_phy_reset (
+		.clk(sys_clk), .rst(1'b0),
+		.mdc(pr_mdc), .mdio_o(pr_mdio_o), .mdio_oe(pr_mdio_oe),
+		.mdio_i(eth_mdio), .done(pr_done)
+	);
+	assign eth_mdc  = pr_done ? rf_mdc : pr_mdc;
+	wire   mdio_oe  = pr_done ? rf_mdio_oe : pr_mdio_oe;
+	wire   mdio_out = pr_done ? rf_mdio_o  : pr_mdio_o;
+	assign eth_mdio = mdio_oe ? mdio_out : 1'bz;
+	end else begin : g_nonet
+	// no network: the bus's first master asks nothing, the pins are still
+	assign b_addr = 32'd0; assign b_wdata = 32'd0; assign b_we = 1'b0; assign b_re = 1'b0;
+	assign stream_frd = 1'b0; assign rx_frame = 1'b0; assign tx_frame = 1'b0;
+	assign eth_txd = 2'b00; assign eth_tx_en = 1'b0;
+	assign eth_mdc = 1'b0; assign eth_mdio = 1'bz;
+	assign led1 = !rst;                       // (lit: the console is out of reset)
+	end endgenerate
 
 	// What the analyser watches. Pointing it at the RMII pins makes the board
 	// able to show you its own network traffic in the browser: ping it, capture,
@@ -301,23 +333,6 @@ module eth_top #(
 		.sym_0(), .sym_1(), .sym_2(), .aud_l(aud_s), .aud_r(aud_r), .aud_tog(aud_tog)
 	);
 
-	// --- the MDIO bus, and who owns it ----------------------------------------
-	// Two masters: the one that resets the PHY at power-up, on the board's own
-	// oscillator, and the host's, on the console's clock. The first has the bus
-	// until it is finished, which is a few hundred microseconds.
-	wire rf_mdc, rf_mdio_o, rf_mdio_oe;
-	wire pr_mdc, pr_mdio_o, pr_mdio_oe, pr_done;
-
-	phy_reset u_phy_reset (
-		.clk(sys_clk), .rst(1'b0),
-		.mdc(pr_mdc), .mdio_o(pr_mdio_o), .mdio_oe(pr_mdio_oe),
-		.mdio_i(eth_mdio), .done(pr_done)
-	);
-
-	assign eth_mdc  = pr_done ? rf_mdc : pr_mdc;
-	wire   mdio_oe  = pr_done ? rf_mdio_oe : pr_mdio_oe;
-	wire   mdio_out = pr_done ? rf_mdio_o  : pr_mdio_o;
-	assign eth_mdio = mdio_oe ? mdio_out : 1'bz;
 
 	// --- the ESP32: a second master on the bus ------------------------------------
 	// A turn is one transfer: a master holds its request until the acknowledge, and
@@ -365,16 +380,6 @@ module eth_top #(
 		.pclk(vid_pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb),
 		.aud_s(aud_s), .aud_r(aud_r), .aud_tog(aud_tog)
 	);
-
-	// --- activity LED --------------------------------------------------------
-	// A frame is over in microseconds. Stretch it to ~80 ms so an eye can see it.
-	reg [21:0] act;
-	always @(posedge refclk) begin
-		if (nrst)                       act <= 22'd0;
-		else if (rx_frame || tx_frame)  act <= 22'h3F_FFFF;
-		else if (act != 22'd0)          act <= act - 22'd1;
-	end
-	assign led1 = (act != 22'd0);
 
 endmodule
 

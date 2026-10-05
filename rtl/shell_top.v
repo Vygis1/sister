@@ -79,7 +79,11 @@
 
 `default_nettype none
 
-module shell_top (
+module shell_top #(
+	// 1: the PC's door, net_core on the LAN8720 module's REF_CLK through net_bridge.
+	// 0 (as built): the ESP32 is the only door -- the board has no LAN module.
+	parameter NET = 0
+) (
 	input  wire       sys_clk,        // 50 MHz board oscillator, heartbeat only
 	output wire       led0,           // heartbeat
 	output wire       led1,           // flash busy, or network activity
@@ -115,10 +119,9 @@ module shell_top (
 	output wire       hdmi_5v
 );
 
-	// clk: the board oscillator's 50 MHz, through the picture's MMCM (below). refclk:
-	// the LAN module's, for net_core alone -- the module may not be there at all.
-	wire refclk, clk, clk_raw;
-	BUFG bufg_ref (.I(eth_refclk), .O(refclk));
+	// clk: the board oscillator's 50 MHz, through the picture's MMCM (below). (The LAN
+	// module's REF_CLK only with NET, for net_core.)
+	wire clk, clk_raw;
 	BUFG bufg_con (.I(clk_raw), .O(clk));
 	wire hfb, hp_raw, hp5_raw, hpclk, hpclk5, hlocked;
 
@@ -128,12 +131,6 @@ module shell_top (
 		if (!hlocked)                 begin rst_cnt <= 16'd0; rst <= 1'b1; end
 		else if (rst_cnt == 16'hFFFF) rst <= 1'b0;
 		else                          rst_cnt <= rst_cnt + 16'd1;
-	end
-	reg [15:0] nrst_cnt = 16'd0;
-	reg        nrst = 1'b1;
-	always @(posedge refclk) begin
-		if (nrst_cnt == 16'hFFFF) nrst <= 1'b0;
-		else                      nrst_cnt <= nrst_cnt + 16'd1;
 	end
 
 	// 2: the menu can draw (osd.v on the ESP32's register bus, the pad register)
@@ -177,7 +174,17 @@ module shell_top (
 	wire        bus_we, bus_re, bus_ack, n_we, n_re, n_ack, b_we, b_re, b_ack, e_we, e_re, e_ack;
 	wire [1:0]  bus_err, n_err;
 	wire        rx_frame, tx_frame;
+	wire        e_we_raw, e_ack_arb;
 
+	generate if (NET) begin : g_net
+	wire refclk;
+	BUFG bufg_ref (.I(eth_refclk), .O(refclk));
+	reg [15:0] nrst_cnt = 16'd0;
+	reg        nrst = 1'b1;
+	always @(posedge refclk) begin
+		if (nrst_cnt == 16'hFFFF) nrst <= 1'b0;
+		else                      nrst_cnt <= nrst_cnt + 16'd1;
+	end
 	net_core #(
 		.MAC_ADDR (48'h02_00_5E_10_00_01),
 		.IP_ADDR  ({8'd192, 8'd168, 8'd178, 8'd50}),
@@ -198,6 +205,20 @@ module shell_top (
 		.c_clk(clk), .c_rst(rst),
 		.c_addr(b_addr), .c_wdata(b_wdata), .c_we(b_we), .c_re(b_re),
 		.c_rdata(bus_rdata), .c_err(bus_err), .c_ack(b_ack));
+	// network activity, stretched to something an eye can see
+	reg [21:0] act;
+	always @(posedge refclk) begin
+		if (nrst)                      act <= 22'd0;
+		else if (rx_frame || tx_frame) act <= 22'h3F_FFFF;
+		else if (act != 22'd0)         act <= act - 22'd1;
+	end
+	assign led1 = busy | (act != 22'd0);
+	end else begin : g_nonet
+	assign b_addr = 32'd0; assign b_wdata = 32'd0; assign b_we = 1'b0; assign b_re = 1'b0;
+	assign rx_frame = 1'b0; assign tx_frame = 1'b0;
+	assign eth_txd = 2'b00; assign eth_tx_en = 1'b0;
+	assign led1 = busy;
+	end endgenerate
 	bus_arb u_arb (.clk(clk), .rst(rst),
 		.a_addr(b_addr), .a_wdata(b_wdata), .a_we(b_we), .a_re(b_re), .a_ack(b_ack),
 		.b_addr(e_addr), .b_wdata(e_wdata), .b_we(e_we), .b_re(e_re), .b_ack(e_ack_arb),
@@ -305,7 +326,6 @@ module shell_top (
 	// (its writes reach the menu's pages and nothing else: shell_regs can start the flash
 	// engine, and that is the unlocked door's alone. Any other write is acknowledged and
 	// dropped.)
-	wire        e_we_raw, e_ack_arb;
 	wire        e_pg_ok = e_addr[31:16] == 16'h0007 || e_addr[31:16] == 16'h0008;
 	reg         e_drop_ack;
 	always @(posedge clk) e_drop_ack <= !rst && e_we_raw && !e_pg_ok && !e_drop_ack;
@@ -594,15 +614,7 @@ module shell_top (
 	always @(posedge sys_clk) beat <= beat + 25'd1;
 	assign led0 = beat[24];
 
-	// Busy, plus network activity stretched to something an eye can see. While
-	// wiring, "did anything happen when I sent that" is the only question.
-	reg [21:0] act;
-	always @(posedge refclk) begin
-		if (nrst)                      act <= 22'd0;
-		else if (rx_frame || tx_frame) act <= 22'h3F_FFFF;
-		else if (act != 22'd0)         act <= act - 22'd1;
-	end
-	assign led1 = busy | (act != 22'd0);
+	// (led1: the flash busy -- and network activity with NET: g_net above)
 
 endmodule
 
