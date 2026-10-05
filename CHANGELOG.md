@@ -26,6 +26,9 @@ from the card, the console switched by writing its image into the flash.
 - **The NES's sound:** the frame sequencer ran at twice its rate (notes too short),
   a negated sweep muted pulse 1, the noise ran an octave low; the dot clock is
   exactly NTSC now.
+- **The NES's picture:** a $2007 read of tile ROM came back from the name table
+  about half the time. Super Mario Bros. reads its title screen that way, and drew
+  it as garbage that stayed in its status bar through every demo.
 - **The Mega Drive's sprites:** a sprite attribute cache and an engine on every
   clock -- sprites late in a long list were not drawn.
 - **The Mega Drive's sound:** the Z80 gets the VDP's vertical-blank interrupt (it
