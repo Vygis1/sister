@@ -441,7 +441,15 @@ module vr4300 #(
 	reg         fp_arith;     // to the unit (S/D/W/L, all but MOV)
 	reg         fp_mt, fp_dmt, fp_mov, fp_ctc, fp_bc, fp_unimpl;
 	reg         fp_load, fp_ld_d;
-	wire        fpu_done, fpu_res32, fpu_wr, fpu_trap, fpu_cmp_wr, fpu_cmp_val;
+	wire        fpu_done, fpu_res32, fpu_wr, fpu_trap, fpu_cmp_wr, fpu_cmp_val, fpu_asy;
+	// An FPU operation that cannot trap (fpu_asy) does not hold E: the instruction goes on
+	// the clock after it starts, and its result -- register and FCR31's cause and flags --
+	// is written when the unit is done (fp_pend). Until then the COP1 instructions wait, as
+	// do an FP load into that register pair and an FP store of it; the CPU's own work goes
+	// on beside it. (The CPU waited out every add and multiply: 16% of its clocks on SM64's
+	// title screen.)
+	reg         fp_pend;
+	reg  [4:0]  fp_pend_idx;
 	wire [63:0] fpu_res;
 	wire [5:0]  fpu_cause;
 	wire [4:0]  fpu_flags;
@@ -816,9 +824,19 @@ module vr4300 #(
 	wire        fpl_dep = (m_valid && m_fpl && fpl_m_hit) || (w_valid && w_fpl && fpl_w_hit);
 	// (and an FPU result too, while a load is in W: a pipeline held by a cache miss lets an
 	// operation started under it finish, and its commit would meet the load's write)
-	assign e_fp_wait  = e_valid && (op == 6'h11 || fp_ls) && (fpl_dep || (w_valid && w_fpl && (fpe_1clk || fp_arith)));
-	assign e_fpu_wait = e_valid && fp_arith && !(fpu_on && fpu_done);
-	wire   fpu_start  = e_valid && fp_arith && !fpu_on && !fpl_dep;
+	wire        fp_pend_hit = fp_pend && (op == 6'h11 || ((op == 6'h31 || op == 6'h35 || fp_ls) && rt[4:1] == fp_pend_idx[4:1]));
+	assign e_fp_wait  = e_valid && (((op == 6'h11 || fp_ls) && (fpl_dep || (w_valid && w_fpl && (fpe_1clk || fp_arith)))) || fp_pend_hit);
+	assign e_fpu_wait = e_valid && fp_arith && !(fpu_on && (fpu_done || fpu_asy));
+	// the pending result written: on a clock W's FP load does not have the port
+	wire        fp_async_wr = fp_pend && fpu_done && !(adv_mw && w_valid && w_fpl);
+	always @(posedge clk) begin
+		if (rst) fp_pend <= 1'b0;
+		else if (e_ok && fp_arith && fpu_on && fpu_asy && !fpu_done) begin fp_pend <= 1'b1; fp_pend_idx <= sa; end
+		else if (fp_async_wr) fp_pend <= 1'b0;
+	end
+	// (not while a result is pending: the unit is still working on it, and a start would
+	// take it over -- the test ROM caught a chain whose middle result never came)
+	wire   fpu_start  = e_valid && fp_arith && !fpu_on && !fpl_dep && !fp_pend;
 	always @(posedge clk) begin
 		if (rst || adv) fpu_on <= 1'b0;
 		else if (fpu_start) fpu_on <= 1'b1;
@@ -827,7 +845,7 @@ module vr4300 #(
 		.clk(clk), .rst(rst), .start(fpu_start), .fmt(rs), .fn(fn), .fs_v(fpa), .ft_v(fpb),
 		.rm(fcr31[1:0]), .en(fcr31[11:7]), .fs_flush(fcr31[24]),
 		.done(fpu_done), .res(fpu_res), .res32(fpu_res32), .wr(fpu_wr), .trap(fpu_trap),
-		.cause(fpu_cause), .flags(fpu_flags), .cmp_wr(fpu_cmp_wr), .cmp_val(fpu_cmp_val)
+		.cause(fpu_cause), .flags(fpu_flags), .cmp_wr(fpu_cmp_wr), .cmp_val(fpu_cmp_val), .asy(fpu_asy)
 	);
 
 	// the instruction in E runs (it may still trap): not an interrupt, not a fetch fault
@@ -841,6 +859,8 @@ module vr4300 #(
 		if (adv_mw && w_valid && w_fpl) begin
 			fpw_idx = w_fpl_idx; fpw_dlo = w_value[31:0]; fpw_dhi = w_fpl_d ? w_value[63:32] : w_value[31:0];
 			fpw_lo = w_fpl_d || !w_fpl_hi; fpw_hi = w_fpl_d || w_fpl_hi;
+		end else if (fp_async_wr) begin
+			fpw_idx = fp_pend_idx; fpw_dlo = fpu_res[31:0]; fpw_dhi = fpu_res[63:32]; fpw_lo = 1'b1; fpw_hi = 1'b1;
 		end else if (e_ok) begin
 			if (fp_mt) begin
 				fpw_idx = fs_e; fpw_dlo = b[31:0]; fpw_dhi = b[31:0];
@@ -849,7 +869,7 @@ module vr4300 #(
 				fpw_idx = fs_e; fpw_dlo = b[31:0]; fpw_dhi = b[63:32]; fpw_lo = 1'b1; fpw_hi = 1'b1;
 			end else if (fp_mov) begin
 				fpw_idx = sa; fpw_dlo = fpa[31:0]; fpw_dhi = fpa[63:32]; fpw_lo = 1'b1; fpw_hi = 1'b1;
-			end else if (fp_arith && fpu_wr) begin
+			end else if (fp_arith && fpu_done && fpu_wr) begin
 				fpw_lo = 1'b1; fpw_hi = 1'b1;
 			end
 		end
@@ -861,8 +881,11 @@ module vr4300 #(
 	// FCR31: an operation's cause (kept when it traps, as ares does), its flags, the condition
 	always @(posedge clk) begin
 		if (rst) fcr31 <= 32'd0;
-		else if (e_exec && op == 6'h11 && c0_status[29]) begin
-			if (fp_arith) begin
+		else if (fp_async_wr) begin
+			fcr31[17:12] <= fpu_cause;
+			fcr31[6:2]   <= fcr31[6:2] | fpu_flags;
+		end else if (e_exec && op == 6'h11 && c0_status[29]) begin
+			if (fp_arith && fpu_done) begin
 				fcr31[17:12] <= fpu_cause;
 				fcr31[6:2]   <= fcr31[6:2] | fpu_flags;
 				if (fpu_cmp_wr) fcr31[23] <= fpu_cmp_val;

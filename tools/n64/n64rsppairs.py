@@ -7,7 +7,7 @@ order by the next, could the two go in one clock?
   narrow: a scalar ALU op first and a vector computation second, the pair 8-aligned in
          IMEM (one doubleword fetch) -- what rtl/n64_rsp.v could do cheaply
 
-    python tools/n64/n64rsppairs.py
+    python tools/n64/n64rsppairs.py [TRACE]
 """
 import os
 import sys
@@ -40,7 +40,7 @@ def vu_regs(w):
 
 def main():
     seq = []
-    for line in open(TRACE):
+    for line in open(sys.argv[1] if len(sys.argv) > 1 else TRACE):
         p = line.split()
         if len(p) == 2 and p[0] != 'RUN':
             seq.append((int(p[0], 16), int(p[1], 16)))

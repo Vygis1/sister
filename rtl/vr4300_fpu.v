@@ -53,7 +53,11 @@ module vr4300_fpu (
 	output reg  [5:0]  cause,         // FCR31's new cause field, I U O Z V E
 	output reg  [4:0]  flags,         // to OR into the flags, I U O Z V
 	output reg         cmp_wr,        // a C.cond: the condition bit
-	output reg         cmp_val
+	output reg         cmp_val,
+	// the operation taken cannot trap: the fast path's, with Flush (FS) set and Overflow
+	// and Underflow not enabled (whatever path its result takes, nothing traps). The CPU
+	// lets the instruction go on and takes the result when done (see vr4300.v, fp_pend).
+	output reg         asy
 );
 	localparam BI = 0, BU = 1, BO = 2, BZ = 3, BV = 4, BE = 5;
 
@@ -292,10 +296,11 @@ module vr4300_fpu (
 
 	always @(posedge clk) begin
 		if (rst) begin
-			st <= P_IDLE; done <= 1'b0;
+			st <= P_IDLE; done <= 1'b0; asy <= 1'b0;
 		end else if (start) begin
 			q_fmt <= fmt; q_fn <= fn; q_a <= fs_v; q_b <= ft_v; q_rm <= rm; q_en <= en; q_fs <= fs_flush;
 			st <= fast_in ? P_FAST : P_UNP; fx <= 3'd0; done <= 1'b0;
+			asy <= fast_in && fs_flush && en[2:1] == 2'b00;
 			trap <= 1'b0; wr <= 1'b0; cmp_wr <= 1'b0; cause <= 6'd0; flags <= 5'd0; res32 <= 1'b0;
 		end else begin
 			case (st)

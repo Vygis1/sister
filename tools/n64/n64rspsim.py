@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import n64model  # noqa: E402
 
-OUT = os.path.join(HERE, '..', '..', 'sim', 'n64r')
+OUT = os.environ.get('N64R_OUT') or os.path.join(HERE, '..', '..', 'sim', 'n64r')   # (N64R_OUT: elsewhere, for runs not meant for the bench)
 NL = chr(10)
 
 
