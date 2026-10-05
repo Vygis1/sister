@@ -779,10 +779,12 @@ module n64_top #(
 					// the RSP's posted DMA writes, before any read
 					d_addr <= rw_head[167:144]; d_wmask <= rw_head[143:128]; d_wdata <= rw_head[127:0];
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_RWRITE;
-				end else if (x_qv && !x_qr && !x_flush_p && rd_ok && !dp_cop) begin
-					// the RSP's DMA reads, ahead of the CPU's: one is two clocks of the port (it is
-					// pipelined), where a CPU miss holds it a whole round trip -- and while the RSP's
-					// DMA waits, its microcode does nothing else (SM64's RSP: 34 ms a frame)
+				end else if (x_qv && !x_qr && !x_flush_p && rd_ok && !dp_cop && rd_rd_req && !rd_rd_ack) begin
+					// the RSP's DMA reads ahead of the CPU's while its DMA is waiting for a line: one
+					// is two clocks of the port (it is pipelined), where a CPU miss holds it a round
+					// trip, and while the RSP's DMA waits its microcode does nothing else. (Always
+					// first, its read-ahead's window kept the CPU's misses waiting: an I-cache line
+					// took 87 clocks.)
 					d_addr <= RDRAM_LINE + {4'd0, x_ql}; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 2'd1;
 				end else if (dp_cop && !c_dreq) begin
 					// CACHE: {operation [4:2], cache [1:0]}; 0 = I, 1 = D. Write-backs are
@@ -818,6 +820,8 @@ module n64_top #(
 				// lost lines and hung the RDP.)
 				end else if (rq_valid && !rq_ready && rd_ok) begin
 					d_addr <= rq_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 2'd0;
+				end else if (x_qv && !x_qr && !x_flush_p && rd_ok) begin
+					d_addr <= RDRAM_LINE + {4'd0, x_ql}; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 2'd1;
 				end else if (cf_req && !cf_ack && rd_ok) begin
 					d_addr <= cf_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_CREAD;
 				end else if (cw_req && !cw_ack) begin

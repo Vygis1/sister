@@ -120,7 +120,7 @@ def run(fmt, fn, a, b, rm, en, fs):
 
 def one_fast(rng):
     """what the FPU's fast path takes (rtl/vr4300_fpu.v): ADD/SUB/MUL.S of two normal
-    singles, round to nearest, no exception enabled -- with the cases that go wrong:
+    singles, round to nearest, Inexact not enabled -- with the cases that go wrong:
     cancellation, exponents 0..30 apart, products at the edges of the range"""
     fn = rng.choice([0, 1, 2])
     def norm(e):
@@ -143,7 +143,8 @@ def one_fast(rng):
             d = rng.choice([0, 1, 2, 23, 24, 25, 26, 27, 30, rng.randint(0, 40)])
             eb = min(254, max(1, ea + rng.choice([-d, d])))
             a, b = norm(ea), norm(eb)
-    return 16, fn, a, b, 0, 0, rng.randint(0, 1)
+    # (enables as games set them: libultra's FCR31 enables Invalid; anything but Inexact)
+    return 16, fn, a, b, 0, rng.choice([0, 0x10, 0x10, 0x18, 0x1E, rng.getrandbits(5) & 0x1E]), rng.randint(0, 1)
 
 
 def main():

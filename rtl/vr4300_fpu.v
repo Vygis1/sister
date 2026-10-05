@@ -232,14 +232,17 @@ module vr4300_fpu (
 	wire        u_c_lt = !both_zero && ((u_sa && !u_sb) || (!u_sa && !u_sb && mag_a < mag_b) || (u_sa && u_sb && mag_a > mag_b));
 
 	// --- the fast path ----------------------------------------------------------------------------
-	// ADD/SUB/MUL.S of two normal singles, rounding to nearest, no exception enabled: what
+	// ADD/SUB/MUL.S of two normal singles, rounding to nearest, Inexact not enabled: what
 	// SM64 spends its floating point on. A pipeline of its own -- add four clocks, multiply
 	// three, where the general path takes eight or nine and the CPU waits through all of
 	// them (22% of its clocks) -- that gives the operation back to the general path from
 	// P_UNP whenever the result would not be a normal number (overflow, underflow: what
 	// traps or is flushed is the general path's business). Bit for bit the same; checked by
 	// sim/tb_vr4300_fpu.v against tools/n64/n64fpu.py (n64fpuvec.py --fast).
-	wire        fast_in = fmt == 5'd16 && fn <= 6'h02 && rm == 2'd0 && en == 5'd0
+	// (the enables: only Inexact's matters -- two normal operands raise no Invalid and no
+	// divide-by-zero, and Overflow and Underflow go to the general path. SM64 runs with
+	// Invalid enabled, as libultra sets FCR31, and "none enabled" took nothing of it.)
+	wire        fast_in = fmt == 5'd16 && fn <= 6'h02 && rm == 2'd0 && !en[0]
 	                      && fs_v[30:23] != 8'h00 && fs_v[30:23] != 8'hFF && ft_v[30:23] != 8'h00 && ft_v[30:23] != 8'hFF;
 	reg  [2:0]  fx;                          // the step
 	// step 1 -- add: the operands ordered by magnitude, the smaller aligned; multiply: the product
