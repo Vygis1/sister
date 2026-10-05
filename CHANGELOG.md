@@ -35,9 +35,13 @@ from the card, the console switched by writing its image into the flash.
   was tied off), and a Z80 stopped by the 68000 in the middle of a read keeps its
   own byte (the RAM had one port, switched to the 68000). Battletoads and other
   games whose sound driver runs on the interrupt were silent.
-- **The N64's sound:** DAC ticks are no longer lost when a sample's line is slow to
-  come. SM64 still supplies only about 24.6k of its 32k samples a second, because
-  the game itself runs below full speed; the sound breaks up until it does.
+- **The N64's sound:** the audio interface's clock summed in too few bits and
+  wrapped, so it played 24,636 of SM64's 32,006 samples a second; the game's
+  buffers piled up and it dropped them, which is what broke the sound up.
+- **The N64's speed:** the HDMI picture's reads no longer hold the memory port a
+  round trip each, the RSP's DMA writes are queued and pipelined (SM64's microcode
+  spent a third of its time waiting on its DMA): 20.6 drawn frames a second to
+  24.4 so far, the goal being SM64's 30.
 - **The guide:** [docs/GUIDE.md](docs/GUIDE.md).
 
 ## 0.1.x -- unreleased changes after 0.1.0

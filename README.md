@@ -89,8 +89,8 @@ over Ethernet, the register bus and debugging a running core.
 
 Release **0.2.0** -- [CHANGELOG.md](CHANGELOG.md).
 
-- **Nintendo 64:** below full speed, so its sound breaks up; the graphics chip
-  lacks some modes.
+- **Nintendo 64:** below full speed (SM64 draws about 24 frames a second of its
+  30); the graphics chip lacks some modes.
 - **PlayStation:** about one frame in ten can be late on busy scenes.
 - The consoles take their 50 MHz clock from the LAN8720 module, so it has to be
   plugged in even without a network.
