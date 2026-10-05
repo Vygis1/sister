@@ -276,6 +276,150 @@ static bool streamBanks(File &f, uint32_t n, int swap = 0) {
   return true;
 }
 
+// --- the PlayStation's memory card ----------------------------------------------
+// /saves/card1.mcr on the card (raw 128 kB, the format DuckStation reads), put into the
+// board's DDR3 card with the BIOS; every sector the game stores is queued on the board
+// (ps1_sio.v, CARD_Q) and copied back into the file from here -- as pc/server.py's
+// MemCard does over Ethernet. A missing file becomes a freshly formatted card.
+static const uint32_t CARD_Q = NES + 0x138, HR_LINE = NES + 0x7C, HR_DATA = NES + 0x80;
+static const uint32_t CARD_LINE = 0x090000, CARD_BYTES = 128 * 1024;
+static const char *CARD_PATH = "/saves/card1.mcr";
+static bool cardIn = false;
+
+// a formatted, empty card (DuckStation's MemoryCardImage::Format)
+static void blankCard(uint8_t *d) {
+  memset(d, 0xFF, CARD_BYTES);
+  auto frame = [&](int n, const uint8_t *head, int hn, bool chk) {
+    uint8_t *f = d + n * 128;
+    memset(f, 0, 128);
+    memcpy(f, head, hn);
+    if (chk) { uint8_t c = 0; for (int i = 0; i < 127; i++) c ^= f[i]; f[127] = c; }
+  };
+  const uint8_t mc[] = { 'M', 'C' };
+  const uint8_t dir[] = { 0xA0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF };
+  const uint8_t bad[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0xFF };
+  frame(0, mc, 2, true);
+  for (int n = 1; n < 16; n++) frame(n, dir, sizeof(dir), true);
+  for (int n = 16; n < 36; n++) frame(n, bad, sizeof(bad), true);
+  for (int n = 36; n < 63; n++) frame(n, nullptr, 0, false);
+  memcpy(d + 63 * 128, d, 128);
+}
+
+static bool cardInsert() {
+  cardIn = false;
+  if (!SD.exists(CARD_PATH)) {
+    SD.mkdir("/saves");
+    uint8_t *d = (uint8_t *)malloc(CARD_BYTES);
+    if (!d) return false;
+    blankCard(d);
+    File w = SD.open(CARD_PATH, FILE_WRITE);
+    if (w) { w.write(d, CARD_BYTES); w.close(); }
+    free(d);
+    Serial.println("menu: a new memory card, " + String(CARD_PATH));
+  }
+  File f = SD.open(CARD_PATH);
+  if (!f || f.size() != CARD_BYTES) { if (f) f.close(); return false; }
+  fpga.busWrite(CARD_CTL, 0b0010);                 // the fill goes to card 1
+  fpga.busWrite(NES_CART_BANK, 0);
+  bool ok = stream(f, NES_PRG, CARD_BYTES);
+  f.close();
+  fpga.busWrite(CARD_Q, 1u << 31);                 // a fresh card owes the file nothing
+  for (int i = 0; i < 32 && ((fpga.busRead(CARD_Q) >> 16) & 0x1F); i++) fpga.busWrite(CARD_Q, 1);
+  fpga.busWrite(CARD_CTL, ok ? 0b0001 : 0);         // card 1 in
+  cardIn = ok;
+  return ok;
+}
+
+// one DDR3 line (16 bytes) through the console's window
+static bool cardLine(uint32_t line, uint8_t *out) {
+  fpga.busWrite(HR_LINE, line);
+  for (int i = 0; i < 200; i++)
+    if (fpga.busRead(HR_LINE) >> 31) {
+      for (int k = 0; k < 4; k++) { uint32_t w = fpga.busRead(HR_DATA + 4 * k); memcpy(out + 4 * k, &w, 4); }
+      return true;
+    }
+  return false;
+}
+
+// what the game has stored since last time, into the file
+static void cardService() {
+  if (!cardIn) return;
+  uint32_t q = fpga.busRead(CARD_Q);
+  bool ovf = q >> 31; uint32_t n = (q >> 16) & 0x1F, slot = (q >> 10) & 1, sec = q & 0x3FF;
+  if (!ovf && !n) return;
+  File f = SD.open(CARD_PATH, "r+");
+  if (!f) return;
+  uint8_t sector[128];
+  if (ovf) {                                        // more than the queue held: the whole card
+    for (uint32_t s2 = 0; s2 < 1024; s2++) {
+      for (int k = 0; k < 8; k++) if (!cardLine(CARD_LINE + s2 * 8 + k, sector + 16 * k)) { f.close(); return; }
+      f.seek(s2 * 128); f.write(sector, 128);
+    }
+    fpga.busWrite(CARD_Q, 1u << 31);
+    for (int i = 0; i < 32 && ((fpga.busRead(CARD_Q) >> 16) & 0x1F); i++) fpga.busWrite(CARD_Q, 1);
+  } else if (slot == 0) {
+    for (int k = 0; k < 8; k++) if (!cardLine(CARD_LINE + sec * 8 + k, sector + 16 * k)) { f.close(); return; }
+    f.seek(sec * 128); f.write(sector, 128);
+    fpga.busWrite(CARD_Q, 1);
+  } else fpga.busWrite(CARD_Q, 1);                 // (slot 2 has no file here)
+  f.close();
+}
+
+// --- the N64's save EEPROM ---------------------------------------------------------
+// Which games have one, and its size, by the game ID at 0x3B (pc/n64_saves.py's table,
+// from the games' own documentation). The EEPROM lives on the board (ctrl 0x16C, a byte
+// at a time); /saves/n64/<id> <title>.eep holds it between sessions, written back
+// whenever it has changed (looked at every 20 s, as the PC server does).
+static const char *EEP_4K = " CLB NAB NAD NAG NB6 NBC NBD NBH NBK NBM NBN NBV NCG NCH NCR NCT NCU NCX NDQ NDR NDU NDY NEA NER NF2 NFG NFH NFW NFX NFY NGE NGL NGU NGV NHA NHF NHP NIC NIJ NIR NJK NJM NK2 NKA NKI NKT NLB NLL NLR NMG NMI NML NMO NMR NMS NMU NMW NMZ NN6 NNA NOS NP2 NPG NPT NPW NPY NRA NRC NRS NS3 NS6 NSA NSC NSN NSS NSU NSV NSW NT6 NTB NTC NTJ NTM NTN NTP NTR NTW NTX NVL NVY NWC NWQ NWU NXO NYK ";
+static const char *EEP_16K = " N3D NB7 NCW NCZ ND2 ND3 ND4 ND6 NDO NEP NEV NFU NGC NGT NIM NM8 NMV NMX NNB NPD NPP NR7 NRZ NUB NYS ";
+static const uint32_t N64_CFG = NES + 0x168, N64_EEP = NES + 0x16C;
+static String eepPath; static uint16_t eepSize = 0; static uint8_t *eepLast = nullptr;
+static uint32_t eepCheck = 0;
+
+static uint16_t eepromSize(const uint8_t *h) {           // h: the header, z64 byte order
+  char gid[4] = { (char)h[0x3B], (char)h[0x3C], (char)h[0x3D], 0 };
+  char region = h[0x3E]; uint8_t rev = h[0x3F];
+  String g = gid;
+  if (g == "NK4") return (region == 'J' && rev < 2) ? 0 : 2048;
+  if (g == "NDK" || g == "NWT") return region == 'J' ? 512 : 0;
+  if (g == "ND3" || g == "ND4") return region == 'J' ? 2048 : 0;
+  if (g == "NWR" || g == "NSM") return 512;              // Wave Race 64, Super Mario 64
+  if (g.substring(1) == "ED") return (rev >> 4) == 1 ? 512 : (rev >> 4) == 2 ? 2048 : 0;
+  String key = " " + g + " ";
+  if (strstr(EEP_4K, key.c_str())) return 512;
+  if (strstr(EEP_16K, key.c_str())) return 2048;
+  return 0;
+}
+
+static void eepBegin(const uint8_t *h) {
+  eepSize = eepromSize(h);
+  fpga.busWrite(N64_CFG, (0b0001 << 4) | (eepSize == 512 ? 1 : eepSize == 2048 ? 2 : 0));   // pad 1 in
+  if (!eepSize) { eepPath = ""; return; }
+  String name;
+  for (int i = 0x3B; i < 0x3F; i++) name += (char)h[i];
+  name += " ";
+  for (int i = 0x20; i < 0x34; i++) { char c = h[i]; name += (isalnum(c) || c == ' ' || c == '-' || c == '_') ? c : '_'; }
+  name.trim();
+  eepPath = "/saves/n64/" + name + ".eep";
+  if (!eepLast) eepLast = (uint8_t *)malloc(2048);
+  memset(eepLast, 0, 2048);
+  File f = SD.open(eepPath);
+  if (f) { f.read(eepLast, eepSize); f.close(); }
+  for (int a = 0; a < eepSize; a++) fpga.busWrite(N64_EEP, (1u << 31) | ((uint32_t)eepLast[a] << 16) | a);
+  eepCheck = millis();
+}
+
+static void eepService(bool now_ = false) {
+  if (!eepSize || !eepPath.length() || (!now_ && millis() - eepCheck < 20000)) return;
+  eepCheck = millis();
+  static uint8_t now[2048];
+  for (int a = 0; a < eepSize; a++) { fpga.busWrite(N64_EEP, a); now[a] = (fpga.busRead(N64_EEP) >> 16) & 0xFF; }
+  if (!memcmp(now, eepLast, eepSize)) return;
+  SD.mkdir("/saves"); SD.mkdir("/saves/n64");
+  File f = SD.open(eepPath, FILE_WRITE);
+  if (f) { f.write(now, eepSize); f.close(); memcpy(eepLast, now, eepSize); Serial.println("menu: saved " + eepPath); }
+}
+
 // The PlayStation's BIOS: SCPH*.BIN in /bios, /roms/ps1 or /roms.
 static String findBios() {
   const char *dirs[] = { "/bios", "/roms/ps1", "/roms" };
@@ -295,6 +439,7 @@ static String findBios() {
 }
 
 static String load(const Game &g) {
+  if (g.m != 4) cardIn = false;
   File f = SD.open(g.path);
   if (!f) return "cannot open " + g.path;
   uint32_t size = f.size();
@@ -346,14 +491,19 @@ static String load(const Game &g) {
     bool ok = streamBanks(b, b.size());
     b.close();
     if (!ok) return "the BIOS file ended early";
+    fpga.busWrite(NES_FILL_END, 1);
+    if (!cardInsert()) Serial.println("menu: no memory card (" + String(CARD_PATH) + ")");
     if (!discInsert(g.path)) return "cannot open the disc " + g.path;
     fpga.busWrite(VID_CTRL, 3);
     fpga.busWrite(NES_CTRL, 1);
     return "";
   } else {                                           // N64: big-endian (.z64) whatever the file
-    uint8_t m4[4]; f.read(m4, 4); f.seek(0);
-    int swap = (m4[0] == 0x37 && m4[1] == 0x80) ? 1 : (m4[0] == 0x40 && m4[1] == 0x12) ? 2 : 0;
+    uint8_t h[64]; f.read(h, 64); f.seek(0);
+    int swap = (h[0] == 0x37 && h[1] == 0x80) ? 1 : (h[0] == 0x40 && h[1] == 0x12) ? 2 : 0;
+    if (swap == 1) for (int k = 0; k + 1 < 64; k += 2) std::swap(h[k], h[k + 1]);
+    if (swap == 2) for (int k = 0; k + 3 < 64; k += 4) { std::swap(h[k], h[k + 3]); std::swap(h[k + 1], h[k + 2]); }
     fpga.busWrite(NES_CONSOLE, 4);
+    eepBegin(h);                                     // pad 1 plugged in, the save in
     if (!streamBanks(f, size, swap)) err = "the file ended early";
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);
   }
@@ -417,6 +567,8 @@ static void pick() {
   }
   if (lists[cur].empty()) return;
   const Game &g = lists[cur][sel];
+  // the N64 game running now: its save to the card while the N64 is still there
+  if (eepSize) { eepService(true); eepSize = 0; }
   Status st = fpga.status();
   if (machineOfCore(st.core) != g.m) {
     String e = switchTo(g.m);
@@ -460,6 +612,9 @@ static void task(void *) {
       }
       if (!console) { up = false; continue; }
     }
+    static uint32_t lastCard = 0;
+    if (cardIn && millis() - lastCard > 100) { lastCard = millis(); cardService(); }
+    if (gameIn) eepService();
     uint8_t p = pad();
     uint8_t edge = p & ~was;
     if (p != was) held = millis();
