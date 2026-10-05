@@ -64,6 +64,9 @@ LOG="build/core_$NAME.log"
 # a fresh image from the one the previous run left behind.
 STAMP="build/.core_$NAME.start"
 mkdir -p build && : > "$STAMP"
+# What every source looked like as the build started: cores/$NAME.src is cut from
+# this (tools/srcstamp.py), and tools/release.sh checks an image against it.
+python tools/srcstamp.py --snapshot > "build/.core_$NAME.hashes"
 # EFFORT=1 asks for the timing-driven place and route directives. They cost
 # about twice the runtime and are worth it for a design that is close, which the
 # PlayStation now is: at 99.99% of the part's slices its critical path is 75%
@@ -105,5 +108,8 @@ fi
 
 mkdir -p cores
 cp "build/$TOP/$TOP.bin" "cores/$NAME.bin"
+python tools/srcstamp.py "$LOG" "build/.core_$NAME.hashes" > "cores/$NAME.src" || echo " *** no source stamp: tools/release.sh will refuse this image"
+# the shell as a bitstream too: the first programming writes it over JTAG
+[ "$NAME" = shell ] && cp "build/$TOP/$TOP.bit" cores/shell.bit
 grep -E "Slice LUTs|Block RAM Tile" "build/$TOP/post_route_util.rpt" | head -2
 echo " cores/$NAME.bin  $((SIZE/1024)) kB"
