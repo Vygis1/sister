@@ -11,7 +11,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-module tb_ps1_hdmi;
+module tb_ps1_hdmi #(parameter W = 256);
 	reg clk = 0, pclk = 0, rst = 1;
 	always #10 clk = ~clk;                     // 50 MHz
 	always #20 pclk = ~pclk;                   // 25 MHz
@@ -33,7 +33,7 @@ module tb_ps1_hdmi;
 		if (gap > 0) begin gap = gap - 1; if (gap == 0) begin fstart <= 1'b1; fx <= 0; fy <= 0; end end
 		else if (!hold && !pv) begin
 			pv <= 1'b1; prgb <= src(fy, fx); px_x <= fx; px_y <= fy;
-			if (fx == 10'd319) begin fx <= 0; if (fy == 9'd239) gap = 20000; else fy <= fy + 9'd1; end
+			if (fx == W - 1) begin fx <= 0; if (fy == 9'd239) gap = 20000; else fy <= fy + 9'd1; end
 			else fx <= fx + 10'd1;
 		end
 	end
@@ -61,24 +61,26 @@ module tb_ps1_hdmi;
 		.frame_start(fstart), .px_valid(pv), .px_x(px_x), .px_y(px_y), .px_rgb(prgb),
 		.fl_valid(1'b0), .fl_data(128'd0), .fl_x(10'd0), .fl_y(9'd0),
 		.hold(hold), .want(want), .cap_go(1'b0), .cap_ready(),
-		.hdmi_on(1'b1), .lf_want(lf_want), .lf_words(7'd40), .lf_we(lf_we), .lf_addr(lf_addr), .lf_data(lf_data),
+		.hdmi_on(1'b1), .lf_want(lf_want), .lf_words(W / 8), .lf_we(lf_we), .lf_addr(lf_addr), .lf_data(lf_data),
 		.hr_addr(18'd0), .hr_req(1'b0), .hr_rdata(), .hr_ack(),
 		.m_addr(m_addr), .m_req(m_req), .m_we(m_we), .m_wdata(m_wdata), .m_ready(m_ready), .m_rdata(m_rdata), .m_valid(m_valid));
 	n64_vid #(.PS1(1)) u_vid (.clk(clk), .wr_en(lf_we), .wr_addr(lf_addr), .wr_data(lf_data), .want(lf_want),
-		.width(12'd320), .bpp32(1'b0), .on(1'b1), .pclk(pclk), .x(x), .y(y), .req(req), .rgb(rgb));
+		.width(W), .bpp32(1'b0), .on(1'b1), .pclk(pclk), .x(x), .y(y), .req(req), .rgb(rgb));
 
 	initial begin repeat (8) @(posedge clk); rst = 0; gap = 10; end
 
 	// check from the third frame (the first capture has to be in memory)
 	reg [9:0] x1, y1; reg r1;
 	always @(posedge pclk) begin x1 <= x; y1 <= y; r1 <= req; end
-	integer errors = 0, checked = 0, frames = 0;
+	integer errors = 0, checked = 0, frames = 0; reg [23:0] wantc;
 	always @(posedge pclk) if (x == 10'd0 && y == 10'd0 && req) frames = frames + 1;
 	always @(posedge pclk) if (r1 && frames >= 3) begin
 		checked = checked + 1;
-		if (rgb !== to888(src(y1[9:1], {1'b0, x1[9:1]}))) begin
+		// (centred: the doubled picture starts at 320 - W, black either side)
+		wantc = (x1 >= 320 - W && x1 < 320 + W) ? to888(src(y1[9:1], (x1 - (320 - W)) >> 1)) : 24'd0;
+		if (rgb !== wantc) begin
 			errors = errors + 1;
-			if (errors < 8) $display("tb_ps1_hdmi: (%0d,%0d) got %06x want %06x", x1, y1, rgb, to888(src(y1[9:1], {1'b0, x1[9:1]})));
+			if (errors < 8) $display("tb_ps1_hdmi: (%0d,%0d) got %06x want %06x", x1, y1, rgb, wantc);
 		end
 	end
 	initial begin

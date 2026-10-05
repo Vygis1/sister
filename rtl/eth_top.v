@@ -262,7 +262,7 @@ module eth_top #(
 	BUFG bufgpx  (.I(pclk_raw_w),  .O(vid_pclk));
 	BUFG bufgpx5 (.I(pclk5_raw_w), .O(vid_pclk5));
 	assign vid_locked = hlocked_w;
-	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .FS441(CORE_PS1 != 0)) u_hdmi (
+	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .FS441(CORE_PS1 != 0 || CORE_N64 != 0)) u_hdmi (
 		.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0),
 		.ext_pclk(vid_pclk), .ext_pclk5(vid_pclk5), .ext_locked(vid_locked),
 		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(),

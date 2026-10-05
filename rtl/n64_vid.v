@@ -44,7 +44,11 @@ module n64_vid #(
 	reg [11:0] w1, w2; reg b1, b2, o1, o2;
 	always @(posedge pclk) begin w1 <= width; w2 <= w1; b1 <= bpp32; b2 <= b1; o1 <= on; o2 <= o1; end
 	wire       dbl = w2 <= 12'd320;                       // shown doubled
-	wire [9:0] sx = dbl ? {1'b0, x[9:1]} : x;
+	// a doubled picture narrower than 320 is centred: it starts (640 - 2w) / 2 in
+	// (a PlayStation game in a 256- or 512-wide mode is 256 here)
+	wire [9:0] xoff = dbl ? 10'd320 - w2[9:0] : 10'd0;
+	wire [9:0] xr = x - xoff;
+	wire [9:0] sx = dbl ? {1'b0, xr[9:1]} : x;
 	wire [8:0] sy = dbl ? y[9:1] : y[8:0];
 	// the word with this pixel: 8 pixels a word at 16 bits, 4 at 32
 	wire [6:0] wd = b2 ? sx[8:2] : {1'b0, sx[8:3]};
@@ -52,7 +56,7 @@ module n64_vid #(
 	always @(posedge pclk) begin
 		q <= lbuf[{sy[0], wd}];
 		sel <= b2 ? {1'b0, sx[1:0]} : sx[2:0];
-		vis <= req && o2 && {2'd0, sx} < w2;
+		vis <= req && o2 && x >= xoff && {2'd0, sx} < w2;
 	end
 	// pixel n of the word: bytes 2n, 2n+1 (16-bit) or 4n..4n+3 (32-bit), big-endian
 	wire [15:0] p16 = {q[8 * {sel, 1'b0} +: 8], q[8 * {sel, 1'b1} +: 8]};
