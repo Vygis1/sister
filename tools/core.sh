@@ -51,7 +51,8 @@ case "${1:-nes}" in
          # needs the memory controller. Its boot program is baked into the core.
          EXTRA="-ip $MIG_XCI" ;;
   n64|nintendo64)
-         NAME=n64;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:1"
+         # (at 62.5 MHz: the console's MMCM, 1000 MHz / 16 -- the RCP's own clock)
+         NAME=n64;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:1 -gen CLK_DIV:${N64_DIV:-16}"
          # RDRAM and the cartridge live in DDR3: the memory controller again.
          EXTRA="-ip $MIG_XCI" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;
@@ -113,5 +114,5 @@ cp "$OUT/$TOP.bin" "cores/$NAME.bin"
 python tools/srcstamp.py "$LOG" "build/.core_$NAME.hashes" > "cores/$NAME.src" || echo " *** no source stamp: tools/release.sh will refuse this image"
 # the shell as a bitstream too: the first programming writes it over JTAG
 [ "$NAME" = shell ] && cp "$OUT/$TOP.bit" cores/shell.bit
-grep -E "Slice LUTs|Block RAM Tile" "build/$TOP/post_route_util.rpt" | head -2
+grep -E "Slice LUTs|Block RAM Tile" "$OUT/post_route_util.rpt" | head -2
 echo " cores/$NAME.bin  $((SIZE/1024)) kB"

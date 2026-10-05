@@ -625,31 +625,43 @@ static String switchTo(int m) {
     while (millis() - t0 < 3000 && fpga.status().core != 0) delay(50);
   }
   if (fpga.status().core != 0) { f.close(); return "the board would not go back to the shell"; }
-  prefs.begin("menu", true); String inSlot = prefs.getString("slot", ""); uint32_t inSize = prefs.getUInt("size", 0); prefs.end();
-  if (inSlot != M.core || inSize != (uint32_t)f.size()) {
-    // (twice if the read-back disagrees: the board is in the shell with no picture,
-    // and a second try beats leaving the screen dark)
-    bool ok = false;
-    for (int tries = 0; tries < 2 && !ok; tries++) {
-      job.busy = true; job.error = "";
-      f.seek(0);
-      ok = installCard(f);
-      job.busy = false;
+  // Install (unless the slot holds this core already) and boot; and if it does not come
+  // up, once more with the install forced: the slot is not always what was last put
+  // there (one was found blank), and a dark screen is no answer.
+  for (int round = 0; round < 2; round++) {
+    prefs.begin("menu", true); String inSlot = prefs.getString("slot", ""); uint32_t inSize = prefs.getUInt("size", 0); prefs.end();
+    if (round == 1 || inSlot != M.core || inSize != (uint32_t)f.size()) {
+      if (round == 1) message(String("the ") + M.name + " did not start", "installing it again");
+      // (twice if the read-back disagrees: the board is in the shell with no picture,
+      // and a second try beats leaving the screen dark)
+      bool ok = false;
+      for (int tries = 0; tries < 2 && !ok; tries++) {
+        job.busy = true; job.error = "";
+        f.seek(0);
+        ok = installCard(f);
+        job.busy = false;
+      }
+      if (!ok) { f.close(); return "install failed: " + job.error; }
+      prefs.begin("menu", false); prefs.putString("slot", M.core); prefs.putUInt("size", f.size()); prefs.end();
     }
-    if (!ok) { f.close(); return "install failed: " + job.error; }
-    prefs.begin("menu", false); prefs.putString("slot", M.core); prefs.putUInt("size", f.size()); prefs.end();
+    // (boot asked twice if the first did not take: once, it did not)
+    for (int tries = 0; tries < 2; tries++) {
+      fpga.boot(true);
+      t0 = millis();
+      while (millis() - t0 < 5000) {
+        delay(100);
+        Status s = fpga.status();
+        if (s.alive && s.core == M.id) { f.close(); return ""; }
+      }
+    }
+    // not up: back in the shell (the fallback takes it there; else PROGRAM_B) for the next round
+    Serial.printf("menu: the %s did not come up (round %d)\n", M.name, round + 1);
+    t0 = millis();
+    while (millis() - t0 < 3000 && fpga.status().core != 0) delay(100);
+    if (fpga.status().core != 0) { fpga.forceShell(); delay(3000); }
+    prefs.begin("menu", false); prefs.putString("slot", ""); prefs.end();
   }
   f.close();
-  // (boot asked twice if the first did not take: once, it did not)
-  for (int tries = 0; tries < 2; tries++) {
-    fpga.boot(true);
-    t0 = millis();
-    while (millis() - t0 < 5000) {
-      delay(100);
-      Status s = fpga.status();
-      if (s.alive && s.core == M.id) return "";
-    }
-  }
   return String("the ") + M.name + " core did not come up";
 }
 

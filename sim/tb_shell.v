@@ -124,11 +124,18 @@ module tb_shell;
 		end
 	endtask
 
+	task unlock;                    // the frame an erase or a write must follow
+		begin
+			frame_open; send(8'h15); send(8'hC0); send(8'hDE); send(8'h5A); send(8'hFE); frame_close;
+		end
+	endtask
+
 	task write_page;                // one page of the pattern below
 		input [23:0] off;
 		input [7:0]  seed;
 		integer i;
 		begin
+			unlock;
 			frame_open;
 			send(CMD_WRITE);
 			send(off[23:16]); send(off[15:8]); send(off[7:0]);
@@ -138,9 +145,21 @@ module tb_shell;
 		end
 	endtask
 
+	task erase_sector_raw;          // the same, without the unlock
+		input [23:0] off;
+		begin
+			frame_open;
+			send(CMD_ERASE);
+			send(off[23:16]); send(off[15:8]); send(off[7:0]);
+			frame_close;
+			wait_idle;
+		end
+	endtask
+
 	task erase_sector;              // the 64 kB sector an offset falls in
 		input [23:0] off;
 		begin
+			unlock;
 			frame_open;
 			send(CMD_ERASE);
 			send(off[23:16]); send(off[15:8]); send(off[7:0]);
@@ -321,6 +340,18 @@ module tb_shell;
 		frame_open; send(8'h41); send(8'h00); send(8'h07); send(8'h00); send(8'h00);
 		repeat (8) send(8'h00); frame_close;
 		check({rx[12], rx[11], rx[10], rx[9]} === 32'h4F53_4431, "the OSD's page reads OSD1");
+
+		// --- the guards: no erase without the unlock, no flash from the bus door -----
+		$display(" the guards:");
+		write_page(24'h000000, 8'h10);
+		erase_sector_raw(24'h000000);
+		check(flash.mem[24'h200000] === 8'h10, "an erase without the unlock frame is refused");
+		frame_open; send(8'h40); send(8'h00); send(8'h00); send(8'h00); send(8'h10);
+		send(8'h01); send(8'h00); send(8'h00); send(8'h00); frame_close;     // op 1 (erase), offset 0
+		wait_idle;
+		check(flash.mem[24'h200000] === 8'h10, "the bus door cannot start the flash engine");
+		erase_sector(24'h000000);
+		check(flash.mem[24'h200000] === 8'hFF, "with the unlock it erases");
 
 		// --- boot ---------------------------------------------------------------
 		// No reply is possible: on real silicon the chip stops being the thing

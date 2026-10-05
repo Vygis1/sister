@@ -1388,6 +1388,7 @@ void setup() {
 // it would put it in every log and scrollback that ever captured this port.
 static void serialCommand(String c) {
   c.trim();
+  if (c.length() && c[0] == 'P') { pads::usbLine(c); return; }   // the PC's pad (pc/pad.py): quietly
   if (c == "state") {
     // (not while a core is being installed: a status frame in the middle of the
     // flash traffic is the one thing seen to spoil an install's read-back)

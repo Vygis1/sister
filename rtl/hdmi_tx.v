@@ -213,9 +213,11 @@ module hdmi_tx #(
 	wire [3:0]  bflag = present & {fc3 == 8'd0, fc2 == 8'd0, fc1 == 8'd0, fc == 8'd0};
 	wire [23:0] ha = (take != 4'd0) ? {bflag, 4'd0, 3'd0, 1'b0, present, 8'h02} : 24'd0;
 	wire [7:0]  fcn = (take == 4'd0) ? fc : (take == 4'd1) ? fc1 : (take == 4'd2) ? fc2 : (take == 4'd3) ? fc3 : fc4;
-	// packet B: AVI InfoFrame {PB6..PB0} = {0, 0, VIC 1, 0, M 4:3 R same, RGB, checksum};
+	// packet B: AVI InfoFrame {PB6..PB0} = {0, 0, VIC 1, 0, M 4:3 R same, RGB underscanned,
+	// checksum}. (S1:S0 = 10, underscanned: with "no data" a TV overscans, and the menu's
+	// header and footer and the edges of the picture fell off the screen.)
 	// Audio InfoFrame {.., PB1 2 channels, checksum}; or clock regeneration {N, CTS, 0}
-	wire [55:0] avi = {8'h00, 8'h00, 8'h01, 8'h00, 8'h18, 8'h00, 8'h56};   // (PB0: 0x82+0x02+0x0D+0x18+0x01 = 0xAA, -0xAA = 0x56)
+	wire [55:0] avi = {8'h00, 8'h00, 8'h01, 8'h00, 8'h18, 8'h02, 8'h54};   // (PB0: 0x82+0x02+0x0D+0x02+0x18+0x01 = 0xAC, -0xAC = 0x54)
 	wire [55:0] aif = {8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h01, 8'h70};
 	wire [55:0] acr = FS441 ? {8'h90, 8'h1B, 8'h00, 8'h12, 8'h7A, 8'h00, 8'h00}    // N 7056, CTS 31250
 	                        : {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00};   // N 6144, CTS 25000

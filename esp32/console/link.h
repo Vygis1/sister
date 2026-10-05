@@ -19,6 +19,7 @@ enum : uint8_t {
   CMD_STATUS       = 0x02,
   CMD_FLASH_ERASE  = 0x10,   // one 64 kB sector
   CMD_FLASH_WRITE  = 0x11,   // one 256-byte page
+  CMD_UNLOCK       = 0x15,   // C0 DE 5A FE: the next erase or write is taken (shell 2; older ones ignore it)
   CMD_FLASH_READ   = 0x12,   // fetch a page into the board's buffer
   CMD_FLASH_PAGE   = 0x13,   // and dump it back
   CMD_BOOT         = 0x20,   // 0 = the shell, 1 = the core
@@ -184,9 +185,17 @@ public:
   // Erase is one 64 kB sector, so the caller clears exactly what it is about to
   // write. Erasing the whole 6 MB slot would be tidier and spends three minutes
   // clearing space nothing is going to use.
+  // (each erase and write right behind an unlock frame: the shell takes neither without
+  // one -- a frame of noise on the wires once erased a slot)
+  void unlock() {
+    static const uint8_t key[4] = { 0xC0, 0xDE, 0x5A, 0xFE };
+    frame(CMD_UNLOCK, key, sizeof(key), nullptr, 0);
+  }
+
   bool eraseSector(uint32_t offset) {
     uint8_t a[3] = { (uint8_t)(offset >> 16), (uint8_t)(offset >> 8),
                      (uint8_t)offset };
+    unlock();
     frame(CMD_FLASH_ERASE, a, sizeof(a), nullptr, 0);
     return waitDone(10000);
   }
@@ -194,6 +203,7 @@ public:
   bool writePage(uint32_t offset, const uint8_t *data, size_t n) {
     uint8_t hdr[3] = { (uint8_t)(offset >> 16), (uint8_t)(offset >> 8),
                        (uint8_t)offset };
+    unlock();
     xSemaphoreTake(lock_, portMAX_DELAY);
     spi_.beginTransaction(settings_);
     digitalWrite(cs_, LOW);

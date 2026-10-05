@@ -200,7 +200,7 @@ module shell_top (
 		.c_rdata(bus_rdata), .c_err(bus_err), .c_ack(b_ack));
 	bus_arb u_arb (.clk(clk), .rst(rst),
 		.a_addr(b_addr), .a_wdata(b_wdata), .a_we(b_we), .a_re(b_re), .a_ack(b_ack),
-		.b_addr(e_addr), .b_wdata(e_wdata), .b_we(e_we), .b_re(e_re), .b_ack(e_ack),
+		.b_addr(e_addr), .b_wdata(e_wdata), .b_we(e_we), .b_re(e_re), .b_ack(e_ack_arb),
 		.bus_addr(bus_addr), .bus_wdata(bus_wdata), .bus_we(bus_we), .bus_re(bus_re), .bus_ack(bus_ack));
 
 	// --- the menu's pages: osd.v's (0x0007, in shell_screen) and the pad's (0x0008, as a
@@ -302,10 +302,19 @@ module shell_top (
 	// door's, as the console images share the wires with the PlayStation's disc feed)
 	wire        sh_miso, eb_miso;
 	wire [7:0]  e_cmd;
+	// (its writes reach the menu's pages and nothing else: shell_regs can start the flash
+	// engine, and that is the unlocked door's alone. Any other write is acknowledged and
+	// dropped.)
+	wire        e_we_raw, e_ack_arb;
+	wire        e_pg_ok = e_addr[31:16] == 16'h0007 || e_addr[31:16] == 16'h0008;
+	reg         e_drop_ack;
+	always @(posedge clk) e_drop_ack <= !rst && e_we_raw && !e_pg_ok && !e_drop_ack;
+	assign      e_we  = e_we_raw && e_pg_ok;
+	assign      e_ack = e_ack_arb || e_drop_ack;
 	esp_bus #(.VERSION(VERSION), .CORE_ID(CORE_ID)) u_ebus (
 		.clk(clk), .rst(rst),
 		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(eb_miso), .spi_cs_n(esp_cs_n),
-		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
+		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we_raw), .bus_re(e_re),
 		.bus_rdata(bus_rdata), .bus_ack(e_ack), .cmd(e_cmd));
 	assign esp_miso = (e_cmd[7:4] == 4'h4) ? eb_miso : sh_miso;
 	esp_link u_link (
@@ -321,6 +330,7 @@ module shell_top (
 	                 CMD_STATUS      = 8'h02,
 	                 CMD_FLASH_ERASE = 8'h10,
 	                 CMD_FLASH_WRITE = 8'h11,
+	                 CMD_UNLOCK      = 8'h15,
 	                 CMD_FLASH_READ  = 8'h12,
 	                 CMD_FLASH_PAGE  = 8'h13,
 	                 CMD_BOOT        = 8'h20;
@@ -387,8 +397,16 @@ module shell_top (
 		else if (rx_stb) rn <= rn + 10'd1;
 	end
 
+	// An erase or a write is taken only straight after an unlock frame, 15 C0 DE 5A FE,
+	// within 50 ms, and uses it up. A slot was found blank after the ESP32 was reset while
+	// the shell ran: its four wires floated and twitched, and a frame of noise is enough to
+	// look like an erase. Five exact bytes and then a well-formed erase are not.
+	reg  [31:0] ukey;
+	reg         armed;
+	reg  [21:0] arm_t;
 	always @(posedge clk) begin
 		if (rst) begin
+			armed <= 1'b0; arm_t <= 22'd0; ukey <= 32'd0;
 			cmd <= 8'd0; arg_addr <= 24'd0; byte_sh <= 32'd0;
 			sp_op <= 2'd0; sp_offset <= 23'd0; sp_start <= 1'b0;
 			sp_windex <= 6'd0; sp_we <= 1'b0; sp_wdata <= 32'd0;
@@ -396,6 +414,10 @@ module shell_top (
 		end else begin
 			sp_start <= 1'b0;
 			sp_we    <= 1'b0;
+			if (armed) begin
+				arm_t <= arm_t + 22'd1;
+				if (arm_t == 22'd2_500_000) armed <= 1'b0;          // 50 ms
+			end
 
 			if (frame_start) cmd <= 8'd0;
 
@@ -425,6 +447,9 @@ module shell_top (
 				CMD_BOOT:
 					if (rx_index == 24'd1) sp_boot_core <= rx_byte[0];
 
+				CMD_UNLOCK:
+					if (rx_index <= 24'd4) ukey <= {ukey[23:0], rx_byte};
+
 				default: ;
 				endcase
 			end
@@ -433,11 +458,15 @@ module shell_top (
 			// is the only moment the master has certainly finished, and a flash
 			// program started early would race the bytes still arriving.
 			if (frame_end) case (cmd)
+			CMD_UNLOCK:
+				if (rn == 10'd5 && ukey == 32'hC0DE_5AFE) begin armed <= 1'b1; arm_t <= 22'd0; end
 			CMD_FLASH_ERASE: begin
-				sp_op <= 2'd1; sp_offset <= arg_addr[22:0]; sp_start <= 1'b1;
+				if (armed) begin sp_op <= 2'd1; sp_offset <= arg_addr[22:0]; sp_start <= 1'b1; end
+				armed <= 1'b0;
 			end
 			CMD_FLASH_WRITE: begin
-				sp_op <= 2'd2; sp_offset <= arg_addr[22:0]; sp_start <= 1'b1;
+				if (armed) begin sp_op <= 2'd2; sp_offset <= arg_addr[22:0]; sp_start <= 1'b1; end
+				armed <= 1'b0;
 			end
 			CMD_FLASH_READ: begin
 				sp_op <= 2'd3; sp_offset <= arg_addr[22:0]; sp_start <= 1'b1;
@@ -535,7 +564,7 @@ module shell_top (
 
 	// --- the picture -------------------------------------------------------------
 	// 640 x 480 from the board oscillator (VCO 1000 MHz: /40 25 MHz, /8 125 MHz, as
-	// eth_top; /20 the shell's own 50 MHz), DVI (no sound); what the flash is doing,
+	// eth_top; /20 the shell's own 50 MHz), HDMI with silent sound; what the flash is doing,
 	// as text and a bar.
 	assign hdmi_lo = 11'd0;
 	assign hdmi_5v = 1'b1;
@@ -547,7 +576,8 @@ module shell_top (
 	BUFG u_hb0 (.I(hp_raw), .O(hpclk));
 	BUFG u_hb1 (.I(hp5_raw), .O(hpclk5));
 	wire [9:0] hx, hy; wire [23:0] hrgb;
-	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .AUDIO(0)) u_hdmi (
+	// (HDMI, not DVI -- silent -- for the AVI InfoFrame: without one a TV overscans)
+	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .AUDIO(1)) u_hdmi (
 		.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0), .ext_pclk(hpclk), .ext_pclk5(hpclk5), .ext_locked(hlocked),
 		.pclk(), .x(hx), .y(hy), .req(), .rgb(hrgb), .frame_start(),
 		.tmds_p(hdmi_d_p), .tmds_n(hdmi_d_n), .tmds_clk_p(hdmi_ck_p), .tmds_clk_n(hdmi_ck_n),
