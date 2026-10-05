@@ -228,9 +228,9 @@ module n64_top #(
 	// past its return queue).
 	reg          if_b;                                // the I-cache line's second half is asked for
 	reg  [1:0]   one_out;                             // single reads out (two: an I-cache line's halves)
-	wire [1:0]   q_head;                              // the owner of the next line back
+	wire [2:0]   q_head;                              // the owner of the next line back (4: the D-cache's prefetch)
 	wire         rd_ok = rdp_out + {5'd0, one_out} < 7'd12;  // room for another read (ddr3_mem's return queue holds 32)
-	wire         head_one = q_head == 2'd2;
+	wire         head_one = q_head == 3'd2;
 	// the RSP's DMA reads go through a read-ahead (n64_rdp_stream.v) on the same pipelined
 	// port: it waited a whole DDR3 round trip a line, about 0.5 bytes a clock, and SM64's
 	// microcode spent most of its time in its DMA wait. Each read taken is noted with its
@@ -241,7 +241,13 @@ module n64_top #(
 	reg          x_flush_p;                           // a write landed in the read-ahead: empty it
 	wire         x_snoop_hit;
 	reg  [1:0]   rq_own;                              // the owner of the read in S_RQ: 0 the RDP, 1 the RSP's read-ahead, 3 the HDMI picture
-	reg  [1:0]   rq_tag [0:15];  reg [3:0] rq_tw, rq_tr;  // owners of the reads taken, oldest at rq_tr
+	reg  [2:0]   rq_tag [0:15];  reg [3:0] rq_tw, rq_tr;  // owners of the reads taken, oldest at rq_tr
+	// The D-cache's prefetch: a miss's fill asks for the next line too, right behind it, and
+	// the line goes into the cache when it comes back -- unless anything wrote it meanwhile
+	// (a store of the CPU's, or anyone's write taken by the memory), then it is dropped.
+	// (SM64's title screen: 14.6% of the CPU's clocks waiting on D-cache misses, 25 each.)
+	reg          pf_v, pf_b, pf_poison;               // one out; asked for in this fill; written since
+	reg  [23:0]  pf_line;
 	assign q_head = rq_tag[rq_tr];
 	reg  [127:0] rd_rd_data, cf_data;
 	wire [127:0] rd_wr_data;
@@ -474,7 +480,8 @@ module n64_top #(
 	           S_RREAD = 5'd15, S_RWRITE = 5'd16, S_CREAD = 5'd17, S_CWRITE = 5'd18, S_RQ = 5'd19, S_VREAD = 5'd20;
 	reg  [4:0]   st;
 	// the single read taken: its state requesting, the memory taking it
-	wire         one_take = d_req && d_ready && (st == S_DREAD || st == S_DFILL || st == S_IREAD || st == S_IFILL0 || st == S_IFILL1 || st == S_VREAD
+	wire         pf_take  = d_req && d_ready && st == S_DFILL && pf_b;
+	wire         one_take = d_req && d_ready && !pf_take && (st == S_DREAD || st == S_DFILL || st == S_IREAD || st == S_IFILL0 || st == S_IFILL1 || st == S_VREAD
 	                     || st == S_HREAD || st == S_PREAD || st == S_FREAD || st == S_SREAD || st == S_AREAD || st == S_RREAD || st == S_CREAD);
 	// the host's fill: four words to a line. A finished line moves to its own
 	// buffer for the write, so the next line's first word can arrive while that
@@ -551,7 +558,7 @@ module n64_top #(
 			pd_rd_ack <= 1'b0; pd_wr_ack <= 1'b0; sd_rd_ack <= 1'b0; sd_wr_ack <= 1'b0; si_we <= 1'b0;
 			ad_rd_ack <= 1'b0; ai_we <= 1'b0; rd_rd_ack <= 1'b0; rd_wr_ack <= 1'b0; cf_ack <= 1'b0; cw_ack <= 1'b0;
 			rq_ready <= 1'b0; rs_valid <= 1'b0; rdp_out <= 7'd0; x_qr <= 1'b0; x_rs <= 1'b0; rq_tw <= 4'd0; rq_tr <= 4'd0;
-			one_out <= 2'd0; rw_wp <= 5'd0; rw_rp <= 5'd0;
+			one_out <= 2'd0; rw_wp <= 5'd0; rw_rp <= 5'd0; pf_v <= 1'b0; pf_b <= 1'b0; pf_poison <= 1'b0;
 			dsp_pend <= 1'b0; isp_pend <= 1'b0;
 			mi_intr <= 6'd0; mi_mask <= 6'd0; mi_mode <= 32'd0;
 			pi_we <= 1'b0;
@@ -569,16 +576,21 @@ module n64_top #(
 			// (the RDP's acks are a clock long: it may ask again on the clock it takes one)
 			cf_ack <= 1'b0; cw_ack <= 1'b0; rq_ready <= 1'b0; rs_valid <= 1'b0; x_qr <= 1'b0; x_rs <= 1'b0;
 			// the pipelined reads: taken (S_RQ) and returned, to their owners
-			rdp_out <= rdp_out + {6'd0, st == S_RQ && d_ready} - {6'd0, d_valid && !head_one};
+			rdp_out <= rdp_out + {6'd0, (st == S_RQ && d_ready) || pf_take} - {6'd0, d_valid && !head_one};
 			// each read taken, its owner queued: a pipelined read (S_RQ), or the single read (its
 			// state, the clock the memory takes it)
-			if (st == S_RQ && d_ready) begin rq_tag[rq_tw] <= rq_own; rq_tw <= rq_tw + 4'd1; end
-			if (one_take) begin rq_tag[rq_tw] <= 2'd2; rq_tw <= rq_tw + 4'd1; end
+			if (st == S_RQ && d_ready) begin rq_tag[rq_tw] <= {1'b0, rq_own}; rq_tw <= rq_tw + 4'd1; end
+			if (one_take) begin rq_tag[rq_tw] <= 3'd2; rq_tw <= rq_tw + 4'd1; end
+			if (pf_take) begin rq_tag[rq_tw] <= 3'd4; rq_tw <= rq_tw + 4'd1; end
+			// the prefetch's line back (written into the cache below, as dw_pf); and what spoils it
+			if (d_valid && q_head == 3'd4) pf_v <= 1'b0;
+			if ((d_req && d_ready && d_we && d_addr == pf_line)
+			    || (c_dreq && c_dwe && is_rdram(c_daddr) && line_of(c_daddr) == pf_line) || !run || dp_cop) pf_poison <= 1'b1;
 			one_out <= one_out + {1'b0, one_take} - {1'b0, d_valid && head_one};
 			if (d_valid) rq_tr <= rq_tr + 4'd1;
 			if (d_valid && !head_one) begin
 				rs_data <= d_rdata;
-				if (q_head == 2'd1) x_rs <= 1'b1; else if (q_head == 2'd0) rs_valid <= 1'b1;   // (3: the picture's, below)
+				if (q_head == 3'd1) x_rs <= 1'b1; else if (q_head == 3'd0) rs_valid <= 1'b1;   // (3: the picture's, 4: the prefetch's)
 			end
 			// the RSP's DMA reads: its read-ahead answers
 			if (!rd_rd_req) rd_rd_ack <= 1'b0;
@@ -628,7 +640,7 @@ module n64_top #(
 				if (hv_want == 9'd0) hv_org <= vi[1][23:0];
 			end else if (hv_busy && hv_rk == hv_n) hv_busy <= 1'b0;
 			// its lines, back in the order they were asked for, into n64_vid's half for it
-			if (d_valid && q_head == 2'd3) begin
+			if (d_valid && q_head == 3'd3) begin
 				hv_we <= 1'b1; hv_wa <= {hv_line[0], hv_rk}; hv_wd <= d_rdata; hv_rk <= hv_rk + 7'd1;
 			end
 			if (fbr_req && !fbr_ack) begin
@@ -796,7 +808,7 @@ module n64_top #(
 					else begin dp_cop <= 1'b0; d_ready_r <= 1'b1; cop_k <= 3'd0; end
 				end else if (dp && !c_dreq && rd_ok) begin
 					d_addr <= line_of(dpa); d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1;
-					d_for <= dpa; st <= dp_fill ? S_DFILL : S_DREAD;
+					d_for <= dpa; st <= dp_fill ? S_DFILL : S_DREAD; pf_b <= 1'b0;
 				end else if (ip && !i_req && rd_ok) begin
 					d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; i_for <= ipa;
 					if (ip_fill) begin d_addr <= line_of({ipa[31:5], 5'd0}); st <= S_IFILL0; if_b <= 1'b0; end
@@ -867,6 +879,16 @@ module n64_top #(
 				// an I-cache line: the second half asked for the clock the first is taken (two
 				// round trips one after the other were 18% of the CPU's clocks)
 				if (st == S_IFILL0 && d_ready && !if_b) begin d_addr <= d_addr + 24'd1; d_req <= 1'b1; if_b <= 1'b1; end
+				// a D-cache fill: the next line asked for the clock this one is taken (RDRAM only,
+				// one prefetch out at a time)
+				if (st == S_DFILL && d_ready && !pf_b && !pf_v && d_addr - RDRAM_LINE < 24'h08_0000 && rd_ok) begin
+					d_addr <= d_addr + 24'd1; d_req <= 1'b1; pf_b <= 1'b1;
+					pf_v <= 1'b1; pf_line <= d_addr + 24'd1; pf_poison <= 1'b0;
+				end
+				// (the fill's own line back before the prefetch was taken: the prefetch is dropped)
+				// (and its request taken back now: presented to the memory in the idle state's
+				// first clock, it would be taken with no owner queued)
+				if (st == S_DFILL && d_valid && head_one && pf_b && d_req && !d_ready) begin pf_v <= 1'b0; d_req <= 1'b0; end
 				if (d_valid && head_one) begin
 					st <= S_IDLE;
 					case (st)
@@ -1049,13 +1071,24 @@ module n64_top #(
 	// the caches' data arrays, one write port each: a fill, or a store into a line
 	// the D-cache holds (byte enables), or each half of an I-cache line's fill
 	// (the fill's own line: a pipelined read's may come back while it waits -- head_one)
+	wire         tw_sweep = !rst && !run;
+	// a write to RDRAM by anyone but the CPU (the RSP's DMA, the RDP, the PI, the SI), taken
+	// this clock: the D-cache's line for it, if it holds that line, is dropped
+	wire [23:0]  sn_rel   = d_addr - RDRAM_LINE;
+	wire         dsn_w    = !rst && d_req && d_ready && d_we && st != S_WB && st != S_FILL && sn_rel[23:19] == 5'd0
+	                        && dtag[sn_rel[11:0]] == {1'b1, sn_rel[18:12]};
 	wire         dw_fill = !rst && st == S_DFILL && d_valid && head_one;
 	// (a store through the uncached window updates a line the D-cache holds too: the cache
 	// always equals memory, see dsn_w)
 	wire         dw_hit  = !rst && c_dreq && !c_dcache && c_dwe && is_rdram(c_daddr) && d_hit_now;
-	wire [11:0]  dw_idx  = dw_fill ? d_for[15:4] : d_idx;
-	wire [15:0]  dw_be   = dw_fill ? 16'hFFFF : dw_hit ? c_mask : 16'h0000;
-	wire [127:0] dw_data = dw_fill ? d_rdata : c_line;
+	// the prefetch's line: into the data and tag arrays together, on a clock neither port is
+	// otherwise wanted (a store's hit, a snoop, the sweep) -- else it is just not kept
+	wire [23:0]  pf_rel  = pf_line - RDRAM_LINE;
+	wire         dw_pf   = !rst && d_valid && q_head == 3'd4 && pf_v && !pf_poison && !dw_hit && !dsn_w && !tw_sweep
+	                       && !(d_req && d_ready && d_we && d_addr == pf_line) && !(c_dreq && c_dwe);
+	wire [11:0]  dw_idx  = dw_fill ? d_for[15:4] : dw_pf ? pf_rel[11:0] : d_idx;
+	wire [15:0]  dw_be   = (dw_fill || dw_pf) ? 16'hFFFF : dw_hit ? c_mask : 16'h0000;
+	wire [127:0] dw_data = (dw_fill || dw_pf) ? d_rdata : c_line;
 	wire         iw_en   = !rst && (st == S_IFILL0 || st == S_IFILL1) && d_valid && head_one;
 	wire [11:0]  iw_idx  = {i_for[15:5], st == S_IFILL1};
 	integer wk;
@@ -1068,7 +1101,6 @@ module n64_top #(
 	// invalidate -- so they are distributed RAM. Written from three places with their
 	// own addresses they were 21,000 flip-flops and a mux over the whole array per
 	// writer: 190,000 LUTs, which no build was ever going to fit.
-	wire         tw_sweep = !rst && !run;
 	wire         cop_go   = !rst && st == S_IDLE && d_calibrated && !(fill_pending && !run) && wb_empty && dp_cop && !c_dreq;
 	// by index (0, 2, and the D-cache's 3): the four lines {cop_k, the chip's index}; the hit
 	// forms (4, 5): the line the address names, invalidated without looking at its tag (it
@@ -1082,20 +1114,15 @@ module n64_top #(
 	// task, and the board filled 9.7 lines a 1000 instructions where the model, keeping them,
 	// filled 1.8.
 	wire         dcop_w   = 1'b0;
-	// a write to RDRAM by anyone but the CPU (the RSP's DMA, the RDP, the PI, the SI), taken
-	// this clock: the D-cache's line for it, if it holds that line, is dropped
-	wire [23:0]  sn_rel   = d_addr - RDRAM_LINE;
-	wire         dsn_w    = !rst && d_req && d_ready && d_we && st != S_WB && st != S_FILL && sn_rel[23:19] == 5'd0
-	                        && dtag[sn_rel[11:0]] == {1'b1, sn_rel[18:12]};
 	wire [10:0]  icop_ix  = cop_idx ? {cop_k[1:0], dpa[13:5]} : dpa[15:5];
 	wire [11:0]  dcop_ix  = cop_idx ? {cop_k, dpa[12:4]} : dpa[15:4];
 	wire         ifill_w  = !rst && st == S_IFILL1 && d_valid && head_one;
 	wire         itw_en   = tw_sweep || ifill_w || icop_w;
 	wire [10:0]  itw_idx  = tw_sweep ? sweep[10:0] : ifill_w ? i_for[15:5] : icop_ix;
 	wire [7:0]   itw_val  = (!tw_sweep && ifill_w) ? {1'b1, i_for[22:16]} : 8'd0;
-	wire         dtw_en   = tw_sweep || dw_fill || dsn_w;
-	wire [11:0]  dtw_idx  = tw_sweep ? sweep : dw_fill ? d_for[15:4] : sn_rel[11:0];
-	wire [7:0]   dtw_val  = (!tw_sweep && dw_fill) ? {1'b1, d_for[22:16]} : 8'd0;
+	wire         dtw_en   = tw_sweep || dw_fill || dsn_w || dw_pf;
+	wire [11:0]  dtw_idx  = tw_sweep ? sweep : dw_fill ? d_for[15:4] : dw_pf ? pf_rel[11:0] : sn_rel[11:0];
+	wire [7:0]   dtw_val  = (!tw_sweep && dw_fill) ? {1'b1, d_for[22:16]} : (!tw_sweep && dw_pf) ? {1'b1, pf_rel[18:12]} : 8'd0;
 	always @(posedge clk) begin
 		if (itw_en) itag[itw_idx] <= itw_val;
 		if (dtw_en) dtag[dtw_idx] <= dtw_val;

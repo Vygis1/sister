@@ -802,9 +802,23 @@ module vr4300 #(
 	// =============================================================================
 	// COP1: the unit, and what the instruction in E commits
 	// =============================================================================
-	assign e_fp_wait  = e_valid && (op == 6'h11 || fp_ls) && fpl_inflight;
+	// An FP load in M or W holds back only what it concerns (by register pair, as FR clear
+	// pairs them): an instruction reading what it loads, one that writes the same in one
+	// clock (MTC1, DMTC1, MOV: the older load would land after it), and any FP write on
+	// the clock the load writes (the one write port). An operation of the FPU takes three
+	// clocks or more, so it writes after any load ahead of it. (It was every COP1
+	// instruction behind every FP load: 5.5% of the CPU's clocks on SM64's title screen.)
+	wire [3:0]  fpe_rd = rd[4:1], fpe_rt = rt[4:1];
+	wire [3:0]  fpe_wr = fp_mov ? sa[4:1] : rd[4:1];
+	wire        fpe_1clk = fp_mt || fp_dmt || fp_mov;
+	wire        fpl_m_hit = m_fpl_idx[4:1] == fpe_rd || m_fpl_idx[4:1] == fpe_rt || (fpe_1clk && m_fpl_idx[4:1] == fpe_wr);
+	wire        fpl_w_hit = w_fpl_idx[4:1] == fpe_rd || w_fpl_idx[4:1] == fpe_rt || (fpe_1clk && w_fpl_idx[4:1] == fpe_wr);
+	wire        fpl_dep = (m_valid && m_fpl && fpl_m_hit) || (w_valid && w_fpl && fpl_w_hit);
+	// (and an FPU result too, while a load is in W: a pipeline held by a cache miss lets an
+	// operation started under it finish, and its commit would meet the load's write)
+	assign e_fp_wait  = e_valid && (op == 6'h11 || fp_ls) && (fpl_dep || (w_valid && w_fpl && (fpe_1clk || fp_arith)));
 	assign e_fpu_wait = e_valid && fp_arith && !(fpu_on && fpu_done);
-	wire   fpu_start  = e_valid && fp_arith && !fpu_on && !fpl_inflight;
+	wire   fpu_start  = e_valid && fp_arith && !fpu_on && !fpl_dep;
 	always @(posedge clk) begin
 		if (rst || adv) fpu_on <= 1'b0;
 		else if (fpu_start) fpu_on <= 1'b1;

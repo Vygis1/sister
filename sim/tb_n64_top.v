@@ -62,14 +62,16 @@ module tb_n64_top;
 	reg [31:0] rnd = 32'hC0FF_EE11;
 	always @(posedge clk) rnd <= {rnd[30:0], rnd[31] ^ rnd[21] ^ rnd[1] ^ rnd[0]};
 	localparam LAT = 12;
-	reg [23:0] q_a [0:LAT-1]; reg q_v [0:LAT-1];
-	initial for (i = 0; i < LAT; i = i + 1) begin q_v[i] = 0; q_a[i] = 0; end
+	reg [23:0] q_a [0:LAT-1]; reg q_v [0:LAT-1]; reg [127:0] q_d [0:LAT-1];
+	initial for (i = 0; i < LAT; i = i + 1) begin q_v[i] = 0; q_a[i] = 0; q_d[i] = 0; end
 	integer mk, rdram_writes = 0;
 	always @(posedge clk) begin
 		d_ready <= (rnd[1:0] != 2'b00);
 		d_valid <= q_v[LAT-1];
-		d_rdata <= (q_a[LAT-1] >= 24'h10_0000) ? cart[q_a[LAT-1] - 24'h10_0000] : rdram[q_a[LAT-1][18:0]];
-		for (mk = LAT-1; mk > 0; mk = mk - 1) begin q_v[mk] <= q_v[mk-1]; q_a[mk] <= q_a[mk-1]; end
+		// (a read is answered with memory as it was when the read was taken, as DDR3 does: a
+		// write taken after it is not in it)
+		d_rdata <= q_d[LAT-1];
+		for (mk = LAT-1; mk > 0; mk = mk - 1) begin q_v[mk] <= q_v[mk-1]; q_a[mk] <= q_a[mk-1]; q_d[mk] <= q_d[mk-1]; end
 		q_v[0] <= 1'b0;
 		if (d_req && d_ready) begin
 			if (d_we) begin
@@ -80,6 +82,7 @@ module tb_n64_top;
 				if (d_addr < 24'h10_0000) rdram_writes = rdram_writes + 1;
 			end else begin
 				q_v[0] <= 1'b1; q_a[0] <= d_addr;
+				q_d[0] <= (d_addr >= 24'h10_0000) ? cart[d_addr - 24'h10_0000] : rdram[d_addr[18:0]];
 			end
 		end
 	end
@@ -95,6 +98,17 @@ module tb_n64_top;
 			                           dut.hv_wa[6:0], dut.hv_line, dut.hv_wd, rdram[dut.hv_base[22:4] + {12'd0, dut.hv_wa[6:0]}]);
 		end
 	end
+	// --- the D-cache: every line put in it (a fill, or the prefetch's) is memory as it is now
+	integer dc_in = 0, dc_pf = 0, dc_bad = 0;
+	always @(posedge clk) if (!rst && (dut.dw_fill || dut.dw_pf)) begin
+		dc_in = dc_in + 1; if (dut.dw_pf) dc_pf = dc_pf + 1;
+		if (d_rdata !== rdram[dut.dw_fill ? dut.line_of(dut.d_for) : dut.pf_line]) begin
+			dc_bad = dc_bad + 1;
+			if (dc_bad <= 5) $display("tb_n64_top: D-cache line %s at %06x is not memory", dut.dw_pf ? "prefetched" : "filled",
+			                          dut.dw_fill ? dut.line_of(dut.d_for) : dut.pf_line);
+		end
+	end
+
 	// --- the RSP's posted DMA writes: each line handed over reaches the memory as it was, in
 	// order, and no read is issued while one of them is still queued
 	reg [167:0] rwm [0:4095]; integer rwm_in = 0, rwm_out = 0, rwm_bad = 0, rwm_early = 0;
@@ -230,6 +244,7 @@ module tb_n64_top;
 		         dut.rdp_out, dut.st, dut.u_rsp_ra.live, dut.u_rsp_ra.b, dut.u_rsp_ra.n, dut.u_rsp_ra.r, dut.u_rsp_ra.drop,
 		         dut.u_rsp.dma_busy, dut.u_rsp.halted, dut.rd_rd_req, dut.rd_rd_ack, dut.x_flush_p);
 		$display("tb_n64_top: %0d clocks since run, %0d frames; %0d video lines fetched", ($time - t_run) / 20, frames, vid_lines);
+		$display("tb_n64_top: D-cache lines put in %0d (%0d prefetched), %0d not memory%s", dc_in, dc_pf, dc_bad, dc_bad ? " -- FAIL" : "");
 		$display("tb_n64_top: RSP DMA writes: %0d handed over, %0d written, %0d wrong; %0d reads issued past a queued one%s",
 		         rwm_in, rwm_out, rwm_bad, rwm_early, (rwm_bad || rwm_early) ? " -- FAIL" : "");
 		// the frame stream's port: words of the picture, against RDRAM at the VI's origin
