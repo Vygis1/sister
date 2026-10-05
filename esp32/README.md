@@ -91,10 +91,52 @@ hangs, a bad flash write, a bitstream for the wrong part. Pulling it low and
 releasing it restarts configuration from address 0, which is the shell. Without
 that wire the recovery is reaching for the power lead.
 
+## The menu on the TV (menu.h)
+
+The console images carry `esp_bus.v` (this chip drives the register bus over its four
+wires, as the PC does over Ethernet) and `osd.v` (40 x 30 text over the HDMI picture).
+At power-up the ESP32 boots whatever core the flash slot holds and shows the menu:
+the consoles first, then the chosen one's games. Picking a game for another console
+goes back to the shell (which shows the install's progress on the TV), installs that
+core from `/cores` (a sector at a time, read back and rewritten if wrong), boots it and
+loads the game.
+
+    START + SELECT, or a Bluetooth pad's PS / Home    the menu (the NES and Master System pause)
+    UP / DOWN, LEFT / RIGHT                          move, a page at a time
+    A                                                open a console / load the game
+    B                                                back
+
 ## The card
 
-    /cores/nes.bin            /roms/nes/*.nes
-    /cores/sms.bin            /roms/sms/*.sms
+    /cores/nes.bin  sms.bin  md.bin  n64.bin  ps1.bin
+    /roms/nes/*.nes            /roms/sms/*.sms        /roms/md/*.md *.gen
+    /roms/n64/*.z64 *.n64 *.v64                       /discs/*.bin (PlayStation, raw 2352-byte sectors)
+    /roms/SCPH*.BIN (or /bios)  the PlayStation BIOS
+    /saves/card1.mcr            the PlayStation's memory card (made, formatted, when missing)
+    /saves/n64/*.eep            N64 EEPROM saves
+
+A game left loose in `/roms` is moved into its console's folder, by its extension, the
+first time the card is read.
+
+## The LilyGO T8 (classic ESP32): Bluetooth pads
+
+The S3 has no Bluetooth Classic, which PS4/PS5 pads need. The same sketch builds for a
+classic ESP32-WROVER board (the LilyGO T8) on the esp32-bluepad32 platform and then takes
+PS4, PS5, Xbox and Switch pads (`pads.h`): each machine gets its own button layout, the
+N64 its stick. Pair a PlayStation pad by holding SHARE and PS until the light flashes.
+
+    ./tools/arduino/arduino-cli.exe compile --fqbn "esp32-bluepad32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" esp32/console
+
+    T8          FPGA                header U2
+    GPIO18  ->  esp_sclk            pin 7
+    GPIO23  ->  esp_mosi            pin 8
+    GPIO19  <-  esp_miso            pin 9
+    GPIO5   ->  esp_cs_n            pin 10
+    GPIO32  ->  PROGRAM_B           (the SW1 wire)
+    GND     --  GND                 pin 61
+    microSD: the T8's own slot (GPIO 27/12/14/33)
+
+Bluepad32 is Apache-2.0 but runs on BTstack, which is free for non-commercial use only.
 
 A core is a **`.bin`, not a `.bit`**. They are not interchangeable and the
 difference is not cosmetic: a `.bit` carries a header -- design name, part,
