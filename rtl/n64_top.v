@@ -482,6 +482,7 @@ module n64_top #(
 	reg          hv_busy;             // fetching it
 	reg  [6:0]   hv_k, hv_n;          // the DDR3 line next / how many a source line has
 	reg  [23:0]  hv_base;             // its first byte in RDRAM
+	reg  [23:0]  hv_org;              // VI_ORIGIN as it was at the top of this HDMI frame
 	reg          hv_we;  reg [7:0] hv_wa;  reg [127:0] hv_wd;
 	wire         hv_bpp32 = vi[0][1:0] == 2'd3;
 	wire [13:0]  hv_stride = hv_bpp32 ? {vi[2][11:0], 2'b00} : {1'b0, vi[2][11:0], 1'b0};
@@ -606,7 +607,10 @@ module n64_top #(
 				bytes = hv_bpp32 ? {1'b0, vi[2][11:0], 2'b00} : {2'b00, vi[2][11:0], 1'b0};
 				hv_line <= hv_want; hv_k <= 7'd0; hv_busy <= 1'b1;
 				hv_n <= (bytes + 15'd15 > 15'd1280) ? 7'd80 : bytes[10:4] + {6'd0, bytes[3:0] != 4'd0};
-				hv_base <= vi[1][23:0] + hv_want * hv_stride;
+				// (the origin taken once a frame, at its first line: a flip half way down would
+				// otherwise show the rest of the frame from the other buffer)
+				hv_base <= (hv_want == 9'd0 ? vi[1][23:0] : hv_org) + hv_want * hv_stride;
+				if (hv_want == 9'd0) hv_org <= vi[1][23:0];
 			end else if (hv_busy && hv_k == hv_n && st != S_VREAD) hv_busy <= 1'b0;
 			if (fbr_req && !fbr_ack) begin
 				if (fr_v && fr_tag == fr_lidx) begin

@@ -86,8 +86,18 @@ module fb_ddr #(
 	reg [23:0]  cur_line;
 	reg [127:0] cur_data;
 	reg         cur_v;
-	wire [23:0] px_line = FB_LINE + px_y * STRIDE + {17'd0, px_x[9:3]};
-	wire [23:0] fl_line = FB_LINE + fl_y * STRIDE + {17'd0, fl_x[9:3]};
+	// Two frames for HDMI (the second 0x5000 lines -- 320 kB -- after the first): the
+	// capture writes the one not on screen, a finished capture waits (pend) until
+	// HDMI starts its next frame and takes it, and no new capture starts meanwhile --
+	// so the frame on screen is never written while it is read. (One frame, written
+	// while HDMI read it, showed pixels of two frames: a blink's eye pixels one frame
+	// wrong.) Without HDMI it is the one frame, as it always was.
+	reg         disp_b, pend;
+	wire        cap_b     = hdmi_on ? ~disp_b : 1'b0;
+	wire [23:0] cap_base  = FB_LINE + (cap_b ? 24'h00_5000 : 24'd0);
+	wire [23:0] disp_base = FB_LINE + ((hdmi_on && disp_b) ? 24'h00_5000 : 24'd0);
+	wire [23:0] px_line = cap_base + px_y * STRIDE + {17'd0, px_x[9:3]};
+	wire [23:0] fl_line = cap_base + fl_y * STRIDE + {17'd0, fl_x[9:3]};
 	wire        fl_take = capturing && fl_valid;
 
 	// --- lines waiting to be written -------------------------------------------
@@ -140,16 +150,19 @@ module fb_ddr #(
 			rs <= R_IDLE; rc_v <= 1'b0; rc_line <= 24'd0; rc_data <= 128'd0;
 			hr_ack <= 1'b0; hr_rdata <= 32'd0; wr_busy <= 1'b0;
 			lf_have <= 9'h1FF; lf_line <= 9'd0; lf_w <= 7'd0; lf_on <= 1'b0; lf_wait <= 1'b0; lf_we <= 1'b0;
+			disp_b <= 1'b0; pend <= 1'b0;
 		end else begin
 			hr_ack <= 1'b0;
 			lf_we  <= 1'b0;
 
 			// --- capture control ------------------------------------------------
 			// (HDMI: the next frame is armed as soon as this one is in)
-			if (cap_go || (hdmi_on && !armed && !capturing && !finishing)) begin armed <= 1'b1; cap_ready <= 1'b0; finishing <= 1'b0; end
+			if (cap_go || (hdmi_on && !armed && !capturing && !finishing && !pend)) begin armed <= 1'b1; cap_ready <= 1'b0; finishing <= 1'b0; end
 			// a line wanted that is not in the buffer: fetch it
 			if (hdmi_on && !lf_on && lf_want != lf_have && lf_want < 9'd240) begin
 				lf_on <= 1'b1; lf_line <= lf_want; lf_w <= 7'd0;
+				// the top of HDMI's frame: a finished capture goes on screen
+				if (lf_want == 9'd0 && pend) begin disp_b <= ~disp_b; pend <= 1'b0; end
 			end
 			if (frame_start) begin
 				if (armed) begin capturing <= 1'b1; armed <= 1'b0; rc_v <= 1'b0; end
@@ -158,6 +171,7 @@ module fb_ddr #(
 			// ready once the frame's last line has been written
 			if (finishing && !cur_v && q_empty && !wr_busy && !push) begin
 				cap_ready <= 1'b1; finishing <= 1'b0;
+				pend <= hdmi_on;
 			end
 
 			// --- gather pixels into lines ------------------------------------------
@@ -197,10 +211,10 @@ module fb_ddr #(
 					m_we <= 1'b1; m_req <= 1'b1; wr_busy <= 1'b1;
 				end else if (lf_on && !lf_wait && rs == R_IDLE) begin
 					// (before the host's reads: the picture cannot wait)
-					m_addr <= FB_LINE + lf_line * STRIDE + {17'd0, lf_w}; m_we <= 1'b0; m_req <= 1'b1;
+					m_addr <= disp_base + lf_line * STRIDE + {17'd0, lf_w}; m_we <= 1'b0; m_req <= 1'b1;
 					lf_wait <= 1'b1;
 				end else if (rs == R_IDLE && hr_req && !hr_hit && q_empty && !lf_wait) begin
-					m_addr <= FB_LINE + {8'd0, hr_line}; m_we <= 1'b0; m_req <= 1'b1;
+					m_addr <= disp_base + {8'd0, hr_line}; m_we <= 1'b0; m_req <= 1'b1;
 					rs <= R_WAIT;
 				end
 			end

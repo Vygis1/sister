@@ -26,14 +26,17 @@ module tb_ps1_hdmi #(parameter W = 256);
 	// --- the scanout: a frame of pixels, one every other clock, then a gap -------------
 	reg fstart = 0, pv = 0; reg [9:0] fx = 0; reg [8:0] fy = 0; reg [15:0] prgb = 0;
 	reg [9:0] px_x = 0; reg [8:0] px_y = 0;
+	// each captured frame its own: the frame number in the top bits of every pixel
+	reg [4:0] fk = 0;
+	function [15:0] srck; input [8:0] py; input [9:0] px; input [4:0] k; srck = src(py, px) ^ {1'b0, k, 10'd0}; endfunction
 	wire hold, want;
 	integer gap = 0;
 	always @(posedge clk) if (!rst) begin
 		fstart <= 1'b0; pv <= 1'b0;
 		if (gap > 0) begin gap = gap - 1; if (gap == 0) begin fstart <= 1'b1; fx <= 0; fy <= 0; end end
 		else if (!hold && !pv) begin
-			pv <= 1'b1; prgb <= src(fy, fx); px_x <= fx; px_y <= fy;
-			if (fx == W - 1) begin fx <= 0; if (fy == 9'd239) gap = 20000; else fy <= fy + 9'd1; end
+			pv <= 1'b1; prgb <= srck(fy, fx, fk); px_x <= fx; px_y <= fy;
+			if (fx == W - 1) begin fx <= 0; if (fy == 9'd239) begin gap = 20000; fk <= fk + 5'd1; end else fy <= fy + 9'd1; end
 			else fx <= fx + 10'd1;
 		end
 	end
@@ -72,21 +75,29 @@ module tb_ps1_hdmi #(parameter W = 256);
 	// check from the third frame (the first capture has to be in memory)
 	reg [9:0] x1, y1; reg r1;
 	always @(posedge pclk) begin x1 <= x; y1 <= y; r1 <= req; end
-	integer errors = 0, checked = 0, frames = 0; reg [23:0] wantc;
+	integer errors = 0, checked = 0, frames = 0; reg [23:0] wantc; integer shown_k = 0, last_k = -1, ks_seen = 0, changes = 0;
 	always @(posedge pclk) if (x == 10'd0 && y == 10'd0 && req) frames = frames + 1;
 	always @(posedge pclk) if (r1 && frames >= 3) begin
 		checked = checked + 1;
-		// (centred: the doubled picture starts at 320 - W, black either side)
-		wantc = (x1 >= 320 - W && x1 < 320 + W) ? to888(src(y1[9:1], (x1 - (320 - W)) >> 1)) : 24'd0;
+		// (centred: the doubled picture starts at 320 - W, black either side; every pixel
+		// of an HDMI frame from the one capture its first pixel came from)
+		if (x1 == 320 - W && y1 == 0) begin : which
+			// (pixel 0,0 is the frame number in blue: src(0, 0) is 0. Not a loop over
+			// to888(srck(..k)): nested calls in a loop simulate wrong in xsim.)
+			shown_k = rgb[7:3];
+			ks_seen = ks_seen + 1; if (shown_k != last_k) changes = changes + 1; last_k = shown_k;
+			if (ks_seen < 6) $display("tb_ps1_hdmi: frame %0d: first pixel %06x -> capture %0d; disp_b %0d pend %0d", frames, rgb, shown_k, u_fb.disp_b, u_fb.pend);
+		end
+		wantc = (x1 >= 320 - W && x1 < 320 + W) ? to888(srck(y1[9:1], (x1 - (320 - W)) >> 1, shown_k)) : 24'd0;
 		if (rgb !== wantc) begin
 			errors = errors + 1;
 			if (errors < 8) $display("tb_ps1_hdmi: (%0d,%0d) got %06x want %06x", x1, y1, rgb, wantc);
 		end
 	end
 	initial begin
-		#(800 * 525 * 40 * 4);
-		$display("tb_ps1_hdmi: %0d pixels checked, %0d wrong", checked, errors);
-		if (errors == 0 && checked >= 307200) $display("tb_ps1_hdmi: all checks passed"); else $display("tb_ps1_hdmi: FAIL");
+		#(800 * 525 * 40 * 6);
+		$display("tb_ps1_hdmi: %0d pixels checked, %0d wrong; %0d frames shown, the picture changed %0d times", checked, errors, ks_seen, changes);
+		if (errors == 0 && checked >= 307200 && changes >= 2) $display("tb_ps1_hdmi: all checks passed"); else $display("tb_ps1_hdmi: FAIL");
 		$finish;
 	end
 endmodule
