@@ -1,12 +1,11 @@
 //////////////////////////////////////////////////////////////////////////////////
 // eth_top.v - the Ethernet endpoint, wired to real pins.
 //
-// Everything of consequence runs in the PHY's REF_CLK domain. That is a
-// deliberate choice: the RMII receiver, transmitter, packet engine and register
-// file all share one clock, so there is not a single clock-domain crossing in
-// the data path to get subtly wrong. The board's own oscillator drives only a
-// heartbeat LED, which doubles as the way to tell "bitstream dead" apart from
-// "PHY clock dead".
+// The console runs from the board's own oscillator, through the MMCM (cclk,
+// 1000 MHz / CLK_DIV). The LAN8720 module is optional: its RMII logic (net_core)
+// runs on the 50 MHz REF_CLK the module drives, and reaches the register bus through
+// net_bridge. Without the module that side sits in reset and the ESP32 is the only
+// master on the bus.
 //
 // led0  heartbeat off the board oscillator - always blinks if configured
 // led1  network activity - flashes on every frame we accept or answer
@@ -33,7 +32,12 @@ module eth_top #(
 	// 1: the picture to the web page too, as a UDP stream (net_core's streamer, the
 	// NES / Master System / Mega Drive framebuffer in regfile, the console's stream
 	// registers). The picture is on HDMI; the network keeps only the register API.
-	parameter WEBVID   = 0
+	// (not with the console on its own clock: the streamer reads the console's
+	// framebuffer directly, in the PHY's clock, and would need a crossing of its own)
+	parameter WEBVID   = 0,
+	// The console's clock: the MMCM's 1000 MHz VCO divided by this. 20 is 50 MHz,
+	// what every core was written for; a core that runs faster says so in its build.
+	parameter CLK_DIV  = 20
 )(
 	input  wire       sys_clk,       // 50 MHz onboard oscillator, ball U22
 	input  wire       eth_refclk,    // 50 MHz from the LAN8720, U4 pin 47
@@ -89,16 +93,27 @@ module eth_top #(
 );
 
 	// --- clocks -------------------------------------------------------------
+	// refclk: the LAN module's, for net_core alone. cclk: the console's, from the
+	// board oscillator through the MMCM below (cclk_raw, cclk_locked).
 	wire refclk;
 	BUFG bufg_ref (.I(eth_refclk), .O(refclk));
+	wire cclk_raw, cclk_locked, cclk;
+	BUFG bufg_con (.I(cclk_raw), .O(cclk));
 
-	// Hold reset for ~1.3 ms after configuration so the PHY's clock and the
-	// logic that runs off it are both settled before the first frame.
+	// Hold reset for 65,536 clocks after the MMCM locks.
 	reg [15:0] rst_cnt = 16'd0;
 	reg        rst = 1'b1;
+	always @(posedge cclk) begin
+		if (!cclk_locked)             begin rst_cnt <= 16'd0; rst <= 1'b1; end
+		else if (rst_cnt == 16'hFFFF) rst <= 1'b0;
+		else                          rst_cnt <= rst_cnt + 16'd1;
+	end
+	// and net_core's, on the module's clock (which may never come)
+	reg [15:0] nrst_cnt = 16'd0;
+	reg        nrst = 1'b1;
 	always @(posedge refclk) begin
-		if (rst_cnt == 16'hFFFF) rst <= 1'b0;
-		else                     rst_cnt <= rst_cnt + 16'd1;
+		if (nrst_cnt == 16'hFFFF) nrst <= 1'b0;
+		else                      nrst_cnt <= nrst_cnt + 16'd1;
 	end
 
 	// --- heartbeat, deliberately on the other clock --------------------------
@@ -107,10 +122,12 @@ module eth_top #(
 	assign led0 = hb[24];
 
 	// --- register bus --------------------------------------------------------
-	// net_core's bus (n_*) and the ESP32's (e_*), taking turns onto regfile's (bus_*)
-	wire [31:0] n_addr, n_wdata, e_addr, e_wdata, bus_rdata;
-	wire        n_we, n_re, e_we, e_re, bus_ack, n_ack, e_ack;
-	wire [1:0]  bus_err;
+	// net_core's bus (n_*, through net_bridge to b_*) and the ESP32's (e_*), taking
+	// turns onto regfile's (bus_*)
+	wire [31:0] n_addr, n_wdata, n_rdata, b_addr, b_wdata, e_addr, e_wdata, bus_rdata;
+	wire        n_we, n_re, b_we, b_re, b_ack, e_we, e_re, bus_ack, n_ack, e_ack;
+	wire [1:0]  bus_err, n_err;
+	wire        n_frd;
 	wire        rx_frame, tx_frame;
 
 	// the frame streamer's settings come from the console's registers
@@ -127,19 +144,27 @@ module eth_top #(
 		.IP_ADDR  ({8'd192, 8'd168, 8'd178, 8'd50}),
 		.UDP_PORT (16'd5005)
 	) u_net (
-		.clk(refclk), .rst(rst),
+		.clk(refclk), .rst(nrst),
 		.rmii_rxd(eth_rxd), .rmii_crs_dv(eth_crs_dv),
 		.rmii_txd(eth_txd), .rmii_tx_en(eth_tx_en),
 		.bus_addr(n_addr), .bus_wdata(n_wdata),
 		.bus_we(n_we), .bus_re(n_re),
-		.bus_rdata(bus_rdata), .bus_ack(n_ack), .bus_err(bus_err),
+		.bus_rdata(n_rdata), .bus_ack(n_ack), .bus_err(n_err),
 		.rx_frame(rx_frame), .tx_frame(tx_frame),
 		// (without WEBVID the streamer never starts, and synthesis removes it)
 		.stream_en(WEBVID ? stream_en : 1'b0), .stream_port(stream_port), .stream_base(stream_base), .stream_words(stream_words),
 		.stream_rowlen(stream_rowlen), .stream_stride(stream_stride),
 		.stream_ready(WEBVID ? stream_ready : 1'b0), .stream_done_tog(stream_done_tog),
-		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(WEBVID ? stream_fvalid : 1'b0), .stream_frd(stream_frd)
+		.stream_direct(stream_direct), .stream_fdata(stream_fdata), .stream_fvalid(WEBVID ? stream_fvalid : 1'b0), .stream_frd(n_frd)
 	);
+	assign stream_frd = WEBVID ? n_frd : 1'b0;
+	net_bridge u_nbr (
+		.n_clk(refclk), .n_rst(nrst),
+		.n_addr(n_addr), .n_wdata(n_wdata), .n_we(n_we), .n_re(n_re),
+		.n_rdata(n_rdata), .n_err(n_err), .n_ack(n_ack),
+		.c_clk(cclk), .c_rst(rst),
+		.c_addr(b_addr), .c_wdata(b_wdata), .c_we(b_we), .c_re(b_re),
+		.c_rdata(bus_rdata), .c_err(bus_err), .c_ack(b_ack));
 
 	// What the analyser watches. Pointing it at the RMII pins makes the board
 	// able to show you its own network traffic in the browser: ping it, capture,
@@ -184,15 +209,17 @@ module eth_top #(
 			.DIVCLK_DIVIDE(1),
 			.CLKOUT0_DIVIDE_F(5.0),        // 200 MHz
 			.CLKOUT1_DIVIDE(40),           // 25 MHz
-			.CLKOUT2_DIVIDE(8)             // 125 MHz
+			.CLKOUT2_DIVIDE(8),            // 125 MHz
+			.CLKOUT3_DIVIDE(CLK_DIV)       // the console
 		) u_mmcm (
 			.CLKIN1(sys_clk), .CLKFBIN(mmcm_fb), .CLKFBOUT(mmcm_fb),
 			.CLKOUT0(clk200_raw), .LOCKED(mmcm_locked),
 			.RST(1'b0), .PWRDWN(1'b0),
 			.CLKOUT0B(), .CLKOUT1(pclk_raw), .CLKOUT1B(), .CLKOUT2(pclk5_raw), .CLKOUT2B(),
-			.CLKOUT3(), .CLKOUT3B(), .CLKOUT4(), .CLKOUT5(), .CLKOUT6(),
+			.CLKOUT3(cclk_raw), .CLKOUT3B(), .CLKOUT4(), .CLKOUT5(), .CLKOUT6(),
 			.CLKFBOUTB()
 		);
+		assign cclk_locked = mmcm_locked;
 		BUFG bufg200 (.I(clk200_raw), .O(clk200));
 		assign pclk_raw_w = pclk_raw; assign pclk5_raw_w = pclk5_raw; assign hlocked_w = mmcm_locked;
 
@@ -205,12 +232,9 @@ module eth_top #(
 		wire        app_rd_data_valid;
 
 		ddr3_mem #(.AW(24)) u_mem (
-			// The console side runs on refclk -- the PHY's 50 MHz, which is what
-			// the register bus and every core already use. MIG's own 200 MHz
-			// comes from the board oscillator through the MMCM above, so the
-			// two are genuinely unrelated clocks and the crossing inside
-			// ddr3_mem is doing real work.
-			.clk(refclk), .rst(rst),
+			// The console side runs on cclk, MIG's user clock on its own MMCM: the
+			// crossing inside ddr3_mem is between unrelated clocks.
+			.clk(cclk), .rst(rst),
 			.m_addr(d_addr), .m_req(d_req), .m_we(d_we), .m_wdata(d_wdata), .m_wmask(d_wdata_wmask),
 			.m_ready(d_ready), .m_rdata(d_rdata), .m_valid(d_valid),
 			.m_calibrated(d_calibrated),
@@ -254,14 +278,16 @@ module eth_top #(
 		assign ddr3_ck_p = 1'b0;  assign ddr3_ck_n = 1'b1;
 		assign ddr3_cke = 1'b0;
 		assign ddr3_dm = 2'd0;    assign ddr3_odt = 1'b0;
-		// (no memory: an MMCM for HDMI alone -- VCO 1000 MHz, /40 25 MHz, /8 125 MHz)
+		// (no memory: an MMCM for HDMI and the console -- VCO 1000 MHz, /40 25 MHz,
+		// /8 125 MHz, /CLK_DIV)
 		wire hfb, p_raw, p5_raw, hl;
 		MMCME2_BASE #(.CLKIN1_PERIOD(20.0), .CLKFBOUT_MULT_F(20.0), .DIVCLK_DIVIDE(1),
-		              .CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8)) u_hmmcm (
+		              .CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8), .CLKOUT2_DIVIDE(CLK_DIV)) u_hmmcm (
 			.CLKIN1(sys_clk), .CLKFBIN(hfb), .CLKFBOUT(hfb), .CLKOUT0(p_raw), .CLKOUT1(p5_raw), .LOCKED(hl),
-			.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
+			.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(cclk_raw), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
 			.CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .CLKFBOUTB());
 		assign pclk_raw_w = p_raw; assign pclk5_raw_w = p5_raw; assign hlocked_w = hl;
+		assign cclk_locked = hl;
 	end endgenerate
 	// HDMI, in every build: the clocks from whichever MMCM above
 	BUFG bufgpx  (.I(pclk_raw_w),  .O(vid_pclk));
@@ -277,7 +303,7 @@ module eth_top #(
 
 	// --- the MDIO bus, and who owns it ----------------------------------------
 	// Two masters: the one that resets the PHY at power-up, on the board's own
-	// oscillator, and the host's, on the PHY's clock. The first has the bus
+	// oscillator, and the host's, on the console's clock. The first has the bus
 	// until it is finished, which is a few hundred microseconds.
 	wire rf_mdc, rf_mdio_o, rf_mdio_oe;
 	wire pr_mdc, pr_mdio_o, pr_mdio_oe, pr_done;
@@ -301,29 +327,30 @@ module eth_top #(
 	// everything else this). Byte 0 out is the signature from both alike.
 	wire rf_esp_miso, e_miso; wire [7:0] e_cmd;
 	esp_bus #(.CORE_ID(CORE_PS1 ? 8'h50 : CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
-		.clk(refclk), .rst(rst),
+		.clk(cclk), .rst(rst),
 		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(e_miso), .spi_cs_n(esp_cs_n),
 		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
 		.bus_rdata(bus_rdata), .bus_ack(e_ack), .cmd(e_cmd));
 	assign esp_miso = (CORE_PS1 && e_cmd[7:4] == 4'h3) ? rf_esp_miso : e_miso;
 	wire [31:0] bus_addr, bus_wdata;
 	wire        bus_we, bus_re;
-	bus_arb u_arb (.clk(refclk), .rst(rst),
-		.a_addr(n_addr), .a_wdata(n_wdata), .a_we(n_we), .a_re(n_re), .a_ack(n_ack),
+	bus_arb u_arb (.clk(cclk), .rst(rst),
+		.a_addr(b_addr), .a_wdata(b_wdata), .a_we(b_we), .a_re(b_re), .a_ack(b_ack),
 		.b_addr(e_addr), .b_wdata(e_wdata), .b_we(e_we), .b_re(e_re), .b_ack(e_ack),
 		.bus_addr(bus_addr), .bus_wdata(bus_wdata), .bus_we(bus_we), .bus_re(bus_re), .bus_ack(bus_ack));
 
 	// Back to the shell: 0xB0070000 written to SYS 0x0014 (by the ESP32, to switch
 	// consoles; regfile takes the write as a no-op).
-	icap_reboot u_reboot (.clk(refclk), .rst(rst),
+	icap_reboot u_reboot (.clk(cclk), .rst(rst),
 		.go(bus_we && bus_ack && bus_addr == 32'h0000_0014 && bus_wdata == 32'hB007_0000));
 
 	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID)) u_regs (
+	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID),
+	          .CLK_HZ(1_000_000_000 / CLK_DIV)) u_regs (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wdata_wmask),
 		.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid),
 		.d_calibrated(d_calibrated),
-		.clk(refclk), .rst(rst),
+		.clk(cclk), .rst(rst),
 		.la_probe(la_probe),
 		.bus_addr(bus_addr), .bus_wdata(bus_wdata),
 		.bus_we(bus_we), .bus_re(bus_re),
@@ -343,7 +370,7 @@ module eth_top #(
 	// A frame is over in microseconds. Stretch it to ~80 ms so an eye can see it.
 	reg [21:0] act;
 	always @(posedge refclk) begin
-		if (rst)                        act <= 22'd0;
+		if (nrst)                       act <= 22'd0;
 		else if (rx_frame || tx_frame)  act <= 22'h3F_FFFF;
 		else if (act != 22'd0)          act <= act - 22'd1;
 	end

@@ -77,7 +77,8 @@ module console_top #(
 	// The Nintendo 64 (n64_top.v). Its own image, like the PlayStation's; RDRAM
 	// and the cartridge are in DDR3.
 	parameter CORE_N64 = 0,
-	parameter WEBVID   = 0     // the picture to the web page as well (see eth_top); without it the stream registers read 0
+	parameter WEBVID   = 0,    // the picture to the web page as well (see eth_top); without it the stream registers read 0
+	parameter CLK_HZ   = 50_000_000   // the console's clock: only the N64 is written for others
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -999,7 +1000,7 @@ module console_top #(
 
 	// --- the Nintendo 64 -------------------------------------------------------------
 	generate if (CORE_N64) begin : g_n64
-		n64_top u_n64 (
+		n64_top #(.CLK_HZ(CLK_HZ)) u_n64 (
 			.clk(clk), .rst(rst),
 			// held in reset (and the cartridge filling) until the host releases it
 			.run(n64_sel && run),

@@ -115,14 +115,25 @@ module shell_top (
 	output wire       hdmi_5v
 );
 
-	wire clk;
-	BUFG bufg_ref (.I(eth_refclk), .O(clk));
+	// clk: the board oscillator's 50 MHz, through the picture's MMCM (below). refclk:
+	// the LAN module's, for net_core alone -- the module may not be there at all.
+	wire refclk, clk, clk_raw;
+	BUFG bufg_ref (.I(eth_refclk), .O(refclk));
+	BUFG bufg_con (.I(clk_raw), .O(clk));
+	wire hfb, hp_raw, hp5_raw, hpclk, hpclk5, hlocked;
 
 	reg [15:0] rst_cnt = 16'd0;
 	reg        rst = 1'b1;
 	always @(posedge clk) begin
-		if (rst_cnt == 16'hFFFF) rst <= 1'b0;
-		else                     rst_cnt <= rst_cnt + 16'd1;
+		if (!hlocked)                 begin rst_cnt <= 16'd0; rst <= 1'b1; end
+		else if (rst_cnt == 16'hFFFF) rst <= 1'b0;
+		else                          rst_cnt <= rst_cnt + 16'd1;
+	end
+	reg [15:0] nrst_cnt = 16'd0;
+	reg        nrst = 1'b1;
+	always @(posedge refclk) begin
+		if (nrst_cnt == 16'hFFFF) nrst <= 1'b0;
+		else                      nrst_cnt <= nrst_cnt + 16'd1;
 	end
 
 	localparam [7:0] VERSION = 8'd1;
@@ -159,9 +170,10 @@ module shell_top (
 	assign flash_hold_n = 1'b1;
 
 	// --- door one: the PC ----------------------------------------------------
-	wire [31:0] bus_addr, bus_wdata, bus_rdata;
-	wire        bus_we, bus_re, bus_ack;
-	wire [1:0]  bus_err;
+	// (net_core on the module's clock, n_*; through net_bridge to shell_regs, bus_*)
+	wire [31:0] bus_addr, bus_wdata, bus_rdata, n_addr, n_wdata, n_rdata;
+	wire        bus_we, bus_re, bus_ack, n_we, n_re, n_ack;
+	wire [1:0]  bus_err, n_err;
 	wire        rx_frame, tx_frame;
 
 	net_core #(
@@ -169,14 +181,21 @@ module shell_top (
 		.IP_ADDR  ({8'd192, 8'd168, 8'd178, 8'd50}),
 		.UDP_PORT (16'd5005)
 	) u_net (
-		.clk(clk), .rst(rst),
+		.clk(refclk), .rst(nrst),
 		.rmii_rxd(eth_rxd), .rmii_crs_dv(eth_crs_dv),
 		.rmii_txd(eth_txd), .rmii_tx_en(eth_tx_en),
-		.bus_addr(bus_addr), .bus_wdata(bus_wdata),
-		.bus_we(bus_we), .bus_re(bus_re),
-		.bus_rdata(bus_rdata), .bus_ack(bus_ack), .bus_err(bus_err),
+		.bus_addr(n_addr), .bus_wdata(n_wdata),
+		.bus_we(n_we), .bus_re(n_re),
+		.bus_rdata(n_rdata), .bus_ack(n_ack), .bus_err(n_err),
 		.rx_frame(rx_frame), .tx_frame(tx_frame)
 	);
+	net_bridge u_nbr (
+		.n_clk(refclk), .n_rst(nrst),
+		.n_addr(n_addr), .n_wdata(n_wdata), .n_we(n_we), .n_re(n_re),
+		.n_rdata(n_rdata), .n_err(n_err), .n_ack(n_ack),
+		.c_clk(clk), .c_rst(rst),
+		.c_addr(bus_addr), .c_wdata(bus_wdata), .c_we(bus_we), .c_re(bus_re),
+		.c_rdata(bus_rdata), .c_err(bus_err), .c_ack(bus_ack));
 
 	wire [1:0]  rg_op;
 	wire [22:0] rg_offset;
@@ -471,14 +490,14 @@ module shell_top (
 
 	// --- the picture -------------------------------------------------------------
 	// 640 x 480 from the board oscillator (VCO 1000 MHz: /40 25 MHz, /8 125 MHz, as
-	// eth_top), DVI (no sound); what the flash is doing, as text and a bar.
+	// eth_top; /20 the shell's own 50 MHz), DVI (no sound); what the flash is doing,
+	// as text and a bar.
 	assign hdmi_lo = 11'd0;
 	assign hdmi_5v = 1'b1;
-	wire hfb, hp_raw, hp5_raw, hpclk, hpclk5, hlocked;
 	MMCME2_BASE #(.CLKIN1_PERIOD(20.0), .CLKFBOUT_MULT_F(20.0), .DIVCLK_DIVIDE(1),
-	              .CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8)) u_hmmcm (
+	              .CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8), .CLKOUT2_DIVIDE(20)) u_hmmcm (
 		.CLKIN1(sys_clk), .CLKFBIN(hfb), .CLKFBOUT(hfb), .CLKOUT0(hp_raw), .CLKOUT1(hp5_raw), .LOCKED(hlocked),
-		.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
+		.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(clk_raw), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
 		.CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .CLKFBOUTB());
 	BUFG u_hb0 (.I(hp_raw), .O(hpclk));
 	BUFG u_hb1 (.I(hp5_raw), .O(hpclk5));
@@ -493,9 +512,8 @@ module shell_top (
 		.pclk(hpclk), .x(hx), .y(hy), .rgb(hrgb));
 
 	// --- lights ----------------------------------------------------------------
-	// The heartbeat runs on the BOARD oscillator, not the PHY's, so that a dead
-	// PHY clock -- which would stop everything else in here -- still looks
-	// different from a board that never configured at all.
+	// The heartbeat runs on the board oscillator directly, so that it blinks
+	// whatever the MMCM is doing.
 	reg [24:0] beat;
 	always @(posedge sys_clk) beat <= beat + 25'd1;
 	assign led0 = beat[24];
@@ -503,8 +521,8 @@ module shell_top (
 	// Busy, plus network activity stretched to something an eye can see. While
 	// wiring, "did anything happen when I sent that" is the only question.
 	reg [21:0] act;
-	always @(posedge clk) begin
-		if (rst)                       act <= 22'd0;
+	always @(posedge refclk) begin
+		if (nrst)                      act <= 22'd0;
 		else if (rx_frame || tx_frame) act <= 22'h3F_FFFF;
 		else if (act != 22'd0)         act <= act - 22'd1;
 	end

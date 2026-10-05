@@ -47,6 +47,10 @@ create_clock -name eth_refclk -period 20.000 [get_ports eth_refclk]
 # nothing with anything.
 # (with the clocks made from them: the HDMI picture's come from sys_clk)
 set_clock_groups -asynchronous -group [get_clocks -include_generated_clocks sys_clk] -group [get_clocks -include_generated_clocks eth_refclk]
+# The shell's own clock (bufg_con) and the picture's come from one MMCM; what
+# crosses between them (shell_screen's status) is synchronised, so: unrelated.
+set cclk [get_clocks -of_objects [get_pins bufg_con/O]]
+set_clock_groups -asynchronous -group $cclk -group [get_clocks -include_generated_clocks sys_clk -filter "NAME != [get_property NAME $cclk]"]
 
 set_input_delay  -clock eth_refclk -max 14.000 [get_ports {eth_rxd[*] eth_crs_dv}]
 set_input_delay  -clock eth_refclk -min 2.000  [get_ports {eth_rxd[*] eth_crs_dv}]

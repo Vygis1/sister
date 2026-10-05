@@ -35,7 +35,7 @@ module tb_n64_top;
 	hdmi_tx #(.SIM(1)) u_hdmi (.clk50(1'b0), .rst(1'b0), .sim_pclk(pclk), .ext_pclk(1'b0), .ext_pclk5(1'b0), .ext_locked(1'b0),
 		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(), .tmds_p(), .tmds_n(), .tmds_clk_p(), .tmds_clk_n(),
 		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
-	n64_top #(.HALFLINE(11'd1587)) dut (
+	n64_top dut (
 		.clk(clk), .rst(rst), .run(run),
 		.host_windex(host_windex), .host_we(host_we), .host_wdata(host_wdata), .fill_end(fill_end),
 		.hr_go(hr_go), .hr_line(hr_line), .hr_done(hr_done), .hr_data(hr_data),

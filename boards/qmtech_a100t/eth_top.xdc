@@ -58,6 +58,14 @@ create_clock -name eth_refclk -period 20.000 [get_ports eth_refclk]
 # The payload has tens of nanoseconds to settle, not one clock edge.
 set_clock_groups -asynchronous     -group [get_clocks -include_generated_clocks sys_clk]     -group [get_clocks -include_generated_clocks eth_refclk]
 
+# The console's own clock (cclk, eth_top.v's MMCM through bufg_con) comes from the
+# same oscillator as the memory controller's and the HDMI clocks, so the tools would
+# take them as related. Every crossing between them is a handshake or a synchroniser
+# (ddr3_mem.v's toggles, the picture's line buffer, the audio toggle), never a path
+# of one clock edge: unrelated, as they were when the console ran on REF_CLK.
+set cclk [get_clocks -of_objects [get_pins bufg_con/O]]
+set_clock_groups -asynchronous -group $cclk -group [get_clocks -include_generated_clocks sys_clk -filter "NAME != [get_property NAME $cclk]"]
+
 # RMII input setup/hold against REF_CLK. The PHY drives these from the same
 # clock edge we sample on, so give the tools the real window rather than letting
 # them assume the whole period is available.

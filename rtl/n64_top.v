@@ -47,7 +47,8 @@
 module n64_top #(
 	parameter [23:0] RDRAM_LINE = 24'h00_0000,     // RDRAM at DDR3 0
 	parameter [23:0] CART_LINE  = 24'h10_0000,     // the cartridge at 16 MB
-	parameter [10:0] HALFLINE   = 11'd1587         // 50 MHz / (60 Hz x 525 half-lines)
+	parameter        CLK_HZ     = 50_000_000,      // this core's clock
+	parameter [10:0] HALFLINE   = CLK_HZ / 31500   // (60 Hz x 525 half-lines)
 ) (
 	input  wire         clk,
 	input  wire         rst,
@@ -1228,11 +1229,11 @@ module n64_top #(
 	// hardware's does: invisible within a buffer, but a buffer ending on an 8 kB
 	// boundary leaves the carry for the next one, which then plays from 8 kB
 	// above its address. The DAC's rate is counted in NTSC video clocks
-	// (48,681,812 Hz) against our 50 MHz; the host's ring takes a sample at a
-	// steady 44.1 kHz, whatever the game's rate, by holding the last one.
-	reg  [25:0]  vclk_acc;               // 50 MHz -> the video clock
+	// (48,681,812 Hz) against our clock (CLK_HZ, above it); the host's ring takes a
+	// sample at a steady 44.1 kHz, whatever the game's rate, by holding the last one.
+	reg  [26:0]  vclk_acc;               // CLK_HZ -> the video clock
 	reg  [13:0]  dac_div;
-	reg  [25:0]  out_acc;                // 50 MHz -> 44.1 kHz
+	reg  [26:0]  out_acc;                // CLK_HZ -> 44.1 kHz
 	reg          ai_carry, ai_pend;
 	reg  [18:0]  al_tag, al_rtag;        // the line in hand, and the one asked for
 	reg          al_v;
@@ -1249,26 +1250,27 @@ module n64_top #(
 	wire [23:0]  ai_a = ai_carry ? {ai_addr0[23:13] + 11'd1, ai_addr0[12:0]} : ai_addr0;
 	wire [31:0]  ai_word = {al_data[8 * ai_a[3:0] +: 8], al_data[8 * (ai_a[3:0] + 4'd1) +: 8],
 	                        al_data[8 * (ai_a[3:0] + 4'd2) +: 8], al_data[8 * (ai_a[3:0] + 4'd3) +: 8]};
-	// (27 bits: the sum reaches 98.7 million. In 26 it wrapped whenever the accumulator was past
-	// 18.4 million, a quarter of the ticks were lost, and the DAC ran at 37.5 MHz: SM64's
-	// 32,006 samples a second played at 24,636, its buffers piled up and it dropped them)
-	wire [26:0]  vsum  = {1'b0, vclk_acc} + 27'd48_681_812;
-	wire         vtick = vsum >= 27'd50_000_000;
+	// (28 bits: the sum reaches CLK_HZ + 48.7 million. In 26 at 50 MHz it wrapped whenever the
+	// accumulator was past 18.4 million, a quarter of the ticks were lost, and the DAC ran at
+	// 37.5 MHz: SM64's 32,006 samples a second played at 24,636, its buffers piled up and it
+	// dropped them)
+	wire [27:0]  vsum  = {1'b0, vclk_acc} + 28'd48_681_812;
+	wire         vtick = vsum >= CLK_HZ;
 	always @(posedge clk) begin
 		ai_irq <= 1'b0; audio_lr_we <= 1'b0;
 		if (ad_rd_ack) ad_rd_req <= 1'b0;
 		if (rst) begin
 			ai_count <= 2'd0; ai_enable <= 1'b0; ai_dacrate <= 14'd0; ai_carry <= 1'b0; ai_pend <= 1'b0;
-			al_v <= 1'b0; ad_rd_req <= 1'b0; vclk_acc <= 26'd0; dac_div <= 14'd0; out_acc <= 26'd0;
+			al_v <= 1'b0; ad_rd_req <= 1'b0; vclk_acc <= 27'd0; dac_div <= 14'd0; out_acc <= 27'd0;
 			dac_l <= 16'd0; dac_r <= 16'd0; ai_len0 <= 18'd0; ai_len1 <= 18'd0; n_ai_samp <= 16'd0; n_ai_lost <= 16'd0; ai_debt <= 3'd0;
 		end else begin
 			// the host's 44.1 kHz
-			if (out_acc + 26'd44_100 >= 26'd50_000_000) begin
-				out_acc <= out_acc + 26'd44_100 - 26'd50_000_000;
+			if (out_acc + 27'd44_100 >= CLK_HZ) begin
+				out_acc <= out_acc + 27'd44_100 - CLK_HZ;
 				audio_lr <= {dac_r, dac_l}; audio_lr_we <= 1'b1;
-			end else out_acc <= out_acc + 26'd44_100;
+			end else out_acc <= out_acc + 27'd44_100;
 			// the DAC's: a sample due every DACRATE + 1 video clocks
-			vclk_acc <= vtick ? vsum - 27'd50_000_000 : vsum[25:0];
+			vclk_acc <= vtick ? vsum - CLK_HZ : vsum[26:0];
 			if (vtick && dac_div >= ai_dacrate) begin
 				dac_div <= 14'd0;
 				if (ai_count != 2'd0) begin

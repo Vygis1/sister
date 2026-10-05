@@ -46,7 +46,8 @@ module regfile #(
 	parameter        MD_DDR3  = 0,
 	parameter        CORE_PS1 = 0,
 	parameter        CORE_N64 = 0,
-	parameter        WEBVID   = 0     // the picture to the web page as well (see eth_top)
+	parameter        WEBVID   = 0,    // the picture to the web page as well (see eth_top)
+	parameter        CLK_HZ   = 50_000_000   // the console's clock (eth_top's cclk)
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -224,11 +225,11 @@ module regfile #(
 	// For HDMI: the console's sound, 48000 samples a second (aud_filter.v: low-pass, DC
 	// block, the average of each sample period; one for a mono console, two for the Mega
 	// Drive's stereo)
-	reg  [25:0] a48;  reg a_tick, a_tick_d;
-	initial begin a48 = 26'd0; a_tick = 1'b0; a_tick_d = 1'b0; aud_tog = 1'b0; aud_s = 16'd0; aud_r = 16'd0; end
+	reg  [26:0] a48;  reg a_tick, a_tick_d;
+	initial begin a48 = 27'd0; a_tick = 1'b0; a_tick_d = 1'b0; aud_tog = 1'b0; aud_s = 16'd0; aud_r = 16'd0; end
 	always @(posedge clk) begin
-		a_tick   <= a48 + 26'd48_000 >= 26'd50_000_000;
-		a48      <= (a48 + 26'd48_000 >= 26'd50_000_000) ? a48 + 26'd48_000 - 26'd50_000_000 : a48 + 26'd48_000;
+		a_tick   <= a48 + 27'd48_000 >= CLK_HZ;
+		a48      <= (a48 + 27'd48_000 >= CLK_HZ) ? a48 + 27'd48_000 - CLK_HZ : a48 + 27'd48_000;
 		a_tick_d <= a_tick;
 	end
 	// The PlayStation's and the N64's samples come ready-made from their own sound
@@ -358,7 +359,7 @@ module regfile #(
 	localparam MD_ONLY = (CORE_MD && !CORE_NES && !CORE_SMS);
 
 	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID),
+	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID), .CLK_HZ(CLK_HZ),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),
