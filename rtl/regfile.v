@@ -220,45 +220,35 @@ module regfile #(
 	wire [15:0] console_audio;
 	wire [31:0] ps1_audio_lr;
 	wire        ps1_audio_lr_we;
-	// For HDMI: the console's sound is UNSIGNED, and not centred -- the NES mixer's silence
-	// is 0 and its loudest 65000 (apu_mix.v). Low-passed at about 15.5 kHz -- y += (x - y)
-	// / 512 at 50 MHz, 8 fraction bits --, its DC taken away by a second, slow average
-	// (dc += (y - dc) / 2^20: corner ~8 Hz, kept with 20 more fraction bits so it settles
-	// exactly), halved so the swing fits 16 signed bits, saturated, and taken 48000 times a
-	// second. (Was: the sample XOR 0x8000 then zero-extended -- silence full-scale negative,
-	// every crossing of 0x8000 a jump of the whole range.)
-	// Then each output sample is the AVERAGE of the ~1042 clocks since the last one, not
-	// one clock picked out: a square wave's harmonics run far past 24 kHz, and picked
-	// samples fold them back down as tones that are not in the music (the boxcar's nulls
-	// sit on every multiple of 48 kHz, where the folding lands). The sum of a period
-	// times 1/1041.67 (2^26 / 1041.67 = 64424) is the mean.
-	reg  signed [25:0] alp;
-	reg  signed [45:0] adc;
-	reg  [25:0]        a48;
-	reg  signed [36:0] asum;
-	wire signed [25:0] aac = alp - $signed(adc[45:20]);
-	wire signed [53:0] amean = asum * $signed(18'sd64424);   // the mean, << 26
-	wire signed [16:0] ah  = amean[51:35];                   // (>> 26, then >> 9 as before)
-	initial begin alp = 26'sd0; adc = 46'sd0; a48 = 26'd0; asum = 37'sd0; aud_tog = 1'b0; aud_s = 16'd0; aud_r = 16'd0; end
-	// The PlayStation, the N64 and the Mega Drive are stereo, and their samples come
-	// ready-made from their own sound hardware (the SPU at 44.1 kHz; the N64's AI at the
-	// game's rate; the Mega Drive's mixer, taken at 48 kHz in console_top): each one goes
-	// to hdmi_tx as it is, which takes the latest at its own rate.
-	localparam STEREO = (CORE_PS1 != 0) || (CORE_N64 != 0) || (CORE_MD != 0 && CORE_NES == 0 && CORE_SMS == 0);
-	always @(posedge clk) if (STEREO) begin
-		if (ps1_audio_lr_we) begin aud_s <= ps1_audio_lr[15:0]; aud_r <= ps1_audio_lr[31:16]; aud_tog <= ~aud_tog; end
-	end else begin
-		alp <= alp + (($signed({2'b00, console_audio, 8'd0}) - alp) >>> 9);
-		adc <= adc + {{20{alp[25]}}, alp} - {{20{adc[45]}}, adc[45:20]};
-		if (a48 + 26'd48_000 >= 26'd50_000_000) begin
-			a48 <= a48 + 26'd48_000 - 26'd50_000_000;
-			aud_s <= (ah > 17'sd32767) ? 16'h7FFF : (ah < -17'sd32768) ? 16'h8000 : ah[15:0];
-			aud_r <= (ah > 17'sd32767) ? 16'h7FFF : (ah < -17'sd32768) ? 16'h8000 : ah[15:0];
-			aud_tog <= ~aud_tog;
-			asum <= {{11{aac[25]}}, aac};
-		end else begin
-			a48 <= a48 + 26'd48_000;
-			asum <= asum + {{11{aac[25]}}, aac};
+	// For HDMI: the console's sound, 48000 samples a second (aud_filter.v: low-pass, DC
+	// block, the average of each sample period; one for a mono console, two for the Mega
+	// Drive's stereo)
+	reg  [25:0] a48;  reg a_tick, a_tick_d;
+	initial begin a48 = 26'd0; a_tick = 1'b0; a_tick_d = 1'b0; aud_tog = 1'b0; aud_s = 16'd0; aud_r = 16'd0; end
+	always @(posedge clk) begin
+		a_tick   <= a48 + 26'd48_000 >= 26'd50_000_000;
+		a48      <= (a48 + 26'd48_000 >= 26'd50_000_000) ? a48 + 26'd48_000 - 26'd50_000_000 : a48 + 26'd48_000;
+		a_tick_d <= a_tick;
+	end
+	// The PlayStation's and the N64's samples come ready-made from their own sound
+	// hardware (the SPU at 44.1 kHz, the N64's AI at its DAC's rate, both stereo): each
+	// goes to hdmi_tx as it is, which takes the latest at its own rate. The Mega Drive is
+	// stereo too but its FM chip time-multiplexes its channels on its output: its two
+	// channels are filtered and averaged here like any other chip's.
+	localparam READY = (CORE_PS1 != 0) || (CORE_N64 != 0);
+	localparam MDST  = !READY && CORE_MD != 0 && CORE_NES == 0 && CORE_SMS == 0;
+	wire [15:0] f_l, f_r;
+	aud_filter u_afl (.clk(clk), .x(MDST ? ps1_audio_lr[15:0] ^ 16'h8000 : console_audio), .tick(a_tick), .y(f_l));
+	generate if (MDST) begin : g_afr
+		aud_filter u_afr (.clk(clk), .x(ps1_audio_lr[31:16] ^ 16'h8000), .tick(a_tick), .y(f_r));
+	end else begin : g_afr
+		assign f_r = f_l;
+	end endgenerate
+	always @(posedge clk) begin
+		if (READY) begin
+			if (ps1_audio_lr_we) begin aud_s <= ps1_audio_lr[15:0]; aud_r <= ps1_audio_lr[31:16]; aud_tog <= ~aud_tog; end
+		end else if (a_tick_d) begin
+			aud_s <= f_l; aud_r <= f_r; aud_tog <= ~aud_tog;
 		end
 	end
 
@@ -405,6 +395,16 @@ module regfile #(
 		.pclk(pclk), .x(vid_x), .y(vid_y), .rgb_in(con_vid_rgb), .rgb(vid_rgb)
 	);
 
+	// --- the cartridge writes' checksum ------------------------------------------
+	// Every word written into the cartridge windows (PRG, CHR) folds into it with its
+	// address -- c = rotl(c, 1) ^ address ^ word -- so the ESP32, which computes the same
+	// over what it sent, can tell a chunk that arrived wrong (its wire flips a bit now
+	// and then) and send it again. Read at SYS 0x0018; any write there clears it.
+	reg [31:0] pchk = 32'd0;
+	always @(posedge clk)
+		if (new_req && bus_we && bus_addr == 32'h0000_0018) pchk <= 32'd0;
+		else if (new_req && bus_we && (in_prg || in_chr)) pchk <= {pchk[30:0], pchk[31]} ^ bus_addr ^ bus_wdata;
+
 	// --- scratch -------------------------------------------------------------
 	reg [31:0] scratch;
 
@@ -452,6 +452,7 @@ module regfile #(
 			16'h0008: bus_rdata = scratch;
 			16'h000C: if (req_we) bus_err = 2'd2; else bus_rdata = uptime_ms;
 			16'h0014: ;                       // REBOOT: 0xB0070000 restarts into the shell (eth_top's icap_reboot)
+			16'h0018: bus_rdata = pchk;       // the cartridge writes' checksum (a write clears it)
 			// MEM: whether this image has DDR3 in it, and whether the controller
 			// finished training. Without this a memory that never calibrates and
 			// a console that was never going to draw look identical from the

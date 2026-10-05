@@ -1182,6 +1182,14 @@ module n64_top #(
 	reg          al_v;
 	reg  [127:0] al_data;
 	reg  [15:0]  dac_l, dac_r;
+	reg  [15:0]  n_ai_samp, n_ai_lost;   // (debugging) samples played; DAC ticks that found the last one still pending
+	// DAC ticks owed: one that comes while the last sample still waits for its line is
+	// not lost but owed, and played as soon as that one is. (They were merged away: a
+	// line fetch slower than a sample period -- the AI's DDR3 reads wait behind the
+	// CPU's, the RSP's and the RDP's -- cost SM64 a quarter of its 32 kHz, measured
+	// 24.4 kHz on the board, and its audio driver, keeping time against the AI, made
+	// the music come out wrong.)
+	reg  [2:0]   ai_debt;
 	wire [23:0]  ai_a = ai_carry ? {ai_addr0[23:13] + 11'd1, ai_addr0[12:0]} : ai_addr0;
 	wire [31:0]  ai_word = {al_data[8 * ai_a[3:0] +: 8], al_data[8 * (ai_a[3:0] + 4'd1) +: 8],
 	                        al_data[8 * (ai_a[3:0] + 4'd2) +: 8], al_data[8 * (ai_a[3:0] + 4'd3) +: 8]};
@@ -1192,7 +1200,7 @@ module n64_top #(
 		if (rst) begin
 			ai_count <= 2'd0; ai_enable <= 1'b0; ai_dacrate <= 14'd0; ai_carry <= 1'b0; ai_pend <= 1'b0;
 			al_v <= 1'b0; ad_rd_req <= 1'b0; vclk_acc <= 26'd0; dac_div <= 14'd0; out_acc <= 26'd0;
-			dac_l <= 16'd0; dac_r <= 16'd0; ai_len0 <= 18'd0; ai_len1 <= 18'd0;
+			dac_l <= 16'd0; dac_r <= 16'd0; ai_len0 <= 18'd0; ai_len1 <= 18'd0; n_ai_samp <= 16'd0; n_ai_lost <= 16'd0; ai_debt <= 3'd0;
 		end else begin
 			// the host's 44.1 kHz
 			if (out_acc + 26'd44_100 >= 26'd50_000_000) begin
@@ -1201,9 +1209,18 @@ module n64_top #(
 			end else out_acc <= out_acc + 26'd44_100;
 			// the DAC's: a sample due every DACRATE + 1 video clocks
 			vclk_acc <= vtick ? vclk_acc + 26'd48_681_812 - 26'd50_000_000 : vclk_acc + 26'd48_681_812;
-			if (vtick) begin
-				if (dac_div >= ai_dacrate) begin dac_div <= 14'd0; if (ai_count != 2'd0) ai_pend <= 1'b1; end
-				else dac_div <= dac_div + 14'd1;
+			if (vtick && dac_div >= ai_dacrate) begin
+				dac_div <= 14'd0;
+				if (ai_count != 2'd0) begin
+					if (ai_pend) begin
+						if (ai_debt != 3'd7) ai_debt <= ai_debt + 3'd1;
+						n_ai_lost <= n_ai_lost + 16'd1;
+					end else ai_pend <= 1'b1;
+				end
+			end else begin
+				if (vtick) dac_div <= dac_div + 14'd1;
+				// a tick owed: as soon as the last sample is out
+				if (!ai_pend && ai_debt != 3'd0 && ai_count != 2'd0) begin ai_pend <= 1'b1; ai_debt <= ai_debt - 3'd1; end
 			end
 			// the CPU's writes
 			if (ai_we) begin
@@ -1230,7 +1247,7 @@ module n64_top #(
 						if (ai_count == 2'd2) begin ai_addr0 <= ai_addr1; ai_len0 <= ai_len1; ai_irq <= 1'b1; end
 					end
 				end else if (al_v && al_tag == ai_a[22:4]) begin
-					dac_l <= ai_word[31:16]; dac_r <= ai_word[15:0];
+					dac_l <= ai_word[31:16]; dac_r <= ai_word[15:0]; n_ai_samp <= n_ai_samp + 16'd1;
 					ai_addr0 <= {ai_a[23:13], ai_a[12:0] + 13'd4};
 					ai_carry <= ai_a[12:0] + 13'd4 == 13'd0;
 					ai_len0 <= ai_len0 - 18'd4;
@@ -1247,7 +1264,7 @@ module n64_top #(
 			if (ad_rd_ack && ad_rd_req) begin al_data <= ad_rd_data; al_tag <= al_rtag; al_v <= 1'b1; end
 			// a new buffer: whatever line is in hand may since have been written over
 			if (ai_irq) al_v <= 1'b0;
-			if (ai_count == 2'd0) begin dac_l <= 16'd0; dac_r <= 16'd0; end
+			if (ai_count == 2'd0) begin dac_l <= 16'd0; dac_r <= 16'd0; ai_debt <= 3'd0; end
 		end
 	end
 
@@ -1448,6 +1465,8 @@ module n64_top #(
 		6'd39: dbg_q <= rdp_dbg[63:32];
 		6'd40: dbg_q <= rdp_dbg[31:0];
 		6'd54: dbg_q <= n_rsp_ins;
+		6'd52: dbg_q <= {ai_count, ai_enable, 15'd0, ai_dacrate};            // the AI: what the game set
+		6'd53: dbg_q <= {n_ai_lost, n_ai_samp};                              // samples played / DAC ticks lost
 		6'd60: dbg_q <= retired;
 		6'd42: dbg_q <= n_ipw;
 		6'd46: dbg_q <= n_stall;

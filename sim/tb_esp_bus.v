@@ -91,6 +91,19 @@ module tb_esp_bus;
 				if (errors < 8) $display("tb_esp_bus: word %0d read %08x, wrote %08x", w, got, 32'h1234_0000 + w * 32'h0101 + (w << 24));
 			end
 		end
+		// and all 64 in one block read
+		cs_n = 0; #200;
+		xfer(8'h42, t); xfer(8'h00, t); xfer(8'h00, t); xfer(8'h04, t); xfer(8'h00, t);
+		for (n = 0; n < 4; n = n + 1) xfer(8'h00, t);
+		for (w = 0; w < 64; w = w + 1) begin
+			for (n = 0; n < 4; n = n + 1) xfer(8'h00, r[n]);
+			got = {r[3], r[2], r[1], r[0]};
+			if (got !== 32'h1234_0000 + w * 32'h0101 + (w << 24)) begin
+				errors = errors + 1;
+				if (errors < 8) $display("tb_esp_bus: block word %0d read %08x", w, got);
+			end
+		end
+		#200; cs_n = 1; #600;
 		$display("tb_esp_bus: the other master made %0d transfers meanwhile", a_done);
 		if (errors == 0 && a_done > 10000) $display("tb_esp_bus: all checks passed"); else $display("tb_esp_bus: FAIL (%0d errors)", errors);
 		$finish;

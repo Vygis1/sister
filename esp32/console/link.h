@@ -28,6 +28,7 @@ enum : uint8_t {
   CMD_CD_DISC      = 0x32,   // 1 byte: 1 = a disc is in the drive, 0 = the tray is empty
   CMD_BUS_WRITE    = 0x40,   // a console image's register bus: address, then words
   CMD_BUS_READ     = 0x41,   // address, 4 bytes while it reads, the word
+  CMD_BUS_RDBLK    = 0x42,   // the same, word after word while chip select stays low
 };
 
 static const uint8_t CORE_PS1_ID = 0x50;   // 'P': the byte the PlayStation image answers as its core
@@ -262,6 +263,23 @@ public:
     spi_.endTransaction();
     xSemaphoreGive(lock_);
     return r[0] | (r[1] << 8) | (r[2] << 16) | ((uint32_t)r[3] << 24);
+  }
+
+  // n words from addr up, in one frame (rtl/esp_bus.v CMD_BUS_RDBLK)
+  void busReadBlock(uint32_t addr, uint32_t *out, size_t n) {
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    spi_.beginTransaction(settings_);
+    digitalWrite(cs_, LOW);
+    spi_.transfer(CMD_BUS_RDBLK);
+    spi_.transfer(addr >> 24); spi_.transfer(addr >> 16); spi_.transfer(addr >> 8); spi_.transfer(addr);
+    for (int i = 0; i < 4; i++) spi_.transfer(0);
+    for (size_t k = 0; k < n; k++) {
+      uint32_t b0 = spi_.transfer(0), b1 = spi_.transfer(0), b2 = spi_.transfer(0), b3 = spi_.transfer(0);
+      out[k] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    }
+    digitalWrite(cs_, HIGH);
+    spi_.endTransaction();
+    xSemaphoreGive(lock_);
   }
 
   // No reply is possible: the chip stops being the thing that was listening.

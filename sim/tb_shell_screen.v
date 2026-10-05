@@ -22,8 +22,17 @@ module tb_shell_screen;
 	initial begin
 		repeat (4) @(posedge clk); rst <= 0;
 		repeat (4) @(posedge clk);
+		// as installCard does it: every sector erased, then each written and read back
+		// (sector 3 erased again and redone), stopping half way: 20 of 41 sectors
 		for (i = 0; i < 41; i = i + 1) go(2'd1, i * 65536);
-		go(2'd2, 23'd1300000);
+		for (i = 0; i < 20 * 256; i = i + 1) begin
+			go(2'd2, i * 256);
+			if (i % 256 == 255) begin : chk
+				integer k;
+				for (k = i - 255; k <= i; k = k + 1) go(2'd3, 23'h200000 + k * 256);
+				if (i / 256 == 3) begin go(2'd1, 3 * 65536); end
+			end
+		end
 	end
 	reg [9:0] x1, y1; reg r1;
 	always @(posedge pclk) begin x1 <= x; y1 <= y; r1 <= req; end

@@ -57,31 +57,71 @@ static int machineOfCore(uint8_t id) {
 
 struct Game { String path, name; int8_t m; uint32_t size; };
 
-// --- the screen: 40 x 30 cells -------------------------------------------------
+// --- the screen: 40 x 30 cells ----------------------------------------------------
+// osd.v draws them: a cell is [6:0] the character, [8] the selection bar behind it,
+// [10:9] the colour, [11] the header's / footer's lighter background. The font's
+// codes 0x01-0x07 are a frame's corners and lines and a block, 0x0F a diamond.
 static const int COLS = 40, ROWS = 30;
 static uint32_t *cells = (uint32_t *)calloc(COLS * ROWS, 4);   // (heap: static RAM is short beside Bluetooth)
 enum { WHITE = 0, YELLOW = 1, GREY = 2, GREEN = 3 };
+enum : char { G_TL = 0x01, G_TR = 0x02, G_BL = 0x03, G_BR = 0x04, G_HL = 0x05, G_VL = 0x06, G_BLOCK = 0x07, G_DIAMOND = 0x0F,
+              G_CURSOR = 0x10, G_UP = 0x1E, G_DOWN = 0x1F };
+static bool barRow[ROWS];
 
-static void clear() { for (int i = 0; i < COLS * ROWS; i++) cells[i] = ' '; }
+static bool drawable(char c) { return (uint8_t)c >= 0x20 || (c >= G_TL && c <= G_BLOCK) || c == G_DIAMOND || c == G_CURSOR || c == G_UP || c == G_DOWN; }
 static void put(int col, int row, const String &s, int colour = WHITE, bool hl = false, int width = -1) {
   if (row < 0 || row >= ROWS) return;
   int n = width < 0 ? s.length() : width;
   for (int i = 0; i < n && col + i < COLS; i++) {
+    if (col + i < 0) continue;
     char ch = i < (int)s.length() ? s[i] : ' ';
-    if ((uint8_t)ch < 0x20 && ch != 0x10 && ch != 0x1E && ch != 0x1F) ch = ' ';
+    if (!drawable(ch)) ch = ' ';
     if ((uint8_t)ch > 0x7E) ch = '?';
-    cells[row * COLS + col + i] = (uint8_t)ch | (hl ? 0x100 : 0) | (colour << 9);
+    cells[row * COLS + col + i] = (uint8_t)ch | (hl ? 0x100 : 0) | (colour << 9) | (barRow[row] ? 0x800 : 0);
   }
 }
+static void putc_(int col, int row, char c, int colour = WHITE, bool hl = false) { put(col, row, String(c), colour, hl); }
 static void centre(int row, const String &s, int colour = WHITE) { put((COLS - (int)s.length()) / 2, row, s, colour); }
+static void right(int endCol, int row, const String &s, int colour = WHITE, bool hl = false) { put(endCol - (int)s.length() + 1, row, s, colour, hl); }
+// a name cut to fit, with an ellipsis
+static String fit(const String &s, int w) { return (int)s.length() <= w ? s : s.substring(0, w - 3) + "..."; }
+// a game's name as shown: without the dump's tags -- "(USA, Europe)", "[!]", "(Rev-A)"
+static String shown(const String &n) {
+  int cut = -1;
+  for (int i = 1; i < (int)n.length(); i++)
+    if ((n[i] == '(' || n[i] == '[') && n[i - 1] == ' ') { cut = i - 1; break; }
+  return cut > 0 ? n.substring(0, cut) : n;
+}
+
+// an empty screen: the header bar (rows 0-2) and the footer bar (27-29) lighter
+static void clear() {
+  for (int r = 0; r < ROWS; r++) barRow[r] = r <= 2 || r >= 27;
+  for (int r = 0; r < ROWS; r++) for (int c = 0; c < COLS; c++) cells[r * COLS + c] = ' ' | (barRow[r] ? 0x800 : 0);
+}
+// a frame from (c0, r0) to (c1, r1), a title set into its top edge
+static void frame(int c0, int r0, int c1, int r1, const String &title = "") {
+  putc_(c0, r0, G_TL, GREY); putc_(c1, r0, G_TR, GREY); putc_(c0, r1, G_BL, GREY); putc_(c1, r1, G_BR, GREY);
+  for (int c = c0 + 1; c < c1; c++) { putc_(c, r0, G_HL, GREY); putc_(c, r1, G_HL, GREY); }
+  for (int r = r0 + 1; r < r1; r++) { putc_(c0, r, G_VL, GREY); putc_(c1, r, G_VL, GREY); }
+  if (title.length()) put(c0 + 2, r0, " " + title + " ", WHITE);
+}
+// the header: the name, and what the board is now
+static void header(const String &what) {
+  putc_(2, 1, G_DIAMOND, YELLOW);
+  put(4, 1, "FPGA CONSOLE", YELLOW);
+  right(COLS - 3, 1, what, GREY);
+}
+static void footer(const String &hints) { centre(28, hints, GREY); }
 static void show() { fpga.busWrite(OSD_CELLS, cells, COLS * ROWS); }
 static void osd(uint32_t ctrl) { fpga.busWrite(OSD_CTRL, ctrl); }
 
-// A message alone on the screen (loading, switching, an error).
+// A message in a box (loading, switching, an error).
 static void message(const String &a, const String &b = "", int colour = WHITE) {
   clear();
-  centre(13, a, colour);
-  if (b.length()) centre(15, b, GREY);
+  header("");
+  frame(2, 10, 37, 18);
+  centre(13, fit(a, 32), colour);
+  if (b.length()) centre(15, fit(b, 32), GREY);
   show(); osd(1);
 }
 
@@ -174,46 +214,48 @@ static int cur = 0;                         // the console whose games are shown
 static int sel = 0, top = 0, consSel = 0;
 static bool (*menuButton)() = nullptr;      // a Bluetooth pad's PS / Home button (pads.h sets it)
 static bool open_ = false, gameIn = false;
-static String note;                         // one line at the bottom: what just happened
-static const int LIST_TOP = 4, LIST_ROWS = 22;
+static String note;                         // one line under the list: what just happened
+static const int LIST_TOP = 5, LIST_ROWS = 20;   // inside the frame (rows 4-25)
 
 static int count() { return level == 0 ? (int)consoles.size() : (int)lists[cur].size(); }
+// how many fit (a row free under the frame's title and above its bottom)
+static int pageRows() { return level == 0 ? (LIST_ROWS - 2) / 2 + 1 : LIST_ROWS - 2; }
 
 static void draw() {
   clear();
   Status st = fpga.status();
   int cm = machineOfCore(st.core);
-  if (level == 0) {
-    centre(0, "FPGA CONSOLE", YELLOW);
-    put(1, 2, String("running: ") + (cm >= 0 ? MACHINES[cm].name : "?"), GREY);
-    if (consoles.empty()) {
-      centre(12, haveCard ? "no games on the card" : "no SD card", YELLOW);
-      centre(14, "/roms/nes  /roms/sms  /roms/md  /roms/n64", GREY);
-    }
-  } else {
-    centre(0, MACHINES[cur].name, YELLOW);
-    put(1, 2, String(lists[cur].size()) + " games", GREY);
-  }
-  if (sel < top) top = sel;
-  if (sel >= top + LIST_ROWS) top = sel - LIST_ROWS + 1;
+  header(cm >= 0 ? String(MACHINES[cm].name) : String(""));
   int n = count();
-  for (int r = 0; r < LIST_ROWS && top + r < n; r++) {
-    int i = top + r;
+  if (level == 0) frame(1, 4, 38, 25, "CONSOLES");
+  else frame(1, 4, 38, 25, String(MACHINES[cur].name) + "  " + n + (n == 1 ? " game" : " games"));
+  if (level == 0 && consoles.empty()) {
+    centre(13, haveCard ? "no games on the card" : "no SD card", YELLOW);
+    centre(15, "roms/nes  sms  md  n64   discs", GREY);
+  }
+  // (the consoles a line apart -- there are few -- the games one under another)
+  int step = level == 0 ? 2 : 1, rows = pageRows();
+  if (sel < top) top = sel;
+  if (sel >= top + rows) top = sel - rows + 1;
+  for (int r = 0; r < rows && top + r < n; r++) {
+    int i = top + r, row = LIST_TOP + 1 + r * step;
     bool here = i == sel;
-    put(1, LIST_TOP + r, here ? String((char)0x10) : String(" "), YELLOW);
+    put(2, row, "", WHITE, here, 36);                                  // the bar, frame to frame
+    if (here) putc_(3, row, G_CURSOR, YELLOW, true);
     if (level == 0) {
       int m = consoles[i];
-      put(3, LIST_TOP + r, MACHINES[m].name, m == cm ? GREEN : WHITE, here, 24);
-      put(28, LIST_TOP + r, String(lists[m].size()), GREY, here, 6);
+      put(5, row, MACHINES[m].name, m == cm ? GREEN : WHITE, here);
+      right(36, row, String(lists[m].size()) + (lists[m].size() == 1 ? " game" : " games"), GREY, here);
     } else {
-      put(3, LIST_TOP + r, lists[cur][i].name, WHITE, here, COLS - 5);
+      put(5, row, fit(shown(lists[cur][i].name), 31), WHITE, here);
     }
   }
-  if (top > 0) put(COLS - 2, LIST_TOP, String((char)0x1E), GREY);
-  if (top + LIST_ROWS < n) put(COLS - 2, LIST_TOP + LIST_ROWS - 1, String((char)0x1F), GREY);
-  put(1, ROWS - 3, note, YELLOW, false, COLS - 2);
-  put(1, ROWS - 2, level == 0 ? (gameIn ? "A open  B back to the game" : "A open")
-                              : "A load  B consoles", GREY);
+  if (top > 0) putc_(38, LIST_TOP + 1, G_UP, YELLOW);
+  if (top + rows < n) putc_(38, LIST_TOP + LIST_ROWS - 2, G_DOWN, YELLOW);
+  if (level == 1 && n > rows) right(36, 25, " " + String(sel + 1) + "/" + n + " ", GREY);
+  put(2, 26, fit(note, 36), YELLOW);
+  footer(level == 0 ? (gameIn ? "A open    B back to the game" : "A open")
+                    : "A play     B back     L/R page");
   show();
 }
 
@@ -247,6 +289,15 @@ static uint8_t pad() {
 
 // --- loading ------------------------------------------------------------------------
 static uint8_t *buf = nullptr;              // 16 kB staging, words in the board's order
+static const uint32_t SYS_PCHK = 0x00000018;   // the board's checksum of cartridge writes
+static bool pchkOk = false;                 // this core keeps it (older ones do not)
+static void probeChecksum() {
+  // a word into the cartridge window (the load writes over it) and the sum it must make
+  fpga.busWrite(SYS_PCHK, 0);
+  fpga.busWrite(NES_PRG, 0x5A5A5A5A);
+  pchkOk = fpga.busRead(SYS_PCHK) == (NES_PRG ^ 0x5A5A5A5Au);
+}
+static uint32_t loadFixes = 0;              // chunks written again this load
 static const size_t BUF = 16384;
 
 // Copy n bytes of the file from where it stands to the bus at addr (and up), padded
@@ -260,7 +311,21 @@ static bool stream(File &f, uint32_t addr, uint32_t n, int swap = 0) {
     for (size_t k = want; k < words * 4; k++) buf[k] = 0;
     if (swap == 1) for (size_t k = 0; k + 1 < want; k += 2) std::swap(buf[k], buf[k + 1]);                 // .v64
     if (swap == 2) for (size_t k = 0; k + 3 < want; k += 4) { std::swap(buf[k], buf[k + 3]); std::swap(buf[k + 1], buf[k + 2]); }   // .n64
-    fpga.busWrite(addr, (uint32_t *)buf, words);
+    // written and checked: the board folds every word it takes into a checksum with
+    // its address (regfile.v pchk, SYS 0x0018), the same sum is made here, and a chunk
+    // whose sums differ goes again -- the wire to the FPGA flips a bit now and then,
+    // and a game loaded with a few wrong bytes showed corrupted tiles in its title
+    uint32_t want_c = 0;
+    const uint32_t *w32 = (const uint32_t *)buf;
+    for (size_t k = 0; k < words; k++) want_c = ((want_c << 1) | (want_c >> 31)) ^ (addr + 4 * k) ^ w32[k];
+    bool same = false;
+    for (int tries = 0; tries < 4 && !same; tries++) {
+      if (tries) loadFixes++;
+      if (pchkOk) fpga.busWrite(SYS_PCHK, 0);
+      fpga.busWrite(addr, w32, words);
+      same = !pchkOk || fpga.busRead(SYS_PCHK) == want_c;
+    }
+    if (!same) return false;
     addr += words * 4; n -= want;
   }
   return true;
@@ -445,6 +510,7 @@ static String load(const Game &g) {
   if (!f) return "cannot open " + g.path;
   uint32_t size = f.size();
   if (size > MACHINES[g.m].limit) { f.close(); return "too big for the " + String(MACHINES[g.m].name); }
+  probeChecksum();
   message("loading", g.name);
   fpga.busWrite(NES_CTRL, 0);                       // held while the cartridge changes
   String err;
@@ -518,7 +584,7 @@ static String switchTo(int m) {
   String path = String("/cores/") + M.core + ".bin";
   File f = SD.open(path);
   if (!f) return String("no ") + path + " on the card";
-  message(String("switching to the ") + M.name, "the screen goes dark for a few seconds");
+  message(String("switching to the ") + M.name, "this takes about a minute");
   delay(300);
   // Back to the shell: the console image's own reboot register (SYS 0x0014), and
   // PROGRAM_B if that did not take. The shell has no picture: dark from here.
@@ -575,12 +641,13 @@ static void pick() {
     String e = switchTo(g.m);
     if (e.length()) { note = e; open_ = true; osd(1); draw(); return; }
   }
+  loadFixes = 0;
   String e = load(g);
   if (e.length()) { note = e; draw(); return; }
   note = "";
   gameIn = true; open_ = false;
   osd(0);
-  Serial.println("menu: loaded " + g.path);
+  Serial.println("menu: loaded " + g.path + (loadFixes ? " (" + String(loadFixes) + " chunk(s) written again)" : ""));
 }
 
 static void openMenu() {
@@ -631,8 +698,8 @@ static void task(void *) {
     int n = count();
     if ((edge | (rep ? p : 0)) & B_UP)   { if (sel > 0) sel--; draw(); }
     if ((edge | (rep ? p : 0)) & B_DOWN) { if (sel + 1 < n) sel++; draw(); }
-    if (edge & B_LEFT)  { sel = max(0, sel - LIST_ROWS); draw(); }
-    if (edge & B_RIGHT) { sel = max(0, min(n - 1, sel + LIST_ROWS)); draw(); }
+    if (edge & B_LEFT)  { sel = max(0, sel - pageRows()); draw(); }
+    if (edge & B_RIGHT) { sel = max(0, min(n - 1, sel + pageRows())); draw(); }
     if ((edge & B_A) || ((edge & B_START) && !(p & B_SEL))) pick();
     if (edge & B_B) {
       if (level == 1) { level = 0; sel = consSel; top = 0; note = ""; draw(); }

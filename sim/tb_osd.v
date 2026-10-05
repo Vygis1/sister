@@ -30,20 +30,20 @@ module tb_osd;
 
 	reg [7:0] font [0:1023];
 	initial $readmemh("../../sim/osd_font_ref.hex", font);
-	function [10:0] cellv; input integer i; cellv = {i[4:3], i[2] & i[0], 4'd0, i[6:0] ^ i[11:7]} | 11'h20; endfunction
+	function [11:0] cellv; input integer i; cellv = {i[5] & i[1], i[4:3], i[2] & i[0], 4'd0, i[6:0] ^ i[11:7]} | 12'h20; endfunction
 
 	reg show = 0;
 	integer i;
 	task wr; input [15:0] o; input [31:0] d; begin @(posedge clk); we <= 1; off <= o; wdata <= d; @(posedge clk); we <= 0; end endtask
 	initial begin
-		for (i = 0; i < 1200; i = i + 1) wr(16'h2000 + 4 * i, {21'd0, cellv(i)});
+		for (i = 0; i < 1200; i = i + 1) wr(16'h2000 + 4 * i, {20'd0, cellv(i)});
 		wr(16'h0004, 32'd1); show = 1;
 	end
 
 	reg [9:0] x1, y1; reg r1; reg [23:0] con1;
 	always @(posedge pclk) begin x1 <= x; y1 <= y; r1 <= req; end
 	integer errors = 0, checked = 0, frames = 0, ci, glyph;
-	reg [10:0] cv; reg fg; reg [23:0] want, ink;
+	reg [11:0] cv; reg fg; reg [23:0] want, ink, grad; reg [5:0] gt;
 	always @(posedge pclk) if (x == 10'd0 && y == 10'd0 && req && show) frames = frames + 1;
 	always @(posedge pclk) if (r1 && frames >= 2) begin
 		ci = (y1 >> 4) * 40 + (x1 >> 4);
@@ -51,7 +51,9 @@ module tb_osd;
 		glyph = font[{cv[6:0], y1[3:1]}];
 		fg = glyph[x1[3:1]];
 		ink = (cv[10:9] == 2'd1) ? 24'hFFE040 : (cv[10:9] == 2'd2) ? 24'h8890A8 : (cv[10:9] == 2'd3) ? 24'h60E070 : 24'hF0F0F0;
-		want = fg ? ink : cv[8] ? 24'h2C58C8 : 24'h101830;
+		gt = 6'd59 - y1[8:3];
+		grad = {8'd8 + gt[5:2], 8'd10 + gt[5:2] + gt[5:4], 8'd24 + gt[5:1]};
+		want = fg ? ink : cv[8] ? 24'h2C58C8 : cv[11] ? 24'h26325E : grad;
 		checked = checked + 1;
 		if (rgb !== want) begin
 			errors = errors + 1;

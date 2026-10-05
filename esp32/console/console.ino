@@ -723,13 +723,26 @@ static bool installCard(File &f) {
   uint32_t pages = (length + PAGE - 1) / PAGE;
   uint32_t sectors = (length + SECTOR - 1) / SECTOR, redone = 0;
   const uint32_t per = SECTOR / PAGE;
+  // every sector erased first, in order -- the shell's screen takes the image's
+  // size from these -- then each written and read back, and erased again and
+  // rewritten only if it came back wrong
+  job.stage = "erasing"; job.total = sectors; job.done = 0;
+  for (uint32_t sec = 0; sec < sectors; sec++) {
+    if (!fpga.eraseSector(sec * SECTOR) && !fpga.eraseSector(sec * SECTOR)) {
+      job.error = "the flash never finished erasing sector " + String(sec);
+      return false;
+    }
+    job.done = sec + 1;
+  }
   job.stage = "writing"; job.total = pages; job.done = 0;
   for (uint32_t sec = 0; sec < sectors; sec++) {
     uint32_t p0 = sec * per, p1 = min(pages, p0 + per);
     bool good = false;
     for (int tries = 0; tries < 3 && !good; tries++) {
-      if (tries) redone++;
-      if (!fpga.eraseSector(sec * SECTOR) && !fpga.eraseSector(sec * SECTOR)) continue;
+      if (tries) {
+        redone++;
+        if (!fpga.eraseSector(sec * SECTOR) && !fpga.eraseSector(sec * SECTOR)) continue;
+      }
       f.seek(p0 * PAGE);
       for (uint32_t i = p0; i < p1; i++) {
         size_t r = f.read(want, PAGE);

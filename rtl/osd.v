@@ -9,7 +9,9 @@
 //                  plain dark background)
 //   0x2000 + 4 * (row * 40 + col)           a cell: [6:0] the character, [8] highlight
 //                  (a bright bar behind it), [10:9] colour: 0 white, 1 yellow, 2 grey,
-//                  3 green
+//                  3 green, [11] a bar (the header's and footer's lighter background)
+// The plain background is a gradient, lighter at the top. The font's control codes
+// 0x01-0x07 and 0x0F draw a frame (corners, lines, a block) and a diamond.
 //
 // The pixel side is a clock behind the request like every source of hdmi_tx: the
 // cell and glyph are fetched two pixels ahead (x counts the whole 800-clock line, so
@@ -35,13 +37,13 @@ module osd (
 	output wire [23:0] rgb
 );
 	reg [1:0] ctrl;
-	(* ram_style = "block" *) reg [10:0] cells [0:2047];
-	integer k; initial for (k = 0; k < 2048; k = k + 1) cells[k] = 11'h020;   // spaces (the block RAM's initial contents)
+	(* ram_style = "block" *) reg [11:0] cells [0:2047];
+	integer k; initial for (k = 0; k < 2048; k = k + 1) cells[k] = 12'h020;   // spaces (the block RAM's initial contents)
 	wire [10:0] widx = off[12:2];
 	always @(posedge clk) begin
 		if (rst) ctrl <= 2'd0;
 		else if (we && off == 16'h0004) ctrl <= wdata[1:0];
-		if (we && off[15:13] == 3'd1 && widx < 11'd1200) cells[widx] <= wdata[10:0];
+		if (we && off[15:13] == 3'd1 && widx < 11'd1200) cells[widx] <= wdata[11:0];
 	end
 	always @* begin
 		err = 1'b0; rdata = 32'd0;
@@ -67,7 +69,7 @@ module osd (
 	wire        inside = xa < 10'd640 && ya < 10'd480;
 
 	// stage 1: the cell
-	reg [10:0] cel; reg [2:0] gr1, gb1; reg in1;
+	reg [11:0] cel; reg [2:0] gr1, gb1; reg in1;
 	always @(posedge pclk) begin
 		cel <= cells[cidx];
 		gr1 <= ya[3:1]; gb1 <= xa[3:1]; in1 <= inside;
@@ -75,17 +77,20 @@ module osd (
 	// stage 2: the glyph's row
 	wire [7:0] grow;
 	osd_font u_font (.clk(pclk), .a({cel[6:0], gr1}), .q(grow));
-	reg [2:0] gb2; reg in2; reg hl2; reg [1:0] col2;
-	always @(posedge pclk) begin gb2 <= gb1; in2 <= in1; hl2 <= cel[8]; col2 <= cel[10:9]; end
+	reg [2:0] gb2; reg in2; reg hl2, bar2; reg [1:0] col2;
+	always @(posedge pclk) begin gb2 <= gb1; in2 <= in1; hl2 <= cel[8]; col2 <= cel[10:9]; bar2 <= cel[11]; end
 	// stage 3: the pixel, registered so it lines up with rgb_in
-	reg fg3, hl3, in3; reg [1:0] col3;
+	reg fg3, hl3, in3, bar3; reg [1:0] col3;
 	always @(posedge pclk) begin
-		fg3 <= grow[gb2]; hl3 <= hl2; in3 <= in2; col3 <= col2;
+		fg3 <= grow[gb2]; hl3 <= hl2; in3 <= in2; col3 <= col2; bar3 <= bar2;
 	end
+	// the background: lighter at the top, 60 steps down the screen
+	wire [5:0] gt = 6'd59 - y[8:3];
+	wire [23:0] grad = {8'd8 + {4'd0, gt[5:2]}, 8'd10 + {4'd0, gt[5:2]} + {6'd0, gt[5:4]}, 8'd24 + {3'd0, gt[5:1]}};
 
 	wire [23:0] ink = (col3 == 2'd1) ? 24'hFFE040 : (col3 == 2'd2) ? 24'h8890A8 : (col3 == 2'd3) ? 24'h60E070 : 24'hF0F0F0;
 	wire [23:0] dim = {2'b00, rgb_in[23:18], 2'b00, rgb_in[15:10], 2'b00, rgb_in[7:2]} + 24'h080818;
-	wire [23:0] bg  = hl3 ? 24'h2C58C8 : c2[1] ? dim : 24'h101830;
+	wire [23:0] bg  = hl3 ? 24'h2C58C8 : bar3 ? 24'h26325E : c2[1] ? dim : grad;
 	assign rgb = (c2[0] && in3) ? (fg3 ? ink : bg) : rgb_in;
 endmodule
 
