@@ -49,11 +49,21 @@ module tb_n64_rsp;
 	reg  [127:0] dm_rd_data;
 	integer      rf, rn, rl, ri;
 	reg  [127:0] rd_v;
+	// (+WSTALL: a write is taken only one clock in four, at random, as n64_top's queue
+	// does when it is full -- the DMA must read a doubleword again rather than lose it)
+	integer wf;    // sim/n64r/rtl_writes.txt: every line the DMA wrote, with its mask
+	integer n_reread = 0;
+	always @(posedge clk) if (dut.dst == 3'd3 && dut.w2_v && dut.g_v && dut.g_line != dut.w2_line && !dut.out_free) n_reread = n_reread + 1;
+	reg [31:0] wrnd = 32'h1234_5679; reg wstall = 0;
+	initial wstall = $test$plusargs("WSTALL");
+	always @(posedge clk) wrnd <= {wrnd[30:0], wrnd[31] ^ wrnd[21] ^ wrnd[1] ^ wrnd[0]};
+	wire w_take = dm_wr_req && !dm_wr_ack && (!wstall || wrnd[1:0] == 2'b00);
 	always @(posedge clk) begin
 		dm_rd_ack <= dm_rd_req && !dm_rd_ack;
-		dm_wr_ack <= dm_wr_req && !dm_wr_ack;
+		dm_wr_ack <= w_take;
 		if (dm_rd_req && !dm_rd_ack) dm_rd_data <= ram[dm_rd_line[18:0]];
-		if (dm_wr_req && !dm_wr_ack)
+		if (w_take) $fwrite(wf, "%05x %04x %032x\n", dm_wr_line[18:0], dm_wr_mask, dm_wr_data);
+		if (w_take)
 			for (ri = 0; ri < 16; ri = ri + 1)
 				if (dm_wr_mask[ri]) ram[dm_wr_line[18:0]][8 * ri +: 8] <= dm_wr_data[8 * ri +: 8];
 	end
@@ -96,6 +106,7 @@ module tb_n64_rsp;
 		tf = $fopen("../../sim/n64r/rtl.trace", "w");
 		df = $fopen("../../sim/n64r/rtl_dmem.hex", "w");
 		vf = $fopen("../../sim/n64r/rtl_vstate.txt", "w");
+		wf = $fopen("../../sim/n64r/rtl_writes.txt", "w");
 		if (fd == 0) begin $display("tb_n64_rsp: FAIL no runs"); $finish; end
 		code = $fscanf(fd, "%h\n", nruns);
 		repeat (4) @(posedge clk); rst = 0;
@@ -105,7 +116,7 @@ module tb_n64_rsp;
 				code = $fscanf(fd, "%h\n", w);
 				mem_write(i[9:0], w);                 // DMEM, then IMEM
 			end
-			@(negedge clk); $fwrite(tf, "RUN %0d\n", r);
+			@(negedge clk); $fwrite(tf, "RUN %0d\n", r); $fwrite(wf, "RUN %0d\n", r);
 			// stop it, if the last run did not halt, before its memory is written
 			reg_write(4'd4, 32'h0000_0002);
 			repeat (8) @(negedge clk);
@@ -149,7 +160,7 @@ module tb_n64_rsp;
 		$display("pace: %0d clocks running, %0d instructions, CPI %0d.%02d, %0d clocks waiting on a vector result", pc_run, pc_ins,
 		         pc_run / (pc_ins ? pc_ins : 1), (pc_run * 100 / (pc_ins ? pc_ins : 1)) % 100, pc_haz);
 		for (pi = 0; pi < 16; pi = pi + 1) if (pc_st[pi] != 0) $display("  state %0d: %0d clocks", pi, pc_st[pi]);
-		$display("tb_n64_rsp: %0d runs done", nruns);
+		$display("tb_n64_rsp: %0d runs done; the DMA read a doubleword again %0d times (the write output taken)", nruns, n_reread);
 		$finish;
 	end
 endmodule

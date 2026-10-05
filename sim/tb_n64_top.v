@@ -35,8 +35,6 @@ module tb_n64_top;
 	hdmi_tx #(.SIM(1)) u_hdmi (.clk50(1'b0), .rst(1'b0), .sim_pclk(pclk), .ext_pclk(1'b0), .ext_pclk5(1'b0), .ext_locked(1'b0),
 		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(), .tmds_p(), .tmds_n(), .tmds_clk_p(), .tmds_clk_n(),
 		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
-	integer vid_lines = 0;
-	always @(posedge clk) if (dut.st == 5'd20 && dut.d_valid && dut.head_one) vid_lines = vid_lines + 1;
 	n64_top #(.HALFLINE(11'd1587)) dut (
 		.clk(clk), .rst(rst), .run(run),
 		.host_windex(host_windex), .host_we(host_we), .host_wdata(host_wdata), .fill_end(fill_end),
@@ -84,6 +82,52 @@ module tb_n64_top;
 				q_v[0] <= 1'b1; q_a[0] <= d_addr;
 			end
 		end
+	end
+
+	// --- the HDMI picture's fetch: every line n64_top puts in n64_vid's buffer must be the
+	// RDRAM line it is meant to be (its lines come back pipelined, tagged, among other reads)
+	integer vid_lines = 0, vid_bad = 0;
+	always @(posedge clk) if (dut.hv_we) begin
+		vid_lines = vid_lines + 1;
+		if (dut.hv_wd !== rdram[dut.hv_base[22:4] + {12'd0, dut.hv_wa[6:0]}]) begin
+			vid_bad = vid_bad + 1;
+			if (vid_bad <= 5) $display("tb_n64_top: picture line %0d of source line %0d is %032x, RDRAM has %032x",
+			                           dut.hv_wa[6:0], dut.hv_line, dut.hv_wd, rdram[dut.hv_base[22:4] + {12'd0, dut.hv_wa[6:0]}]);
+		end
+	end
+	// --- the RSP's posted DMA writes: each line handed over reaches the memory as it was, in
+	// order, and no read is issued while one of them is still queued
+	reg [167:0] rwm [0:4095]; integer rwm_in = 0, rwm_out = 0, rwm_bad = 0, rwm_early = 0;
+	reg d_req_was = 0, rw_empty_was = 1;
+	always @(posedge clk) if (!rst) begin
+		if (dut.rd_wr_req && !dut.rd_wr_ack && !dut.rw_full) begin
+			rwm[rwm_in % 4096] = {dut.rd_wr_line, dut.rd_wr_mask, dut.rd_wr_data}; rwm_in = rwm_in + 1;
+		end
+		if (dut.st == dut.S_RWRITE && d_req && d_ready) begin
+			if ({d_addr, d_wmask, d_wdata} !== rwm[rwm_out % 4096]) begin
+				rwm_bad = rwm_bad + 1;
+				if (rwm_bad <= 5) $display("tb_n64_top: RSP write %0d reached memory as %06x/%04x, was handed over as %06x/%04x",
+				                           rwm_out, d_addr, d_wmask, rwm[rwm_out % 4096][167:144], rwm[rwm_out % 4096][143:128]);
+			end
+			rwm_out = rwm_out + 1;
+		end
+		// a read chosen (its request rising) while an RSP write was already queued
+		if (d_req && !d_req_was && !d_we && !rw_empty_was) rwm_early = rwm_early + 1;
+		d_req_was = d_req; rw_empty_was = dut.rw_empty;
+	end
+
+	// +VIDTEST (with +JUNK1 +PRELOAD1): VI pointed at a 320-wide 16-bit picture at 1 MB from
+	// the start, while the game boots alongside; three HDMI frames of fetches checked
+	integer vframes = 0; reg [9:0] vy_was = 0;
+	always @(posedge pclk) begin vy_was <= vid_y; if (vid_y == 10'd0 && vy_was != 10'd0) vframes = vframes + 1; end
+	initial if ($test$plusargs("VIDTEST")) begin
+		wait (!rst); repeat (20) @(posedge clk);
+		dut.vi[0] = 32'h0000_3002; dut.vi[1] = 32'h0010_0000; dut.vi[2] = 32'd320;
+		wait (vframes >= 4);
+		$display("tb_n64_top: VIDTEST %0d picture lines fetched, %0d wrong (one HDMI frame wants 9,600)", vid_lines, vid_bad);
+		if (vid_bad == 0 && vid_lines >= 2 * 9600) $display("=== tb_n64_top passed ===");
+		else $display("*** tb_n64_top FAILED ***");
+		$finish;
 	end
 
 	// --- the run --------------------------------------------------------------------------
@@ -186,6 +230,8 @@ module tb_n64_top;
 		         dut.rdp_out, dut.st, dut.u_rsp_ra.live, dut.u_rsp_ra.b, dut.u_rsp_ra.n, dut.u_rsp_ra.r, dut.u_rsp_ra.drop,
 		         dut.u_rsp.dma_busy, dut.u_rsp.halted, dut.rd_rd_req, dut.rd_rd_ack, dut.x_flush_p);
 		$display("tb_n64_top: %0d clocks since run, %0d frames; %0d video lines fetched", ($time - t_run) / 20, frames, vid_lines);
+		$display("tb_n64_top: RSP DMA writes: %0d handed over, %0d written, %0d wrong; %0d reads issued past a queued one%s",
+		         rwm_in, rwm_out, rwm_bad, rwm_early, (rwm_bad || rwm_early) ? " -- FAIL" : "");
 		// the frame stream's port: words of the picture, against RDRAM at the VI's origin
 		sbad = 0;
 		for (i = 0; i < (fb_words != 0 ? 3000 : 0); i = i + 1) begin

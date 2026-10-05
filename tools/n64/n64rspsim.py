@@ -56,7 +56,22 @@ def prepare(rom_path, max_runs, steps=20_000_000, skip=0):
         return v
     rsp.dp_read = dp_read
 
+    # and the doublewords each run's DMAs wrote to RDRAM, as they were left
+    writes = {}
+
     def dma(read):
+        if not read and not rsp.halted:
+            p = rsp.pend
+            d = p['dram'] & 0xFFFFF8
+            out = []
+            for row in range(p['count'] + 1):
+                for o in range(0, p['length'] + 8, 8):
+                    out.append((d + o) & 0xFFFFF8)
+                d = (d + p['length'] + 8 + p['skip']) & 0xFFFFF8
+            orig_dma(read)
+            for a in out:
+                writes[a] = bytes(m.rdram[a:a + 8])
+            return
         if read and not rsp.halted:
             p = rsp.pend
             d = p['dram'] & 0xFFFFF8
@@ -90,6 +105,7 @@ def prepare(rom_path, max_runs, steps=20_000_000, skip=0):
             # the RSP's first instruction is next)
             started[0] += 1
             reads.clear()
+            writes.clear()
             dpr.clear()
             if started[0] > skip:
                 runs.append({'dmem': bytes(m.dmem), 'imem': bytes(m.imem), 'pc': rsp.pc & 0xFFC, 't0': len(trace)})
@@ -100,6 +116,7 @@ def prepare(rom_path, max_runs, steps=20_000_000, skip=0):
             runs[-1]['t1'] = len(trace)
             runs[-1]['reads'] = dict(reads)
             runs[-1]['dpr'] = list(dpr)
+            runs[-1]['writes'] = dict(writes)
             last = i
             if len(runs) >= max_runs:
                 break
@@ -127,6 +144,12 @@ def prepare(rom_path, max_runs, steps=20_000_000, skip=0):
             f.write('%x' % len(r['reads']) + NL)
             for a, d in sorted(r['reads'].items()):
                 f.write('%05x %s' % (a >> 4, d[::-1].hex()) + NL)
+    with open(os.path.join(OUT, 'model_writes.txt'), 'w') as f:
+        # per run: the doublewords its DMAs wrote, "address bytes"
+        for k, r in enumerate(runs):
+            f.write('RUN %d' % k + NL)
+            for a, d in sorted(r.get('writes', {}).items()):
+                f.write('%06x %s' % (a, d.hex()) + NL)
     with open(os.path.join(OUT, 'model.trace'), 'w') as f:
         for k, r in enumerate(runs):
             f.write('RUN %d\n' % k)
@@ -210,9 +233,50 @@ def check():
         ok = False
     else:
         print('DMEM: the same after every run')
+    ok = check_writes() and ok
     if '--runs' in sys.argv:
         per_run(a, b)
     return ok
+
+
+def check_writes():
+    """what each run's DMAs left in RDRAM: the model's doublewords against the bench's
+    writes (lines with byte masks, sim/n64r/rtl_writes.txt), byte for byte"""
+    pm, pr = os.path.join(OUT, 'model_writes.txt'), os.path.join(OUT, 'rtl_writes.txt')
+    if not (os.path.exists(pm) and os.path.exists(pr)):
+        print('RDRAM writes: not compared (no %s)' % ('model_writes.txt' if not os.path.exists(pm) else 'rtl_writes.txt'))
+        return True
+    model, rtl = [], []
+    for line in open(pm):
+        p = line.split()
+        if not p: continue
+        if p[0] == 'RUN': model.append({})
+        else:
+            a, d = int(p[0], 16), bytes.fromhex(p[1])
+            for i in range(8): model[-1][a + i] = d[i]
+    for line in open(pr):
+        p = line.split()
+        if not p: continue
+        if p[0] == 'RUN': rtl.append({})
+        else:
+            l, mask, data = int(p[0], 16), int(p[1], 16), bytes.fromhex(p[2])[::-1]   # (byte 15 first in the file)
+            for i in range(16):
+                if mask >> i & 1: rtl[-1][(l << 4) + i] = data[i]
+    bad = 0
+    for k in range(min(len(model), len(rtl))):
+        if model[k] != rtl[k]:
+            bad += 1
+            if bad <= 3:
+                diff = sorted(set(model[k]) ^ set(rtl[k])) or [a for a in model[k] if model[k][a] != rtl[k].get(a)]
+                a = diff[0]
+                print('RDRAM writes: run %d differs first at %06x: model %s rtl %s (%d bytes model, %d rtl)'
+                      % (k, a, model[k].get(a), rtl[k].get(a), len(model[k]), len(rtl[k])))
+    if len(model) != len(rtl):
+        print('RDRAM writes: model %d runs, rtl %d' % (len(model), len(rtl)))
+        return False
+    print('RDRAM writes: %s (%d runs, %d bytes written)' % ('the same' if not bad else '%d runs differ' % bad,
+                                                         len(model), sum(len(m) for m in model)))
+    return bad == 0
 
 
 def per_run(a, b):

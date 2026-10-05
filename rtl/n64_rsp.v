@@ -744,7 +744,18 @@ module n64_rsp #(
 	assign dm_phase = {dst == D_WRB || dst == D_WRB2 || dst == 3'd7 || dst == D_WFLUSH, dst == D_RD || dst == D_RWAIT};
 	reg  [9:0]   d_n;                     // doublewords left in this row
 	reg  [127:0] d_line;  reg [18:0] d_tag; reg d_lv;
-	reg          d_wv;                    // a line being gathered for RDRAM
+	reg          d_wv;                    // (unused: the gather line is g_v below)
+	// DMEM/IMEM to RDRAM, pipelined: a doubleword read from port B every clock, its answer
+	// two clocks on (w1: asked this clock past, w2: answering now), gathered into the line
+	// g; a line complete goes to the output (dm_wr_*) while the next is gathered. Port B's
+	// answer lasts one clock, so if it comes while the output is still taken (the queue in
+	// n64_top full), the DMA goes back to that doubleword and reads it again. (It was a
+	// doubleword every three clocks and a line waited out before the next: SM64's microcode
+	// waited on its write DMAs most of the time.)
+	reg          w1_v, w2_v;  reg [23:0] w1_a, w2_a;  reg [11:0] w1_p, w2_p;
+	reg          g_v;  reg [23:0] g_line;  reg [127:0] g_data;  reg [15:0] g_mask;
+	wire [23:0]  w2_line = RDRAM_LINE + {5'd0, w2_a[22:4]};
+	wire         out_free = !dm_wr_req || dm_wr_ack;
 	wire [63:0]  d_bq = c_region ? ib_q : db_q;   // port B's answer, for the DMA
 	reg          cpu_b;                   // the CPU had port B (its answer comes a clock later)
 	reg          cpu_b_imem;
@@ -789,6 +800,7 @@ module n64_rsp #(
 			st <= R_HALT; halted <= 1'b1; dlog_n <= 32'd0; dlog_stop <= 1'b0; frozen <= 1'b0; broken <= 1'b0; sstep <= 1'b0; intbreak <= 1'b0; semaphore <= 1'b0; signal <= 8'd0;
 			pc <= 12'd0; npc <= 12'd4;
 			dma_busy <= 1'b0; dma_full <= 1'b0; dst <= D_IDLE; d_lv <= 1'b0; d_wv <= 1'b0; dm_rd_req <= 1'b0; dm_wr_req <= 1'b0;
+			w1_v <= 1'b0; w2_v <= 1'b0; g_v <= 1'b0;
 			c_len <= 12'd0; c_count <= 8'd0; c_skip <= 12'd0; c_pbus <= 12'd0; c_region <= 1'b0; c_dram <= 24'd0;
 			vcoh <= 8'd0; vcol <= 8'd0; vcch <= 8'd0; vccl <= 8'd0; vce <= 8'd0; divin <= 16'd0; divout <= 16'd0; divdp <= 1'b0;
 			for (k = 0; k < 8; k = k + 1) begin acch[k] <= 16'd0; accm[k] <= 16'd0; accl[k] <= 16'd0; end
@@ -855,7 +867,7 @@ module n64_rsp #(
 				end
 				c_pbus <= p_pbus; c_region <= p_region; c_dram <= p_dram; c_len <= p_len; c_count <= p_count; c_skip <= p_skip;
 				dma_rd <= p_rd; dma_busy <= 1'b1; dma_full <= 1'b0;
-				d_n <= p_len[11:3] + 10'd1; d_lv <= 1'b0; d_wv <= 1'b0;
+				d_n <= p_len[11:3] + 10'd1; d_lv <= 1'b0; d_wv <= 1'b0; w1_v <= 1'b0; w2_v <= 1'b0; g_v <= 1'b0;
 				dst <= p_rd ? D_RD : D_WRB;
 				dm_new <= 1'b1;
 			end
@@ -875,27 +887,45 @@ module n64_rsp #(
 				end
 			end
 			D_RWAIT: if (dm_rd_ack) begin d_line <= dm_rd_data; d_tag <= c_dram[22:4]; d_lv <= 1'b1; dst <= D_RD; end
-			// DMEM/IMEM to RDRAM: read a doubleword, then gather it into the line
-			D_WRB: begin
-				if (d_n == 10'd0) begin
-					if (d_wv) begin dm_wr_req <= 1'b1; dst <= D_WFLUSH; end else dst <= D_ROW;
-				end else if (d_wv && dm_wr_line != RDRAM_LINE + {5'd0, c_dram[22:4]}) begin
-					dm_wr_req <= 1'b1; dst <= D_WFLUSH;
-				end else if (!c_mem_en) begin
-					b_en <= 1'b1; b_imem <= c_region; b_addr <= c_pbus[11:3]; b_we <= 8'h00; dst <= D_WRB2;
+			// DMEM/IMEM to RDRAM, pipelined (see w1/w2/g above)
+			D_WRB: begin : wr_pipe
+				reg replay;
+				replay = 1'b0;
+				// a doubleword answering: into the line, or the line out first
+				if (w2_v) begin
+					if (g_v && g_line != w2_line) begin
+						if (out_free) begin
+							dm_wr_line <= g_line; dm_wr_data <= g_data; dm_wr_mask <= g_mask; dm_wr_req <= 1'b1;
+							g_line <= w2_line; g_mask <= 16'h00FF << {w2_a[3], 3'd0};
+							for (k = 0; k < 8; k = k + 1) g_data[8 * ({w2_a[3], 3'd0} + k) +: 8] <= d_bq[63 - 8 * k -: 8];
+						end else begin
+							// the output still taken: read this one (and the one behind it) again
+							replay = 1'b1;
+							c_dram <= w2_a; c_pbus <= w2_p; d_n <= d_n + {9'd0, w1_v} + 10'd1;
+						end
+					end else begin
+						if (!g_v) begin g_line <= w2_line; g_mask <= 16'h00FF << {w2_a[3], 3'd0}; end
+						else g_mask <= g_mask | (16'h00FF << {w2_a[3], 3'd0});
+						for (k = 0; k < 8; k = k + 1) g_data[8 * ({w2_a[3], 3'd0} + k) +: 8] <= d_bq[63 - 8 * k -: 8];
+					end
+					if (!replay) g_v <= 1'b1;
 				end
+				// the next doubleword asked for, while port B is the DMA's
+				if (!replay && d_n != 10'd0 && !c_mem_en) begin
+					b_en <= 1'b1; b_imem <= c_region; b_addr <= c_pbus[11:3]; b_we <= 8'h00;
+					w1_v <= 1'b1; w1_a <= c_dram; w1_p <= c_pbus;
+					c_dram <= c_dram + 24'd8; c_pbus <= c_pbus + 12'd8; d_n <= d_n - 10'd1;
+				end else w1_v <= 1'b0;
+				w2_v <= w1_v && !replay; w2_a <= w1_a; w2_p <= w1_p;
+				// the row's last answered: its line out, then the next row
+				if (!replay && d_n == 10'd0 && !w1_v && !w2_v) dst <= D_WFLUSH;
 			end
-			D_WRB2: dst <= D_ROW + 3'd1;                                 // (the read's answer: next clock)
-			3'd7: begin
-				if (!d_wv) begin dm_wr_line <= RDRAM_LINE + {5'd0, c_dram[22:4]}; dm_wr_mask <= 16'd0; end
-				for (k = 0; k < 8; k = k + 1)
-					dm_wr_data[8 * ({c_dram[3], 3'd0} + k) +: 8] <= d_bq[63 - 8 * k -: 8];
-				dm_wr_mask <= (d_wv ? dm_wr_mask : 16'd0) | (16'h00FF << {c_dram[3], 3'd0});
-				d_wv <= 1'b1;
-				c_dram <= c_dram + 24'd8; c_pbus <= c_pbus + 12'd8; d_n <= d_n - 10'd1;
-				dst <= D_WRB;
+			D_WFLUSH: begin
+				if (!out_free) ;
+				else if (g_v) begin
+					dm_wr_line <= g_line; dm_wr_data <= g_data; dm_wr_mask <= g_mask; dm_wr_req <= 1'b1; g_v <= 1'b0;
+				end else if (!dm_wr_req) dst <= D_ROW;
 			end
-			D_WFLUSH: if (dm_wr_ack) begin d_wv <= 1'b0; dst <= (d_n == 10'd0) ? D_ROW : D_WRB; end
 			D_ROW: begin
 				if (c_count != 8'd0) begin
 					c_count <= c_count - 8'd1; c_dram <= c_dram + {12'd0, c_skip}; d_n <= c_len[11:3] + 10'd1;
