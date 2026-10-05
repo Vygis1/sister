@@ -1,8 +1,13 @@
 # fpga-console
 
-Four game consoles written in Verilog, running on an inexpensive Artix-7
-board: the **NES**, the **Sega Master System**, the **Sega Mega Drive**, and
-the **Sony PlayStation**. The board becomes whichever one you choose. The
+> **The stand-alone console** -- HDMI to the TV, a menu on the screen, games on an SD
+> card, Bluetooth pads, no PC: [docs/GUIDE.md](docs/GUIDE.md) has the parts, the wiring,
+> the first programming and how to play. The rest of this page describes the
+> development setup (the web page over Ethernet), which still works.
+
+Five game consoles written in Verilog, running on an inexpensive Artix-7
+board: the **NES**, the **Sega Master System**, the **Sega Mega Drive**, the
+**Sony PlayStation** and the **Nintendo 64**. The board becomes whichever one you choose. The
 picture, the sound and the controller travel over Ethernet to a web page on
 your PC, and a small ESP32 on the side can run the board without a PC at all.
 
