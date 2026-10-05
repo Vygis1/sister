@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 -- the stand-alone console
+
+**HDMI, a menu, no PC.** The board drives a TV through an HDMI breakout on header U4,
+and an ESP32 with an SD card runs it: a menu over the picture, the games loaded
+from the card, the console switched by writing its image into the flash.
+
+- **HDMI** (`rtl/hdmi_tx.v`): 640 x 480, TMDS through ODDR gearboxes as
+  pseudo-differential pairs; HDMI audio in data islands -- 48 kHz, or 44.1 kHz for
+  the PlayStation and N64 -- checked symbol by symbol (`tools/hdmi_check.py`).
+- **Every console on it:** the NES with its palette, the Master System and Mega
+  Drive at their own colour depths (`frame_hdmi.v`), the N64 and PlayStation a line
+  at a time out of DDR3 (`n64_vid.v`; the PlayStation's frame double-buffered),
+  each doubled and centred. Stereo for the Mega Drive, PlayStation and N64.
+- **The menu** (`esp32/console/menu.h`, `rtl/osd.v`): the consoles, then the games
+  from `/roms/<console>` and `/discs`; the pad, a Bluetooth pad's PS / Home button
+  or Start + Select opens it and pauses the NES and Master System.
+- **The ESP32 drives the console** (`rtl/esp_bus.v`, `bus_arb.v`): game loads,
+  every chunk checked against a sum the FPGA keeps; PlayStation memory card and
+  N64 EEPROM saves on the card.
+- **Switching console:** back to the shell (a reboot register, or PROGRAM_B), the
+  core written sector by sector and read back, booted; the shell shows the progress
+  on the TV.
+- **Bluetooth pads** on a classic ESP32 (LilyGO T8) through Bluepad32 (`pads.h`).
+- **The NES's sound:** the frame sequencer ran at twice its rate (notes too short),
+  a negated sweep muted pulse 1, the noise ran an octave low; the dot clock is
+  exactly NTSC now.
+- **The Mega Drive's sprites:** a sprite attribute cache and an engine on every
+  clock -- sprites late in a long list were not drawn.
+- **The N64's sound:** DAC ticks are no longer lost when a sample's line is slow to
+  come (SM64 played at 24.4 kHz of 32).
+- **The guide:** [docs/GUIDE.md](docs/GUIDE.md).
+
+## 0.1.x -- unreleased changes after 0.1.0
 
 **PlayStation.**
 - **CD audio.** The drive has a table of contents and plays audio tracks: Play,
