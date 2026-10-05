@@ -28,8 +28,13 @@ from the card, the console switched by writing its image into the flash.
   exactly NTSC now.
 - **The Mega Drive's sprites:** a sprite attribute cache and an engine on every
   clock -- sprites late in a long list were not drawn.
+- **The Mega Drive's sound:** the Z80 gets the VDP's vertical-blank interrupt (it
+  was tied off), and a Z80 stopped by the 68000 in the middle of a read keeps its
+  own byte (the RAM had one port, switched to the 68000). Battletoads and other
+  games whose sound driver runs on the interrupt were silent.
 - **The N64's sound:** DAC ticks are no longer lost when a sample's line is slow to
-  come (SM64 played at 24.4 kHz of 32).
+  come. SM64 still supplies only about 24.6k of its 32k samples a second, because
+  the game itself runs below full speed; the sound breaks up until it does.
 - **The guide:** [docs/GUIDE.md](docs/GUIDE.md).
 
 ## 0.1.x -- unreleased changes after 0.1.0
