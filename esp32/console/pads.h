@@ -65,6 +65,8 @@ static uint32_t word(ControllerPtr c, uint8_t which) {
 }
 
 static uint32_t last[2] = { 0xFFFFFFFF, 0xFFFFFFFF }, lastStick = 0xFFFFFFFF;
+// the PS / Xbox / Home button: the menu (menu.h takes it; every console has it this way)
+static volatile bool menuPressed = false; static bool sysWas = false;
 static uint8_t which = 0; static bool console = false; static uint32_t lastLook = 0;
 
 // From loop(): Bluepad32 wants its update() called there.
@@ -77,6 +79,9 @@ static void poll() {
     if (console) which = fpga.busRead(CONSOLE) & 0xF;
     else last[0] = last[1] = lastStick = 0xFFFFFFFF;
   }
+  bool sys = slot[0] && slot[0]->isConnected() && slot[0]->miscSystem();
+  if (sys && !sysWas) menuPressed = true;
+  sysWas = sys;
   if (!console) return;
   for (int i = 0; i < 2; i++) {
     ControllerPtr c = slot[i];
@@ -100,5 +105,5 @@ static void begin() {
 }  // namespace pads
 
 #else
-namespace pads { static void begin() {} static void poll() {} }
+namespace pads { static volatile bool menuPressed = false; static void begin() {} static void poll() {} }
 #endif

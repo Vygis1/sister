@@ -1353,6 +1353,7 @@ void setup() {
   Serial.println("web server up");
   menu::begin();
   pads::begin();
+  menu::menuButton = []() { bool m = pads::menuPressed; pads::menuPressed = false; return m; };
 }
 
 // --- the same commands, over USB --------------------------------------------------

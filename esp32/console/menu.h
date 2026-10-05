@@ -172,6 +172,7 @@ static void scan() {
 static int level = 0;                       // 0 the consoles, 1 a console's games
 static int cur = 0;                         // the console whose games are shown
 static int sel = 0, top = 0, consSel = 0;
+static bool (*menuButton)() = nullptr;      // a Bluetooth pad's PS / Home button (pads.h sets it)
 static bool open_ = false, gameIn = false;
 static String note;                         // one line at the bottom: what just happened
 static const int LIST_TOP = 4, LIST_ROWS = 22;
@@ -615,6 +616,7 @@ static void task(void *) {
     static uint32_t lastCard = 0;
     if (cardIn && millis() - lastCard > 100) { lastCard = millis(); cardService(); }
     if (gameIn) eepService();
+    bool sysMenu = menuButton && menuButton();
     uint8_t p = pad();
     uint8_t edge = p & ~was;
     if (p != was) held = millis();
@@ -622,9 +624,10 @@ static void task(void *) {
     if (rep) held = millis() - 270;                  // ~12 a second once it repeats
     was = p;
     if (!open_) {
-      if ((p & (B_START | B_SEL)) == (B_START | B_SEL) && (edge & (B_START | B_SEL))) openMenu();
+      if (sysMenu || ((p & (B_START | B_SEL)) == (B_START | B_SEL) && (edge & (B_START | B_SEL)))) openMenu();
       continue;
     }
+    if (sysMenu && gameIn) { closeMenu(); continue; }
     int n = count();
     if ((edge | (rep ? p : 0)) & B_UP)   { if (sel > 0) sel--; draw(); }
     if ((edge | (rep ? p : 0)) & B_DOWN) { if (sel + 1 < n) sel++; draw(); }
