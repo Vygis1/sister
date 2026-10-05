@@ -38,6 +38,8 @@ done
 rm -rf "$OUT"
 mkdir -p "$OUT/cores" "$OUT/esp32"
 for c in $CORES; do cp "cores/$c.bin" "$OUT/cores/"; done
+# the shell as a bitstream too: the first programming writes it over JTAG (docs/GUIDE.md)
+[ -f cores/shell.bit ] && cp cores/shell.bit "$OUT/cores/" || echo "(no cores/shell.bit: the package cannot be first-programmed over JTAG)"
 
 # the ESP32 front door, as the images arduino-cli would flash
 if [ -x tools/arduino/arduino-cli.exe ] || command -v arduino-cli >/dev/null; then

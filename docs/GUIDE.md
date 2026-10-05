@@ -68,9 +68,9 @@ GPIO14 for PROGRAM_B, and an SD module on GPIO5 / 6 / 4 / 7 -- see
 The FPGA's flash holds **the shell** at address 0 -- it is what the board starts
 into, and what installs the consoles from the SD card. It is written once, over JTAG:
 
-    ./tools/vivado.sh flash shell.bit -mem n25q64-3.3v-spi-x1_x2_x4
+    ./tools/vivado.sh flash cores/shell.bit -mem n25q64-3.3v-spi-x1_x2_x4
     # or, with openFPGALoader:
-    openFPGALoader -c <your cable> --fpga-part xc7a100tfgg676 --write-flash shell.bin
+    openFPGALoader -c <your cable> --fpga-part xc7a100tfgg676 --write-flash cores/shell.bin
 
 Writing the shell this way erases the console slot as well; the menu installs a
 console again the first time you pick a game.
@@ -78,9 +78,9 @@ console again the first time you pick a game.
 The ESP32's firmware:
 
     # LilyGO T8 (Bluetooth pads):
-    esptool.py --chip esp32 write_flash 0x0 console-t8.merged.bin
+    esptool.py --chip esp32 write_flash 0x0 esp32/console-t8.bin
     # ESP32-S3:
-    esptool.py --chip esp32s3 write_flash 0x0 console-s3.merged.bin
+    esptool.py --chip esp32s3 write_flash 0x0 esp32/console-esp32s3.bin
 
 or build it yourself (Arduino CLI, the esp32-bluepad32 platform for the T8 -- the
 commands are in [esp32/README.md](../esp32/README.md)).
