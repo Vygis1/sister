@@ -59,7 +59,7 @@ module vr4300_fpu (
 
 	localparam [3:0] P_IDLE = 4'd0, P_DEC = 4'd1, P_ADD = 4'd2, P_MUL = 4'd3, P_DIV = 4'd4,
 	                 P_SQRT = 4'd5, P_NORM = 4'd6, P_ROUND = 4'd7, P_DENORM = 4'd8, P_TOINT = 4'd9,
-	                 P_FIN = 4'd10, P_DONE = 4'd11, P_UNP = 4'd12, P_ALIGN = 4'd13, P_TOINT2 = 4'd14;
+	                 P_FIN = 4'd10, P_DONE = 4'd11, P_UNP = 4'd12, P_ALIGN = 4'd13, P_TOINT2 = 4'd14, P_FAST = 4'd15;
 	reg  [3:0]  st;
 
 	// --- the operation, as taken ----------------------------------------------------
@@ -231,6 +231,47 @@ module vr4300_fpu (
 	wire        u_c_eq = both_zero || (u_sa == u_sb && mag_a == mag_b);
 	wire        u_c_lt = !both_zero && ((u_sa && !u_sb) || (!u_sa && !u_sb && mag_a < mag_b) || (u_sa && u_sb && mag_a > mag_b));
 
+	// --- the fast path ----------------------------------------------------------------------------
+	// ADD/SUB/MUL.S of two normal singles, rounding to nearest, no exception enabled: what
+	// SM64 spends its floating point on. A pipeline of its own -- add four clocks, multiply
+	// three, where the general path takes eight or nine and the CPU waits through all of
+	// them (22% of its clocks) -- that gives the operation back to the general path from
+	// P_UNP whenever the result would not be a normal number (overflow, underflow: what
+	// traps or is flushed is the general path's business). Bit for bit the same; checked by
+	// sim/tb_vr4300_fpu.v against tools/n64/n64fpu.py (n64fpuvec.py --fast).
+	wire        fast_in = fmt == 5'd16 && fn <= 6'h02 && rm == 2'd0 && en == 5'd0
+	                      && fs_v[30:23] != 8'h00 && fs_v[30:23] != 8'hFF && ft_v[30:23] != 8'h00 && ft_v[30:23] != 8'hFF;
+	reg  [2:0]  fx;                          // the step
+	// step 1 -- add: the operands ordered by magnitude, the smaller aligned; multiply: the product
+	wire        x_sa = q_a[31], x_sb = q_b[31] ^ (q_fn[1:0] == 2'd1);
+	wire [7:0]  x_ea = q_a[30:23], x_eb = q_b[30:23];
+	wire [23:0] x_ma = {1'b1, q_a[22:0]}, x_mb = {1'b1, q_b[22:0]};
+	wire        x_abig = {x_ea, x_ma} >= {x_eb, x_mb};
+	wire [7:0]  x_d = x_abig ? x_ea - x_eb : x_eb - x_ea;
+	wire [4:0]  x_dc = (x_d > 8'd31) ? 5'd31 : x_d[4:0];
+	wire [50:0] x_sh = {x_abig ? x_mb : x_ma, 27'd0} >> x_dc;
+	reg         f_s, f_sub, f_mul;
+	reg  [9:0]  f_e;                         // biased, with room for the multiply's range
+	reg  [27:0] f_big, f_small;              // {carry, hidden, 23, guard, round, sticky}
+	reg  [47:0] f_p;
+	// step 2 -- add: the sum; multiply: normalised
+	reg  [27:0] f_sum;
+	// step 3 (add): normalised -- {hidden, 23, guard, round, sticky}
+	function [4:0] lz27; input [26:0] v; integer i; reg f; begin
+		lz27 = 5'd27; f = 1'b0;
+		for (i = 26; i >= 0; i = i - 1) if (!f && v[i]) begin lz27 = 5'd26 - i[4:0]; f = 1'b1; end
+	end endfunction
+	wire [4:0]  f_lz = lz27(f_sum[26:0]);
+	reg  [26:0] f_n;
+	reg         f_zero;
+	// the last step: rounded to nearest, even; packed, or handed to the general path
+	wire        f_inc = f_n[2] && (f_n[1] || f_n[0] || f_n[3]);
+	wire [24:0] f_m = {1'b0, f_n[26:3]} + {24'd0, f_inc};
+	wire [9:0]  f_er = f_e + {9'd0, f_m[24]};
+	wire [22:0] f_frac = f_m[24] ? f_m[23:1] : f_m[22:0];
+	wire        f_ok = f_zero || (!f_er[9] && f_er != 10'd0 && f_er < 10'd255);
+	wire        f_inexact = !f_zero && (f_n[2] || f_n[1] || f_n[0]);
+
 	// --- the end: flags, cause, the trap ----------------------------------------------------------
 	// raise(bits): the cause for each; the flag for those not enabled; a trap if any is
 	task finish_with; input [4:0] r; input [63:0] v; input is32; input w; begin
@@ -251,7 +292,7 @@ module vr4300_fpu (
 			st <= P_IDLE; done <= 1'b0;
 		end else if (start) begin
 			q_fmt <= fmt; q_fn <= fn; q_a <= fs_v; q_b <= ft_v; q_rm <= rm; q_en <= en; q_fs <= fs_flush;
-			st <= P_UNP; done <= 1'b0;
+			st <= fast_in ? P_FAST : P_UNP; fx <= 3'd0; done <= 1'b0;
 			trap <= 1'b0; wr <= 1'b0; cmp_wr <= 1'b0; cause <= 6'd0; flags <= 5'd0; res32 <= 1'b0;
 		end else begin
 			case (st)
@@ -476,6 +517,46 @@ module vr4300_fpu (
 			P_DONE: begin
 				done <= 1'b1;
 				st <= P_IDLE;
+			end
+
+			// the fast path (see above), a step a clock
+			P_FAST: begin
+				fx <= fx + 3'd1;
+				case (fx)
+				3'd0: begin
+					f_mul <= q_fn[1:0] == 2'd2;
+					if (q_fn[1:0] == 2'd2) begin
+						f_s <= q_a[31] ^ q_b[31];
+						f_e <= {2'b00, x_ea} + {2'b00, x_eb} - 10'd127;
+						f_p <= x_ma * x_mb;
+					end else begin
+						f_s <= x_abig ? x_sa : x_sb;
+						f_sub <= x_sa ^ x_sb;
+						f_e <= {2'b00, x_abig ? x_ea : x_eb};
+						f_big <= {1'b0, x_abig ? x_ma : x_mb, 3'b000};
+						f_small <= {1'b0, x_sh[50:25], x_sh[24:0] != 25'd0};
+					end
+				end
+				3'd1: begin
+					if (f_mul) begin
+						// the product is in [2^46, 2^48): its top 24 bits, guard, round, sticky
+						f_zero <= 1'b0;
+						if (f_p[47]) begin f_n <= {f_p[47:22], f_p[21:0] != 22'd0}; f_e <= f_e + 10'd1; end
+						else f_n <= {f_p[46:21], f_p[20:0] != 21'd0};
+						fx <= 3'd3;                      // (to the rounding)
+					end else
+						f_sum <= f_sub ? f_big - f_small : f_big + f_small;
+				end
+				3'd2: begin
+					f_zero <= f_sum == 28'd0;
+					if (f_sum[27]) begin f_n <= {f_sum[27:2], f_sum[1] | f_sum[0]}; f_e <= f_e + 10'd1; end
+					else begin f_n <= f_sum[26:0] << f_lz; f_e <= f_e - {5'd0, f_lz}; end
+				end
+				default: begin
+					if (!f_ok) begin st <= P_UNP; fx <= 3'd0; end                    // the general path
+					else finish_with({4'd0, f_inexact}, {32'd0, f_zero ? 32'd0 : {f_s, f_er[7:0], f_frac}}, 1'b1, 1'b1);
+				end
+				endcase
 			end
 			default: ;
 			endcase

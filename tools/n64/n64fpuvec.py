@@ -118,11 +118,41 @@ def run(fmt, fn, a, b, rm, en, fs):
     return wr, trap, cause, flags, (res if wr else 0), cmp_wr, cmp_val
 
 
+def one_fast(rng):
+    """what the FPU's fast path takes (rtl/vr4300_fpu.v): ADD/SUB/MUL.S of two normal
+    singles, round to nearest, no exception enabled -- with the cases that go wrong:
+    cancellation, exponents 0..30 apart, products at the edges of the range"""
+    fn = rng.choice([0, 1, 2])
+    def norm(e):
+        m = rng.getrandbits(23)
+        if rng.random() < 0.25:
+            m &= ~((1 << rng.randint(0, 22)) - 1)
+        return (rng.getrandbits(1) << 31) | (e << 23) | m
+    k = rng.random()
+    if fn == 2:
+        if k < 0.2:                                   # near the overflow / underflow edges
+            ea = rng.randint(1, 254); eb = max(1, min(254, rng.choice([254, 253, 1, 2, 127]) + 127 - ea + rng.randint(-2, 2)))
+        else:
+            ea, eb = rng.randint(64, 190), rng.randint(64, 190)
+        a, b = norm(ea), norm(eb)
+    else:
+        ea = rng.randint(1, 254)
+        if k < 0.3:                                   # (nearly) equal magnitudes: cancellation
+            a = norm(ea); b = (a ^ (1 << 31) if fn == 0 else a) ^ rng.choice([0, 1, 3, 1 << rng.randint(0, 22)])
+        else:
+            d = rng.choice([0, 1, 2, 23, 24, 25, 26, 27, 30, rng.randint(0, 40)])
+            eb = min(254, max(1, ea + rng.choice([-d, d])))
+            a, b = norm(ea), norm(eb)
+    return 16, fn, a, b, 0, 0, rng.randint(0, 1)
+
+
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 20000
-    rng = random.Random(int(sys.argv[2]) if len(sys.argv) > 2 else 64)
+    fast = '--fast' in sys.argv
+    args = [x for x in sys.argv[1:] if not x.startswith('--')]
+    n = int(args[0]) if args else 20000
+    rng = random.Random(int(args[1]) if len(args) > 1 else 64)
     for _ in range(n):
-        fmt, fn, a, b, rm, en, fs = one(rng)
+        fmt, fn, a, b, rm, en, fs = one_fast(rng) if fast else one(rng)
         wr, trap, cause, flags, res, cw, cv = run(fmt, fn, a, b, rm, en, fs)
         ctl = (fs << 7) | (en << 2) | rm
         print('%02x %02x %016x %016x %02x %x %x %02x %02x %016x %x %x' %
