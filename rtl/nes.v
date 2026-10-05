@@ -247,7 +247,15 @@ module nes #(
 		nt_q <= vram_nt[nt_index];
 	end
 
-	always @* vram_din = (vram_addr < 14'h2000) ? chr_din : nt_q;
+	// Both memories answer a clock after they are addressed, so which one answered is
+	// the last clock's address too. A $2007 read drives the bus for one clock only:
+	// choosing on the current address picked whatever the rendering fetch was
+	// pointing at by then -- a name-table byte for half the reads of tile ROM, and
+	// Super Mario Bros., which copies its title screen out of tile ROM through
+	// $2007, drew it as garbage and left the garbage in its status bar.
+	reg vram_chr_q;
+	always @(posedge clk) vram_chr_q <= (vram_addr < 14'h2000);
+	always @* vram_din = vram_chr_q ? chr_din : nt_q;
 
 	// A cartridge with no tile ROM has RAM there instead, and the PPU writes it
 	// through the same $2007 port it uses for name tables.
