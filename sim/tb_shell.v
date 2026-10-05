@@ -203,7 +203,7 @@ module tb_shell;
 		frame_close;
 		$display("    PING -> %02x %02x %02x %02x", rx[0], rx[1], rx[2], rx[3]);
 		check(rx[0] == 8'hA5, "the first byte back is the signature");
-		check(rx[1] == 8'd1,  "then the protocol version");
+		check(rx[1] == 8'd2,  "then the protocol version (2: the menu)");
 		check(rx[2] == 8'd0,  "and core 0, which is the shell");
 
 		// --- put a page in the core slot and read it back ----------------------
@@ -301,6 +301,26 @@ module tb_shell;
 		erase_sector(24'h600000);
 		check(flash.mem[24'h200000] === 8'h10,
 		      "an erase past the end of the slot is refused");
+
+		// --- the menu's door: esp_bus on the same wires --------------------------
+		$display(" the menu's bus:");
+		frame_open; send(CMD_STATUS); send(8'h00); send(8'h00); send(8'h00); frame_close;
+		check(rx[0] === 8'hA5 && rx[1] === 8'd2 && rx[2] === 8'd0, "status: the shell, version 2 (it can draw the menu)");
+		// write pad 1 (0x00080008), then read it back
+		frame_open; send(8'h40); send(8'h00); send(8'h08); send(8'h00); send(8'h08);
+		send(8'h34); send(8'h12); send(8'h00); send(8'h00); frame_close;
+		frame_open; send(8'h41); send(8'h00); send(8'h08); send(8'h00); send(8'h08);
+		repeat (8) send(8'h00); frame_close;
+		check({rx[12], rx[11], rx[10], rx[9]} === 32'h0000_1234, "the pad register reads back what was written");
+		// a cell of the menu's text (0x00072000: row 0, column 0), and the OSD's signature
+		frame_open; send(8'h40); send(8'h00); send(8'h07); send(8'h20); send(8'h00);
+		send(8'h41); send(8'h00); send(8'h00); send(8'h00); frame_close;
+		repeat (20) @(posedge clk);
+		check(dut.u_screen.u_osd.cells[0] === 12'h041, "the menu's write lands in the OSD's cells");
+		check(dut.u_screen.ext_own === 1'b1, "and the menu has the screen");
+		frame_open; send(8'h41); send(8'h00); send(8'h07); send(8'h00); send(8'h00);
+		repeat (8) send(8'h00); frame_close;
+		check({rx[12], rx[11], rx[10], rx[9]} === 32'h4F53_4431, "the OSD's page reads OSD1");
 
 		// --- boot ---------------------------------------------------------------
 		// No reply is possible: on real silicon the chip stops being the thing

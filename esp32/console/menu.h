@@ -6,7 +6,8 @@
 // Included by console.ino after everything it uses (fpga, the card, installFrom,
 // job, prefs).
 //
-//   START + SELECT together   open the menu (it is open at power-up)
+//   START + SELECT together   open the menu (it is open at power-up, on the shell's
+//                             own picture when the shell can draw it: version 2)
 //   UP / DOWN                 move; LEFT / RIGHT a page at a time
 //   A or START                open a console's games / load the game
 //   B                         back to the consoles / back to the game (the menu
@@ -56,6 +57,10 @@ static int machineOfCore(uint8_t id) {
 }
 
 struct Game { String path, name; int8_t m; uint32_t size; };
+
+// The shell draws the menu itself from version 2 (osd.v and the pad register on its own
+// bus): the menu runs there with no console booted, and installs one when a game wants it.
+static bool shellMenu(const Status &s) { return s.alive && s.core == 0 && s.version >= 2; }
 
 // --- the screen: 40 x 30 cells ----------------------------------------------------
 // osd.v draws them: a cell is [6:0] the character, [8] the selection bar behind it,
@@ -209,7 +214,7 @@ static void scan() {
   }
 }
 
-static int level = 0;                       // 0 the consoles, 1 a console's games
+static int level = 0;                       // 0 the consoles, 1 a console's games, 2 the settings
 static int cur = 0;                         // the console whose games are shown
 static int sel = 0, top = 0, consSel = 0;
 static bool (*menuButton)() = nullptr;      // a Bluetooth pad's PS / Home button (pads.h sets it)
@@ -217,7 +222,10 @@ static bool open_ = false, gameIn = false;
 static String note;                         // one line under the list: what just happened
 static const int LIST_TOP = 5, LIST_ROWS = 20;   // inside the frame (rows 4-25)
 
-static int count() { return level == 0 ? (int)consoles.size() : (int)lists[cur].size(); }
+// (the consoles, and Settings under them)
+static const int NSET = 2;                  // the settings' rows: at power-up, back
+static int count() { return level == 0 ? (int)consoles.size() + 1 : level == 2 ? NSET : (int)lists[cur].size(); }
+static bool bootLast() { prefs.begin("menu", true); bool v = prefs.getBool("bootlast", false); prefs.end(); return v; }
 // how many fit (a row free under the frame's title and above its bottom)
 static int pageRows() { return level == 0 ? (LIST_ROWS - 2) / 2 + 1 : LIST_ROWS - 2; }
 
@@ -228,10 +236,22 @@ static void draw() {
   header(cm >= 0 ? String(MACHINES[cm].name) : String(""));
   int n = count();
   if (level == 0) frame(1, 4, 38, 25, "CONSOLES");
+  else if (level == 2) frame(1, 4, 38, 25, "SETTINGS");
   else frame(1, 4, 38, 25, String(MACHINES[cur].name) + "  " + n + (n == 1 ? " game" : " games"));
   if (level == 0 && consoles.empty()) {
-    centre(13, haveCard ? "no games on the card" : "no SD card", YELLOW);
-    centre(15, "roms/nes  sms  md  n64   discs", GREY);
+    centre(11, haveCard ? "no games on the card" : "no SD card", YELLOW);
+    centre(13, "roms/nes  sms  md  n64   discs", GREY);
+  }
+  if (level == 2) {
+    // what the board is, under the settings
+    put(3, 17, "board", GREY);
+    right(36, 17, st.core == 0 ? String("the shell, protocol ") + st.version
+                               : String(cm >= 0 ? MACHINES[cm].name : "a core") + ", protocol " + st.version, GREY);
+    put(3, 19, "SD card", GREY);
+    right(36, 19, haveCard ? String((uint32_t)(SD.totalBytes() >> 30)) + " GB, " + String((uint32_t)((SD.totalBytes() - SD.usedBytes()) >> 30)) + " GB free"
+                           : String("none"), GREY);
+    put(3, 21, "Wi-Fi", GREY);
+    right(36, 21, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("not connected"), GREY);
   }
   // (the consoles a line apart -- there are few -- the games one under another)
   int step = level == 0 ? 2 : 1, rows = pageRows();
@@ -242,10 +262,17 @@ static void draw() {
     bool here = i == sel;
     put(2, row, "", WHITE, here, 36);                                  // the bar, frame to frame
     if (here) putc_(3, row, G_CURSOR, YELLOW, true);
-    if (level == 0) {
+    if (level == 0 && i == (int)consoles.size()) {
+      put(5, row, "Settings", WHITE, here);
+    } else if (level == 0) {
       int m = consoles[i];
       put(5, row, MACHINES[m].name, m == cm ? GREEN : WHITE, here);
       right(36, row, String(lists[m].size()) + (lists[m].size() == 1 ? " game" : " games"), GREY, here);
+    } else if (level == 2) {
+      if (i == 0) {
+        put(5, row, "At power-up", WHITE, here);
+        right(36, row, bootLast() ? "the last game" : "this menu", YELLOW, here);
+      } else put(5, row, "Back", WHITE, here);
     } else {
       put(5, row, fit(shown(lists[cur][i].name), 31), WHITE, here);
     }
@@ -255,6 +282,7 @@ static void draw() {
   if (level == 1 && n > rows) right(36, 25, " " + String(sel + 1) + "/" + n + " ", GREY);
   put(2, 26, fit(note, 36), YELLOW);
   footer(level == 0 ? (gameIn ? "A open    B back to the game" : "A open")
+       : level == 2 ? "A change    B back"
                     : "A play     B back     L/R page");
   show();
 }
@@ -626,9 +654,20 @@ static String switchTo(int m) {
 }
 
 static void pick() {
+  if (level == 0 && sel == (int)consoles.size()) {     // Settings
+    consSel = sel; level = 2; sel = 0; top = 0; note = "";
+    draw();
+    return;
+  }
   if (level == 0) {                         // a console: its games
     if (consoles.empty()) return;
     consSel = sel; cur = consoles[sel]; level = 1; sel = 0; top = 0; note = "";
+    draw();
+    return;
+  }
+  if (level == 2) {
+    if (sel == 0) { bool v = !bootLast(); prefs.begin("menu", false); prefs.putBool("bootlast", v); prefs.end(); }
+    else { level = 0; sel = consSel; top = 0; }
     draw();
     return;
   }
@@ -647,6 +686,7 @@ static void pick() {
   note = "";
   gameIn = true; open_ = false;
   osd(0);
+  prefs.begin("menu", false); prefs.putString("last", g.path); prefs.end();
   Serial.println("menu: loaded " + g.path + (loadFixes ? " (" + String(loadFixes) + " chunk(s) written again)" : ""));
 }
 
@@ -673,10 +713,19 @@ static void task(void *) {
     if (millis() - lastCheck > 1000 || !up) {
       lastCheck = millis();
       Status s = fpga.status();
-      bool console = s.alive && machineOfCore(s.core) >= 0;
+      bool console = s.alive && (machineOfCore(s.core) >= 0 || shellMenu(s));
       if (console && !up) {                          // it came up (power-up, or a core booted by hand)
         up = true;
         if (!gameIn) { open_ = true; draw(); osd(1); }
+        // (at power-up, in the shell: the last game, if the settings say so)
+        static bool first = true;
+        if (first && s.core == 0 && bootLast()) {
+          prefs.begin("menu", true); String last = prefs.getString("last", ""); prefs.end();
+          for (int m = 0; m < NMACH && last.length(); m++)
+            for (int i = 0; i < (int)lists[m].size(); i++)
+              if (lists[m][i].path == last) { level = 1; cur = m; sel = i; pick(); m = NMACH; break; }
+        }
+        first = false;
       }
       if (!console) { up = false; continue; }
     }
@@ -703,7 +752,7 @@ static void task(void *) {
     if (edge & B_RIGHT) { sel = max(0, min(n - 1, sel + pageRows())); draw(); }
     if ((edge & B_A) || ((edge & B_START) && !(p & B_SEL))) pick();
     if (edge & B_B) {
-      if (level == 1) { level = 0; sel = consSel; top = 0; note = ""; draw(); }
+      if (level == 1 || level == 2) { level = 0; sel = consSel; top = 0; note = ""; draw(); }
       else if (gameIn) closeMenu();
     }
   }
@@ -714,7 +763,7 @@ static void begin() {
   // The board starts in the shell (power-up, or this chip's own reset pulsing
   // PROGRAM_B): start whatever core the slot holds, so the menu has a screen.
   Status s0 = fpga.status();
-  if (s0.alive && s0.core == 0 && !s0.busy) {
+  if (s0.alive && s0.core == 0 && !s0.busy && !shellMenu(s0)) {
     for (int tries = 0; tries < 2; tries++) {
       fpga.boot(true);
       uint32_t t0 = millis();

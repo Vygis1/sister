@@ -10,6 +10,11 @@
 //   write  at offset o: written to o + 256
 //   read   at 2 MB + o: checked to o + 256 (reads are absolute; the slot is at 2 MB)
 //   boot:               starting the console
+//
+// The ESP32's menu draws on the same cells (ext_*, from the shell's register bus, as
+// over a console's picture): its first write takes the screen, and the writer here
+// stops; a flash operation (the menu installing a console) gives it back, so the
+// install shows its bar.
 //////////////////////////////////////////////////////////////////////////////////
 
 `default_nettype none
@@ -22,6 +27,11 @@ module shell_screen (
 	input  wire [1:0]  op,                // 1 erase, 2 write, 3 read
 	input  wire [22:0] offset,
 	input  wire        boot_go,
+	// the ESP32's menu: osd.v's bus page (a write a clock), and what it reads
+	input  wire        ext_we,
+	input  wire [15:0] ext_off,
+	input  wire [31:0] ext_wdata,
+	output wire [31:0] ext_rdata,
 	// the picture
 	input  wire        pclk,
 	input  wire [9:0]  x,
@@ -88,6 +98,7 @@ module shell_screen (
 	reg         ctrl_done;
 	wire [10:0] cidx = {row, 5'd0} + {2'd0, row, 3'd0} + {5'd0, col};
 	reg  [7:0]  c; reg [1:0] colour; reg hl, bar;
+	reg         ext_own;                  // the ESP32 has the screen
 	wire        bar_on = phase == 3'd2;
 	wire [28:0] pos30 = pos * 5'd30;
 	wire        in_box  = row >= 5'd10 && row <= 5'd18 && col >= 6'd2 && col <= 6'd37;
@@ -120,7 +131,10 @@ module shell_screen (
 	end
 	always @(posedge clk) begin
 		we <= 1'b0;
-		if (rst) begin row <= 5'd0; col <= 6'd0; acc <= 29'd0; wait_n <= 20'd0; ctrl_done <= 1'b0; end
+		if (rst) begin row <= 5'd0; col <= 6'd0; acc <= 29'd0; wait_n <= 20'd0; ctrl_done <= 1'b0; ext_own <= 1'b0; end
+		else if (op_start || boot_go) begin ext_own <= 1'b0; ctrl_done <= 1'b0; end   // (shown again)
+		else if (ext_we) ext_own <= 1'b1;
+		else if (ext_own) ;
 		else if (!ctrl_done) begin we <= 1'b1; woff <= 16'h0004; wdata <= 32'd1; ctrl_done <= 1'b1; end
 		else if (wait_n != 20'd0) wait_n <= wait_n - 20'd1;
 		else begin
@@ -136,7 +150,12 @@ module shell_screen (
 		end
 	end
 
-	osd u_osd (.clk(clk), .rst(rst), .we(we), .off(woff), .wdata(wdata), .rdata(), .err(),
+	// (the ESP32's write wins a clock it meets the writer's: the writer stops after it)
+	wire        o_we = ext_we || (we && !ext_own);
+	// (the bus's offset but for the writer's own writes: the ESP32's reads see their address)
+	wire [15:0] o_off = (we && !ext_own && !ext_we) ? woff : ext_off;
+	wire [31:0] o_wd  = ext_we ? ext_wdata : wdata;
+	osd u_osd (.clk(clk), .rst(rst), .we(o_we), .off(o_off), .wdata(o_wd), .rdata(ext_rdata), .err(),
 		.pclk(pclk), .x(x), .y(y), .rgb_in(24'd0), .rgb(rgb));
 endmodule
 

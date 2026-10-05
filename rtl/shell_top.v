@@ -136,7 +136,8 @@ module shell_top (
 		else                      nrst_cnt <= nrst_cnt + 16'd1;
 	end
 
-	localparam [7:0] VERSION = 8'd1;
+	// 2: the menu can draw (osd.v on the ESP32's register bus, the pad register)
+	localparam [7:0] VERSION = 8'd2;
 	localparam [7:0] CORE_ID = 8'd0;          // 0 is the shell itself
 
 	// --- the flash engine, shared by both doors ------------------------------
@@ -170,9 +171,10 @@ module shell_top (
 	assign flash_hold_n = 1'b1;
 
 	// --- door one: the PC ----------------------------------------------------
-	// (net_core on the module's clock, n_*; through net_bridge to shell_regs, bus_*)
-	wire [31:0] bus_addr, bus_wdata, bus_rdata, n_addr, n_wdata, n_rdata;
-	wire        bus_we, bus_re, bus_ack, n_we, n_re, n_ack;
+	// (net_core on the module's clock, n_*; through net_bridge (b_*) and, beside the
+	// ESP32's esp_bus (e_*), through bus_arb onto the one register bus, bus_*)
+	wire [31:0] bus_addr, bus_wdata, bus_rdata, n_addr, n_wdata, n_rdata, b_addr, b_wdata, e_addr, e_wdata;
+	wire        bus_we, bus_re, bus_ack, n_we, n_re, n_ack, b_we, b_re, b_ack, e_we, e_re, e_ack;
 	wire [1:0]  bus_err, n_err;
 	wire        rx_frame, tx_frame;
 
@@ -194,8 +196,41 @@ module shell_top (
 		.n_addr(n_addr), .n_wdata(n_wdata), .n_we(n_we), .n_re(n_re),
 		.n_rdata(n_rdata), .n_err(n_err), .n_ack(n_ack),
 		.c_clk(clk), .c_rst(rst),
-		.c_addr(bus_addr), .c_wdata(bus_wdata), .c_we(bus_we), .c_re(bus_re),
-		.c_rdata(bus_rdata), .c_err(bus_err), .c_ack(bus_ack));
+		.c_addr(b_addr), .c_wdata(b_wdata), .c_we(b_we), .c_re(b_re),
+		.c_rdata(bus_rdata), .c_err(bus_err), .c_ack(b_ack));
+	bus_arb u_arb (.clk(clk), .rst(rst),
+		.a_addr(b_addr), .a_wdata(b_wdata), .a_we(b_we), .a_re(b_re), .a_ack(b_ack),
+		.b_addr(e_addr), .b_wdata(e_wdata), .b_we(e_we), .b_re(e_re), .b_ack(e_ack),
+		.bus_addr(bus_addr), .bus_wdata(bus_wdata), .bus_we(bus_we), .bus_re(bus_re), .bus_ack(bus_ack));
+
+	// --- the menu's pages: osd.v's (0x0007, in shell_screen) and the pad's (0x0008, as a
+	// console's NES page: 0x08 pad 1, 0x0C pad 2, 0x20 the console -- 0, so the pad is
+	// in the NES's order). Everything else is shell_regs'. Answered the clock after.
+	wire        pg_osd = bus_addr[31:16] == 16'h0007;
+	wire        pg_pad = bus_addr[31:16] == 16'h0008;
+	wire        pg_ui  = pg_osd || pg_pad;
+	reg         ui_ack;
+	reg  [31:0] ui_rdata;
+	reg  [15:0] joy1, joy2;
+	wire [31:0] osd_rdata;
+	wire        osd_we = bus_we && pg_osd && !ui_ack;
+	always @(posedge clk) begin
+		ui_ack <= !rst && (bus_we || bus_re) && pg_ui && !ui_ack;
+		if (rst) begin joy1 <= 16'd0; joy2 <= 16'd0; end
+		else if (bus_we && pg_pad && !ui_ack) begin
+			if (bus_addr[15:0] == 16'h0008) joy1 <= bus_wdata[15:0];
+			if (bus_addr[15:0] == 16'h000C) joy2 <= bus_wdata[15:0];
+		end
+		ui_rdata <= pg_osd ? osd_rdata
+		          : (bus_addr[15:0] == 16'h0008) ? {16'd0, joy1}
+		          : (bus_addr[15:0] == 16'h000C) ? {16'd0, joy2} : 32'd0;
+	end
+	wire [31:0] sr_rdata;
+	wire        sr_ack;
+	wire [1:0]  sr_err;
+	assign bus_rdata = pg_ui ? ui_rdata : sr_rdata;
+	assign bus_ack   = pg_ui ? ui_ack : sr_ack;
+	assign bus_err   = pg_ui ? 2'd0 : sr_err;
 
 	wire [1:0]  rg_op;
 	wire [22:0] rg_offset;
@@ -210,8 +245,8 @@ module shell_top (
 	shell_regs u_regs (
 		.clk(clk), .rst(rst),
 		.bus_addr(bus_addr), .bus_wdata(bus_wdata),
-		.bus_we(bus_we), .bus_re(bus_re),
-		.bus_rdata(bus_rdata), .bus_ack(bus_ack), .bus_err(bus_err),
+		.bus_we(bus_we && !pg_ui), .bus_re(bus_re && !pg_ui),
+		.bus_rdata(sr_rdata), .bus_ack(sr_ack), .bus_err(sr_err),
 		.op(rg_op), .offset(rg_offset),
 		.start(rg_start), .busy(busy), .miso_level(miso_level),
 		.sck_edges(sck_edges), .cs_falls(cs_falls),
@@ -263,10 +298,20 @@ module shell_top (
 	wire [23:0] rx_index;
 	reg  [7:0]  tx_byte;
 
+	// (esp_bus beside it, for the menu: the bus commands 0x40-0x42 are its, the rest this
+	// door's, as the console images share the wires with the PlayStation's disc feed)
+	wire        sh_miso, eb_miso;
+	wire [7:0]  e_cmd;
+	esp_bus #(.VERSION(VERSION), .CORE_ID(CORE_ID)) u_ebus (
+		.clk(clk), .rst(rst),
+		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(eb_miso), .spi_cs_n(esp_cs_n),
+		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
+		.bus_rdata(bus_rdata), .bus_ack(e_ack), .cmd(e_cmd));
+	assign esp_miso = (e_cmd[7:4] == 4'h4) ? eb_miso : sh_miso;
 	esp_link u_link (
 		.clk(clk), .rst(rst),
 		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi),
-		.spi_miso(esp_miso), .spi_cs_n(esp_cs_n),
+		.spi_miso(sh_miso), .spi_cs_n(esp_cs_n),
 		.frame_start(frame_start), .frame_end(frame_end),
 		.rx_byte(rx_byte), .rx_stb(rx_stb), .rx_index(rx_index),
 		.tx_byte(tx_byte)
@@ -509,6 +554,7 @@ module shell_top (
 		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
 	shell_screen u_screen (.clk(clk), .rst(rst),
 		.op_start(fl_start), .op(fl_op), .offset(fl_offset), .boot_go(boot_go),
+		.ext_we(osd_we), .ext_off(bus_addr[15:0]), .ext_wdata(bus_wdata), .ext_rdata(osd_rdata),
 		.pclk(hpclk), .x(hx), .y(hy), .rgb(hrgb));
 
 	// --- lights ----------------------------------------------------------------
