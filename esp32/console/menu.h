@@ -690,6 +690,7 @@ static void task(void *) {
     bool rep = (p & (B_UP | B_DOWN)) && millis() - held > 350;
     if (rep) held = millis() - 270;                  // ~12 a second once it repeats
     was = p;
+    if (edge) Serial.printf("menu: buttons %02x (new %02x), %s, level %d, item %d\n", p, edge, open_ ? "open" : "closed", level, sel);
     if (!open_) {
       if (sysMenu || ((p & (B_START | B_SEL)) == (B_START | B_SEL) && (edge & (B_START | B_SEL)))) openMenu();
       continue;
