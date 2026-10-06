@@ -21,7 +21,7 @@ module tb_snes_dsp;
 		if (ram_we) ram[ram_a] <= ram_wd;
 	end
 
-	integer fd, r, k, ns, bad, shown, cyc;
+	integer fd, r, k, ns, bad, shown, cyc, maxcyc;
 	reg [8*8-1:0] tag;
 	reg [31:0] a, d, wl, wr_, wx;
 	reg [7:0] wenv [0:7], wout [0:7];
@@ -32,7 +32,7 @@ module tb_snes_dsp;
 		fd = $fopen("../../build/dsp.vec", "r");
 		if (fd == 0) begin $display("tb_snes_dsp: FAIL no build/dsp.vec"); $finish; end
 		repeat (4) @(posedge clk); rst = 0; @(posedge clk);
-		ns = 0; bad = 0; shown = 0;
+		ns = 0; bad = 0; shown = 0; maxcyc = 0;
 		while (!$feof(fd)) begin
 			r = $fscanf(fd, "%s", tag);
 			if (r != 1) begin end
@@ -49,7 +49,11 @@ module tb_snes_dsp;
 				cyc = 0;
 				while (!out_stb && cyc < 5000) begin @(posedge clk); cyc = cyc + 1; end
 				if (cyc >= 5000) begin $display("tb_snes_dsp: FAIL sample %0d never came", ns); $finish; end
-				repeat (12) @(posedge clk);         // (the echo's write-back; registers settled)
+				// (the echo's write-back, until the work is done: the sample's whole time, which must
+				// fit the 1562 clocks a 32 kHz sample has at 50 MHz)
+				while (dut.ws != 5'd0 && cyc < 5000) begin @(posedge clk); cyc = cyc + 1; end
+				if (cyc > maxcyc) maxcyc = cyc;
+				repeat (2) @(posedge clk);
 				mism = (out_l !== wl[15:0]) || (out_r !== wr_[15:0]) || (dut.R[7'h7C] !== wx[7:0]);
 				for (k = 0; k < 8; k = k + 1) if (dut.R[{k[2:0], 4'h8}] !== wenv[k] || dut.R[{k[2:0], 4'h9}] !== wout[k]) mism = 1;
 				if (mism) begin
@@ -64,8 +68,8 @@ module tb_snes_dsp;
 				ns = ns + 1;
 			end
 		end
-		$display("tb_snes_dsp: %0d samples, %0d differ", ns, bad);
-		if (bad == 0 && ns > 0) $display("tb_snes_dsp: all checks passed"); else $display("tb_snes_dsp: FAIL");
+		$display("tb_snes_dsp: %0d samples, %0d differ; the longest took %0d clocks (of 1562 at 50 MHz)", ns, bad, maxcyc);
+		if (bad == 0 && ns > 0 && maxcyc < 1500) $display("tb_snes_dsp: all checks passed"); else $display("tb_snes_dsp: FAIL");
 		$finish;
 	end
 endmodule
