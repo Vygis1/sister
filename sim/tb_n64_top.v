@@ -207,7 +207,7 @@ module tb_n64_top;
 		end
 		if (stopexc) begin
 			if (dut.tr_valid) begin ring[ring_w] <= {dut.tr_pc, 3'd0, dut.tr_we, 7'd0, dut.tr_rd, 16'd0, dut.tr_val}; ring_w <= ring_w + 9'd1; end
-			if (dut.tr_exc && dut.tr_code != 5'd0) begin
+			if (dut.tr_exc && dut.tr_code >= 5'd1 && dut.tr_code <= 5'd7) begin   // (TLB, address and bus errors: not CpU, which libultra takes on purpose)
 				$fclose(tf); tf = $fopen("../../sim/n64/sys_exc.trace", "w");
 				for (rk = 0; rk < 512; rk = rk + 1) begin
 					re = ring[(ring_w + rk) & 9'h1FF];

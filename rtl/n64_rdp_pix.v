@@ -306,18 +306,18 @@ module n64_rdp_pix (
 	// =====================================================================================
 	// D: the coordinates; the LOD; the tile (the second texel's in a second slot)
 	// =====================================================================================
-	reg          e_occ, e_val, e_ph, e_end, e_slot;
-	reg  [12:0]  e_x;  reg [3:0] e_cc;  reg [31:0] e_shade;  reg [17:0] e_pz;
-	reg  signed [16:0] e_s, e_t;
-	reg  [2:0]   e_tile;
-	reg          e_bil;
-	reg  [8:0]   e_lf;
+	// D -> L: the coordinates, and the largest of the LOD's four deltas, registered before the
+	// rest of the LOD and the tile (the deltas, the max tree, the priority encoder and the tile's
+	// adds in one clock were the RDP's second-longest path at 62.5 MHz)
+	reg          l_occ, l_val, l_ph, l_end, l_slot, l_povf;
+	reg  [12:0]  l_x;  reg [3:0] l_cc;  reg [31:0] l_shade;  reg [17:0] l_pz;
+	reg  signed [16:0] l_s, l_t;
+	reg  [16:0]  l_mx;
 	always @(posedge clk) begin
-		if (rst) e_occ <= 1'b0;
-		else if (ce) begin : lod
+		if (rst) l_occ <= 1'b0;
+		else if (ce) begin : lod1
 			reg signed [16:0] ss, tt, sxd, txd, syd, tyd; reg povf;
-			reg signed [17:0] d0, d1, d2, d3; reg [16:0] a0, a1, a2, a3, m01, m23, mx; reg [4:0] mb; reg dist, mag;
-			reg [8:0] lf; reg [2:0] toff; reg [2:0] maxl, tl0, tl1; reg [11:0] lf12;
+			reg signed [17:0] d0, d1, d2, d3; reg [16:0] a0, a1, a2, a3, m01, m23;
 			if (persp_en) begin ss = p0s; tt = p0t; sxd = p1s; txd = p1t; syd = p2s; tyd = p2t; povf = p0o | p1o | p2o; end
 			else begin
 				ss = {c_ps[1][15], c_ps[1]}; tt = {c_pt[1][15], c_pt[1]};
@@ -328,18 +328,37 @@ module n64_rdp_pix (
 			// (the divide's overflow counts only where the LOD is worked out: as the
 			// state machine had it, the LOD's neighbours were divided only then)
 			if (!uses_lod) povf = 1'b0;
+			// compute_lod: the largest of the four deltas, as a tree (two compares deep)
+			d0 = sxd - ss; d1 = txd - tt; d2 = syd - ss; d3 = tyd - tt;
+			a0 = d0[17] ? ~d0[16:0] : d0[16:0]; a1 = d1[17] ? ~d1[16:0] : d1[16:0];
+			a2 = d2[17] ? ~d2[16:0] : d2[16:0]; a3 = d3[17] ? ~d3[16:0] : d3[16:0];
+			m01 = (a1 > a0) ? a1 : a0; m23 = (a3 > a2) ? a3 : a2;
+			l_mx <= (m23 > m01) ? m23 : m01;
+			l_povf <= povf;
+			l_occ <= c_occ[1]; l_val <= c_val[1]; l_ph <= c_ph[1]; l_end <= c_end[1]; l_slot <= c_slot[1];
+			l_x <= c_x[1]; l_cc <= c_cc[1]; l_shade <= c_shade[1]; l_pz <= c_pz[1];
+			l_s <= ss; l_t <= tt;
+		end
+	end
+	// =====================================================================================
+	// L: the LOD; the tile (the second texel's in a second slot)
+	// =====================================================================================
+	reg          e_occ, e_val, e_ph, e_end, e_slot;
+	reg  [12:0]  e_x;  reg [3:0] e_cc;  reg [31:0] e_shade;  reg [17:0] e_pz;
+	reg  signed [16:0] e_s, e_t;
+	reg  [2:0]   e_tile;
+	reg          e_bil;
+	reg  [8:0]   e_lf;
+	always @(posedge clk) begin
+		if (rst) e_occ <= 1'b0;
+		else if (ce) begin : lod
+			reg [16:0] mx; reg [4:0] mb; reg dist, mag;
+			reg [8:0] lf; reg [2:0] toff; reg [2:0] maxl, tl0, tl1; reg [11:0] lf12;
+			mx = l_mx;
 			tl0 = tile[2:0]; tl1 = tile[2:0] + 3'd1; lf = 9'd0;
 			if (uses_lod) begin
-				// compute_lod
-				d0 = sxd - ss; d1 = txd - tt; d2 = syd - ss; d3 = tyd - tt;
-				a0 = d0[17] ? ~d0[16:0] : d0[16:0]; a1 = d1[17] ? ~d1[16:0] : d1[16:0];
-				a2 = d2[17] ? ~d2[16:0] : d2[16:0]; a3 = d3[17] ? ~d3[16:0] : d3[16:0];
-				// (the largest of the four as a tree, two compares deep: in a chain it was three,
-				// on the RDP's longest path at 62.5 MHz)
-				m01 = (a1 > a0) ? a1 : a0; m23 = (a3 > a2) ? a3 : a2;
-				mx = (m23 > m01) ? m23 : m01;
 				maxl = tile[5:3]; toff = 3'd0; mag = 1'b0; dist = 1'b0;
-				if (povf) begin dist = 1'b1; lf = 9'h0FF; end
+				if (l_povf) begin dist = 1'b1; lf = 9'h0FF; end
 				else if (mx >= 17'h4000) begin dist = 1'b1; lf = 9'h0FF; toff = maxl; end
 				else if (mx < 17'd32) begin
 					dist = maxl == 3'd0; mag = 1'b1;
@@ -365,11 +384,11 @@ module n64_rdp_pix (
 					end
 				end
 			end
-			e_occ <= c_occ[1]; e_val <= c_val[1]; e_ph <= c_ph[1]; e_end <= c_end[1]; e_slot <= c_slot[1];
-			e_x <= c_x[1]; e_cc <= c_cc[1]; e_shade <= c_shade[1]; e_pz <= c_pz[1];
-			e_s <= ss; e_t <= tt; e_lf <= lf;
-			e_tile <= c_ph[1] ? tl1 : tl0;
-			e_bil <= c_ph[1] ? bilerp1 : bilerp0;
+			e_occ <= l_occ; e_val <= l_val; e_ph <= l_ph; e_end <= l_end; e_slot <= l_slot;
+			e_x <= l_x; e_cc <= l_cc; e_shade <= l_shade; e_pz <= l_pz;
+			e_s <= l_s; e_t <= l_t; e_lf <= lf;
+			e_tile <= l_ph ? tl1 : tl0;
+			e_bil <= l_ph ? bilerp1 : bilerp0;
 		end
 	end
 
@@ -571,6 +590,47 @@ module n64_rdp_pix (
 	wire [15:0]  zw = {sz_q[8 * r_zbi +: 8], sz_q[8 * (r_zbi + 4'd1) +: 8]};
 	wire [13:0]  mem_depth = zw[15:2];
 	wire [3:0]   mem_dz = {zw[1:0], 2'b11};                    // (the ninth bits as 3)
+	// R -> K: what the memory holds, worked out and registered before the depth test (the span
+	// buffer's block RAM through the decompression, the delta's priority encoder and shift, and
+	// the compares in one clock were the RDP's longest path at 62.5 MHz)
+	reg          k_occ, k_val, k_ovf, k_coplanar, k_maxz;
+	reg  [3:0]   k_cc;  reg [17:0] k_pz;  reg [7:0] k_comb [0:3];  reg [7:0] k_sha;  reg [2:0] k_adith, k_dm;
+	reg  [1:0]   k_y;  reg [12:0] k_x;
+	reg  [19:0]  k_cline, k_zline;  reg [3:0] k_pb, k_zbi;
+	reg  [23:0]  k_mem;  reg [7:0] k_mema;  reg [2:0] k_mcov;
+	reg  [17:0]  k_mz;  reg [15:0] k_cdz;  reg [19:0] k_cdz8;  reg [2:0] k_bsh_a, k_bsh_b;
+	always @(posedge clk) begin
+		if (rst) k_occ <= 1'b0;
+		else if (ce) begin : kd
+			reg [16:0] mdz; reg [15:0] cdz; reg [3:0] prec; reg coplanar;
+			k_occ <= r_occ; k_val <= r_val; k_cc <= r_cc; k_pz <= r_pz;
+			for (i = 0; i < 4; i = i + 1) k_comb[i] <= r_comb[i];
+			k_sha <= r_sha; k_adith <= r_adith; k_dm <= r_dm; k_y <= r_y; k_x <= r_x;
+			k_cline <= r_cline; k_zline <= r_zline; k_pb <= r_pb; k_zbi <= r_zbi;
+			k_mem <= {mem_r, mem_g, mem_b}; k_mema <= mem_a; k_mcov <= mem_cov;
+			k_ovf <= ({1'b0, r_cc} + {2'b00, mem_cov}) >= 5'd8;
+			k_mz <= z_decomp(mem_depth);
+			k_maxz <= z_decomp(mem_depth) == 18'h3FFFF;
+			mdz = 17'd1 << mem_dz;
+			prec = {1'b0, mem_depth[13:11]};
+			coplanar = 1'b0;
+			if (prec < 4'd3) begin
+				if (mdz != 17'h8000) mdz = ((mdz << 1) > (17'd16 >> prec)) ? (mdz << 1) : (17'd16 >> prec);
+				else begin coplanar = 1'b1; mdz = 17'hFFFF; end
+			end
+			cdz = dzpix | mdz[15:0];
+			k_cdz <= cdz;
+			k_cdz8 <= (cdz == 16'd0) ? 20'd0 : (20'd1 << msb18({2'd0, cdz})) << 3;
+			k_coplanar <= coplanar;
+			if (z_cmp) begin
+				k_bsh_a <= (dz_c > mem_dz) ? ((dz_c - mem_dz > 4'd4) ? 3'd4 : dz_c - mem_dz) : 3'd0;
+				k_bsh_b <= (mem_dz > dz_c) ? ((mem_dz - dz_c > 4'd4) ? 3'd4 : mem_dz - dz_c) : 3'd0;
+			end else begin
+				k_bsh_a <= 3'd0;
+				k_bsh_b <= (4'hF - dz_c > 4'd4) ? 3'd4 : 4'hF - dz_c;
+			end
+		end
+	end
 	reg          s_occ, s_val, s_bl_en, s_wrap;
 	reg  [2:0]   s_bsh_a, s_bsh_b;
 	reg  [3:0]   s_cc;  reg [2:0] s_mcov;
@@ -580,59 +640,43 @@ module n64_rdp_pix (
 	always @(posedge clk) begin
 		if (rst) s_occ <= 1'b0;
 		else if (ce) begin : dt
-			reg ovf, ok, coplanar, farther, nearer, front, max_z;
-			reg [17:0] mz; reg [16:0] mdz; reg [15:0] cdz; reg [19:0] cdz8; reg [3:0] prec;
+			reg ok, farther, nearer, front;
 			reg [4:0] sh; reg [3:0] coeff; reg [7:0] ncc;
-			ovf = ({1'b0, r_cc} + {2'b00, mem_cov}) >= 5'd8;
-			s_wrap <= ovf;
+			s_wrap <= k_ovf;
+			s_bsh_a <= k_bsh_a; s_bsh_b <= k_bsh_b;
 			if (z_cmp) begin
-				mz = z_decomp(mem_depth);
-				mdz = 17'd1 << mem_dz;
-				prec = {1'b0, mem_depth[13:11]};
-				coplanar = 1'b0;
-				s_bsh_a <= (dz_c > mem_dz) ? ((dz_c - mem_dz > 4'd4) ? 3'd4 : dz_c - mem_dz) : 3'd0;
-				s_bsh_b <= (mem_dz > dz_c) ? ((mem_dz - dz_c > 4'd4) ? 3'd4 : mem_dz - dz_c) : 3'd0;
-				if (prec < 4'd3) begin
-					if (mdz != 17'h8000) mdz = ((mdz << 1) > (17'd16 >> prec)) ? (mdz << 1) : (17'd16 >> prec);
-					else begin coplanar = 1'b1; mdz = 17'hFFFF; end
-				end
-				cdz = dzpix | mdz[15:0];
-				cdz8 = (cdz == 16'd0) ? 20'd0 : (20'd1 << msb18({2'd0, cdz})) << 3;
-				farther = coplanar || ({2'd0, r_pz} + cdz8) >= {2'd0, mz};
-				s_bl_en <= force_blend || (!ovf && aa && farther);
-				max_z = mz == 18'h3FFFF;
-				front = r_pz < mz;
-				nearer = coplanar || ($signed({2'd0, r_pz}) - $signed(cdz8)) <= $signed({2'd0, mz});
-				ncc = {4'd0, r_cc};
+				farther = k_coplanar || ({2'd0, k_pz} + k_cdz8) >= {2'd0, k_mz};
+				s_bl_en <= force_blend || (!k_ovf && aa && farther);
+				front = k_pz < k_mz;
+				nearer = k_coplanar || ($signed({2'd0, k_pz}) - $signed(k_cdz8)) <= $signed({2'd0, k_mz});
+				ncc = {4'd0, k_cc};
 				case (z_mode)
-				2'd0: ok = max_z || (ovf ? front : nearer);
+				2'd0: ok = k_maxz || (k_ovf ? front : nearer);
 				2'd1: begin
-					if (!front || !farther || !ovf) ok = max_z || (ovf ? front : nearer);
+					if (!front || !farther || !k_ovf) ok = k_maxz || (k_ovf ? front : nearer);
 					else begin
-						sh = (cdz == 16'd0) ? 5'd0 : msb18({2'd0, cdz});
-						coeff = (mz >> sh) - (r_pz >> sh);
-						ncc = ({4'd0, coeff} * {4'd0, r_cc}) >> 3;
+						sh = (k_cdz == 16'd0) ? 5'd0 : msb18({2'd0, k_cdz});
+						coeff = (k_mz >> sh) - (k_pz >> sh);
+						ncc = ({4'd0, coeff} * {4'd0, k_cc}) >> 3;
 						if (ncc > 8'd8) ncc = 8'd8;
 						ok = 1'b1;
 					end
 				end
-				2'd2: ok = front || max_z;
-				default: ok = farther && nearer && !max_z;
+				2'd2: ok = front || k_maxz;
+				default: ok = farther && nearer && !k_maxz;
 				endcase
 			end else begin
-				ok = 1'b1; ncc = {4'd0, r_cc};
-				s_bl_en <= force_blend || (!ovf && aa);
-				s_bsh_a <= 3'd0;
-				s_bsh_b <= (4'hF - dz_c > 4'd4) ? 3'd4 : 4'hF - dz_c;
+				ok = 1'b1; ncc = {4'd0, k_cc};
+				s_bl_en <= force_blend || (!k_ovf && aa);
 			end
-			s_occ <= r_occ;
-			s_val <= r_val && ok && !(aa && ncc == 8'd0);
-			s_cc <= ncc[3:0]; s_mcov <= mem_cov;
-			for (i = 0; i < 4; i = i + 1) s_pix[i] <= r_comb[i];
-			s_sha <= ({1'b0, r_sha} + {6'd0, r_adith} > 9'd255) ? 8'd255 : r_sha + {5'd0, r_adith};
-			s_mem <= {mem_r, mem_g, mem_b}; s_mema <= mem_a;
-			s_pz <= r_pz; s_y <= r_y; s_x <= r_x; s_dm <= r_dm;
-			s_cline <= r_cline; s_zline <= r_zline; s_pb <= r_pb; s_zbi <= r_zbi;
+			s_occ <= k_occ;
+			s_val <= k_val && ok && !(aa && ncc == 8'd0);
+			s_cc <= ncc[3:0]; s_mcov <= k_mcov;
+			for (i = 0; i < 4; i = i + 1) s_pix[i] <= k_comb[i];
+			s_sha <= ({1'b0, k_sha} + {6'd0, k_adith} > 9'd255) ? 8'd255 : k_sha + {5'd0, k_adith};
+			s_mem <= k_mem; s_mema <= k_mema;
+			s_pz <= k_pz; s_y <= k_y; s_x <= k_x; s_dm <= k_dm;
+			s_cline <= k_cline; s_zline <= k_zline; s_pb <= k_pb; s_zbi <= k_zbi;
 		end
 	end
 
@@ -808,8 +852,8 @@ module n64_rdp_pix (
 	end
 
 	// in flight: any stage, the delay line, the lines held, the queues, the port
-	wire         pipe_occ = cur_v || a_occ || b_occ || c_occ[0] || c_occ[1] || e_occ || (|dl_occ) || n_occ || o_occ
-	                     || p_occ || q_occ || r_occ || s_occ || t_occ || u_occ || v_occ;
+	wire         pipe_occ = cur_v || a_occ || b_occ || c_occ[0] || c_occ[1] || l_occ || e_occ || (|dl_occ) || n_occ || o_occ
+	                     || p_occ || q_occ || r_occ || k_occ || s_occ || t_occ || u_occ || v_occ;
 	assign drain_now = drain && !pipe_occ && !sp_valid;
 	assign busy = pipe_occ || wc_v || wz_v || !qc_empty || !qz_empty || mw_req;
 	assign dbg = {stall_mem, stall_wr, cur_v, pipe_occ, wc_v, wz_v, mw_req, sp_valid, qc_w - qc_r, qz_w - qz_r, ce, drain};
