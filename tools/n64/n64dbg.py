@@ -20,17 +20,33 @@ NAMES = (['SP_MEM_ADDR', 'SP_DRAM_ADDR', 'SP_RD_LEN', 'SP_WR_LEN', 'SP_STATUS', 
           'RSP halted|st|pc', 'RSP instruction', 'RSP last COP0 read'])
 
 
+# The board has no network: its registers are read through the ESP32, whose USB serial
+# port pc/pad.py holds and passes these through (127.0.0.1:5557, "R addr" / "W addr value").
+TOOLS = ('127.0.0.1', 5557)
+_sock = None
+
+
 def reg(a, v=None):
-    for attempt in range(30):              # (the link drops packets in bursts: the server answers 503)
+    global _sock
+    import socket
+    for attempt in range(5):
         try:
-            return _reg(a, v)
-        except urllib.error.HTTPError as e:
-            if e.code != 503 or attempt == 29:
+            if _sock is None:
+                _sock = socket.create_connection(TOOLS, timeout=5).makefile('rwb')
+            _sock.write((('R %x' % a) if v is None else ('W %x %x' % (a, v & 0xFFFFFFFF))).encode() + b'\n')
+            _sock.flush()
+            ans = _sock.readline().decode().strip()
+            if ans in ('timeout', 'busy', ''):
+                raise IOError('the ESP32 says ' + (ans or 'nothing'))
+            return None if v is not None else int(ans, 16)
+        except (OSError, ValueError):
+            _sock = None
+            if attempt == 4:
                 raise
-            time.sleep(0.5)
+            time.sleep(0.2)
 
 
-def _reg(a, v=None):
+def _reg_http(a, v=None):     # (the server's API, when the board had a network)
     url = '%s/api/reg/0x%x' % (SERVER, a)
     if v is None:
         return json.load(urllib.request.urlopen(url, timeout=10))['value']

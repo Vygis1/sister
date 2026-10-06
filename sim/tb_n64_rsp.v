@@ -72,6 +72,15 @@ module tb_n64_rsp;
 	reg [63:0] w;
 	reg [11:0] pc0;
 	always @(posedge clk) if (tr_valid) $fwrite(tf, "%03x %08x\n", tr_pc, tr_ir);
+	// the RSP's own stores into DMEM (port A), for tools/n64/rspstores.py: "pc dw we data we2 data2"
+	integer sf, vf2;
+	initial sf = $fopen("../../sim/n64r/rtl_stores.txt", "w");
+	// and the vector register file's write port: "pc reg lanes data" (lanes: bit g = byte g)
+	initial vf2 = $fopen("../../sim/n64r/rtl_vw.txt", "w");
+	always @(posedge clk) if (!dut.halted && dut.vw_lane != 16'd0)
+		$fwrite(vf2, "%03x %02x %04x %032x\n", dut.ipc, dut.vw_reg, dut.vw_lane, dut.vw_data);
+	always @(posedge clk) if (!dut.halted && (dut.da_we != 8'd0 || dut.da_we2 != 8'd0))
+		$fwrite(sf, "%03x %03x %02x %016x %02x %016x\n", dut.ipc, dut.da_addr, dut.da_we, dut.da_wd, dut.da_we2, dut.da_wd2);
 	// the RSP's pace: clocks running, instructions, clocks R_EX waited on a vector op's result,
 	// clocks in each state
 	reg [63:0] pc_run = 0, pc_ins = 0, pc_haz = 0; reg [63:0] pc_st [0:15]; integer pi;

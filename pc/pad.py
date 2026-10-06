@@ -6,6 +6,10 @@ for the shell's menu -- and writes it to the board. No network, no server.
 
     python pc/pad.py [--port COM6]
 
+It also holds the serial port for the PC's tools: on 127.0.0.1:5557 a line "R <addr>" or
+"W <addr> <value>" (hex) is passed to the ESP32, and its answer ("= <value>", "= ok") comes
+back (tools/n64/n64dbg.py reg()). What else the ESP32 prints is shown here.
+
 Until the ESP32 takes the pad itself. Mapping (the ESP32's, pads.h; PlayStation names):
 
     NES, Master System, menu   Cross or Square -> A, Circle or Triangle -> B,
@@ -18,7 +22,10 @@ Until the ESP32 takes the pad itself. Mapping (the ESP32's, pads.h; PlayStation 
     PS button                  the menu
 """
 import os
+import queue
+import socket
 import sys
+import threading
 import time
 
 import serial
@@ -28,15 +35,77 @@ import pygame
 from pygame._sdl2 import controller
 
 PORT = sys.argv[sys.argv.index('--port') + 1] if '--port' in sys.argv else 'COM6'
+TOOLS = ('127.0.0.1', 5557)
 TRIG = 12000                # a trigger past this is pressed (0..32767)
+
+ser = None
+wlock = threading.Lock()    # one writer at a time on the port
+cmd_lock = threading.Lock() # one register command in flight
+replies = queue.Queue()
+override = [None, 0.0]      # a tool's "P ..." line, and until when it stands in for the pad
 
 
 def open_port():
     s = serial.Serial()
-    s.port = PORT; s.baudrate = 115200; s.timeout = 0
+    s.port = PORT; s.baudrate = 115200; s.timeout = 0.05
     s.dtr = False; s.rts = False             # (set before opening: toggling them resets the ESP32)
     s.open()
     return s
+
+
+def write(line):
+    with wlock:
+        ser.write(line.encode())
+
+
+def reader():
+    """the ESP32's output: register answers to the queue, the rest shown"""
+    buf = b''
+    while True:
+        s = ser
+        if s is None:
+            time.sleep(0.1); continue
+        try:
+            buf += s.read(max(1, s.in_waiting))    # (as soon as anything is there)
+        except Exception:
+            time.sleep(0.1); continue
+        while b'\n' in buf:
+            line, buf = buf.split(b'\n', 1)
+            t = line.decode(errors='replace').rstrip('\r')
+            if t.startswith('= '):
+                replies.put(t[2:])
+            elif t:
+                print(t)
+
+
+def tools_server():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(TOOLS); srv.listen(4)
+
+    def serve(c):
+        f = c.makefile('rwb')
+        for raw in f:
+            q = raw.decode(errors='replace').strip()
+            if q[:2] == 'P ':                 # a tool pressing buttons: in place of the pad for 0.3 s
+                override[0], override[1] = q, time.time() + 0.3
+                f.write(b'ok\n'); f.flush(); continue
+            if not q or q[0] not in 'RWD':
+                continue
+            with cmd_lock:
+                while not replies.empty():
+                    replies.get_nowait()
+                try:
+                    write(q + '\n')
+                    ans = replies.get(timeout=30.0 if q[0] == 'D' else 2.0)
+                except Exception:
+                    ans = 'timeout'
+            f.write((ans + '\n').encode()); f.flush()
+        c.close()
+
+    while True:
+        c, _ = srv.accept()
+        threading.Thread(target=serve, args=(c,), daemon=True).start()
 
 
 def state(pad):
@@ -63,12 +132,14 @@ def state(pad):
 
 
 def main():
+    global ser
     pygame.init()
     controller.init()
-    ser = None
+    threading.Thread(target=reader, daemon=True).start()
+    threading.Thread(target=tools_server, daemon=True).start()
     pad = None
     last, last_t = None, 0.0
-    print('pad: waiting for a controller (plug it into this PC)')
+    print('pad: waiting for a controller (plug it into this PC); tools on %s:%d' % TOOLS)
     while True:
         for ev in pygame.event.get():
             if ev.type == pygame.CONTROLLERDEVICEADDED and pad is None:
@@ -84,12 +155,13 @@ def main():
                 print('pad: %s: %s (again in a second)' % (PORT, e)); time.sleep(1); continue
         bits, ax = state(pad) if pad is not None else (0, [0, 0, 0, 0])
         now = time.time()
-        cur = (bits, tuple(ax))
+        line = 'P %x %d %d %d %d' % (bits, *ax)
+        if override[0] and now < override[1]:
+            line = override[0]                # (a tool's press, see tools_server)
+        cur = line
         if cur != last or now - last_t > 0.1:
             try:
-                ser.write(('P %x %d %d %d %d\n' % (bits, *ax)).encode())
-                if ser.in_waiting:                    # what the ESP32 prints, passed on
-                    sys.stdout.write(ser.read(ser.in_waiting).decode(errors='replace'))
+                write(line + '\n')
             except Exception as e:
                 print('pad: %s: %s' % (PORT, e)); ser = None; continue
             last, last_t = cur, now

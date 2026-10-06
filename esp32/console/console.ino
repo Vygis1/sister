@@ -1389,6 +1389,30 @@ void setup() {
 static void serialCommand(String c) {
   c.trim();
   if (c.length() && c[0] == 'P') { pads::usbLine(c); return; }   // the PC's pad (pc/pad.py): quietly
+  // a board register, for the PC's tools (pc/pad.py passes these through): "R addr" -> "= value",
+  // "W addr value" -> "= ok" (hex)
+  if (c.length() > 2 && (c[0] == 'R' || c[0] == 'W' || c[0] == 'D') && c[1] == ' ') {
+    if (job.busy) { Serial.println("= busy"); return; }
+    char *e = nullptr;
+    uint32_t a = strtoul(c.c_str() + 2, &e, 16);
+    if (c[0] == 'R') Serial.printf("= %08x\n", (unsigned)fpga.busRead(a));
+    else if (c[0] == 'D') {
+      // a block: "D addr n" -> "= " and n words in hex on one line (read at the link's speed,
+      // so a ring that moves on is caught in one piece)
+      uint32_t n = strtoul(e, nullptr, 16);
+      if (n == 0 || n > 16384) n = 16384;
+      uint32_t *w = (uint32_t *)ps_malloc(n * 4);
+      if (!w) { Serial.println("= nomem"); return; }
+      fpga.busReadBlock(a, w, n);
+      Serial.print("= ");
+      char hx[9];
+      for (uint32_t i = 0; i < n; i++) { snprintf(hx, sizeof(hx), "%08x", (unsigned)w[i]); Serial.print(hx); }
+      Serial.println();
+      free(w);
+    }
+    else { uint32_t v = strtoul(e, nullptr, 16); fpga.busWrite(a, v); Serial.println("= ok"); }
+    return;
+  }
   if (c == "state") {
     // (not while a core is being installed: a status frame in the middle of the
     // flash traffic is the one thing seen to spoil an install's read-back)
