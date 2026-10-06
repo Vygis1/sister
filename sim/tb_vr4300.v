@@ -31,12 +31,24 @@ module tb_vr4300;
 	wire [4:0]  tr_rd, tr_code;
 	wire [63:0] tr_val;
 
+	// --- IRQ1: an interrupt (IP2, the MI's) at random moments, held until the program writes
+	// anywhere in 0x0430_0000-0x0430_FFFF (its acknowledge) -- what a game's code meets
+	// thousands of times a second, and krom's tests never: they run with interrupts off
+	integer IRQ = 0;
+	initial if (!$value$plusargs("IRQ%d", IRQ)) IRQ = 0;
+	reg irq0 = 1'b0; reg [31:0] irq_seed = 32'h0BAD_5EED; integer irq_n = 0;
+	always @(posedge clk) begin
+		irq_seed <= irq_seed * 1103515245 + 12345;
+		if (IRQ != 0 && !irq0 && irq_seed[23:16] == 8'h5A) begin irq0 <= 1'b1; irq_n = irq_n + 1; end
+		if (d_req && d_we && d_addr[31:16] == 16'h0430) irq0 <= 1'b0;
+	end
+
 	vr4300 cpu (
 		.clk(clk), .rst(rst),
 		.i_req(i_req), .i_addr(i_addr), .i_cached(i_cached), .i_ready(i_ready), .i_rdata(i_rdata),
 		.d_req(d_req), .d_we(d_we), .d_addr(d_addr), .d_cached(d_cached), .d_be(d_be), .d_wdata(d_wdata),
 		.d_ready(d_ready), .d_rdata(d_rdata),
-		.irq(5'd0), .count_tick(1'b1),
+		.irq({4'd0, irq0}), .count_tick(1'b1),
 		.tr_valid(tr_valid), .tr_pc(tr_pc), .tr_we(tr_we), .tr_rd(tr_rd), .tr_val(tr_val),
 		.tr_exc(tr_exc), .tr_code(tr_code)
 	);
@@ -151,7 +163,7 @@ module tb_vr4300;
 			f = $fopen("../../sim/n64/rtl_rdram.hex", "w");
 			for (i = 0; i < 1048576; i = i + 1) $fwrite(f, "%016x\n", ram[i]);
 			$fclose(f);
-			$display("tb_vr4300: %0d instructions retired at %0t", n, $time);
+			$display("tb_vr4300: %0d instructions retired at %0t (%0d interrupts raised)", n, $time, irq_n);
 			$finish;
 		end
 	end

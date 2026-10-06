@@ -190,12 +190,35 @@ module tb_n64_top;
 	integer f, tf, sbad, sw, maxf, maxi;
 	reg [31:0] pjoy;
 	reg [23:0] sa; reg [31:0] sexp;
+	// (+NOTRACE: no file -- a long game run would write gigabytes. +STOPEXC: the last 512
+	// retired instructions kept in a ring, written to sys_exc.trace at the first exception that
+	// is not an interrupt, and the run ends there: where a game on the board faulted)
+	reg [127:0] ring [0:511]; reg [8:0] ring_w = 0; integer rk, notrace = 0, stopexc = 0;
+	reg [127:0] re;
+	initial begin notrace = $test$plusargs("NOTRACE"); stopexc = $test$plusargs("STOPEXC"); end
 	initial tf = $fopen("../../sim/n64/sys.trace", "w");
 	always @(posedge clk) begin
-		if (dut.tr_exc) $fwrite(tf, "X %02x\n", dut.tr_code);
-		if (dut.tr_valid) begin
-			if (dut.tr_we) $fwrite(tf, "%08x %02d %016x\n", dut.tr_pc, dut.tr_rd, dut.tr_val);
-			else           $fwrite(tf, "%08x\n", dut.tr_pc);
+		if (!notrace) begin
+			if (dut.tr_exc) $fwrite(tf, "X %02x\n", dut.tr_code);
+			if (dut.tr_valid) begin
+				if (dut.tr_we) $fwrite(tf, "%08x %02d %016x\n", dut.tr_pc, dut.tr_rd, dut.tr_val);
+				else           $fwrite(tf, "%08x\n", dut.tr_pc);
+			end
+		end
+		if (stopexc) begin
+			if (dut.tr_valid) begin ring[ring_w] <= {dut.tr_pc, 3'd0, dut.tr_we, 7'd0, dut.tr_rd, 16'd0, dut.tr_val}; ring_w <= ring_w + 9'd1; end
+			if (dut.tr_exc && dut.tr_code != 5'd0) begin
+				$fclose(tf); tf = $fopen("../../sim/n64/sys_exc.trace", "w");
+				for (rk = 0; rk < 512; rk = rk + 1) begin
+					re = ring[(ring_w + rk) & 9'h1FF];
+					if (re[92]) $fwrite(tf, "%08x %02d %016x\n", re[127:96], re[84:80], re[63:0]);
+					else        $fwrite(tf, "%08x\n", re[127:96]);
+				end
+				$fwrite(tf, "X %02x at %0t, frame %0d\n", dut.tr_code, $time, frames);
+				$fclose(tf);
+				$display("tb_n64_top: STOPEXC exception %0d at %0t (frame %0d); the last 512 instructions in sim/n64/sys_exc.trace", dut.tr_code, $time, frames);
+				$finish;
+			end
 		end
 	end
 	initial begin
