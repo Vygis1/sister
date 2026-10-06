@@ -27,7 +27,13 @@ class SPC:
         self.cycles += 1
         self.wr(a & 0xFFFF, v & 0xFF)
 
+    _dummy = False
+
     def idle(self, n=1):
+        if self._dummy:                         # (the first internal cycle of a one-byte op)
+            self._dummy = False
+            self.r(self.pc)
+            n -= 1
         self.cycles += n
 
     def fetch(self):
@@ -112,19 +118,31 @@ class SPC:
         return lo | (self.rdp(o + self.x + 1) << 8)
     def a_diy(self):                                                    # [d]+Y
         o = self.fetch()
+        self.idle()
         p = self.rdp(o) | (self.rdp(o + 1) << 8)
+        return (p + self.y) & 0xFFFF
+
+    def a_diy_st(self):                                                 # [d]+Y, storing: the
+        o = self.fetch()                                                # internal cycle comes
+        p = self.rdp(o) | (self.rdp(o + 1) << 8)                        # after the pointer
         self.idle()
         return (p + self.y) & 0xFFFF
 
     def step(self):
         if self.stopped:
-            self.idle(2)
+            self.r(self.pc)                     # (asleep: the next byte read again and again)
+            self.idle()
             return
         op = self.fetch()
+        # a one-byte instruction spends its first cycle reading the byte after it
+        self._dummy = op in SINGLE
         OPS[op](self)
+        self._dummy = False
 
 
 OPS = [None] * 256
+# the one-byte instructions (their first internal cycle reads the next byte)
+SINGLE = {0xFE, 0x00, 0x01, 0x06, 0x0D, 0x0F, 0x11, 0x19, 0x1C, 0x1D, 0x20, 0x21, 0x26, 0x2D, 0x31, 0x39, 0x3C, 0x3D, 0x40, 0x41, 0x46, 0x4D, 0x51, 0x59, 0x5C, 0x5D, 0x60, 0x61, 0x66, 0x6D, 0x6F, 0x71, 0x79, 0x7C, 0x7D, 0x7F, 0x80, 0x81, 0x86, 0x8E, 0x91, 0x99, 0x9C, 0x9D, 0x9E, 0x9F, 0xA0, 0xA1, 0xA6, 0xAE, 0xAF, 0xB1, 0xB9, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0, 0xC1, 0xC6, 0xCE, 0xCF, 0xD1, 0xDC, 0xDD, 0xDF, 0xE0, 0xE1, 0xE6, 0xED, 0xEE, 0xEF, 0xF1, 0xFC, 0xFD, 0xFF}
 
 
 def op(code):
@@ -260,7 +278,7 @@ OPS[0xCD] = _ld('x', imm=True); OPS[0xF8] = _ld('x', SPC.a_d); OPS[0xF9] = _ld('
 OPS[0x8D] = _ld('y', imm=True); OPS[0xEB] = _ld('y', SPC.a_d); OPS[0xFB] = _ld('y', SPC.a_dx); OPS[0xEC] = _ld('y', SPC.a_abs)
 OPS[0xC4] = _st('a', SPC.a_d); OPS[0xC5] = _st('a', SPC.a_abs); OPS[0xC6] = _st('a', SPC.a_xi)
 OPS[0xC7] = _st('a', SPC.a_dxi); OPS[0xD4] = _st('a', SPC.a_dx); OPS[0xD5] = _st('a', SPC.a_absx)
-OPS[0xD6] = _st('a', SPC.a_absy); OPS[0xD7] = _st('a', SPC.a_diy)
+OPS[0xD6] = _st('a', SPC.a_absy); OPS[0xD7] = _st('a', SPC.a_diy_st)
 OPS[0xD8] = _st('x', SPC.a_d); OPS[0xD9] = _st('x', SPC.a_dy); OPS[0xC9] = _st('x', SPC.a_abs)
 OPS[0xCB] = _st('y', SPC.a_d); OPS[0xDB] = _st('y', SPC.a_dx); OPS[0xCC] = _st('y', SPC.a_abs)
 
@@ -615,9 +633,9 @@ def _pcall(c):
 for n in range(16):
     def tcall(n):
         def f(c):
-            c.idle()
-            _call_to(c, 0)
             c.idle(2)
+            _call_to(c, 0)
+            c.idle()
             a = 0xFFDE - 2 * n
             c.pc = c.r(a) | (c.r(a + 1) << 8)
         return f
@@ -635,19 +653,17 @@ def _brk(c):
 
 @op(0x6F)
 def _ret(c):
-    c.idle()
+    c.idle(2)
     lo = c.pop()
     c.pc = lo | (c.pop() << 8)
-    c.idle()
 
 
 @op(0x7F)
 def _reti(c):
-    c.idle()
+    c.idle(2)
     c.psw = c.pop()
     lo = c.pop()
     c.pc = lo | (c.pop() << 8)
-    c.idle()
 
 
 # --- the stack and the flags ---------------------------------------------------------------
@@ -668,8 +684,16 @@ OPS[0xED] = lambda c: (c.idle(2), c.setf(C, not c.psw & C))
 OPS[0xA0] = lambda c: (c.idle(2), c.setf(I, True))
 OPS[0xC0] = lambda c: (c.idle(2), c.setf(I, False))
 OPS[0x00] = lambda c: c.idle()                                     # NOP
-OPS[0xEF] = lambda c: (c.idle(6), setattr(c, 'stopped', True))     # SLEEP
-OPS[0xFF] = lambda c: (c.idle(6), setattr(c, 'stopped', True))     # STOP
+def _sleep(c):                          # SLEEP / STOP: reading the next byte over and over
+    c.idle(2)
+    for _ in range(2):
+        c.r(c.pc)
+        c.idle()
+    c.stopped = True
+
+
+OPS[0xEF] = _sleep
+OPS[0xFF] = _sleep
 
 missing = [hex(i) for i, f in enumerate(OPS) if f is None]
 assert not missing, missing
