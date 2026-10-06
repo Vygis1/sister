@@ -457,6 +457,7 @@ module n64_rsp #(
 	reg  [2:0]  ex_da_off;                // the first byte in the doubleword
 	reg  [1:0]  ex_x;                     // (f_x for a fast load)
 	reg  [3:0]  ex_off4;                  // an LQV's offset in its quadword
+	reg  [4:0]  ex_start;                 // the fast vector load's first byte of the register (f_start)
 	reg  [3:0]  f_n;                      // R_FL2's f_op 2: the bytes taken
 	reg  [8:0]  ex_da;
 	reg  [7:0]  ex_wm;
@@ -464,7 +465,7 @@ module n64_rsp #(
 	always @(*) begin : exmem
 		reg [11:0] va; reg [6:0] i7; reg [3:0] kk;
 		ex_fl = 1'b0; ex_fs = 1'b0; ex_two = 1'b0; ex_da = ea[11:3]; ex_wm = 8'h00; ex_wd = 64'd0;
-		ex_short = 1'b0; ex_n = 4'd0; ex_da_off = 3'd0; ex_x = 2'd0; ex_off4 = 4'd0;
+		ex_short = 1'b0; ex_n = 4'd0; ex_da_off = 3'd0; ex_x = 2'd0; ex_off4 = 4'd0; ex_start = 5'd0;
 		i7 = ir[6:0]; kk = ir[14:11];
 		va = (kk == 4'd0) ? a[11:0] + {{5{i7[6]}}, i7} : (kk == 4'd1) ? a[11:0] + {{4{i7[6]}}, i7, 1'b0}
 		   : (kk == 4'd2) ? a[11:0] + {{3{i7[6]}}, i7, 2'b00}
@@ -483,13 +484,16 @@ module n64_rsp #(
 			6'h32: begin
 				ex_da = va[11:3];
 				if (kk == 4'd3 && me <= 4'd8 && va[2:0] != 3'd0) begin ex_fl = 1'b1; ex_two = 1'b1; end
-				if (kk == 4'd5 && {1'b0, va[3:0]} >= {1'b0, me}) begin ex_fl = 1'b1; ex_two = 1'b1; ex_da = {va[11:4], 1'b0}; end
+				if (kk == 4'd5 && {1'b0, va[3:0]} >= {1'b0, me}) begin
+					ex_fl = 1'b1; ex_two = 1'b1; ex_da = {va[11:4], 1'b0};
+					ex_start = 5'd16 - ({1'b0, va[3:0]} - {1'b0, me});      // LRV: into the register's end
+				end
 				if (kk == 4'd4 && va[3:0] == 4'd0 && me == 4'd0) begin ex_fl = 1'b1; ex_two = 1'b1; end
 				if (kk == 4'd3 && va[2:0] == 3'd0 && !me[0] && me <= 4'd8) begin ex_fl = 1'b1; ex_two = 1'b0; end
 				// LQV from inside its quadword (element 0: its bytes up to the quadword's end into
 				// the register's first), the whole quadword read at once (the banks)
 				if (kk == 4'd4 && va[3:0] != 4'd0 && me == 4'd0) begin
-					ex_fl = 1'b1; ex_two = 1'b1; ex_da = {va[11:4], 1'b0}; ex_x = 2'd1; ex_off4 = va[3:0];
+					ex_fl = 1'b1; ex_two = 1'b1; ex_da = {va[11:4], 1'b0}; ex_x = 2'd1; ex_off4 = va[3:0]; ex_start = {1'b0, va[3:0]};
 				end
 				// LPV, LUV, 8-aligned, element 0: a doubleword's bytes into the eight elements
 				if ((kk == 4'd6 || kk == 4'd7) && va[2:0] == 3'd0 && me == 4'd0) begin
@@ -1120,7 +1124,10 @@ module n64_rsp #(
 				// stores: the first doubleword written this clock)
 				// (a vector one: its doubleword(s) come next clock and are written beside the next
 				// instruction -- fl_pend; a scalar one waits for them in R_FL2)
-				if (ex_fl && op == 6'h32) begin fl_pend <= 1'b1; f_x <= ex_x; f_start <= {1'b0, ex_off4}; next_ins(npc); end
+				// (f_start as the fast path worked it out: for an LRV, 16 - (a - e). It was the LQV's
+				// offset for every load -- 0 for an LRV -- and every LRV filled its register from byte 0:
+				// the audio microcode's sample loads, all of SM64's sound mixed from shifted data.)
+				if (ex_fl && op == 6'h32) begin fl_pend <= 1'b1; f_x <= ex_x; f_start <= ex_start; next_ins(npc); end
 				else if (ex_fl) begin sl_pend <= 1'b1; next_ins(npc); end   // (a scalar load: sl_pend)
 				if (ex_short) begin f_op <= 3'd2; f_off <= ex_da_off; f_e <= me; f_n <= ex_n; end
 				else if (ex_fl) f_n <= 4'd8;
