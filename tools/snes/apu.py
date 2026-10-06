@@ -6,14 +6,17 @@ documents ("SNES APU Main CPU Communication Port"), so programs that talk to the
 (every game does, to send its sound driver) work the same.
 
     reset: S = $EF, clear $01-$EF, put $AA $BB in ports 0 and 1, wait for $CC in port 0
-    block: the address from ports 2/3, echo port 0; port 1 = 0 means jump to the address
+    block: the address from ports 2/3, echo port 0 (the kick); port 1 = 0 means jump there;
+           else wait for index 0 in port 0 -- the main CPU sends the first byte as soon as it
+           sees the echo, so the kick must not be taken for anything after it
     data:  the main CPU writes the byte to port 1 and its index (from 0) to port 0; each
-           byte is stored and the index echoed. Port 0 still one behind is a byte not yet
-           sent; any other value starts a new block.
+           byte is stored, then its index echoed. One signed compare of port 0 with the
+           index expected (Y) tells the three cases apart: equal, the next byte; behind,
+           the last one still there; ahead, a new block's kick (always index + 2 or more).
 
-X stays 0 throughout (the clear loop leaves it there): the pointer is [$00+X], the index's
-copy in $02, and the jump JMP [!$0000+X], with A = X = Y = 0 (some games count on that).
-Entering at $FFC9 (as some games do) skips only the clearing.
+X stays 0 throughout (the clear loop leaves it there), so the jump is JMP [!$0000+X] with
+A = X = Y = 0 (some games count on that). Entering at $FFC9 (as some games do) skips only
+the clearing.
 """
 import os
 import sys
@@ -33,26 +36,27 @@ IPL = bytes([
     0x8F, 0xBB, 0xF5,       # FFCC  mov $f5,#$bb
     0x78, 0xCC, 0xF4,       # FFCF  hs: cmp $f4,#$cc
     0xD0, 0xFB,             # FFD2  bne hs
-    0xBA, 0xF6,             # FFD4  blk: movw ya,$f6
+    0xBA, 0xF6,             # FFD4  blk: movw ya,$f6     (the address)
     0xDA, 0x00,             # FFD6  movw $00,ya
-    0xFA, 0xF4, 0xF4,       # FFD8  mov $f4,$f4         (echo)
-    0xE4, 0xF5,             # FFDB  mov a,$f5
-    0xF0, 0x1A,             # FFDD  beq go
-    0xD8, 0x02,             # FFDF  mov $02,x           (index 0)
-    0xE4, 0xF4,             # FFE1  wait: mov a,$f4
-    0x2E, 0x02, 0x0D,       # FFE3  cbne $02,nd
-    0xE4, 0xF5,             # FFE6  mov a,$f5
-    0xC7, 0x00,             # FFE8  mov [$00+x],a
-    0xFA, 0x02, 0xF4,       # FFEA  mov $f4,$02         (echo the index)
-    0x3A, 0x00,             # FFED  incw $00
-    0xAB, 0x02,             # FFEF  inc $02
-    0x2F, 0xEE,             # FFF1  bra wait
-    0xBC,                   # FFF3  nd: inc a
-    0x2E, 0x02, 0xDD,       # FFF4  cbne $02,blk        (not one behind: a new block)
-    0x2F, 0xE8,             # FFF7  bra wait
-    0xFD,                   # FFF9  go: mov y,a         (A = X = Y = 0, Z set, as games expect)
-    0x1F, 0x00, 0x00,       # FFFA  jmp [!$0000+x]
-    0x00,                   # FFFD
+    0xFA, 0xF4, 0xF4,       # FFD8  mov $f4,$f4         (echo the kick)
+    0xE4, 0xF5,             # FFDB  mov a,$f5           (the command)
+    0xF0, 0x19,             # FFDD  beq go
+    0x8D, 0x00,             # FFDF  mov y,#0            (Y: the index expected)
+    0x7E, 0xF4,             # FFE1  w0: cmp y,$f4       (the first byte's index: 0)
+    0xD0, 0xFC,             # FFE3  bne w0
+    0xE4, 0xF5,             # FFE5  data: mov a,$f5
+    0xD7, 0x00,             # FFE7  mov [$00]+y,a       (stored, then echoed)
+    0xCB, 0xF4,             # FFE9  mov $f4,y
+    0xFC,                   # FFEB  inc y
+    0xD0, 0x02,             # FFEC  bne wait
+    0xAB, 0x01,             # FFEE  inc $01
+    0x7E, 0xF4,             # FFF0  wait: cmp y,$f4
+    0xF0, 0xF1,             # FFF2  beq data            (the next byte)
+    0x10, 0xFA,             # FFF4  bpl wait            (still the last one)
+    0x2F, 0xDC,             # FFF6  bra blk             (ahead of it: a new block's kick)
+    0xFD,                   # FFF8  go: mov y,a         (A = X = Y = 0, as games expect)
+    0x1F, 0x00, 0x00,       # FFF9  jmp [!$0000+x]
+    0x00, 0x00,             # FFFC
     0xC0, 0xFF,             # FFFE  the reset vector
 ])
 assert len(IPL) == 64

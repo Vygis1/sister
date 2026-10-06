@@ -16,7 +16,7 @@ fi
 XVLOG="$VIVADO_BIN/xvlog.bat"; XELAB="$VIVADO_BIN/xelab.bat"; XSIM="$VIVADO_BIN/xsim.bat"
 OUT="$ROOT/build/sim-$TB"
 mkdir -p "$OUT"; cd "$OUT"
-"$XVLOG" --nolog "$ROOT"/rtl/wip/w65816.v "$ROOT/sim/$TB.v" > xvlog.log 2>&1 || { cat xvlog.log; exit 1; }
+"$XVLOG" --nolog "$ROOT"/rtl/wip/w65816.v "$ROOT"/rtl/wip/spc700.v "$ROOT/sim/$TB.v" > xvlog.log 2>&1 || { cat xvlog.log; exit 1; }
 "$XELAB" --nolog -debug off -s "$TB"_snap "$TB" > xelab.log 2>&1 || { cat xelab.log; exit 1; }
 PLUS=""; for a in "$@"; do PLUS="$PLUS --testplusarg $a"; done
 "$XSIM" --nolog "$TB"_snap -R $PLUS > run.log 2>&1 || { cat run.log; exit 1; }
