@@ -844,6 +844,9 @@ static scr::PadView padView(const pads::Player &p) {
   return v;
 }
 static void draw() {
+  // (a closed menu draws nothing: a page drawn after a game started would put the menu
+  // back over it, closed -- deaf to everything but START + SELECT)
+  if (!open_) return;
   scr::Chrome ch = chrome();
   switch (nav.page) {
   case P_GAMES: {
@@ -872,9 +875,14 @@ static void draw() {
     scr::waitButton(ch, pads::LAYOUTS[mapL].name, pads::LAYOUTS[mapL].b[mapB].name, left < 0 ? 0 : left);
     break; }
   case P_ABOUT:
-    ui::palette(art::SPLASH_PAL);
-    scr::splash(scr::SPLASH_FRAMES);
-    ui::centre(26, "circle: back", ui::GREY);
+    if (ui::v2) {
+      ui::palette(art::SPLASH_PAL);
+      scr::splash(scr::SPLASH_FRAMES);
+      ui::centre(26, "circle: back", ui::GREY);
+    } else {
+      // (an image built before the menu's own glyphs: no logo to draw)
+      scr::message(ch, "BYBA GAMES", "the FPGA game console", ui::YELLOW);
+    }
     break;
   default:
   {
@@ -883,9 +891,10 @@ static void draw() {
     scr::list(ch, title(), items(), nav.sel, nav.top, info(), nt, hintsFor(), nav.page == P_HOME ? 2 : 0);
   }
   }
-  if (nav.page != P_ABOUT) ui::palette(art::MENU_PAL);
+  bool logo = nav.page == P_ABOUT && ui::v2;
+  if (!logo) ui::palette(art::MENU_PAL);
   show();
-  osd(nav.page == P_ABOUT ? 5 : gameIn ? 3 : 1);
+  osd(logo ? 5 : gameIn ? 3 : 1);
 }
 
 static void go(Page p, int sel = 0) {
@@ -1198,7 +1207,7 @@ static void task(void *) {
     else if ((edge & pads::M_Y) && nav.page == P_HOME) go(P_SETTINGS);
     else if (edge & pads::M_B) back();
     // (the settings pages show live things -- the pads coming and going, Wi-Fi: now and then)
-    if ((nav.page == P_PADS || nav.page == P_SETTINGS || nav.page == P_WIFI || nav.page == P_HOME) && millis() - lastDraw > 1000) {
+    if (open_ && (nav.page == P_PADS || nav.page == P_SETTINGS || nav.page == P_WIFI || nav.page == P_HOME) && millis() - lastDraw > 1000) {
       lastDraw = millis(); draw();
     }
   }

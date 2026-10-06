@@ -198,6 +198,14 @@ static char keyAt(int layer, int kr, int kc, int &act) {
 // --- two QR codes: join the console's own network, then open its page ------------------------
 static void qrPage(const Chrome &ch, const std::string &apName, const std::string &apPass, const std::string &url) {
   chrome(ch, { { art::G_CIRCLE, "back" } });
+  if (!v2) {           // (no glyphs to draw a code with: the same in words)
+    frame(2, 8, 37, 20, "CONNECT WITH A PHONE");
+    text(4, 11, "1. join the Wi-Fi network", YELLOW);
+    text(7, 12, apName + "  password " + apPass, WHITE);
+    text(4, 15, "2. open in the browser", YELLOW);
+    text(7, 16, url, WHITE);
+    return;
+  }
   std::string join = "WIFI:T:WPA;S:" + apName + ";P:" + apPass + ";;";
   int a = qrCells(join.c_str()), b = qrCells(url.c_str());
   int gap = 3, c0 = (COLS - (a + gap + b)) / 2;
