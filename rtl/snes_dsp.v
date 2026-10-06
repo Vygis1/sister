@@ -640,6 +640,9 @@ module snes_dsp (
 	reg [15:0] ew;
 	reg signed [15:0] fl, fr;
 	reg [3:0]  bufidx;
+	reg        dph;                     // the decode's phase
+	reg signed [31:0] d_s;
+	reg signed [15:0] d_p1, d_p2;
 	// (timing: the rate test, the Gauss taps and the FIR are spread over clocks)
 	reg [31:0] fires_v;                 // this sample: which of the 32 rates step
 	reg [5:0]  rr;                      // the rate being worked out
@@ -868,20 +871,28 @@ module snes_dsp (
 			W_DEC0: begin ram_a <= baddr[x]; ws <= W_DEC1; end
 			W_DEC1: begin ram_a <= baddr[x] + {12'd0, boff[x]}; ws <= W_DEC2; end
 			W_DEC2: begin hdr <= ram_q; ram_a <= baddr[x] + {12'd0, boff[x]} + 16'd1; ws <= W_DEC3; end
-			W_DEC3: begin db0 <= ram_q; ws <= W_DECN; dk <= 3'd0; end
-			W_DECN: begin
+			W_DEC3: begin db0 <= ram_q; ws <= W_DECN; dk <= 3'd0; dph <= 1'b0; end
+			W_DECN: if (!dph) begin
+				// (two clocks a sample: this one the nibble and the two before it, read out)
 				if (dk == 3'd0) db1 <= ram_q;
 				nib = (dk == 3'd0) ? db0[7:4] : (dk == 3'd1) ? db0[3:0] : (dk == 3'd2) ? ram_q[7:4] : db1[3:0];
 				if (dk == 3'd2) nib = db1[7:4];
 				if (dk == 3'd0) nib = db0[7:4];
-				shift_ = hdr[7:4]; filt = hdr[3:2];
+				shift_ = hdr[7:4];
 				s20 = $signed({{28{nib[3]}}, nib});
 				if (shift_ <= 4'd12) s20 = (s20 <<< shift_) >>> 1;
 				else s20 = nib[3] ? -20'sd2048 : 20'sd0;
+				d_s <= s20;
 				bufidx = (bpos[x] == 4'd0) ? 4'd11 : bpos[x] - 4'd1;
-				p1 = buf_[x * 12 + bufidx];
+				d_p1 <= buf_[x * 12 + bufidx];
 				bufidx = (bpos[x] == 4'd0) ? 4'd10 : (bpos[x] == 4'd1) ? 4'd11 : bpos[x] - 4'd2;
-				p2 = buf_[x * 12 + bufidx];
+				d_p2 <= buf_[x * 12 + bufidx];
+				dph <= 1'b1;
+			end else begin
+				// (this one the filter, and the sample in)
+				dph <= 1'b0;
+				filt = hdr[3:2];
+				s20 = d_s; p1 = d_p1; p2 = d_p2;
 				case (filt)
 				2'd1: s20 = s20 + p1 + ((-p1) >>> 4);
 				2'd2: s20 = s20 + (p1 <<< 1) + ((-(p1 * 3)) >>> 5) - p2 + (p2 >>> 4);
