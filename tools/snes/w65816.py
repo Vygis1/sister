@@ -170,7 +170,7 @@ class CPU:
         o = self.fetch(); self.dp_base(); self.io()
         if self.e and (self.d & 0xFF) == 0:
             pa = (self.d & 0xFF00) | ((o + self.x) & 0xFF)
-            p = self.dp_ptr(pa, True)
+            p = self.dp_ptr(pa, False)          # (the index wraps in the page; the pointer's second byte does not)
         else:
             pa = (self.d + o + self.x) & 0xFFFF
             p = self.dp_ptr(pa, False)
@@ -757,7 +757,7 @@ def _jsl(c):
 
 def _jsr_indx(c):
     lo = c.fetch()
-    c.push16(c.pc, True)
+    c.push16(c.pc)                       # (in emulation mode its stack stays in page 1)
     hi = c.fetch()
     p = (lo | (hi << 8))
     c.io()
@@ -900,8 +900,8 @@ OPS[0x44] = _mv(-1)     # MVP
 # --- the rest -------------------------------------------------------------------------------
 OPS[0xEA] = lambda c: c.io()                                  # NOP
 OPS[0x42] = lambda c: c.fetch()                               # WDM
-OPS[0xCB] = lambda c: (c.io(), c.io(), setattr(c, 'waiting', True))   # WAI
-OPS[0xDB] = lambda c: (c.io(), c.io(), setattr(c, 'stopped', True))   # STP
+OPS[0xCB] = lambda c: (c.io(), c.io(), c.io(), setattr(c, 'waiting', True))   # WAI
+OPS[0xDB] = lambda c: (c.io(), c.io(), c.io(), setattr(c, 'stopped', True))   # STP
 
 missing = [hex(i) for i, f in enumerate(OPS) if f is None]
 assert not missing, missing
