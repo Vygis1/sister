@@ -3,6 +3,8 @@
 // every pixel of the 640 x 480 picture must be the glyph's pixel in the cell's ink,
 // the highlight bar or the background -- or, with the menu off, the console's own
 // pixel. Checks the two-ahead fetch lines up at every column, line ends included.
+// Version 2: the menu's own glyphs (128-255, written here), the palette (one entry
+// changed), a cell's own background colour, the ink's high colour bit.
 // (sim/osd_font_ref.hex: the font as tools/gen_osd_font.py wrote it.)
 //
 //   ./tools/sim.sh tb_osd
@@ -30,40 +32,61 @@ module tb_osd;
 
 	reg [7:0] font [0:1023];
 	initial $readmemh("../../sim/osd_font_ref.hex", font);
-	function [11:0] cellv; input integer i; cellv = {i[5] & i[1], i[4:3], i[2] & i[0], 4'd0, i[6:0] ^ i[11:7]} | 12'h20; endfunction
+	// a cell: [7:0] glyph (half of them the menu's own), [8] hl, [10:9] ink, [11] bar,
+	// [12] the ink's high bit, [13] own background, [16:14] its colour
+	function [16:0] cellv; input integer i;
+		reg [7:0] g;
+		begin
+			g = (i[6:0] ^ i[11:7]) | 8'h20;
+			if (i % 3 == 1) g = 8'h80 | i[6:0];
+			cellv = {i[9:7], (i % 5 == 2), i[3], i[5] & i[1], i[4:3], i[2] & i[0], g};
+		end
+	endfunction
+	function [7:0] mine; input integer a; mine = (a * 37 + (a >> 3) * 11) ^ 8'h5A; endfunction
+	reg [23:0] pal [0:7];
+	initial begin
+		pal[0] = 24'hF0F0F0; pal[1] = 24'hFFE040; pal[2] = 24'h8890A8; pal[3] = 24'h60E070;
+		pal[4] = 24'hFF8FB0; pal[5] = 24'hFF5050; pal[6] = 24'h60C8FF; pal[7] = 24'h123456;   // (7 written below)
+	end
 
 	reg show = 0;
 	integer i;
 	task wr; input [15:0] o; input [31:0] d; begin @(posedge clk); we <= 1; off <= o; wdata <= d; @(posedge clk); we <= 0; end endtask
 	initial begin
-		for (i = 0; i < 1200; i = i + 1) wr(16'h2000 + 4 * i, {20'd0, cellv(i)});
+		for (i = 0; i < 1024; i = i + 1) wr(16'h4000 + 4 * (1024 + i), {24'd0, mine(1024 + i)});
+		wr(16'h005C, 32'h00123456);                     // palette 7
+		for (i = 0; i < 1200; i = i + 1) wr(16'h2000 + 4 * i, {15'd0, cellv(i)});
 		wr(16'h0004, 32'd1); show = 1;
 	end
 
 	reg [9:0] x1, y1; reg r1; reg [23:0] con1;
 	always @(posedge pclk) begin x1 <= x; y1 <= y; r1 <= req; end
 	integer errors = 0, checked = 0, frames = 0, ci, glyph;
-	reg [11:0] cv; reg fg; reg [23:0] want, ink, grad; reg [5:0] gt;
+	reg [16:0] cv; reg fg; reg [23:0] want, ink, grad; reg [5:0] gt;
 	always @(posedge pclk) if (x == 10'd0 && y == 10'd0 && req && show) frames = frames + 1;
 	always @(posedge pclk) if (r1 && frames >= 2) begin
 		ci = (y1 >> 4) * 40 + (x1 >> 4);
 		cv = cellv(ci);
-		glyph = font[{cv[6:0], y1[3:1]}];
+		glyph = cv[7] ? mine({cv[7:0], y1[3:1]}) : font[{cv[6:0], y1[3:1]}];
 		fg = glyph[x1[3:1]];
-		ink = (cv[10:9] == 2'd1) ? 24'hFFE040 : (cv[10:9] == 2'd2) ? 24'h8890A8 : (cv[10:9] == 2'd3) ? 24'h60E070 : 24'hF0F0F0;
+		ink = pal[{cv[12], cv[10:9]}];
 		gt = 6'd59 - y1[8:3];
 		grad = {8'd8 + gt[5:2], 8'd10 + gt[5:2] + gt[5:4], 8'd24 + gt[5:1]};
-		want = fg ? ink : cv[8] ? 24'h2C58C8 : cv[11] ? 24'h26325E : grad;
+		want = fg ? ink : cv[8] ? 24'h2C58C8 : cv[13] ? pal[cv[16:14]] : cv[11] ? 24'h26325E : grad;
 		checked = checked + 1;
 		if (rgb !== want) begin
 			errors = errors + 1;
-			if (errors < 8) $display("tb_osd: (%0d,%0d) cell %0d char %02x got %06x want %06x | c2 %b in3 %b fg3 %b hl3 %b col3 %b cel %h grow %h gb2 %d", x1, y1, ci, cv[6:0], rgb, want, dut.c2, dut.in3, dut.fg3, dut.hl3, dut.col3, dut.cel, dut.grow, dut.gb2);
+			if (errors < 8) $display("tb_osd: (%0d,%0d) cell %0d char %02x got %06x want %06x | c2 %b in3 %b fg3 %b hl3 %b cel %h grow %h gb2 %d", x1, y1, ci, cv[7:0], rgb, want, dut.c2, dut.in3, dut.fg3, dut.hl3, dut.cel, dut.grow, dut.gb2);
 		end
 	end
 	initial begin
 		#(800 * 525 * 40 * 3);
 		$display("tb_osd: %0d pixels checked, %0d wrong", checked, errors);
-		if (errors == 0 && checked >= 307200 && rdata !== 32'hx) $display("tb_osd: all checks passed"); else $display("tb_osd: FAIL");
+		@(posedge clk); off <= 16'h0000; @(posedge clk); #1;
+		if (rdata !== 32'h4F534432) begin errors = errors + 1; $display("tb_osd: id %08x, not OSD2", rdata); end
+		off <= 16'h005C; @(posedge clk); #1;
+		if (rdata !== 32'h00123456) begin errors = errors + 1; $display("tb_osd: palette 7 reads %08x", rdata); end
+		if (errors == 0 && checked >= 307200) $display("tb_osd: all checks passed"); else $display("tb_osd: FAIL");
 		$finish;
 	end
 endmodule

@@ -339,7 +339,7 @@ module tb_shell;
 		check(dut.u_screen.ext_own === 1'b1, "and the menu has the screen");
 		frame_open; send(8'h41); send(8'h00); send(8'h07); send(8'h00); send(8'h00);
 		repeat (8) send(8'h00); frame_close;
-		check({rx[12], rx[11], rx[10], rx[9]} === 32'h4F53_4431, "the OSD's page reads OSD1");
+		check({rx[12], rx[11], rx[10], rx[9]} === 32'h4F53_4432, "the OSD's page reads OSD2");
 
 		// --- the guards: no erase without the unlock, no flash from the bus door -----
 		$display(" the guards:");
