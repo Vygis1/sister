@@ -481,6 +481,10 @@ module ps1_spu #(
 		input signed [15:0] a, b;
 		mul = a * b;
 	endfunction
+	// the all-pass coefficients negated a clock ahead, out of the multiply's path (the
+	// registers change only on a CPU write; a sample's reverb runs long after)
+	reg signed [15:0] nAPF1, nAPF2;
+	always @(posedge clk) begin nAPF1 <= rneg(vAPF1); nAPF2 <= rneg(vAPF2); end
 
 	// the loop address a jump would take, with this block's own loop-start flag applied
 	wire [15:0] lsax_v = lsax[v];
@@ -841,9 +845,9 @@ module ps1_spu #(
 					       + (mul(rd[6], rv[5]) >>> 14) + (mul(rd[7], rv[6]) >>> 14);
 					es <= E_RC4;
 				end
-			E_RC4: begin rmda <= clamp16((raccs + (mul(rd[8], rneg(vAPF1)) >>> 14)) >>> 1); es <= E_RC5; end
+			E_RC4: begin rmda <= clamp16((raccs + (mul(rd[8], nAPF1) >>> 14)) >>> 1); es <= E_RC5; end
 			E_RC5: begin
-					rmdb <= clamp16(rd[8] + (((mul(rmda, vAPF1) >>> 14) + (mul(rd[9], rneg(vAPF2)) >>> 14)) >>> 1));
+					rmdb <= clamp16(rd[8] + (((mul(rmda, vAPF1) >>> 14) + (mul(rd[9], nAPF2) >>> 14)) >>> 1));
 					es <= E_RC6;
 				end
 			E_RC6: begin rwet <= clamp16(rd[9] + (mul(rmdb, vAPF2) >>> 15)); rj <= 4'd0; es <= E_RWR; end
