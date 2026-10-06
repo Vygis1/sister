@@ -2,7 +2,7 @@
 // LoROM from a file, 128 kB of work RAM, the frame timer, and the PPU's VRAM data port
 // ($2118) caught as the text the ROM writes. Passes when "Success" is written.
 //
-//   ./tools/simwip.sh tb_snes_cpu          (+ROM=... picks another ROM; basic by default)
+//   ./tools/simwip.sh tb_snes_cpu          (build/tb_snes_rom.txt names another ROM; basic by default)
 `timescale 1ns/1ps
 `default_nettype none
 module tb_snes_cpu;
@@ -82,7 +82,11 @@ module tb_snes_cpu;
 		ntr = ntr + 1;
 	end
 	initial begin
-		if (!$value$plusargs("ROM=%s", romname)) romname = "../../sim/roms/snes/gilyon/cputest/cputest-basic.sfc";
+		// (the ROM's path from build/tb_snes_rom.txt when there is one: xsim's .bat wrapper
+		// splits arguments at '=', so a +ROM= plusarg never arrives)
+		romname = "../../sim/roms/snes/gilyon/cputest/cputest-basic.sfc";
+		fd = $fopen("../../build/tb_snes_rom.txt", "r");
+		if (fd != 0) begin k = $fscanf(fd, "%s", romname); $fclose(fd); end
 		fd = $fopen(romname, "rb");
 		if (fd == 0) begin $display("tb_snes_cpu: FAIL no ROM"); $finish; end
 		romsize = $fread(rom, fd);
