@@ -167,10 +167,16 @@ class CPU:
         return (self.dbr << 16) | p, 0xFFFFFF
 
     def ea_indx(self):                  # (dp,X)
+        # (In emulation mode the pointer's second byte always wraps within its page -- also
+        # when DL is not zero and the first byte did not wrap: gilyon's cputest, from real
+        # hardware, README "undocumented behavior". SingleStepTests has it unwrapped.)
         o = self.fetch(); self.dp_base(); self.io()
-        if self.e and (self.d & 0xFF) == 0:
-            pa = (self.d & 0xFF00) | ((o + self.x) & 0xFF)
-            p = self.dp_ptr(pa, False)          # (the index wraps in the page; the pointer's second byte does not)
+        if self.e:
+            if (self.d & 0xFF) == 0:
+                pa = (self.d & 0xFF00) | ((o + self.x) & 0xFF)
+            else:
+                pa = (self.d + o + self.x) & 0xFFFF
+            p = self.dp_ptr(pa, True)
         else:
             pa = (self.d + o + self.x) & 0xFFFF
             p = self.dp_ptr(pa, False)
@@ -757,7 +763,8 @@ def _jsl(c):
 
 def _jsr_indx(c):
     lo = c.fetch()
-    c.push16(c.pc)                       # (in emulation mode its stack stays in page 1)
+    c.push16(c.pc, True)                 # (leaves page 1 like the other new ones: gilyon
+                                         # test 0277, from hardware; SingleStepTests wraps it)
     hi = c.fetch()
     p = (lo | (hi << 8))
     c.io()

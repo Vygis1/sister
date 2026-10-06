@@ -6,6 +6,11 @@
 For each test: the state and RAM set as `initial` says, one instruction, then the registers, the
 RAM listed in `final`, and with --cycles the number of bus cycles, held against the suite's.
 Prints a line an opcode/mode: how many of the first N tests pass, and the first failure.
+
+Where this suite and gilyon's cputest (run on real hardware; tools/snes/snesmin.py) disagree, the
+model follows the hardware, so these fail here on purpose: in emulation mode (dp,X) with DL != 0
+(the pointer's high byte wraps in its page; 01 21 41 61 81 a1 c1 e1 .e, ~0.3%), and JSR (a,X)
+pushing from S=$100 (fc.e, ~0.4%). MVN / MVP (44, 54) are sampled mid-instruction.
 """
 import json
 import os
