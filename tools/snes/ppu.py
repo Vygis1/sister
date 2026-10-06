@@ -295,9 +295,9 @@ class PPU:
             out.append(v)
         return out
 
-    def _bg_line(self, n, bpp, y, width, hires):
-        """BG n's pixels on the line: lists (index, palette, priority) per x, x < width.
-        Index 0 = transparent."""
+    def _bg_line(self, n, bpp, y, width, hires, ilace=False):
+        """BG n's pixels on line y: lists (index, palette, priority) per x, x < width.
+        Index 0 = transparent. ilace: hi-res interlace, 448 BG rows (2y + field)."""
         sc = self.bgsc[n]
         tm_base = (sc & 0xFC) << 8
         big = bool(self.bgmode & (0x10 << n))
@@ -309,6 +309,9 @@ class PPU:
         mos = (self.mosaic >> 4) + 1 if self.mosaic & (1 << n) else 1
         if mos > 1:
             y = y - (y - self.mosaic_line) % mos if y >= self.mosaic_line else y
+        if ilace:
+            y = 2 * y + self.field
+        mos_x = mos                                   # (in hi-res too: blocks of `mos` of the 512)
         hofs, vofs = self.hofs[n], self.vofs[n]
         opt = mode in (2, 4, 6) and n < 2
         out = [None] * width
@@ -316,7 +319,7 @@ class PPU:
         rows = {}
         step = 2 if hires else 1                        # (hi-res: 512 pixels, the scroll is in 256ths)
         for x in range(width):
-            sx = x - x % mos if mos > 1 else x
+            sx = x - x % mos_x if mos > 1 else x
             ho, vo = hofs, vofs
             if opt:
                 ho, vo = self._opt(n, sx // step if hires else sx, ho, vo)
@@ -545,10 +548,9 @@ class PPU:
                 if extbg:
                     layers[1] = [None if p is None else (p & 0x7F, 0, p >> 7) for p in m7]
         else:
-            by = (v * 2 + self.field) if (hires and inter) else v     # (hi-res interlace: 448 BG lines)
             for n in range(4):
                 if bpps[n] and used & (1 << n):
-                    layers[n] = self._bg_line(n, bpps[n], by, width, hires)
+                    layers[n] = self._bg_line(n, bpps[n], v, width, hires, hires and inter)
         obj = self._obj_line(v) if used & 0x10 else [None] * 256
 
         direct = bool(self.cgwsel & 1) and mode in (3, 4, 7)

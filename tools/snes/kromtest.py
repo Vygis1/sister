@@ -16,6 +16,8 @@ import snes  # noqa: E402
 
 ROOT = os.path.join(HERE, '..', '..', 'sim', 'roms', 'snes', 'krom', 'SNES-master')
 OUT = os.path.join(HERE, '..', '..', 'build', 'snes_krom')
+# the tests whose screenshot was taken after pressing buttons: (pad 1 held, frames)
+HELD = {'MosaicMode3': (0x0010, 144), 'MosaicMode5': (0x0010, 144)}   # (R to mosaic size 16)
 
 
 def main():
@@ -36,7 +38,9 @@ def main():
         rom = open(sfc, 'rb').read()
         try:
             s = snes.Snes(rom)
-            s.run_frames(frames)
+            joy, n = HELD.get(stem, (0, frames))
+            s.joy1 = joy
+            s.run_frames(n)
             img = s.image(*snes.ref_size(png))
             snes.save_png(img, os.path.join(OUT, stem + '.png'))
             bad, n = snes.compare(img, png)

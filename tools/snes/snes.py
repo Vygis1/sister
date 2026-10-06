@@ -2,10 +2,11 @@
 sound unit's CPU side (apu.py), DMA and HDMA, the CPU's I/O ($4200-$421F), the timing of a
 frame and the interrupts.
 
-    python tools/snes/snes.py ROM.sfc [--frames N] [--png OUT.png] [--ref REF.png]
+    python tools/snes/snes.py ROM.sfc [--frames N] [--joy HEX] [--png OUT.png] [--ref REF.png]
 
 Runs N frames (default 60) and writes the last as a 256x224 PNG (hi-res halves are averaged);
 with --ref, counts the pixels that differ from a reference screenshot (krom's tests ship one).
+--joy holds pad 1's buttons throughout ($4218/$4219 bits: $0010 R, $0020 L, $0080 A, ...).
 
 Timing (Fullsnes "SNES Timings"): a 21.477 MHz master clock, 1364 a line, 262 lines.
 CPU accesses take 6, 8 or 12 master clocks by address (FastROM: 6 above bank $80 when $420D
@@ -64,6 +65,7 @@ class Snes:
         self.rdnmi = False
         self.timeup = False
         self.mdr = 0
+        self.joy1 = 0                        # pad 1's buttons, as $4218/$4219 read them
         self.mc = 0                          # master clocks since power on
         self.frame_no = 0
         self.v = 0
@@ -262,8 +264,12 @@ class Snes:
             return self.rdmpy & 0xFF
         if r == 0x4217:
             return self.rdmpy >> 8
-        if 0x4218 <= r < 0x4220:
-            return 0                                     # (no buttons)
+        if r == 0x4218:
+            return self.joy1 & 0xFF
+        if r == 0x4219:
+            return self.joy1 >> 8
+        if 0x421A <= r < 0x4220:
+            return 0
         return self.mdr
 
     # --- DMA -------------------------------------------------------------------------------
@@ -482,11 +488,12 @@ def compare(img, ref_path):
     from PIL import Image
     ref = Image.open(ref_path).convert('RGB')
     w, h = ref.size
-    w, h = min(w, len(img[0])), min(h, len(img))
+    top = 1 if h in (225, 240) else 0                 # (a screenshot that kept line 0 at the top)
+    w, h = min(w, len(img[0])), min(h - top, len(img))
     bad = 0
     for y in range(h):
         for x in range(w):
-            r = ref.getpixel((x, y))
+            r = ref.getpixel((x, y + top))
             g = img[y][x]
             if max(abs(r[i] - g[i]) for i in range(3)) > 8:
                 bad += 1
@@ -509,6 +516,8 @@ def main():
         rom = rom[512:]
     frames = int(args[args.index('--frames') + 1]) if '--frames' in args else 60
     s = Snes(rom)
+    if '--joy' in args:
+        s.joy1 = int(args[args.index('--joy') + 1], 16)
     s.run_frames(frames)
     size = ref_size(args[args.index('--ref') + 1]) if '--ref' in args else (256, 224)
     img = s.image(*size)
