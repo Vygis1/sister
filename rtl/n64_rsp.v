@@ -103,13 +103,20 @@ module n64_rsp #(
 	// da_addr, da_q2 the next (wrapping at 4 kB); da_we2/da_wd2 write the next.
 	wire [8:0]  da_addr;  wire [7:0] da_we, da_we2; wire [63:0] da_wd, da_wd2;
 	wire [63:0] da_q, da_q2;
-	wire [8:0]  da_p1 = da_addr + 9'd1;
-	wire [7:0]  a0_idx = da_addr[0] ? da_p1[8:1] : da_addr[8:1];
-	wire [7:0]  a1_idx = da_addr[8:1];
-	wire [7:0]  a0_we = da_addr[0] ? da_we2 : da_we;
-	wire [7:0]  a1_we = da_addr[0] ? da_we : da_we2;
-	wire [63:0] a0_wd = da_addr[0] ? da_wd2 : da_wd;
-	wire [63:0] a1_wd = da_addr[0] ? da_wd : da_wd2;
+	// (In R_EX the banks' addresses come straight from the instruction's -- worked out beside
+	// the address, the +1 an adder of its own -- whether or not the fast path takes the access:
+	// a read nobody uses does no harm, and a write is still only the fast store's. The fast
+	// path's decision, which hangs on the address's low bits, is off the address's path: it
+	// was the RSP's longest at 62.5 MHz, IMEM to the DMEM address.)
+	wire        in_ex;                        // st == R_EX (below)
+	wire [7:0]  ex_a0, ex_a1;  wire ex_odd;   // R_EX's bank addresses, and which bank is first
+	wire [8:0]  da_o;                         // any other state's (assigned below)
+	wire        da_odd;
+	wire [7:0]  a0_idx, a1_idx;
+	wire [7:0]  a0_we = da_odd ? da_we2 : da_we;
+	wire [7:0]  a1_we = da_odd ? da_we : da_we2;
+	wire [63:0] a0_wd = da_odd ? da_wd2 : da_wd;
+	wire [63:0] a1_wd = da_odd ? da_wd : da_wd2;
 	reg  [63:0] a0_q, a1_q;  reg a_odd;
 	always @(posedge clk) begin
 		for (k = 0; k < 8; k = k + 1) if (a0_we[k]) dm0[a0_idx][63 - 8 * k -: 8] <= a0_wd[63 - 8 * k -: 8];
@@ -118,7 +125,7 @@ module n64_rsp #(
 	always @(posedge clk) begin
 		for (k = 0; k < 8; k = k + 1) if (a1_we[k]) dm1[a1_idx][63 - 8 * k -: 8] <= a1_wd[63 - 8 * k -: 8];
 		a1_q <= dm1[a1_idx];
-		a_odd <= da_addr[0];
+		a_odd <= da_odd;
 	end
 	assign da_q  = a_odd ? a1_q : a0_q;
 	assign da_q2 = a_odd ? a0_q : a1_q;
@@ -489,15 +496,28 @@ module n64_rsp #(
 	reg  [8:0]  ex_da;
 	reg  [7:0]  ex_wm;
 	reg  [63:0] ex_wd;
+	reg  [7:0]  ex_a0r, ex_a1r;  reg ex_oddr;
+	assign ex_a0 = ex_a0r; assign ex_a1 = ex_a1r; assign ex_odd = ex_oddr; assign in_ex = st == R_EX;
 	always @(*) begin : exmem
-		reg [11:0] va; reg [6:0] i7; reg [3:0] kk;
+		reg [11:0] va, off, aa, aa8; reg [6:0] i7; reg [3:0] kk;
 		ex_fl = 1'b0; ex_fs = 1'b0; ex_two = 1'b0; ex_da = ea[11:3]; ex_wm = 8'h00; ex_wd = 64'd0;
 		ex_short = 1'b0; ex_n = 4'd0; ex_da_off = 3'd0; ex_x = 2'd0; ex_off4 = 4'd0; ex_start = 5'd0;
 		i7 = ir[6:0]; kk = ir[14:11];
-		va = (kk == 4'd0) ? a[11:0] + {{5{i7[6]}}, i7} : (kk == 4'd1) ? a[11:0] + {{4{i7[6]}}, i7, 1'b0}
-		   : (kk == 4'd2) ? a[11:0] + {{3{i7[6]}}, i7, 2'b00}
-		   : (kk == 4'd3 || kk == 4'd6 || kk == 4'd7) ? a[11:0] + {{2{i7[6]}}, i7, 3'b000}
-		   : a[11:0] + {i7[6], i7, 4'b0000};
+		off = (kk == 4'd0) ? {{5{i7[6]}}, i7} : (kk == 4'd1) ? {{4{i7[6]}}, i7, 1'b0}
+		    : (kk == 4'd2) ? {{3{i7[6]}}, i7, 2'b00}
+		    : (kk == 4'd3 || kk == 4'd6 || kk == 4'd7) ? {{2{i7[6]}}, i7, 3'b000}
+		    : {i7[6], i7, 4'b0000};
+		va = a[11:0] + off;
+		// the banks' addresses for R_EX, from the instruction alone: a scalar access at ea, a
+		// vector one at va (LQV, LRV / SQV, SRV on their quadword's even doubleword); the
+		// second bank's +1 from its own adder (a + offset + 8), not after the sum
+		aa  = (op[5:3] == 3'b100 || op[5:3] == 3'b101) ? ea : va;
+		aa8 = (op[5:3] == 3'b100 || op[5:3] == 3'b101) ? a[11:0] + simm[11:0] + 12'd8 : a[11:0] + off + 12'd8;
+		if (op[5:3] != 3'b100 && op[5:3] != 3'b101 && (kk == 4'd4 || kk == 4'd5)) begin
+			ex_a0r = aa[11:4]; ex_a1r = aa[11:4]; ex_oddr = 1'b0;
+		end else begin
+			ex_a0r = aa8[11:4]; ex_a1r = aa[11:4]; ex_oddr = aa[3];
+		end
 		if (st == R_EX && !v2_haz && !fl_haz) begin
 			case (op)
 			6'h20, 6'h21, 6'h23, 6'h24, 6'h25, 6'h27:
@@ -557,7 +577,12 @@ module n64_rsp #(
 		end
 	end
 	wire        fast_st = st == R_FL1 || st == R_FL2 || st == R_FS1 || st == R_FS2;
-	assign da_addr = (ex_fl || ex_fs) ? ex_da : fast_st ? f_dw : sa_addr[11:3];
+	assign da_addr = (ex_fl || ex_fs) ? ex_da : fast_st ? f_dw : sa_addr[11:3];   // (the banks take R_EX's own: ex_a0 / ex_a1)
+	assign da_o    = fast_st ? f_dw : sa_addr[11:3];
+	wire [8:0]  da_p1 = da_o + 9'd1;
+	assign da_odd  = in_ex ? ex_odd : da_o[0];
+	assign a0_idx  = in_ex ? ex_a0 : da_o[0] ? da_p1[8:1] : da_o[8:1];
+	assign a1_idx  = in_ex ? ex_a1 : da_o[8:1];
 	assign da_we   = ex_fs ? ex_wm : (st == R_FS1 || st == R_FS2) ? f_mask
 	               : (st == R_VST && ls_k != ls_n) ? (8'h01 << sa_addr[2:0]) : 8'd0;   // bit k = offset k
 	assign da_wd   = ex_fs ? ex_wd : (st == R_FS1 || st == R_FS2) ? f_wd : {8{sa_val}};
