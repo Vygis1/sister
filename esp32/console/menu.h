@@ -1148,8 +1148,18 @@ static void task(void *) {
     bool rep = (p & (pads::M_UP | pads::M_DOWN | pads::M_LEFT | pads::M_RIGHT)) && millis() - held > 350;
     if (rep) held = millis() - 270;                  // ~12 a second once it repeats
     was = p;
-    if (edge) Serial.printf("menu: buttons %04x (new %04x), %s, level %d, item %d\n", p, edge, open_ ? "open" : "closed",
-                            nav.page == P_HOME ? 0 : nav.page == P_GAMES ? 1 : 2, nav.sel);
+    // (logged once the press has done its work -- whichever way this pass ends -- with the
+    // item it leaves highlighted: tools/menunav.py steers by it)
+    struct LogAfter {
+      uint16_t p, e;
+      ~LogAfter() {
+        if (!e) return;
+        std::string it;
+        if (open_ && nav.page != P_KEYBOARD) { auto v = items(); if (nav.sel < (int)v.size()) it = v[nav.sel].text; }
+        Serial.printf("menu: buttons %04x (new %04x), %s, level %d, item %d [%s]\n", p, e, open_ ? "open" : "closed",
+                      nav.page == P_HOME ? 0 : nav.page == P_GAMES ? 1 : 2, nav.sel, it.c_str());
+      }
+    } logAfter{ p, edge };
     if (!open_) {
       if (sysMenu || ((p & (pads::M_START | pads::M_SEL)) == (pads::M_START | pads::M_SEL) && (edge & (pads::M_START | pads::M_SEL)))) openMenu();
       continue;
