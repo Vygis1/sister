@@ -57,6 +57,11 @@ static uint32_t word(const In &p, uint8_t which) {
       | p.l1 << 5 | p.r1 << 4
       | (p.ry < -DIG || p.y) << 3 | (p.ry > DIG || p.b) << 2 | (p.rx < -DIG || p.sel) << 1 | (p.rx > DIG || p.r2);
     break;
+  case 5:   // SNES ($4218): B 15, Y 14, select 13, start 12, up 11, down 10, left 9, right 8, A 7, X 6, L 5, R 4
+            // (by position: cross B, circle A, square Y, triangle X)
+    o = p.a << 15 | p.x << 14 | p.sel << 13 | p.start << 12 | up << 11 | down << 10 | left << 9 | right << 8
+      | p.b << 7 | p.y << 6 | p.l1 << 5 | p.r1 << 4;
+    break;
   default:  // NES, Master System, and the shell's menu: A, B, select, start, up, down, left, right
     o = (p.a || p.x) | (p.b || p.y) << 1 | p.sel << 2 | p.start << 3 | up << 4 | down << 5 | left << 6 | right << 7;
   }

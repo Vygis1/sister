@@ -46,6 +46,7 @@ module regfile #(
 	parameter        MD_DDR3  = 0,
 	parameter        CORE_PS1 = 0,
 	parameter        CORE_N64 = 0,
+	parameter        CORE_SNES = 0,
 	parameter        WEBVID   = 0,    // the picture to the web page as well (see eth_top)
 	parameter        N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
 	parameter        CLK_HZ   = 50_000_000   // the console's clock (eth_top's cclk)
@@ -199,7 +200,7 @@ module regfile #(
 	// run the console (and the N64 needs the room: its picture's filters). The
 	// page reads back as unmapped, which the server's analyser panel reports
 	// cleanly; nothing else looks here.
-	generate if (CORE_PS1 == 0 && CORE_N64 == 0) begin : g_la
+	generate if (CORE_PS1 == 0 && CORE_N64 == 0 && CORE_SNES == 0) begin : g_la
 	logic_analyzer #(.DEPTH_MAX(LA_DEPTH), .AW(LA_AW)) u_la (
 		.clk(clk), .rst(rst),
 		.probe(la_probe),
@@ -239,7 +240,7 @@ module regfile #(
 	// stereo too but its FM chip time-multiplexes its channels on its output: its two
 	// channels are filtered and averaged here like any other chip's.
 	localparam READY = (CORE_PS1 != 0) || (CORE_N64 != 0);
-	localparam MDST  = !READY && CORE_MD != 0 && CORE_NES == 0 && CORE_SMS == 0;
+	localparam MDST  = !READY && (CORE_MD != 0 || CORE_SNES != 0) && CORE_NES == 0 && CORE_SMS == 0;
 	wire [15:0] f_l, f_r;
 	aud_filter u_afl (.clk(clk), .x(MDST ? ps1_audio_lr[15:0] ^ 16'h8000 : console_audio), .tick(a_tick), .y(f_l));
 	generate if (MDST) begin : g_afr
@@ -357,10 +358,10 @@ module regfile #(
 	// machines' cartridge, which would otherwise sit there fully sized and
 	// entirely unread. 384 kB of block RAM is not something this part can spend
 	// on a memory nothing in the image can address.
-	localparam MD_ONLY = (CORE_MD && !CORE_NES && !CORE_SMS);
+	localparam MD_ONLY = ((CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS);
 
 	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .CLK_HZ(CLK_HZ),
+	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .CLK_HZ(CLK_HZ),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),
@@ -470,7 +471,7 @@ module regfile #(
 			// outside -- both are a black screen -- and the board gets blamed for
 			// the design or the other way round. One bit ends that.
 			16'h0010: if (req_we) bus_err = 2'd2;
-			          else bus_rdata = {30'd0, (MD_DDR3 != 0) || (CORE_PS1 != 0) || (CORE_N64 != 0), d_calibrated};
+			          else bus_rdata = {30'd0, (MD_DDR3 != 0) || (CORE_PS1 != 0) || (CORE_N64 != 0) || (CORE_SNES != 0), d_calibrated};
 			default:  bus_err = 2'd1;
 		endcase
 

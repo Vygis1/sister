@@ -39,8 +39,10 @@ static const Machine MACHINES[] = {
   { "Mega Drive",    "md",  'M', 4 * 1024 * 1024 },
   { "Nintendo 64",   "n64", '6', 16 * 1024 * 1024 },
   { "PlayStation",   "ps1", 'P', 0xFFFFFFFF },          // a disc image: any size
+  { "Super NES",     "snes", 'F', 6 * 1024 * 1024 + 512 },   // (+ a copier header, sometimes)
 };
-static const int NMACH = 5;
+static const int NMACH = 6;
+static const uint32_t SNES_CFG = NES + 0x180;      // [0] HiROM, [15:8] log2 ROM size, [23:16] log2 save RAM
 static const uint32_t CARD_CTL = NES + 0x134;
 
 static int machineOfName(const String &n) {
@@ -49,6 +51,7 @@ static int machineOfName(const String &n) {
   if (l.endsWith(".sms")) return 1;
   if (l.endsWith(".md") || l.endsWith(".gen") || l.endsWith(".smd")) return 2;
   if (l.endsWith(".z64") || l.endsWith(".n64") || l.endsWith(".v64")) return 3;
+  if (l.endsWith(".sfc") || l.endsWith(".smc")) return 5;
   return -1;
 }
 static int machineOfCore(uint8_t id) {
@@ -144,6 +147,7 @@ static int machineOfFolder(String n) {
   if (n == "md" || n == "genesis" || n == "megadrive" || n == "mega drive") return 2;
   if (n == "n64") return 3;
   if (n == "ps1" || n == "psx" || n == "playstation" || n == "discs") return 4;
+  if (n == "snes" || n == "sfc" || n == "superfamicom" || n == "super nes") return 5;
   return -1;
 }
 static String baseName(File &e) {
@@ -338,6 +342,12 @@ static uint8_t pad() {
   if (c == 4) {          // the N64's order (pc/server.py _N64_BITS): the pad's a 15, b 2, select 1, start 12, up 11, down 10, left 9, right 8
     uint8_t o = 0;
     if (v & 0x8000) o |= B_A; if (v & 0x0004) o |= B_B; if (v & 0x0002) o |= B_SEL; if (v & 0x1000) o |= B_START;
+    if (v & 0x0800) o |= B_UP; if (v & 0x0400) o |= B_DOWN; if (v & 0x0200) o |= B_LEFT; if (v & 0x0100) o |= B_RIGHT;
+    return o;
+  }
+  if (c == 5) {          // the SNES's ($4218): B 15, Y 14, select 13, start 12, up 11, down 10, left 9, right 8, A 7
+    uint8_t o = 0;
+    if (v & 0x0080) o |= B_A; if (v & 0x8000) o |= B_B; if (v & 0x2000) o |= B_SEL; if (v & 0x1000) o |= B_START;
     if (v & 0x0800) o |= B_UP; if (v & 0x0400) o |= B_DOWN; if (v & 0x0200) o |= B_LEFT; if (v & 0x0100) o |= B_RIGHT;
     return o;
   }
@@ -621,6 +631,33 @@ static String load(const Game &g) {
     fpga.busWrite(VID_CTRL, 3);
     fpga.busWrite(NES_CTRL, 1);
     return "";
+  } else if (g.m == 5) {                             // SNES: into DDR3; its shape from the header
+    uint32_t base = (size % 1024 == 512) ? 512 : 0;  // (a copier's header in front)
+    uint32_t rom = size - base;
+    // LoROM's header is at 7FC0, HiROM's at FFC0: the one whose checksum and complement
+    // agree, and whose map byte says so, wins
+    int best = 0; uint8_t hh[2][32];
+    for (int k = 0; k < 2; k++) {
+      memset(hh[k], 0, 32);
+      uint32_t at = base + (k ? 0xFFC0 : 0x7FC0);
+      if (at + 32 <= size) { f.seek(at); f.read(hh[k], 32); }
+    }
+    int score[2];
+    for (int k = 0; k < 2; k++) {
+      uint16_t ck = hh[k][0x1C] | hh[k][0x1D] << 8, cs = hh[k][0x1E] | hh[k][0x1F] << 8;
+      uint8_t mode = hh[k][0x15] & 0xEF;
+      score[k] = ((ck ^ cs) == 0xFFFF ? 2 : 0) + (mode == (k ? 0x21 : 0x20) || mode == (k ? 0x31 : 0x30) ? 1 : 0);
+    }
+    best = score[1] > score[0] ? 1 : 0;
+    uint32_t romLog = 0; while ((1u << romLog) < rom) romLog++;
+    uint8_t ramSz = hh[best][0x18];                  // save RAM: 1 << n kB (0: none)
+    uint32_t ramLog = ramSz ? min(15, ramSz + 10) : 0;   // (32 kB of it on the board)
+    fpga.busWrite(NES_CONSOLE, 5);                   // first: the fill only reaches the selected core
+    fpga.busWrite(SNES_CFG, best | romLog << 8 | ramLog << 16);
+    f.seek(base);
+    if (!streamBanks(f, rom)) err = "the file ended early";
+    fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
+    if (!err.length()) fpga.busWrite(NES_CTRL, 1);
   } else {                                           // N64: big-endian (.z64) whatever the file
     uint8_t h[64]; f.read(h, 64); f.seek(0);
     int swap = (h[0] == 0x37 && h[1] == 0x80) ? 1 : (h[0] == 0x40 && h[1] == 0x12) ? 2 : 0;

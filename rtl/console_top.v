@@ -78,6 +78,8 @@ module console_top #(
 	// and the cartridge are in DDR3.
 	parameter CORE_N64 = 0,
 	parameter N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
+	// The Super Nintendo (snes_top.v). Its own image; the cartridge in DDR3.
+	parameter CORE_SNES = 0,
 	parameter WEBVID   = 0,    // the picture to the web page as well (see eth_top); without it the stream registers read 0
 	parameter CLK_HZ   = 50_000_000   // the console's clock: only the N64 is written for others
 )(
@@ -176,13 +178,15 @@ module console_top #(
 	localparam [3:0] CONSOLE_MD  = 4'd2;
 	localparam [3:0] CONSOLE_PS1 = 4'd3;
 	localparam [3:0] CONSOLE_N64 = 4'd4;
+	localparam [3:0] CONSOLE_SNES = 4'd5;
 	// Read by the host rather than assumed, so a build without a given core
 	// reports that honestly instead of selecting it and showing a black screen.
 	localparam [7:0] CORES_BUILT = (CORE_NES ? 8'b0000_0001 : 8'd0)
 	                             | (CORE_SMS ? 8'b0000_0010 : 8'd0)
 	                             | (CORE_MD  ? 8'b0000_0100 : 8'd0)
 	                             | (CORE_PS1 ? 8'b0000_1000 : 8'd0)
-	                             | (CORE_N64 ? 8'b0001_0000 : 8'd0);
+	                             | (CORE_N64 ? 8'b0001_0000 : 8'd0)
+	                             | (CORE_SNES ? 8'b0010_0000 : 8'd0);
 
 	// Which core is selected out of reset: the first one this image actually
 	// contains.
@@ -200,6 +204,7 @@ module console_top #(
 	                               : CORE_MD  ? CONSOLE_MD
 	                               : CORE_PS1 ? CONSOLE_PS1
 	                               : CORE_N64 ? CONSOLE_N64
+	                               : CORE_SNES ? CONSOLE_SNES
 	                                          : CONSOLE_NES;
 
 	wire [15:0] dbg_pc;
@@ -538,7 +543,16 @@ module console_top #(
 	wire md_sel   = (console_sel == CONSOLE_MD);
 	wire ps1_sel  = (console_sel == CONSOLE_PS1);
 	wire n64_sel  = (console_sel == CONSOLE_N64);
+	wire snes_sel = (console_sel == CONSOLE_SNES);
 	wire core_rst = rst || !run;
+	wire snes_rst = core_rst || !snes_sel;
+	// the SNES cartridge's shape, from the loader (it reads the header): [0] HiROM,
+	// [15:8] log2 of the ROM's size, [23:16] log2 of the save RAM's (0: none)
+	reg  [23:0] snes_cfg;
+	wire [23:0] snes_dbg_pc;
+	wire signed [15:0] snes_audio_l, snes_audio_r;
+	wire        snes_frame_st;
+	wire [23:0] snes_vid_rgb;
 	wire nes_rst  = core_rst || !nes_sel;
 	wire z80_rst  = core_rst || !sms_sel;
 	wire md_rst   = core_rst || !md_sel;
@@ -552,6 +566,7 @@ module console_top #(
 			mapper_id <= 4'd0; prg_last <= 6'd3; console_sel <= CONSOLE_FIRST;
 			chr_is_ram <= 1'b0;
 			test_mode <= 1'b0;
+			snes_cfg <= 24'h000F00;
 		end else if (ctrl_we) begin
 			case (off)
 			16'h0004: begin run <= wdata[0]; mirror_v <= wdata[1]; cpu_halt <= wdata[2]; end
@@ -582,6 +597,7 @@ module console_top #(
 			16'h0170: n64_dbg_sel <= wdata;                       // the N64's debug window: what 0x174 shows
 			16'h0178: n64_vi_slow <= wdata[0];                         // the N64's VI at half rate
 			16'h017C: vid_opt <= wdata[15:0];                          // the picture's settings (n64_vid; the menu's Video page)
+			16'h0180: snes_cfg <= wdata[23:0];                         // the SNES cartridge's shape
 			16'h001C: begin
 				mapper_id  <= wdata[3:0];
 				prg_last   <= wdata[13:8];
@@ -611,7 +627,7 @@ module console_top #(
 		// NES's PC while the Mega Drive was selected returned a tied-off zero
 		// and looked exactly like a CPU that had stopped -- the most misleading
 		// possible answer, since a stuck PC is the first thing anyone checks.
-		16'h0014: ctrl_rdata = ps1_sel ? ps1_dbg_pc : n64_sel ? n64_dbg_pc : md_sel ? md_dbg_pc : {16'd0, dbg_pc};
+		16'h0014: ctrl_rdata = snes_sel ? {8'd0, snes_dbg_pc} : ps1_sel ? ps1_dbg_pc : n64_sel ? n64_dbg_pc : md_sel ? md_dbg_pc : {16'd0, dbg_pc};
 		16'h0018: ctrl_rdata = nmi_count;
 		16'h001C: ctrl_rdata = {17'd0, chr_is_ram, prg_last, 4'd0, mapper_id};
 		16'h0020: ctrl_rdata = {8'd0, CORES_BUILT, 7'd0, test_mode, 4'd0, console_sel};
@@ -681,6 +697,7 @@ module console_top #(
 		16'h0174: ctrl_rdata = n64_dbg_q;
 		16'h0178: ctrl_rdata = {31'd0, n64_vi_slow};
 		16'h017C: ctrl_rdata = {16'd0, vid_opt};
+		16'h0180: ctrl_rdata = {8'd0, snes_cfg};
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -758,7 +775,7 @@ module console_top #(
 
 	// --- the picture for HDMI: the running core's ----------------------------------------
 	wire [23:0] n64_vid_rgb, nes_vid_rgb, sms_vid_rgb, md_vid_rgb, ps1_vid_rgb;
-	assign vid_rgb = n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : sms_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : ps1_sel ? ps1_vid_rgb : 24'd0;
+	assign vid_rgb = snes_sel ? snes_vid_rgb : n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : sms_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : ps1_sel ? ps1_vid_rgb : 24'd0;
 
 	// --- the NES ---------------------------------------------------------------
 	wire [8:0] nes_px, nes_py;
@@ -1002,6 +1019,45 @@ module console_top #(
 		assign md_dbg_mem = 32'd0;
 	end endgenerate
 
+	// --- the Super Nintendo ---------------------------------------------------------------
+	// Its cartridge in DDR3 through cart_ddr3, as the Mega Drive's (snes_top undoes the
+	// 68000 byte order on its side); the picture into frame_hdmi as BGR555 (the
+	// PlayStation's colour word); sound at 32 kHz, held for HDMI's 48.
+	generate if (CORE_SNES) begin : g_snes
+		wire [19:0]  s_m_addr; wire s_m_req, s_m_ready, s_m_valid; wire [127:0] s_m_data;
+		cart_ddr3 #(.BASE(24'h00_0000)) u_snes_cart (
+			.clk(clk), .rst(rst),
+			.host_windex(md_windex_full), .host_we(prog_we && snes_sel),
+			.wdata(wdata), .fill_end(fill_end && snes_sel),
+			.m_addr(s_m_addr), .m_req(s_m_req), .m_ready(s_m_ready),
+			.m_data(s_m_data), .m_valid(s_m_valid),
+			.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata),
+			.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid),
+			.d_calibrated(d_calibrated)
+		);
+		// the ROM's and the save RAM's sizes as masks (log2 from the loader)
+		wire [23:0] rom_mask = (24'd1 << snes_cfg[12:8]) - 24'd1;
+		wire [16:0] sram_mask = (snes_cfg[20:16] == 5'd0) ? 17'd0 : (17'd1 << snes_cfg[20:16]) - 17'd1;
+		wire px_we; wire [8:0] px_x, px_y, s_lines; wire [14:0] px_rgb;
+		snes_top #(.CLK_HZ(CLK_HZ)) u_snes (
+			.clk(clk), .rst(snes_rst), .pause(cpu_halt),
+			.rom_hi(snes_cfg[0]), .rom_mask(rom_mask), .sram_mask(sram_mask),
+			.m_addr(s_m_addr), .m_req(s_m_req), .m_ready(s_m_ready), .m_data(s_m_data), .m_valid(s_m_valid),
+			.pad1(joy1), .pad2(joy2),
+			.px_we(px_we), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb), .lines(s_lines), .frame_start(snes_frame_st),
+			.audio_l(snes_audio_l), .audio_r(snes_audio_r), .audio_stb(),
+			.dbg_pc(snes_dbg_pc), .dbg_spc_pc()
+		);
+		frame_hdmi #(.FMT(3), .DW(15)) u_hdmi (.clk(clk), .we(px_we), .wx(px_x), .wy(px_y), .wd(px_rgb),
+			.w(9'd256), .h(s_lines),
+			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(snes_vid_rgb));
+	end else begin : g_snes
+		assign snes_vid_rgb = 24'd0;
+		assign snes_dbg_pc = 24'd0;
+		assign snes_audio_l = 16'sd0; assign snes_audio_r = 16'sd0;
+		assign snes_frame_st = 1'b0;
+	end endgenerate
+
 	// --- the Nintendo 64 -------------------------------------------------------------
 	generate if (CORE_N64) begin : g_n64
 		n64_top #(.CLK_HZ(CLK_HZ), .DBG(N64_DBG)) u_n64 (
@@ -1038,7 +1094,7 @@ module console_top #(
 	// memory (NES, Master System). Without this last case the port floats; with
 	// it in the wrong place it fights the core that legitimately drives it, which
 	// is the multi-driven net that showed up the first time PS1 was built.
-	generate if (!((CORE_MD && MD_DDR3) || CORE_PS1 || CORE_N64)) begin : g_no_mem
+	generate if (!((CORE_MD && MD_DDR3) || CORE_PS1 || CORE_N64 || CORE_SNES)) begin : g_no_mem
 		assign d_addr = 24'd0; assign d_req = 1'b0; assign d_we = 1'b0;
 		assign d_wdata = 128'd0;
 	end endgenerate
@@ -1061,7 +1117,8 @@ module console_top #(
 	wire       md_frame_st  = md_px_valid && (md_px_x == 9'd0) && (md_px_y == 9'd0);
 	wire       core_frame_st = nes_sel ? nes_frame_start :
 	                           sms_sel ? sms_frame_start :
-	                           md_sel  ? md_frame_st     : 1'b0;
+	                           md_sel  ? md_frame_st     :
+	                           snes_sel ? snes_frame_st  : 1'b0;
 	wire [8:0] core_px       = nes_sel ? nes_px  : sms_px;
 	wire [8:0] core_py       = nes_sel ? nes_py  : sms_py;
 	wire [7:0] core_rgb      = nes_sel ? nes_rgb : sms_rgb;
@@ -1072,6 +1129,9 @@ module console_top #(
 	// downstream of here is unsigned centred on half scale. Summing to mono and
 	// re-centring is done in one step, with the sum halved first so that two
 	// channels at full deflection cannot wrap round to silence.
+	wire [15:0] snes_audio = 16'h8000 +
+	              {{1{snes_audio_l[15]}}, snes_audio_l[15:1]} +
+	              {{1{snes_audio_r[15]}}, snes_audio_r[15:1]};
 	wire [15:0] md_audio = 16'h8000 +
 	              {{1{md_audio_l[15]}}, md_audio_l[15:1]} +
 	              {{1{md_audio_r[15]}}, md_audio_r[15:1]};
@@ -1080,6 +1140,7 @@ module console_top #(
 	                         : nes_sel           ? nes_audio
 	                         : (sms_sel && !raw_z80) ? sms_audio
 	                         : md_sel            ? md_audio
+	                         : snes_sel          ? snes_audio
 	                                               : 16'h8000;
 
 	always @(posedge clk) begin
@@ -1152,14 +1213,16 @@ module console_top #(
 			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(ps1_vid_rgb));
 	end else begin : g_ps1
 		assign ps1_vid_rgb = 24'd0;
-		if (!CORE_N64 && CORE_MD && !CORE_NES && !CORE_SMS) begin : g_md_lr
-			// the Mega Drive's two channels, for HDMI's stereo: 48000 times a second
-			reg [25:0] lr_div = 26'd0; reg lr_we = 1'b0;
+		if (!CORE_N64 && (CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS) begin : g_md_lr
+			// the Mega Drive's (or the SNES's) two channels, for HDMI's stereo: 48000 times a
+			// second (the SNES's 32 kHz held)
+			reg [27:0] lr_div = 28'd0; reg lr_we = 1'b0;
 			always @(posedge clk) begin
-				lr_we <= lr_div + 26'd48_000 >= 26'd50_000_000;
-				lr_div <= (lr_div + 26'd48_000 >= 26'd50_000_000) ? lr_div + 26'd48_000 - 26'd50_000_000 : lr_div + 26'd48_000;
+				lr_we <= lr_div + 28'd48_000 >= CLK_HZ;
+				lr_div <= (lr_div + 28'd48_000 >= CLK_HZ) ? lr_div + 28'd48_000 - CLK_HZ : lr_div + 28'd48_000;
 			end
-			assign audio_lr = {md_audio_r, md_audio_l}; assign audio_lr_we = lr_we;
+			assign audio_lr = snes_sel ? {snes_audio_r, snes_audio_l} : {md_audio_r, md_audio_l};
+			assign audio_lr_we = lr_we;
 		end else if (!CORE_N64) begin : g_no_lr      // the N64 drives it when it is the core
 			assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
 		end
