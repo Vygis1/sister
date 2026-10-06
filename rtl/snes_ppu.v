@@ -298,7 +298,7 @@ module snes_ppu (
 		R_BX = 5'd10, R_BMAP = 5'd11, R_BMAP2 = 5'd12, R_BCH = 5'd13, R_BCH2 = 5'd14,
 		R_OPT1 = 5'd15, R_OPT2 = 5'd16, R_OPT3 = 5'd17, R_OPT4 = 5'd18,
 		R_M7 = 5'd19, R_M7B = 5'd20, R_M7C = 5'd21,
-		R_COMP = 5'd22, R_DONE = 5'd23, R_YMOS = 5'd24, R_BLANK = 5'd25;
+		R_COMP = 5'd22, R_DONE = 5'd23, R_YMOS = 5'd24, R_BLANK = 5'd25, R_M7D = 5'd26;
 	reg [4:0]  rs;
 	reg [8:0]  ln;                       // the line
 	reg        fld;
@@ -361,6 +361,8 @@ module snes_ppu (
 	// ---------- mode 7 ----------
 	reg signed [31:0] m7bx, m7by;
 	reg [8:0]  m7x;
+	reg [4:0]  m7rem;                    // m7x % the mosaic size, kept as m7x steps (no divider)
+	reg signed [31:0] m7pa, m7pc;        // A and C times the column, a clock ahead of the sums
 	reg [7:0]  m7tile;
 	reg        m7ovr;
 
@@ -579,6 +581,22 @@ module snes_ppu (
 	reg [14:0] colm, cols;
 	reg [11:0] em_e, es_e;
 	reg [7:0]  ixm, ixs;
+	// (the compositor's later stages: 2 the pick, 3 the colours, 4 the maths)
+	reg        p_v, q_v;
+	reg [8:0]  p_x, q_x;
+	reg [3:0]  p_em, p_es;
+	reg [7:0]  p_ixm, p_ixs;
+	reg [11:0] p_eme, p_ese;
+	reg        p_clip, p_noblend, p_math, q_clip, q_noblend, q_math, q_subbd;
+	reg [14:0] q_colm, q_cols, q_sub0;
+
+	// the mosaic remainder's next value, for a column one on
+	function [4:0] m7next;
+		input [4:0] r; input [3:0] msz;
+		begin
+			m7next = (r + 5'd1 >= {1'b0, msz} + 5'd1) ? 5'd0 : r + 5'd1;
+		end
+	endfunction
 
 	always @(posedge clk) begin
 		done <= 1'b0;
@@ -722,7 +740,7 @@ module snes_ppu (
 					if (mon && mz != 5'd1 && ymos_r >= {4'd0, mz}) ymos_r <= ymos_r - {4'd0, mz};
 					else begin
 						by <= (mon && mz != 5'd1) ? {2'b0, ln - ymos_r} : {2'b0, ln};
-						if (mode == 3'd7) begin m7x <= 9'd0; rs <= R_M7; end
+						if (mode == 3'd7) begin m7x <= 9'd0; m7rem <= 5'd0; rs <= R_M7; end
 						else begin
 							bx <= 10'd0; me_ok <= 1'b0; ch_ok <= 1'b0;
 							opt_col <= 8'hFF;
@@ -809,20 +827,26 @@ module snes_ppu (
 				t1 = ((a_ * ch_) & ~32'sd63) + ((b_ * cv_) & ~32'sd63) + ((b_ * $signed({1'b0, sy})) & ~32'sd63) + (x0 <<< 8);
 				t2 = ((c_ * ch_) & ~32'sd63) + ((d_ * cv_) & ~32'sd63) + ((d_ * $signed({1'b0, sy})) & ~32'sd63) + (y0 <<< 8);
 				m7bx <= t1; m7by <= t2;
-				rs <= R_M7B; m7x <= 9'd0; cx <= 9'd0;
+				rs <= R_M7B; m7x <= 9'd0; m7rem <= 5'd0; cx <= 9'd0;
 			end
 			R_M7B: begin : m7b
-				reg [7:0] sxm; reg [4:0] mz; reg signed [31:0] X, Y;
+				reg [7:0] sxm; reg [4:0] mz;
 				mz = {1'b0, mosaic[7:4]} + 5'd1;
-				sxm = (mosaic[0] && mz != 5'd1) ? (m7x[7:0] - (m7x[7:0] % mz)) : m7x[7:0];
+				sxm = (mosaic[0] && mz != 5'd1) ? (m7x[7:0] - {3'd0, m7rem}) : m7x[7:0];
 				if (m7sel[0]) sxm = 8'd255 - sxm;
-				X = (m7bx + $signed(m7[0]) * $signed({1'b0, sxm})) >>> 8;
-				Y = (m7by + $signed(m7[2]) * $signed({1'b0, sxm})) >>> 8;
+				m7pa <= $signed(m7[0]) * $signed({1'b0, sxm});
+				m7pc <= $signed(m7[2]) * $signed({1'b0, sxm});
+				rs <= R_M7D;
+			end
+			R_M7D: begin : m7d
+				reg signed [31:0] X, Y;
+				X = (m7bx + m7pa) >>> 8;
+				Y = (m7by + m7pc) >>> 8;
 				m7ovr <= ((X | Y) & ~32'sd1023) != 0;
 				if (((X | Y) & ~32'sd1023) != 0 && m7sel[7:6] == 2'd2) begin
 					lw_en <= 4'b0011; lw_a <= m7x; lw_d0 <= 12'd0; lw_d1 <= 12'd0;
-					m7x <= m7x + 9'd1;
-					if (m7x == 9'd255) rs <= R_COMP;
+					m7x <= m7x + 9'd1; m7rem <= m7next(m7rem, mosaic[7:4]);
+					rs <= (m7x == 9'd255) ? R_COMP : R_M7B;
 				end else begin
 					if (((X | Y) & ~32'sd1023) != 0 && m7sel[7:6] == 2'd3) vr_a <= 15'd0;
 					else vr_a <= {1'b0, Y[9:3], X[9:3]};
@@ -841,7 +865,7 @@ module snes_ppu (
 					lw_d0 <= {vr_q[15:8], 4'd0};
 					lw_d1 <= {1'b0, vr_q[14:8], 3'd0, vr_q[15]};
 					cx <= 9'd0;
-					m7x <= m7x + 9'd1;
+					m7x <= m7x + 9'd1; m7rem <= m7next(m7rem, mosaic[7:4]);
 					rs <= (m7x == 9'd255) ? R_COMP : R_M7B;
 				end else cx <= cx + 9'd1;
 			end
@@ -858,6 +882,8 @@ module snes_ppu (
 	reg [8:0]  kx;
 	reg [3:0]  mzc [0:3];
 	// stage 1's addresses: kx's main and sub columns, after the mosaic
+	// (the remainders kx's columns leave by the mosaic size, kept as kx steps: no divider)
+	reg [4:0] crm, crs;
 	always @(*) begin : cmpa
 		reg [8:0] xm_, xs_; reg [4:0] mz_; integer n_;
 		mz_ = {1'b0, mosaic[7:4]} + 5'd1;
@@ -866,18 +892,30 @@ module snes_ppu (
 		for (n_ = 0; n_ < 4; n_ = n_ + 1) begin
 			cmp_xm[n_] = xm_; cmp_xs[n_] = xs_;
 			if (((mode == 3'd7) ? mosaic[0] : mosaic[n_]) && mz_ != 5'd1) begin
-				cmp_xm[n_] = xm_ - (xm_ % mz_); cmp_xs[n_] = xs_ - (xs_ % mz_);
+				cmp_xm[n_] = xm_ - {4'd0, crm}; cmp_xs[n_] = xs_ - {4'd0, crs};
 			end
 		end
 	end
+	// a remainder one step on (a step is 1, or 2 in hi-res, and the size at least 2 when used)
+	function [4:0] mstep;
+		input [4:0] r; input [3:0] msz; input two;
+		reg [5:0] t;
+		begin
+			t = {1'b0, r} + (two ? 6'd2 : 6'd1);
+			mstep = (t >= {2'b0, msz} + 6'd1) ? t - ({2'b0, msz} + 6'd1) : t[4:0];
+		end
+	endfunction
 	always @(posedge clk) begin : comp
 		reg [8:0] xm, xs, xmm, xsm;
 		reg [4:0] mz; integer n;
 		reg [7:0] wm_, ws_;
 		comp_fin <= 1'b0;
-		if (rst) begin comp_run <= 1'b0; c_v <= 1'b0; have_prev <= 1'b0; end
+		if (rst) begin comp_run <= 1'b0; c_v <= 1'b0; p_v <= 1'b0; q_v <= 1'b0; have_prev <= 1'b0; end
 		else begin
-			if (comp_go) begin comp_run <= 1'b1; kx <= 9'd0; c_v <= 1'b0; have_prev <= 1'b0; blank <= inidisp[7]; end
+			if (comp_go) begin
+				comp_run <= 1'b1; kx <= 9'd0; c_v <= 1'b0; have_prev <= 1'b0; blank <= inidisp[7];
+				crm <= (hires && mosaic[7:4] != 4'd0) ? 5'd1 : 5'd0; crs <= 5'd0;
+			end
 			if (comp_run) begin
 				// stage 1: the reads for column kx
 				mz = {1'b0, mosaic[7:4]} + 5'd1;
@@ -887,39 +925,50 @@ module snes_ppu (
 				c_ob <= objb[kx[7:0]];
 				c_x <= kx; c_v <= (kx < 9'd256);
 				kx <= kx + 9'd1;
+				crm <= mstep(crm, mosaic[7:4], hires); crs <= mstep(crs, mosaic[7:4], hires);
 				if (kx == 9'd256) begin comp_run <= 1'b0; end
 			end else c_v <= 1'b0;
-			// stage 2: the pixel
-			if (c_v && blank) begin
-				outb[{obuf, c_x[7:0]}] <= 30'd0;
-				if (c_x == 9'd255) comp_fin <= 1'b1;
-			end else if (c_v) begin
+			// stage 2: the pick -- which layer is in front, main and sub, and the window tests
+			p_v <= c_v; p_x <= c_x;
+			if (c_v) begin
 				pick(tm, tmw, 1'b1, em, ixm);
 				if ((cgwsel[1] || split)) pick(ts, tsw, 1'b0, es, ixs);
 				else es = 4'd12;
-				em_e = (em >= 4'd4 && em < 4'd8) ? c_lm[em - 4'd4] : 12'd0;
-				es_e = (es >= 4'd4 && es < 4'd8) ? c_ls[es - 4'd4] : 12'd0;
-				colm = (em == 4'd12) ? cgram[0] : (em < 4'd4) ? cgram[ixm] : bgcol(mode, em[1:0], em_e, dirc, cgram[ixm]);
-				sub_bd = (es == 4'd12);
-				cols = sub_bd ? fixed : (es < 4'd4) ? cgram2[ixs] : bgcol(mode, es[1:0], es_e, dirc, cgram2[ixs]);
+				p_em <= em; p_es <= es; p_ixm <= ixm; p_ixs <= ixs;
+				p_eme <= (em >= 4'd4 && em < 4'd8) ? c_lm[em - 4'd4] : 12'd0;
+				p_ese <= (es >= 4'd4 && es < 4'd8) ? c_ls[es - 4'd4] : 12'd0;
 				cw_in = win(wobjsel[7:4], wobjlog[3:2], cxo, wh0, wh1, wh2, wh3);
-				clip = (cgwsel[7:6] == 2'd3) || (cgwsel[7:6] == 2'd1 && !cw_in) || (cgwsel[7:6] == 2'd2 && cw_in);
-				noblend = (cgwsel[5:4] == 2'd3) || (cgwsel[5:4] == 2'd1 && !cw_in) || (cgwsel[5:4] == 2'd2 && cw_in);
-				mc = clip ? 15'd0 : colm;
-				raw = mc;
+				p_clip <= (cgwsel[7:6] == 2'd3) || (cgwsel[7:6] == 2'd1 && !cw_in) || (cgwsel[7:6] == 2'd2 && cw_in);
+				p_noblend <= (cgwsel[5:4] == 2'd3) || (cgwsel[5:4] == 2'd1 && !cw_in) || (cgwsel[5:4] == 2'd2 && cw_in);
 				mobj = (em < 4'd4) && (ixm >= 8'd192);
-				math_on = (em >= 4'd4 && em < 4'd8) ? cgadsub[em - 4'd4] : (em < 4'd4) ? (cgadsub[4] && mobj) : cgadsub[5];
-				if (math_on && !noblend)
-					mc = blend(mc, (cgwsel[1] && !sub_bd) ? cols : fixed, cgadsub[7],
-					           cgadsub[6] && !clip && !(cgwsel[1] && sub_bd));
+				p_math <= (em >= 4'd4 && em < 4'd8) ? cgadsub[em - 4'd4] : (em < 4'd4) ? (cgadsub[4] && mobj) : cgadsub[5];
+			end
+			// stage 3: the colours
+			q_v <= p_v; q_x <= p_x; q_clip <= p_clip; q_noblend <= p_noblend; q_math <= p_math;
+			if (p_v) begin
+				q_colm <= (p_em == 4'd12) ? cgram[0] : (p_em < 4'd4) ? cgram[p_ixm] : bgcol(mode, p_em[1:0], p_eme, dirc, cgram[p_ixm]);
+				q_subbd <= (p_es == 4'd12);
+				q_cols <= (p_es == 4'd12) ? fixed : (p_es < 4'd4) ? cgram2[p_ixs] : bgcol(mode, p_es[1:0], p_ese, dirc, cgram2[p_ixs]);
+				q_sub0 <= cgram2[0];
+			end
+			// stage 4: colour math, brightness, out
+			if (q_v && blank) begin
+				outb[{obuf, q_x[7:0]}] <= 30'd0;
+				if (q_x == 9'd255) comp_fin <= 1'b1;
+			end else if (q_v) begin
+				mc = q_clip ? 15'd0 : q_colm;
+				raw = mc;
+				if (q_math && !q_noblend)
+					mc = blend(mc, (cgwsel[1] && !q_subbd) ? q_cols : fixed, cgadsub[7],
+					           cgadsub[6] && !q_clip && !(cgwsel[1] && q_subbd));
 				mres = bright(mc, inidisp[3:0]);
 				if (split) begin
-					sp = sub_bd ? cgram2[0] : cols;
+					sp = q_subbd ? q_sub0 : q_cols;
 					if (have_prev && prev_on) sp = blend(sp, cgwsel[1] ? prev_raw : fixed, cgadsub[7], cgadsub[6]);
-					outb[{obuf, c_x[7:0]}] <= {mres, bright(sp, inidisp[3:0])};
-					prev_raw <= raw; prev_on <= math_on && !noblend; have_prev <= 1'b1;
-				end else outb[{obuf, c_x[7:0]}] <= {mres, mres};
-				if (c_x == 9'd255) comp_fin <= 1'b1;
+					outb[{obuf, q_x[7:0]}] <= {mres, bright(sp, inidisp[3:0])};
+					prev_raw <= raw; prev_on <= q_math && !q_noblend; have_prev <= 1'b1;
+				end else outb[{obuf, q_x[7:0]}] <= {mres, mres};
+				if (q_x == 9'd255) comp_fin <= 1'b1;
 			end
 		end
 	end
