@@ -78,10 +78,20 @@ module snes_ppu (
 
 	// --- the memories --------------------------------------------------------------------
 	// VRAM: 32K words; port A the CPU, port B the renderer
-	reg  [15:0] vram [0:32767];
+	// (a true dual-port block RAM: port A the CPU's writes, with byte enables, and its
+	// prefetch reads -- those land two clocks later, and the CPU's accesses are at
+	// least 14 apart; port B the renderer)
+	(* ram_style = "block" *) reg [15:0] vram [0:32767];
+	reg  [14:0] va_a;  reg [1:0] va_we;  reg [15:0] va_d;  reg [15:0] va_q;
+	always @(posedge clk) begin
+		if (va_we[0]) vram[va_a][7:0]  <= va_d[7:0];
+		if (va_we[1]) vram[va_a][15:8] <= va_d[15:8];
+		va_q <= vram[va_a];
+	end
 	reg  [14:0] vr_a;              // the renderer's read address
 	reg  [15:0] vr_q;              // its data, a clock later
 	always @(posedge clk) vr_q <= vram[vr_a];
+	reg  [1:0]  vload;             // a prefetch on its way: vram_read takes va_q when it lands
 	// CGRAM: two copies (main and sub screen read at once), and the CPU's reads
 	reg  [14:0] cgram [0:255];
 	reg  [14:0] cgram2 [0:255];
@@ -132,7 +142,7 @@ module snes_ppu (
 		if (rst) begin
 			inidisp <= 8'h80; obsel <= 0; oamadd <= 0; oam_pri <= 0; oam_addr <= 0; oam_latch <= 0;
 			bgmode <= 0; mosaic <= 0; ofs_latch <= 0; hofs_latch <= 0; m7_latch <= 0;
-			vmain <= 0; vmadd <= 0; vram_read <= 0; m7sel <= 0; m7hofs <= 0; m7vofs <= 0;
+			vmain <= 0; vmadd <= 0; vram_read <= 0; va_we <= 0; vload <= 0; m7sel <= 0; m7hofs <= 0; m7vofs <= 0;
 			cgadd <= 0; cg_flip <= 0; cg_latch <= 0;
 			w12sel <= 0; w34sel <= 0; wobjsel <= 0; wh0 <= 0; wh1 <= 0; wh2 <= 0; wh3 <= 0;
 			wbglog <= 0; wobjlog <= 0; tm <= 0; ts <= 0; tmw <= 0; tsw <= 0; cgwsel <= 0; cgadsub <= 0;
@@ -141,6 +151,9 @@ module snes_ppu (
 			for (i = 0; i < 4; i = i + 1) begin bgsc[i] <= 0; nba[i] <= 0; hofs[i] <= 0; vofs[i] <= 0; end
 			for (i = 0; i < 6; i = i + 1) m7[i] <= 0;
 		end else begin
+			va_we <= 2'b00;
+			vload <= {vload[0], 1'b0};
+			if (vload[1]) vram_read <= va_q;
 			if (b_wr) case (b_addr)
 			8'h00: inidisp <= b_wdata;
 			8'h01: obsel <= b_wdata;
@@ -174,10 +187,10 @@ module snes_ppu (
 				if (b_addr == 8'h0E) begin m7vofs <= {b_wdata[4:0], m7_latch}; m7_latch <= b_wdata; end
 			end
 			8'h15: vmain <= b_wdata;
-			8'h16: begin vmadd[7:0] <= b_wdata; vram_read <= vram[vremap({vmadd[15:8], b_wdata}, vmain[3:2])]; end
-			8'h17: begin vmadd[15:8] <= b_wdata; vram_read <= vram[vremap({b_wdata, vmadd[7:0]}, vmain[3:2])]; end
-			8'h18: begin vram[vaddr][7:0] <= b_wdata;  if (!vmain[7]) vmadd <= vmadd + vinc; end
-			8'h19: begin vram[vaddr][15:8] <= b_wdata; if (vmain[7])  vmadd <= vmadd + vinc; end
+			8'h16: begin vmadd[7:0] <= b_wdata; va_a <= vremap({vmadd[15:8], b_wdata}, vmain[3:2]); vload <= 2'b01; end
+			8'h17: begin vmadd[15:8] <= b_wdata; va_a <= vremap({b_wdata, vmadd[7:0]}, vmain[3:2]); vload <= 2'b01; end
+			8'h18: begin va_a <= vaddr; va_d <= {8'h00, b_wdata}; va_we <= 2'b01; if (!vmain[7]) vmadd <= vmadd + vinc; end
+			8'h19: begin va_a <= vaddr; va_d <= {b_wdata, 8'h00}; va_we <= 2'b10; if (vmain[7])  vmadd <= vmadd + vinc; end
 			8'h1A: m7sel <= b_wdata;
 			8'h1B, 8'h1C, 8'h1D, 8'h1E, 8'h1F, 8'h20: begin
 				m7[b_addr - 8'h1B] <= {b_wdata, m7_latch};
@@ -217,7 +230,7 @@ module snes_ppu (
 			8'h38: begin oam_addr <= oam_addr + 10'd1; ppu1_mdr <= b_rdata; end
 			8'h39, 8'h3A: begin
 				ppu1_mdr <= b_rdata;
-				if ((b_addr == 8'h3A) == vmain[7]) begin vram_read <= vram[vaddr]; vmadd <= vmadd + vinc; end
+				if ((b_addr == 8'h3A) == vmain[7]) begin va_a <= vaddr; vload <= 2'b01; vmadd <= vmadd + vinc; end
 			end
 			8'h3B: begin ppu2_mdr <= b_rdata; if (cg_flip) cgadd <= cgadd + 8'd1; cg_flip <= !cg_flip; end
 			8'h3C: hl_flip <= !hl_flip;
@@ -257,7 +270,16 @@ module snes_ppu (
 	// --- the line buffers ---------------------------------------------------------------------
 	// BG layers: {pixel index 8, palette 3, priority 1}, 512 wide; written by the fetcher,
 	// read twice at once by the compositor (main and sub columns)
-	reg [11:0] lay [0:3][0:511];
+	// (four dual-port block RAMs: the fetcher writes through port A a clock after it
+	// decides; the compositor reads the main column on A and the sub column on B)
+	reg  [3:0]  lw_en;  reg [8:0] lw_a;  reg [11:0] lw_d0, lw_d1;
+	wire [11:0] c_lm [0:3], c_ls [0:3];
+	reg  [8:0]  cmp_xm [0:3], cmp_xs [0:3];
+	genvar gl;
+	generate for (gl = 0; gl < 4; gl = gl + 1) begin : g_lay
+		snes_lbuf u_l (.clk(clk), .a_we(lw_en[gl] && !comp_run), .a_a(comp_run ? cmp_xm[gl] : lw_a),
+		               .a_d(gl == 1 ? lw_d1 : lw_d0), .a_q(c_lm[gl]), .b_a(cmp_xs[gl]), .b_q(c_ls[gl]));
+	end endgenerate
 	// OBJ: {colour index 8 (128 + palette * 16 + pixel), priority 2, the line's tag 1}
 	reg [10:0] objb [0:255];
 	reg        tag;                      // which line wrote an OBJ entry: others are empty
@@ -393,7 +415,6 @@ module snes_ppu (
 
 	// --- the compositor's pixel (combinational over the reads in hand) --------------------------
 	// reads issued a clock before: c_lm[n] / c_ls[n] (main / sub column), c_ob
-	reg [11:0] c_lm [0:3], c_ls [0:3];
 	reg [10:0] c_ob;
 	reg [8:0]  c_x;                      // the screen column they are for
 	reg        c_v;                      // valid
@@ -562,6 +583,7 @@ module snes_ppu (
 	always @(posedge clk) begin
 		done <= 1'b0;
 		comp_go <= 1'b0;
+		lw_en <= 4'd0;
 		stat_set_range <= 1'b0; stat_set_time <= 1'b0; stat_clear <= 1'b0;
 		if (rst) begin
 			rs <= R_IDLE; tag <= 1'b0;
@@ -727,7 +749,9 @@ module snes_ppu (
 				end else if (!ch_ok || ch_a != ch_want) begin
 					vr_a <= ch_want; ch_a <= ch_want; cwk <= 2'd0; rs <= R_BCH;
 				end else begin
-					lay[ly][bx[8:0]] <= {pix_of(cw[0], cw[1], cw[2], cw[3], bbpp, fx_b[2:0]), me[12:10], me[13]};
+					lw_en <= 4'd1 << ly; lw_a <= bx[8:0];
+					lw_d0 <= {pix_of(cw[0], cw[1], cw[2], cw[3], bbpp, fx_b[2:0]), me[12:10], me[13]};
+					lw_d1 <= {pix_of(cw[0], cw[1], cw[2], cw[3], bbpp, fx_b[2:0]), me[12:10], me[13]};
 					bx <= bx + 10'd1;
 					if (bx == bw - 10'd1) begin ly <= ly + 2'd1; rs <= (ly == 2'd3) ? R_COMP : R_BG; end
 				end
@@ -796,7 +820,7 @@ module snes_ppu (
 				Y = (m7by + $signed(m7[2]) * $signed({1'b0, sxm})) >>> 8;
 				m7ovr <= ((X | Y) & ~32'sd1023) != 0;
 				if (((X | Y) & ~32'sd1023) != 0 && m7sel[7:6] == 2'd2) begin
-					lay[0][m7x] <= 12'd0; lay[1][m7x] <= 12'd0;
+					lw_en <= 4'b0011; lw_a <= m7x; lw_d0 <= 12'd0; lw_d1 <= 12'd0;
 					m7x <= m7x + 9'd1;
 					if (m7x == 9'd255) rs <= R_COMP;
 				end else begin
@@ -813,8 +837,9 @@ module snes_ppu (
 					vr_a <= (m7ovr && m7sel[7:6] == 2'd3) ? {7'd0, m7tile[4:2], m7tile[7:5]} :
 					        {vr_q[7:0], m7tile[4:2], m7tile[7:5]};
 				if (cx == 9'd3) begin
-					lay[0][m7x] <= {vr_q[15:8], 4'd0};
-					lay[1][m7x] <= {1'b0, vr_q[14:8], 3'd0, vr_q[15]};
+					lw_en <= 4'b0011; lw_a <= m7x;
+					lw_d0 <= {vr_q[15:8], 4'd0};
+					lw_d1 <= {1'b0, vr_q[14:8], 3'd0, vr_q[15]};
 					cx <= 9'd0;
 					m7x <= m7x + 9'd1;
 					rs <= (m7x == 9'd255) ? R_COMP : R_M7B;
@@ -832,6 +857,19 @@ module snes_ppu (
 	// --- the compositor: one screen column a clock, two stages ------------------------------------
 	reg [8:0]  kx;
 	reg [3:0]  mzc [0:3];
+	// stage 1's addresses: kx's main and sub columns, after the mosaic
+	always @(*) begin : cmpa
+		reg [8:0] xm_, xs_; reg [4:0] mz_; integer n_;
+		mz_ = {1'b0, mosaic[7:4]} + 5'd1;
+		xm_ = hires ? {kx[7:0], 1'b1} : kx;
+		xs_ = hires ? {kx[7:0], 1'b0} : kx;
+		for (n_ = 0; n_ < 4; n_ = n_ + 1) begin
+			cmp_xm[n_] = xm_; cmp_xs[n_] = xs_;
+			if (((mode == 3'd7) ? mosaic[0] : mosaic[n_]) && mz_ != 5'd1) begin
+				cmp_xm[n_] = xm_ - (xm_ % mz_); cmp_xs[n_] = xs_ - (xs_ % mz_);
+			end
+		end
+	end
 	always @(posedge clk) begin : comp
 		reg [8:0] xm, xs, xmm, xsm;
 		reg [4:0] mz; integer n;
@@ -845,13 +883,7 @@ module snes_ppu (
 				mz = {1'b0, mosaic[7:4]} + 5'd1;
 				xm = hires ? {kx[7:0], 1'b1} : kx;
 				xs = hires ? {kx[7:0], 1'b0} : kx;
-				for (n = 0; n < 4; n = n + 1) begin
-					xmm = xm; xsm = xs;
-					if (((mode == 3'd7) ? mosaic[0] : mosaic[n]) && mz != 5'd1) begin
-						xmm = xm - (xm % mz); xsm = xs - (xs % mz);
-					end
-					c_lm[n] <= lay[n][xmm]; c_ls[n] <= lay[n][xsm];
-				end
+				// (the layers' addresses are cmp_xm / cmp_xs, worked out below from kx)
 				c_ob <= objb[kx[7:0]];
 				c_x <= kx; c_v <= (kx < 9'd256);
 				kx <= kx + 9'd1;
@@ -891,4 +923,23 @@ module snes_ppu (
 			end
 		end
 	end
+endmodule
+
+// a BG layer's line: 512 entries, port A written by the fetcher or read by the compositor
+// (the main column), port B read by the compositor (the sub column)
+module snes_lbuf (
+	input  wire        clk,
+	input  wire        a_we,
+	input  wire [8:0]  a_a,
+	input  wire [11:0] a_d,
+	output reg  [11:0] a_q,
+	input  wire [8:0]  b_a,
+	output reg  [11:0] b_q
+);
+	(* ram_style = "block" *) reg [11:0] m [0:511];
+	always @(posedge clk) begin
+		if (a_we) m[a_a] <= a_d;
+		a_q <= m[a_a];
+	end
+	always @(posedge clk) b_q <= m[b_a];
 endmodule

@@ -651,7 +651,7 @@ static String load(const Game &g) {
     best = score[1] > score[0] ? 1 : 0;
     uint32_t romLog = 0; while ((1u << romLog) < rom) romLog++;
     uint8_t ramSz = hh[best][0x18];                  // save RAM: 1 << n kB (0: none)
-    uint32_t ramLog = ramSz ? min(15, ramSz + 10) : 0;   // (32 kB of it on the board)
+    uint32_t ramLog = ramSz ? min(13, ramSz + 10) : 0;   // (8 kB of it on the board)
     fpga.busWrite(NES_CONSOLE, 5);                   // first: the fill only reaches the selected core
     fpga.busWrite(SNES_CFG, best | romLog << 8 | ramLog << 16);
     f.seek(base);

@@ -103,8 +103,8 @@ module snes_top #(
 	end
 
 	// --- save RAM ----------------------------------------------------------------------------------
-	(* ram_style = "block" *) reg [7:0] sram [0:32767];
-	reg [14:0] sr_a; reg [7:0] sr_q; reg sr_we; reg [7:0] sr_d;
+	(* ram_style = "block" *) reg [7:0] sram [0:8191];      // (8 kB: most games' all; block RAM is short)
+	reg [12:0] sr_a; reg [7:0] sr_q; reg sr_we; reg [7:0] sr_d;
 	always @(posedge clk) begin
 		sr_q <= sram[sr_a];
 		if (sr_we) sram[sr_a] <= sr_d;
@@ -161,7 +161,7 @@ module snes_top #(
 				if (we) begin w_we <= 1'b1; w_d <= wdata; ack <= 1'b1; end
 				else as <= A_WRAM;
 			end else if (is_sram) begin
-				sr_a <= sram_a[14:0];
+				sr_a <= sram_a[12:0];
 				if (we) begin sr_we <= 1'b1; sr_d <= wdata; ack <= 1'b1; end
 				else as <= A_SRAM;
 			end else if (is_rom && !we) begin

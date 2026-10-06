@@ -259,7 +259,7 @@ module regfile #(
 	// NOT IN A PLAYSTATION OR N64 IMAGE: the PlayStation has its own SPU (ps1_spu.v),
 	// which is stereo at 44.1 kHz and gets its own ring (ps1_aring.v) at the same
 	// addresses. Every other image keeps the synthesiser exactly as it was.
-	generate if (!CORE_PS1 && !CORE_N64) begin : g_syn
+	generate if (!CORE_PS1 && !CORE_N64 && !CORE_SNES) begin : g_syn
 		synth u_synth (
 			.clk(clk), .rst(rst),
 			.off(off), .we(syn_we), .wdata(bus_wdata),
@@ -268,6 +268,10 @@ module regfile #(
 			.buf_addr(sel_addr[14:2]),
 			.buf_rdata(abuf_rdata)
 		);
+	end else if (CORE_SNES) begin : g_nosyn
+		// (the SNES: no PC-side sound ring -- HDMI takes aud_s directly -- and its 8 block
+		// RAMs go to the console instead)
+		assign syn_rdata = 32'd0; assign syn_err = 1'b0; assign abuf_rdata = 32'd0;
 	end else begin : g_nosyn
 		// The PlayStation's own ring: stereo, 44.1 kHz, at the same addresses
 		// (the N64's AI feeds it too, through console_top's audio_lr).
