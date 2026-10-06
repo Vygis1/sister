@@ -549,6 +549,17 @@ module console_top #(
 	// the SNES cartridge's shape, from the loader (it reads the header): [0] HiROM,
 	// [15:8] log2 of the ROM's size, [23:16] log2 of the save RAM's (0: none)
 	reg  [23:0] snes_cfg;
+	// the SNES's save RAM from the loader: 0x184 the pointer (a write reads the word there into
+	// 0x188; bit 31 also clears the written flag, which a read of 0x184 gives in bit 0), 0x188
+	// the word (a write puts it at the pointer and moves the pointer on)
+	reg  [12:0] snes_hptr; reg snes_hload, snes_hwr, snes_dclr; reg [31:0] snes_hwd;
+	wire [31:0] snes_hword; wire snes_dirty;
+	always @(posedge clk) begin
+		snes_hload <= 1'b0; snes_hwr <= 1'b0; snes_dclr <= 1'b0;
+		if (snes_hwr) snes_hptr <= snes_hptr + 13'd4;      // (the sequencer took the pointer with the pulse)
+		if (ctrl_we && off == 16'h0184) begin snes_hptr <= wdata[12:0]; snes_hload <= 1'b1; snes_dclr <= wdata[31]; end
+		if (ctrl_we && off == 16'h0188) begin snes_hwd <= wdata; snes_hwr <= 1'b1; end
+	end
 	wire [23:0] snes_dbg_pc;
 	wire signed [15:0] snes_audio_l, snes_audio_r;
 	wire        snes_frame_st;
@@ -698,6 +709,8 @@ module console_top #(
 		16'h0178: ctrl_rdata = {31'd0, n64_vi_slow};
 		16'h017C: ctrl_rdata = {16'd0, vid_opt};
 		16'h0180: ctrl_rdata = {8'd0, snes_cfg};
+		16'h0184: ctrl_rdata = {31'd0, snes_dirty};
+		16'h0188: ctrl_rdata = snes_hword;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -1046,6 +1059,8 @@ module console_top #(
 			.pad1(joy1), .pad2(joy2),
 			.px_we(px_we), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb), .lines(s_lines), .frame_start(snes_frame_st),
 			.audio_l(snes_audio_l), .audio_r(snes_audio_r), .audio_stb(),
+			.h_ptr(snes_hptr), .h_load(snes_hload), .h_wr(snes_hwr), .h_wdata(snes_hwd), .h_word(snes_hword),
+			.sram_dirty(snes_dirty), .dirty_clr(snes_dclr),
 			.dbg_pc(snes_dbg_pc), .dbg_spc_pc()
 		);
 		frame_hdmi #(.FMT(3), .DW(15)) u_hdmi (.clk(clk), .we(px_we), .wx(px_x), .wy(px_y), .wd(px_rgb),
@@ -1056,6 +1071,7 @@ module console_top #(
 		assign snes_dbg_pc = 24'd0;
 		assign snes_audio_l = 16'sd0; assign snes_audio_r = 16'sd0;
 		assign snes_frame_st = 1'b0;
+		assign snes_hword = 32'd0; assign snes_dirty = 1'b0;
 	end endgenerate
 
 	// --- the Nintendo 64 -------------------------------------------------------------

@@ -555,6 +555,49 @@ static void eepService(bool now_ = false) {
   if (f) { f.write(now, eepSize); f.close(); memcpy(eepLast, now, eepSize); Serial.println("menu: saved " + eepPath); }
 }
 
+// --- the SNES's save RAM -------------------------------------------------------------
+// On the board (up to 8 kB; ctrl 0x184 the pointer -- a write reads the word there into
+// 0x188, and bit 31 clears the written flag, which 0x184 reads in bit 0 -- and 0x188 the
+// word, a write storing it and moving the pointer on); /saves/snes/<game>.srm holds it
+// between sessions, written back when the game has written to it and it has changed.
+static const uint32_t SNES_HPTR = NES + 0x184, SNES_HWORD = NES + 0x188;
+static String srmPath; static uint32_t srmSize = 0; static uint8_t *srmLast = nullptr;
+static uint32_t srmCheck = 0;
+
+static void srmBegin(const String &rom, uint32_t size) {
+  srmSize = size;
+  if (!size) { srmPath = ""; return; }
+  String n = rom.substring(rom.lastIndexOf('/') + 1);
+  int dot = n.lastIndexOf('.');
+  if (dot > 0) n = n.substring(0, dot);
+  srmPath = "/saves/snes/" + n + ".srm";
+  if (!srmLast) srmLast = (uint8_t *)malloc(8192);
+  memset(srmLast, 0, 8192);                         // (no save yet: cleared, not the last game's)
+  File f = SD.open(srmPath);
+  if (f) { f.read(srmLast, size); f.close(); }
+  fpga.busWrite(SNES_HPTR, 1u << 31);
+  for (uint32_t a = 0; a < size; a += 4)
+    fpga.busWrite(SNES_HWORD, srmLast[a] | srmLast[a + 1] << 8 | srmLast[a + 2] << 16 | (uint32_t)srmLast[a + 3] << 24);
+  srmCheck = millis();
+}
+
+static void srmService(bool now_ = false) {
+  if (!srmSize || !srmPath.length() || (!now_ && millis() - srmCheck < 5000)) return;
+  srmCheck = millis();
+  if (!(fpga.busRead(SNES_HPTR) & 1)) return;      // not written since the last look
+  fpga.busWrite(SNES_HPTR, 1u << 31);              // (cleared first: a write while this reads sets it again)
+  static uint8_t now[8192];
+  for (uint32_t a = 0; a < srmSize; a += 4) {
+    fpga.busWrite(SNES_HPTR, a);
+    uint32_t w = fpga.busRead(SNES_HWORD);
+    now[a] = w; now[a + 1] = w >> 8; now[a + 2] = w >> 16; now[a + 3] = w >> 24;
+  }
+  if (!memcmp(now, srmLast, srmSize)) return;
+  SD.mkdir("/saves"); SD.mkdir("/saves/snes");
+  File f = SD.open(srmPath, FILE_WRITE);
+  if (f) { f.write(now, srmSize); f.close(); memcpy(srmLast, now, srmSize); Serial.println("menu: saved " + srmPath); }
+}
+
 // The PlayStation's BIOS: SCPH*.BIN in /bios, /roms/ps1 or /roms.
 static String findBios() {
   const char *dirs[] = { "/bios", "/roms/ps1", "/roms" };
@@ -658,6 +701,7 @@ static String load(const Game &g) {
     fpga.busWrite(SNES_CFG, best | romLog << 8 | ramLog << 16);
     f.seek(base);
     if (!streamBanks(f, rom)) err = "the file ended early";
+    srmBegin(g.path, ramLog ? 1u << ramLog : 0);     // the save in
     fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);
   } else {                                           // N64: big-endian (.z64) whatever the file
@@ -759,6 +803,7 @@ static void pick() {
   const Game &g = lists[cur][sel];
   // the N64 game running now: its save to the card while the N64 is still there
   if (eepSize) { eepService(true); eepSize = 0; }
+  if (srmSize) { srmService(true); srmSize = 0; }    // (the SNES's likewise)
   Status st = fpga.status();
   // (and when it is, but the card holds another image of it than the one installed: a
   // console updated on the card was never installed while it ran -- the newer one is now)
@@ -827,7 +872,7 @@ static void task(void *) {
     }
     static uint32_t lastCard = 0;
     if (cardIn && millis() - lastCard > 100) { lastCard = millis(); cardService(); }
-    if (gameIn) eepService();
+    if (gameIn) { eepService(); srmService(); }
     bool sysMenu = menuButton && menuButton();
     uint8_t p = pad();
     uint8_t edge = p & ~was;

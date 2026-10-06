@@ -42,6 +42,15 @@ module snes_top #(
 	output wire signed [15:0] audio_l,
 	output wire signed [15:0] audio_r,
 	output wire        audio_stb,
+	// the save RAM from outside (the loader puts a save in, and reads it back to keep): a
+	// word of four bytes, h_ptr's first (little-endian), read on h_load, written on h_wr
+	input  wire [12:0] h_ptr,
+	input  wire        h_load,
+	input  wire        h_wr,
+	input  wire [31:0] h_wdata,
+	output reg  [31:0] h_word,
+	output reg         sram_dirty,     // the game has written its save RAM since...
+	input  wire        dirty_clr,      // ...this
 	// for a debug window
 	output wire [23:0] dbg_pc,
 	output wire [15:0] dbg_spc_pc
@@ -108,6 +117,29 @@ module snes_top #(
 	always @(posedge clk) begin
 		sr_q <= sram[sr_a];
 		if (sr_we) sram[sr_a] <= sr_d;
+	end
+	// port B: outside's, a byte a clock for four clocks
+	reg [12:0] hb_a, hbase; reg hb_we; reg [7:0] hb_d, hq; reg [2:0] hcnt; reg [1:0] hidx; reg hwr;
+	reg [31:0] hwd; reg [2:0] rp1, rp2;            // (reads in flight: valid, byte)
+	always @(posedge clk) begin
+		hq <= sram[hb_a];
+		if (hb_we) sram[hb_a] <= hb_d;
+	end
+	always @(posedge clk) begin
+		hb_we <= 1'b0;
+		rp1 <= 3'd0;
+		if (h_load || h_wr) begin
+			hcnt <= 3'd4; hidx <= 2'd0; hwr <= h_wr; hwd <= h_wdata; hbase <= h_ptr;
+		end else if (hcnt != 3'd0) begin
+			hb_a <= hbase + {11'd0, hidx};
+			if (hwr) begin hb_we <= 1'b1; hb_d <= hwd[8 * hidx +: 8]; end
+			else rp1 <= {1'b1, hidx};
+			hidx <= hidx + 2'd1; hcnt <= hcnt - 3'd1;
+		end
+		rp2 <= rp1;
+		if (rp2[2]) h_word[8 * rp2[1:0] +: 8] <= hq;
+		if (sr_we) sram_dirty <= 1'b1;
+		else if (dirty_clr || rst) sram_dirty <= 1'b0;
 	end
 
 	// --- the cartridge ------------------------------------------------------------------------------

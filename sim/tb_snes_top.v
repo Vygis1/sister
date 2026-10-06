@@ -19,10 +19,14 @@ module tb_snes_top;
 	wire [19:0] m_addr; wire m_req; reg m_valid = 0; reg [127:0] m_data;
 	wire px_we; wire [8:0] px_x, px_y; wire [14:0] px_rgb; wire [8:0] lines; wire frame_start;
 	wire [23:0] dbg_pc; wire [15:0] dbg_spc;
+	reg [12:0] h_ptr = 0; reg h_load = 0, h_wr = 0, dclr = 0; reg [31:0] h_wdata = 0; wire [31:0] h_word; wire dirty;
+	integer hbad;
 	snes_top #(.CLK_HZ(50_000_000)) dut (.clk(clk), .rst(rst), .pause(1'b0), .rom_hi(rom_hi), .rom_mask(rom_mask), .sram_mask(17'h01FFF),
 		.m_addr(m_addr), .m_req(m_req), .m_ready(1'b1), .m_data(m_data), .m_valid(m_valid),
 		.pad1(16'h0), .pad2(16'h0), .px_we(px_we), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb), .lines(lines),
-		.frame_start(frame_start), .audio_l(), .audio_r(), .audio_stb(), .dbg_pc(dbg_pc), .dbg_spc_pc(dbg_spc));
+		.frame_start(frame_start), .audio_l(), .audio_r(), .audio_stb(),
+		.h_ptr(h_ptr), .h_load(h_load), .h_wr(h_wr), .h_wdata(h_wdata), .h_word(h_word), .sram_dirty(dirty), .dirty_clr(dclr),
+		.dbg_pc(dbg_pc), .dbg_spc_pc(dbg_spc));
 
 	// the cartridge: a line a few clocks after it is asked for
 	reg [19:0] pend_a; reg [3:0] pend_n; reg pend;
@@ -88,6 +92,23 @@ module tb_snes_top;
 		for (k = 0; k < 1024; k = k + 1) $fdisplay(fd, "%02x", dut.wram[k]);
 		$fclose(fd);
 		$display("tb_snes_top: %0d frames run, frame written", nframes);
+		// the save RAM from outside: four words in at 0x1F00, read back, and the written flag
+		// left alone by them (the ROM under test may have set it itself: cleared first)
+		hbad = 0;
+		@(negedge clk); dclr = 1; @(negedge clk); dclr = 0;
+		for (k = 0; k < 4; k = k + 1) begin
+			@(negedge clk); h_ptr = 13'h1F00 + 4 * k; h_wdata = 32'hA5000000 + k * 32'h01020304; h_wr = 1;
+			@(negedge clk); h_wr = 0; repeat (8) @(negedge clk);
+		end
+		for (k = 0; k < 4; k = k + 1) begin
+			@(negedge clk); h_ptr = 13'h1F00 + 4 * k; h_load = 1;
+			@(negedge clk); h_load = 0; repeat (8) @(negedge clk);
+			if (h_word !== 32'hA5000000 + k * 32'h01020304) begin hbad = hbad + 1; $display("  save word %0d: %08x", k, h_word); end
+		end
+		if (dut.sram[13'h1F00] !== 8'h00 || dut.sram[13'h1F03] !== 8'hA5) begin hbad = hbad + 1; $display("  save RAM bytes in the wrong order"); end
+		if (dirty) begin hbad = hbad + 1; $display("  the outside's writes set the written flag"); end
+		if (hbad) begin $display("tb_snes_top: FAIL the save RAM port"); $finish; end
+		$display("tb_snes_top: the save RAM port reads back what it wrote");
 		$display("tb_snes_top: all checks passed");
 		$finish;
 	end
