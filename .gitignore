@@ -61,3 +61,4 @@ sim/n64b/
 sim/n64r/
 sim/n64d/
 tools/menu_preview/cut.h
+sim/vid/
