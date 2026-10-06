@@ -1,6 +1,8 @@
 """snesmin.py - just enough of a SNES around tools/snes/w65816.py to run a CPU test ROM:
-LoROM, work RAM (with its low-page mirror), RDNMI ($4210) raised once a frame, and the
-VRAM data port captured as text (what a test ROM writes on its screen).
+LoROM, work RAM (with its low-page mirror), RDNMI ($4210) raised once a frame, the VRAM data
+port captured as text (what a test ROM writes on its screen), and the sound unit
+(tools/snes/apu.py: the SPC700 with our boot ROM) behind ports $2140-$2143, run in step by
+clock: 21.477 MHz master, the 65816 at ~7 a cycle, the SPC700 at 21.
 
     python tools/snes/snesmin.py ROM.sfc [MAX_INSTRUCTIONS]
 
@@ -12,6 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import w65816  # noqa: E402
+import apu  # noqa: E402
 
 FRAME = 44_700          # CPU cycles a frame (262 lines of 1364 master clocks, ~8 a cycle)
 
@@ -24,6 +27,7 @@ class Snes:
         self.vblank = False
         self.next_frame = FRAME
         self.cpu = w65816.CPU(self.read, self.write)
+        self.apu = apu.APU()
 
     def map(self, a):
         bank, off = a >> 16, a & 0xFFFF
@@ -44,6 +48,8 @@ class Snes:
             return self.wram[o]
         if kind == 'r':
             return self.rom[o]
+        if kind == 'io' and 0x2140 <= o < 0x2180:
+            return self.apu.to_cpu[o & 3]
         if kind == 'io' and o == 0x4210:
             v = 0x80 if self.vblank else 0
             self.vblank = False
@@ -56,6 +62,8 @@ class Snes:
             self.wram[o] = v
         elif kind == 'io' and o == 0x2118:
             self.vram_text.append(v)
+        elif kind == 'io' and 0x2140 <= o < 0x2180:
+            self.apu.to_spc[o & 3] = v
 
     def run(self, limit):
         c = self.cpu
@@ -67,8 +75,13 @@ class Snes:
                 self.next_frame += FRAME
             pc = (c.pbr << 16) | c.pc
             c.step()
-            if (c.pbr << 16) | c.pc == pc and self.rom_at(pc) == 0x4C:
+            sp = self.apu.spc
+            while sp.cycles * 21 < c.cycles * 7:
+                sp.step()
+            if (c.pbr << 16) | c.pc == pc and self.rom_at(pc) in (0x4C, 0x80):
                 return 'stopped at %06x after %d instructions' % (pc, n)
+            if n % 4096 == 0 and (b'Success' in bytes(self.vram_text[-16:]) or b'Failed' in bytes(self.vram_text[-16:])):
+                return 'wrote its result after %d instructions' % n
         return 'still running after %d instructions' % limit
 
     def rom_at(self, a):
