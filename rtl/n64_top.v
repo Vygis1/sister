@@ -48,7 +48,7 @@ module n64_top #(
 	parameter [23:0] RDRAM_LINE = 24'h00_0000,     // RDRAM at DDR3 0
 	parameter [23:0] CART_LINE  = 24'h10_0000,     // the cartridge at 16 MB
 	parameter        CLK_HZ     = 50_000_000,      // this core's clock
-	parameter [10:0] HALFLINE   = CLK_HZ / 31500   // (60 Hz x 525 half-lines)
+	parameter [10:0] HALFLINE   = CLK_HZ / 31250   // (one HDMI line, 32 us: see "the VI's clock")
 ) (
 	input  wire         clk,
 	input  wire         rst,
@@ -320,10 +320,21 @@ module n64_top #(
 
 	// the VI's clock: a half-line every HALFLINE clocks (twice that with vi_slow: the
 	// game then has twice the clocks a frame, and runs at half speed); V_INTR raises the
-	// MI's VI bit
+	// MI's VI bit.
+	// The VI runs with the HDMI picture, as a real one runs with its own: a half-line is one
+	// HDMI line (32 us, from the same oscillator), and at each HDMI frame's start (hv_frame:
+	// the scanout taking the origin) the line is set 20 half-lines past V_INTR. So the
+	// game's VI interrupt -- where it swaps buffers -- comes 0.64 ms before the origin is
+	// taken, every frame. (Free-running at 60 Hz beside the TV's 59.52, the origin was taken
+	// wherever the game happened to be, and now and then it was the buffer being drawn: the
+	// picture tore.)
 	wire [11:0] halfline_n = vi_slow ? {HALFLINE, 1'b0} : {1'b0, HALFLINE};
+	reg         hv_frame;
+	wire [10:0] vi_lk = {1'b0, vi[3][9:0]} + 11'd20;
+	wire [9:0]  vi_lock = (vi_lk > {1'b0, vi_vsync}) ? vi_lk[9:0] - vi_vsync - 10'd1 : vi_lk[9:0];
 	always @(posedge clk) begin
 		if (cpu_rst) begin vi_line <= 10'd0; vi_clk <= 12'd0; end
+		else if (hv_frame && !vi_slow) begin vi_line <= vi_lock; vi_clk <= 12'd0; end
 		else if (vi_clk == halfline_n - 12'd1) begin
 			vi_clk <= 12'd0;
 			vi_line <= (vi_line >= vi_vsync) ? 10'd0 : vi_line + 10'd1;
@@ -629,7 +640,7 @@ module n64_top #(
 			// the streamer's word: out of the line in hand, or the line fetched
 			fbr_ack <= 1'b0;
 			// the picture: a new source line wanted (none being fetched) -- where it is, how long
-			hv_we <= 1'b0;
+			hv_we <= 1'b0; hv_frame <= 1'b0;
 			if (!hv_busy && hv_want != hv_line) begin : hv_start
 				reg [14:0] bytes;
 				bytes = hv_bpp32 ? {1'b0, vi[2][11:0], 2'b00} : {2'b00, vi[2][11:0], 1'b0};
@@ -639,6 +650,7 @@ module n64_top #(
 				// otherwise show the rest of the frame from the other buffer)
 				hv_base <= (hv_want == 9'd0 ? vi[1][23:0] : hv_org) + hv_want * hv_stride;
 				if (hv_want == 9'd0) hv_org <= vi[1][23:0];
+				hv_frame <= hv_want == 9'd0;
 			end else if (hv_busy && hv_rk == hv_n) hv_busy <= 1'b0;
 			// its lines, back in the order they were asked for, into n64_vid's half for it
 			if (d_valid && q_head == 3'd3) begin
@@ -788,6 +800,12 @@ module n64_top #(
 				end else if (!wb_empty) begin
 					d_addr <= wb_addr[wb_rp[1:0]]; d_wdata <= wb_data[wb_rp[1:0]]; d_wmask <= wb_mask[wb_rp[1:0]];
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_WB;
+				end else if (ad_rd_req && !ad_rd_ack && rd_ok) begin
+					// The AI's line, before anything that streams: it is 128 kB a second, but each of
+					// its lines is due within four samples. Behind the RDP's span reads and the RSP's
+					// it waited ~170 us a line, and SM64's 32,006 samples a second played at 5,839 --
+					// the sound stretched and chopped to nothing.
+					d_addr <= ad_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_AREAD;
 				end else if (!rw_empty) begin
 					// the RSP's posted DMA writes, before any read
 					d_addr <= rw_head[167:144]; d_wmask <= rw_head[143:128]; d_wdata <= rw_head[127:0];
@@ -840,8 +858,6 @@ module n64_top #(
 				end else if (cw_req && !cw_ack) begin
 					d_addr <= cw_line; d_wdata <= cw_data; d_wmask <= cw_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_CWRITE;
-				end else if (ad_rd_req && !ad_rd_ack && rd_ok) begin
-					d_addr <= ad_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_AREAD;
 				end else if (sd_rd_req && !sd_rd_ack && rd_ok) begin
 					d_addr <= sd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_SREAD;
 				end else if (sd_wr_req && !sd_wr_ack) begin
@@ -1239,6 +1255,7 @@ module n64_top #(
 	reg          al_v;
 	reg  [127:0] al_data;
 	reg  [15:0]  dac_l, dac_r;
+	reg          out_go, dac_new;          // a 44.1 kHz sample due; a sample went to the DAC
 	reg  [15:0]  n_ai_samp, n_ai_lost;   // (debugging) samples played; DAC ticks that found the last one still pending
 	// DAC ticks owed: one that comes while the last sample still waits for its line is
 	// not lost but owed, and played as soon as that one is. (They were merged away: a
@@ -1257,7 +1274,7 @@ module n64_top #(
 	wire [27:0]  vsum  = {1'b0, vclk_acc} + 28'd48_681_812;
 	wire         vtick = vsum >= CLK_HZ;
 	always @(posedge clk) begin
-		ai_irq <= 1'b0; audio_lr_we <= 1'b0;
+		ai_irq <= 1'b0; out_go <= 1'b0; dac_new <= 1'b0;
 		if (ad_rd_ack) ad_rd_req <= 1'b0;
 		if (rst) begin
 			ai_count <= 2'd0; ai_enable <= 1'b0; ai_dacrate <= 14'd0; ai_carry <= 1'b0; ai_pend <= 1'b0;
@@ -1267,7 +1284,7 @@ module n64_top #(
 			// the host's 44.1 kHz
 			if (out_acc + 27'd44_100 >= CLK_HZ) begin
 				out_acc <= out_acc + 27'd44_100 - CLK_HZ;
-				audio_lr <= {dac_r, dac_l}; audio_lr_we <= 1'b1;
+				out_go <= 1'b1;                                   // (the interpolator, below)
 			end else out_acc <= out_acc + 27'd44_100;
 			// the DAC's: a sample due every DACRATE + 1 video clocks
 			vclk_acc <= vtick ? vsum - CLK_HZ : vsum[26:0];
@@ -1309,7 +1326,7 @@ module n64_top #(
 						if (ai_count == 2'd2) begin ai_addr0 <= ai_addr1; ai_len0 <= ai_len1; ai_irq <= 1'b1; end
 					end
 				end else if (al_v && al_tag == ai_a[22:4]) begin
-					dac_l <= ai_word[31:16]; dac_r <= ai_word[15:0]; n_ai_samp <= n_ai_samp + 16'd1;
+					dac_l <= ai_word[31:16]; dac_r <= ai_word[15:0]; n_ai_samp <= n_ai_samp + 16'd1; dac_new <= 1'b1;
 					ai_addr0 <= {ai_a[23:13], ai_a[12:0] + 13'd4};
 					ai_carry <= ai_a[12:0] + 13'd4 == 13'd0;
 					ai_len0 <= ai_len0 - 18'd4;
@@ -1327,6 +1344,55 @@ module n64_top #(
 			// a new buffer: whatever line is in hand may since have been written over
 			if (ai_irq) al_v <= 1'b0;
 			if (ai_count == 2'd0) begin dac_l <= 16'd0; dac_r <= 16'd0; ai_debt <= 3'd0; end
+		end
+	end
+
+	// --- the host's 44.1 kHz: linear between the DAC's last two samples ------------------------
+	// (Holding the last sample, a game's 32 kHz came out as samples repeated one time in three
+	// or so: harsh on everything high.) At each output tick the fraction of the current
+	// sample's period gone by -- clocks since it came, over clocks between the last two -- by a
+	// 16-step divide; then before + (now - before) x fraction. A sample later than holding.
+	reg  [15:0]  ip_l0, ip_r0, ip_l1, ip_r1;   // the last two samples, older first
+	reg  [12:0]  ip_t, ip_per;             // clocks since dac_l came; between the last two
+	reg          ip_run;
+	reg  [4:0]   ip_k;
+	reg  [13:0]  ip_rem;
+	reg  [16:0]  ip_q;
+	reg  [12:0]  ip_d;
+	reg  [15:0]  ip_cl, ip_cr, ip_pl, ip_pr;
+	wire signed [16:0] ip_dl = $signed({ip_cl[15], ip_cl}) - $signed({ip_pl[15], ip_pl});
+	wire signed [16:0] ip_dr = $signed({ip_cr[15], ip_cr}) - $signed({ip_pr[15], ip_pr});
+	wire [15:0]  ip_f = ip_q[16] ? 16'hFFFF : ip_q[15:0];
+	wire signed [33:0] ip_ml = ip_dl * $signed({1'b0, ip_f});
+	wire signed [33:0] ip_mr = ip_dr * $signed({1'b0, ip_f});
+	always @(posedge clk) begin
+		audio_lr_we <= 1'b0;
+		if (rst) begin
+			ip_t <= 13'd0; ip_per <= 13'd0; ip_run <= 1'b0; ip_l0 <= 16'd0; ip_r0 <= 16'd0; ip_l1 <= 16'd0; ip_r1 <= 16'd0;
+			audio_lr <= 32'd0;
+		end else begin
+			if (dac_new) begin
+				// (dac_new comes the clock after the sample went to dac_l: it is the new one --
+				// taken as the older of the two, the "interpolation" was holding again)
+				ip_l0 <= ip_l1; ip_r0 <= ip_r1; ip_l1 <= dac_l; ip_r1 <= dac_r;
+				ip_per <= ip_t; ip_t <= 13'd0;
+			end else if (ip_t != 13'h1FFF) ip_t <= ip_t + 13'd1;
+			if (out_go && !ip_run) begin
+				ip_cl <= ip_l1; ip_cr <= ip_r1; ip_pl <= ip_l0; ip_pr <= ip_r0;
+				ip_d <= (ip_per == 13'd0) ? 13'd1 : ip_per;
+				ip_rem <= {1'b0, (ip_per == 13'd0) ? 13'd1 : (ip_t > ip_per) ? ip_per : ip_t};
+				ip_q <= 17'd0; ip_k <= 5'd0; ip_run <= 1'b1;
+			end else if (ip_run) begin
+				if (ip_k != 5'd17) begin
+					// one bit of t / per: the remainder doubled, the divisor off it when it fits
+					if (ip_rem >= {1'b0, ip_d}) begin ip_rem <= (ip_rem - {1'b0, ip_d}) << 1; ip_q <= {ip_q[15:0], 1'b1}; end
+					else begin ip_rem <= ip_rem << 1; ip_q <= {ip_q[15:0], 1'b0}; end
+					ip_k <= ip_k + 5'd1;
+				end else begin
+					audio_lr <= {ip_pr + ip_mr[31:16], ip_pl + ip_ml[31:16]}; audio_lr_we <= 1'b1;
+					ip_run <= 1'b0;
+				end
+			end
 		end
 	end
 
