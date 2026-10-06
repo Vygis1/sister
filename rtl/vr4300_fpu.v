@@ -61,10 +61,11 @@ module vr4300_fpu (
 );
 	localparam BI = 0, BU = 1, BO = 2, BZ = 3, BV = 4, BE = 5;
 
-	localparam [3:0] P_IDLE = 4'd0, P_DEC = 4'd1, P_ADD = 4'd2, P_MUL = 4'd3, P_DIV = 4'd4,
-	                 P_SQRT = 4'd5, P_NORM = 4'd6, P_ROUND = 4'd7, P_DENORM = 4'd8, P_TOINT = 4'd9,
-	                 P_FIN = 4'd10, P_DONE = 4'd11, P_UNP = 4'd12, P_ALIGN = 4'd13, P_TOINT2 = 4'd14, P_FAST = 4'd15;
-	reg  [3:0]  st;
+	localparam [4:0] P_IDLE = 5'd0, P_DEC = 5'd1, P_ADD = 5'd2, P_MUL = 5'd3, P_DIV = 5'd4,
+	                 P_SQRT = 5'd5, P_NORM = 5'd6, P_ROUND = 5'd7, P_DENORM = 5'd8, P_TOINT = 5'd9,
+	                 P_FIN = 5'd10, P_DONE = 5'd11, P_UNP = 5'd12, P_ALIGN = 5'd13, P_TOINT2 = 5'd14, P_FAST = 5'd15,
+	                 P_NORM2 = 5'd16, P_MULE = 5'd17;
+	reg  [4:0]  st;
 
 	// --- the operation, as taken ----------------------------------------------------
 	reg  [4:0]  q_fmt;
@@ -144,6 +145,11 @@ module vr4300_fpu (
 	wire [55:0]  gb56 = {3'd0, gb};
 	wire [13:0]  mchunk = gb56[14 * mstep +: 14];
 	wire [66:0]  mpart = ga * mchunk;
+	// (registered before it is shifted and added: the multiply, the shift and the 106-bit add
+	// in one clock were over 16 ns. P_MULE adds the last one.)
+	reg  [66:0]  mp_q;
+	reg  [1:0]   mp_sh;
+	reg          mp_v;
 
 	// --- divide ---------------------------------------------------------------------------
 	reg  [53:0]  drem;
@@ -165,6 +171,7 @@ module vr4300_fpu (
 		for (i = 63; i >= 0; i = i - 1) if (!f && v[i]) begin lzc64 = 7'd63 - i[6:0]; f = 1'b1; end
 	end endfunction
 	wire [6:0]  lz = lzc64(r_sig);
+	reg  [6:0]  lz_q;
 
 	// --- rounding --------------------------------------------------------------------------
 	// the kept bits, the round bit and the sticky, at the format's position
@@ -335,7 +342,7 @@ module vr4300_fpu (
 							else finish_with(5'd0, inf_of(sa ^ sb_raw, dbl), !dbl, 1'b1);
 						end else if (ka == K_ZERO || kb == K_ZERO) finish_with(5'd0, zero_of(sa ^ sb_raw, dbl), !dbl, 1'b1);
 						// (a single's significand is the top 24 bits: its low two 14-bit chunks are zero)
-						else begin macc <= 106'd0; mstep <= dbl ? 2'd0 : 2'd2; st <= P_MUL; end
+						else begin macc <= 106'd0; mstep <= dbl ? 2'd0 : 2'd2; mp_v <= 1'b0; st <= P_MUL; end
 					end
 					default: begin
 						if (ka == K_INF) begin
@@ -436,13 +443,18 @@ module vr4300_fpu (
 			end
 
 			P_MUL: begin
-				macc <= macc + ({39'd0, mpart} << (14 * mstep));
+				mp_q <= mpart; mp_sh <= mstep; mp_v <= 1'b1;
+				if (mp_v) macc <= macc + ({39'd0, mp_q} << (14 * mp_sh));
 				mstep <= mstep + 2'd1;
-				if (mstep == 2'd3) begin
-					r_sign <= sa ^ sb_raw;
-					r_e <= {ea[12], ea} + {eb[12], eb} + 14'd1;
-					st <= P_FIN;          // P_FIN here: take the product (see below)
-				end
+				if (mstep == 2'd3) st <= P_MULE;
+			end
+
+			P_MULE: begin
+				macc <= macc + ({39'd0, mp_q} << (14 * mp_sh));
+				mp_v <= 1'b0;
+				r_sign <= sa ^ sb_raw;
+				r_e <= {ea[12], ea} + {eb[12], eb} + 14'd1;
+				st <= P_FIN;          // P_FIN here: take the product (see below)
 			end
 
 			P_DIV: begin
@@ -472,9 +484,15 @@ module vr4300_fpu (
 				end
 			end
 
+			// (the count and the 64-bit shift by it in one clock were over 16 ns)
 			P_NORM: begin
-				r_sig <= r_sig << lz;
-				r_e <= r_e - {7'd0, lz};
+				lz_q <= lz;
+				st <= P_NORM2;
+			end
+
+			P_NORM2: begin
+				r_sig <= r_sig << lz_q;
+				r_e <= r_e - {7'd0, lz_q};
 				st <= P_ROUND;
 			end
 

@@ -103,33 +103,37 @@ module n64_rdp_texp (
 	`define M_BL(m)   m[0]
 
 	// --- 1: the coordinates -------------------------------------------------------------------
-	reg  [10:0]  s0_1, s1_1;
-	reg  signed [9:0] t0_1, t1_1;
+	// (shifted and clamped here; masked and mirrored, and the next row's offset, at the head
+	// of stage 2, from what this registers -- all of it in one clock was the RDP's longest
+	// path at 62.5 MHz)
+	reg  signed [11:0] si_1, ti_1;
+	reg  [9:0]   mk_1;                    // {mask_s, mirror_s, mask_t, mirror_t} of the request
 	reg  [4:0]   fx_1, fy_1;
 	reg          mid_1, upr_1, up_1;      // mid-texel; fx + fy >= 32 as fetched; and after mid-texel
 	always @(posedge clk) if (ce) begin : coord
-		reg signed [16:0] sc, tcv; reg [10:0] sm0, sm1, tm0, tm1; reg signed [11:0] si, ti; reg signed [11:0] td;
+		reg signed [16:0] sc, tcv;
 		reg [4:0] ffx, ffy;
 		sc = clamp_c(clamp_s, s_in, shift_s, slo, shi);
 		tcv = clamp_c(clamp_t, t_in, shift_t, tlo, thi);
 		ffx = (sample_quad || tlut) ? sc[4:0] : 5'd0;
 		ffy = (sample_quad || tlut) ? tcv[4:0] : 5'd0;
 		fx_1 <= ffx; fy_1 <= ffy;
-		si = sc >>> 5; ti = tcv >>> 5;
-		sm0 = mask_c(si, mask_s, mirror_s);
-		sm1 = mask_c(si + 12'sd1, mask_s, mirror_s);
-		tm0 = mask_c(ti, mask_t, mirror_t);
-		tm1 = mask_c(ti + 12'sd1, mask_t, mirror_t);
-		td = $signed({1'b0, tm1}) - $signed({1'b0, tm0});
-		if (td < -12'sd255) td = -12'sd255;
-		s0_1 <= sm0; s1_1 <= sm1;
-		t0_1 <= {2'b00, tm0[7:0]};
-		t1_1 <= $signed({2'b00, tm0[7:0]}) + td[9:0];
+		si_1 <= sc >>> 5; ti_1 <= tcv >>> 5;
+		mk_1 <= {mask_s, mirror_s, mask_t, mirror_t};
 		mid_1 <= mid_texel_en && bilerp && ffx == 5'h10 && ffy == 5'h10;
 		upr_1 <= ({1'b0, ffx} + {1'b0, ffy}) >= 6'h20;
 		up_1 <= ({1'b0, ffx} + {1'b0, ffy}) >= 6'h20 && !(mid_texel_en && bilerp && ffx == 5'h10 && ffy == 5'h10);
 		m1 <= m_in;
 	end
+	wire [10:0]  sm0_1 = mask_c(si_1, mk_1[9:6], mk_1[5]);
+	wire [10:0]  sm1_1 = mask_c(si_1 + 12'sd1, mk_1[9:6], mk_1[5]);
+	wire [10:0]  tm0_1 = mask_c(ti_1, mk_1[4:1], mk_1[0]);
+	wire [10:0]  tm1_1 = mask_c(ti_1 + 12'sd1, mk_1[4:1], mk_1[0]);
+	wire signed [11:0] tdr_1 = $signed({1'b0, tm1_1}) - $signed({1'b0, tm0_1});
+	wire signed [11:0] td_1 = (tdr_1 < -12'sd255) ? -12'sd255 : tdr_1;
+	wire [10:0]  s0_1 = sm0_1, s1_1 = sm1_1;
+	wire signed [9:0] t0_1 = {2'b00, tm0_1[7:0]};
+	wire signed [9:0] t1_1 = $signed({2'b00, tm0_1[7:0]}) + td_1[9:0];
 
 	// --- 2: the four texels: base (s1, t1 when the fractions add to a texel or more), t10
 	// (s1, t0), t01 (s0, t1), t11 (s1, t1). Without sample_quad, only the base, at (s0, t0)

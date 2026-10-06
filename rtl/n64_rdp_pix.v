@@ -316,7 +316,7 @@ module n64_rdp_pix (
 		if (rst) e_occ <= 1'b0;
 		else if (ce) begin : lod
 			reg signed [16:0] ss, tt, sxd, txd, syd, tyd; reg povf;
-			reg signed [17:0] d0, d1, d2, d3; reg [16:0] a0, a1, a2, a3, mx; reg [4:0] mb; reg dist, mag;
+			reg signed [17:0] d0, d1, d2, d3; reg [16:0] a0, a1, a2, a3, m01, m23, mx; reg [4:0] mb; reg dist, mag;
 			reg [8:0] lf; reg [2:0] toff; reg [2:0] maxl, tl0, tl1; reg [11:0] lf12;
 			if (persp_en) begin ss = p0s; tt = p0t; sxd = p1s; txd = p1t; syd = p2s; tyd = p2t; povf = p0o | p1o | p2o; end
 			else begin
@@ -334,7 +334,10 @@ module n64_rdp_pix (
 				d0 = sxd - ss; d1 = txd - tt; d2 = syd - ss; d3 = tyd - tt;
 				a0 = d0[17] ? ~d0[16:0] : d0[16:0]; a1 = d1[17] ? ~d1[16:0] : d1[16:0];
 				a2 = d2[17] ? ~d2[16:0] : d2[16:0]; a3 = d3[17] ? ~d3[16:0] : d3[16:0];
-				mx = a0; if (a1 > mx) mx = a1; if (a2 > mx) mx = a2; if (a3 > mx) mx = a3;
+				// (the largest of the four as a tree, two compares deep: in a chain it was three,
+				// on the RDP's longest path at 62.5 MHz)
+				m01 = (a1 > a0) ? a1 : a0; m23 = (a3 > a2) ? a3 : a2;
+				mx = (m23 > m01) ? m23 : m01;
 				maxl = tile[5:3]; toff = 3'd0; mag = 1'b0; dist = 1'b0;
 				if (povf) begin dist = 1'b1; lf = 9'h0FF; end
 				else if (mx >= 17'h4000) begin dist = 1'b1; lf = 9'h0FF; toff = maxl; end

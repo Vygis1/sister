@@ -26,9 +26,19 @@
 // delay slot is dropped, so a taken branch costs one clock. A likely branch not
 // taken drops its delay slot instead.
 //
-// Everything is decided in E: an exception there kills what is behind it in D
-// and F, and nothing of the faulting instruction reaches M. So exceptions are
-// precise, and interrupts are taken on the instruction in E, before it runs.
+// Exceptions are decided in two places. What E can know without its ALU and its
+// address adder -- interrupts, fetch faults, reserved and unusable instructions,
+// SYSCALL, BREAK, the FPU's traps -- is taken in E: it kills what is behind it in
+// D and F, and nothing of the faulting instruction reaches M. What needs the
+// adder -- overflow, the traps' compares, address errors, the TLB's answers for a
+// data access, and the micro-TLB replay -- E only registers (m_lexc, m_replay),
+// and M takes it: the instruction in M is dropped, and E, D and F behind it with
+// it, before anything of theirs commits. (From E's forwarding through the adder
+// and the address checks into the commit decision, and from there to the PC, the
+// COP0 registers and every stage's kill, was 19 ns: the CPU's longest path.) The
+// instructions that can raise one of these change nothing in E that M cannot
+// still cancel; an LL's link is set in M. So exceptions stay precise, and
+// interrupts are taken on the instruction in E, before it runs.
 //
 // --- the ports ----------------------------------------------------------------------
 //
@@ -145,45 +155,17 @@ module vr4300 #(
 	reg         llbit;
 	reg  [4:0]  rnd;                       // Random, counting down from 31 to Wired
 
-	// the TLB: flip-flops, since every entry is compared at once
-	reg  [11:0] tlb_mask [0:31];           // PageMask[24:13], made pairs of bits as the chip does
-	reg  [26:0] tlb_vpn  [0:31];           // VA[39:13], the bits under the mask clear
-	reg  [1:0]  tlb_rgn  [0:31];           // VA[63:62]
-	reg  [7:0]  tlb_asid [0:31];
-	reg         tlb_g    [0:31];
-	reg  [19:0] tlb_pfn0 [0:31], tlb_pfn1 [0:31];   // PA[31:12] of each half
-	reg  [2:0]  tlb_c0   [0:31], tlb_c1   [0:31];
-	reg         tlb_d0   [0:31], tlb_d1   [0:31], tlb_v0 [0:31], tlb_v1 [0:31];
+	// the TLB: 32 entries in four banks of LUT RAM (entry i in bank i[1:0] at i[4:2]), each
+	// {PageMask[24:13] made pairs of bits as the chip does, VA[39:13] with the bits under the
+	// mask clear, VA[63:62], ASID, G, PFN0, C0, D0, V0, PFN1, C1, D1, V1}: 100 bits. Looked up
+	// four entries a clock (tlb_s*, below) when a micro-TLB does not hold a page, or for a
+	// TLBP. (They were 3,200 flip-flops compared all at once for each of three lookups: the
+	// micro-TLBs miss rarely -- SM64 runs unmapped -- and nine clocks then cost nothing.)
+	(* ram_style = "distributed" *) reg [99:0] tb0 [0:7];
+	(* ram_style = "distributed" *) reg [99:0] tb1 [0:7];
+	(* ram_style = "distributed" *) reg [99:0] tb2 [0:7];
+	(* ram_style = "distributed" *) reg [99:0] tb3 [0:7];
 	integer     ti, tj;
-
-	// a lookup: {found, valid, dirty, C[2:0], PA[31:12]} of the page holding va.
-	// The matching entry's fields are ORed together rather than chosen by
-	// priority (a chain 32 deep); two entries matching is undefined on the chip.
-	function [25:0] tlb_look;
-		input [63:0] va; input [7:0] asid;
-		integer i; reg hit, odd; reg [11:0] m; reg [19:0] pfn; reg [2:0] c; reg v, d, f;
-		reg [11:0] msel; reg [19:0] psel; reg [24:0] off; reg [31:0] pa;
-		begin
-			f = 1'b0; v = 1'b0; d = 1'b0; c = 3'd0; psel = 20'd0; msel = 12'd0;
-			for (i = 0; i < 32; i = i + 1) begin
-				m = tlb_mask[i];
-				hit = ((va[39:13] & ~{15'd0, m}) == tlb_vpn[i]) && va[63:62] == tlb_rgn[i] && (tlb_g[i] || tlb_asid[i] == asid);
-				// the half: the address bit just above the page
-				odd = m[0] ? (m[2] ? (m[4] ? (m[6] ? (m[8] ? (m[10] ? va[24] : va[22]) : va[20]) : va[18]) : va[16]) : va[14]) : va[12];
-				if (hit) begin
-					f = 1'b1;
-					v = v | (odd ? tlb_v1[i] : tlb_v0[i]);
-					d = d | (odd ? tlb_d1[i] : tlb_d0[i]);
-					c = c | (odd ? tlb_c1[i] : tlb_c0[i]);
-					psel = psel | (odd ? tlb_pfn1[i] : tlb_pfn0[i]);
-					msel = msel | m;
-				end
-			end
-			off = {msel, 13'h1FFF} >> 1;               // the offset within the page
-			pa = {psel, 12'd0} | (va[31:0] & {7'd0, off});
-			tlb_look = {f, v, d, c, pa[31:12]};
-		end
-	endfunction
 
 	// the micro-TLBs: the last page each port translated
 	reg         dut_ok, iut_ok;
@@ -191,6 +173,9 @@ module vr4300 #(
 	reg  [19:0] iut_page;                  // VA[31:12] (a fetch address is 32 bits, sign-extended)
 	reg  [25:0] dut, iut;                  // tlb_look's answer for it
 	reg         dreq;                      // a replay asked for the data page below
+	reg         ti_run, rst_q;             // the TLB's power-on contents going in (see the TLB)
+	reg  [4:0]  ti_k;
+	reg         tlbp_pend;                 // a TLBP is waiting for its answer
 	reg  [63:0] dreq_va;
 
 	wire        st_ie  = c0_status[0];
@@ -256,6 +241,10 @@ module vr4300 #(
 	reg  [4:0]  m_fpl_idx, w_fpl_idx;
 	reg         m_xmark, w_xmark;  // an exception was taken here: for the trace, in program order
 	reg  [4:0]  m_xcode, w_xcode;
+	// an exception M takes (see the top): its code + 1, or a replay; and what it needs
+	reg  [4:0]  m_lexc;
+	reg         m_replay, m_bd, m_ll, m_refill;
+	reg  [63:0] m_va64;
 	// W
 	reg  [2:0]  w_kind;
 	wire [63:0] w_value;           // W's final value (a load's aligned data, or the result)
@@ -346,7 +335,8 @@ module vr4300 #(
 	// the commit decision, the CPU's longest path, by five levels)
 	function [2:0] fw_class; input [31:0] w; reg [5:0] o, f; begin
 		o = w[31:26]; f = w[5:0];
-		fw_class[0] = o == 6'h00 && (f == 6'h00 || f == 6'h02 || f == 6'h03 || f == 6'h04 || f == 6'h06 || f == 6'h07
+		// (not SLLV/SRLV/SRAV: a loaded shift amount is a barrel shifter more on the path)
+		fw_class[0] = o == 6'h00 && (f == 6'h00 || f == 6'h02 || f == 6'h03
 		              || f == 6'h21 || f == 6'h23 || f == 6'h24 || f == 6'h25 || f == 6'h26 || f == 6'h27 || f == 6'h2A || f == 6'h2B);
 		fw_class[1] = o == 6'h09 || o == 6'h0A || o == 6'h0B || o == 6'h0C || o == 6'h0D || o == 6'h0E;
 		fw_class[2] = o == 6'h28 || o == 6'h29 || o == 6'h2B || o == 6'h3F;
@@ -356,8 +346,11 @@ module vr4300 #(
 	wire fw_alu   = fw_alu_r || fw_alu_i;
 	wire [63:0] fa, fb;                       // the operands with a load in W forwarded (assigned below)
 	reg  [63:0] res_f, st_data_f;             // fw_alu's result, and a store's data, from them
+	// (only a whole word or doubleword: the merging loads' shifters, and the byte and halfword
+	// lanes' muxes, on the path from the data cache's block RAM to E's result were over 16 ns)
+	wire w_fwok = w_lsel[2] && !w_kind[2];     // LW, LWU, LD (and not LB/LH: their lanes' muxes too)
 	assign e_hazard = e_valid && ((ld_in_m && ((uses_rs && c_ma) || (uses_rt && c_mb)))
-	                           || (ld_in_w && ((uses_rs && c_wa && !fw_alu) || (uses_rt && c_wb && !fw_alu_r && !fw_st))));
+	                           || (ld_in_w && ((uses_rs && c_wa && !(fw_alu && w_fwok)) || (uses_rt && c_wb && !((fw_alu_r || fw_st) && w_fwok)))));
 
 	// =============================================================================
 	// E: the FP registers. With Status.FR clear the registers pair up: fs reads
@@ -424,7 +417,8 @@ module vr4300 #(
 	reg  [31:0] br_to;
 	reg         is_br;        // any branch or jump (its next instruction is a delay slot)
 	reg         likely_skip;  // a likely branch not taken: drop the delay slot
-	reg  [4:0]  exc;          // 0 none, else code + 1
+	reg  [4:0]  exc;          // 0 none, else code + 1: taken in E
+	reg  [4:0]  lexc;         // the same, from the ALU's answers: taken in M
 	reg         is_mem, is_load, is_store;
 	reg  [2:0]  lsel;         // 0 LB 1 LBU 2 LH 3 LHU 4 LW 5 LWU 6 LD, 7 = merging (see mkind)
 	reg  [2:0]  mkind;        // 0 LWL 1 LWR 2 LDL 3 LDR
@@ -457,6 +451,8 @@ module vr4300 #(
 	// CTC1 to FCR31 traps when it sets a cause that is enabled, or E
 	wire        ctc_trap = ((b[16:12] & b[11:7]) != 5'd0) || b[17];
 
+	// the link as an SC in E sees it: an LL in M sets it this clock
+	wire llbit_e = llbit || (m_valid && m_ll);
 	wire d64_ok = kernel || c0_status[7] && st_ksu == 2'b00 || (st_ksu == 2'b01 && c0_status[6]) || (st_ksu == 2'b10 && c0_status[5]);
 	wire [63:0] hi, lo;
 
@@ -493,7 +489,7 @@ module vr4300 #(
 	always @(*) begin
 		res = 64'd0; we_rf = 1'b0; dst = rd;
 		take_br = 1'b0; br_to = br_target; is_br = 1'b0; likely_skip = 1'b0;
-		exc = 5'd0;
+		exc = 5'd0; lexc = 5'd0;
 		is_mem = 1'b0; is_load = 1'b0; is_store = 1'b0; lsel = 3'd0; mkind = 3'd0; msize = 2'd0;
 		c0_wr = 1'b0; is_eret = 1'b0; is_ll = 1'b0; is_sc = 1'b0; is_cache = 1'b0;
 		md_start = 1'b0; md_op = 3'd0; hi_wr = 1'b0; lo_wr = 1'b0; reads_hilo = 1'b0;
@@ -526,9 +522,9 @@ module vr4300 #(
 				we_rf = 1'b0;
 				if (d64_ok) begin md_start = 1'b1; md_op = {1'b1, fn[1:0]}; end else exc = X_RI + 5'd1;
 			end
-			6'h20: if (ov_add) begin we_rf = 1'b0; exc = X_OV + 5'd1; end else res = sx32(sum32);
+			6'h20: begin res = sx32(sum32); if (ov_add) lexc = X_OV + 5'd1; end
 			6'h21: res = sx32(sum32);
-			6'h22: if (ov_sub) begin we_rf = 1'b0; exc = X_OV + 5'd1; end else res = sx32(diff32);
+			6'h22: begin res = sx32(diff32); if (ov_sub) lexc = X_OV + 5'd1; end
 			6'h23: res = sx32(diff32);
 			6'h24: res = a & b;
 			6'h25: res = a | b;
@@ -537,17 +533,17 @@ module vr4300 #(
 			6'h2A: res = {63'd0, lt_s};
 			6'h2B: res = {63'd0, lt_u};
 			6'h2C: if (!d64_ok) begin we_rf = 1'b0; exc = X_RI + 5'd1; end
-			       else if (ov_dadd) begin we_rf = 1'b0; exc = X_OV + 5'd1; end else res = sum;
+			       else begin res = sum; if (ov_dadd) lexc = X_OV + 5'd1; end
 			6'h2D: if (d64_ok) res = sum; else begin we_rf = 1'b0; exc = X_RI + 5'd1; end
 			6'h2E: if (!d64_ok) begin we_rf = 1'b0; exc = X_RI + 5'd1; end
-			       else if (ov_dsub) begin we_rf = 1'b0; exc = X_OV + 5'd1; end else res = diff;
+			       else begin res = diff; if (ov_dsub) lexc = X_OV + 5'd1; end
 			6'h2F: if (d64_ok) res = diff; else begin we_rf = 1'b0; exc = X_RI + 5'd1; end
-			6'h30: begin we_rf = 1'b0; if (!lt_s) exc = X_TR + 5'd1; end      // TGE
-			6'h31: begin we_rf = 1'b0; if (!lt_u) exc = X_TR + 5'd1; end      // TGEU
-			6'h32: begin we_rf = 1'b0; if (lt_s)  exc = X_TR + 5'd1; end      // TLT
-			6'h33: begin we_rf = 1'b0; if (lt_u)  exc = X_TR + 5'd1; end      // TLTU
-			6'h34: begin we_rf = 1'b0; if (eq)    exc = X_TR + 5'd1; end      // TEQ
-			6'h36: begin we_rf = 1'b0; if (!eq)   exc = X_TR + 5'd1; end      // TNE
+			6'h30: begin we_rf = 1'b0; if (!lt_s) lexc = X_TR + 5'd1; end      // TGE
+			6'h31: begin we_rf = 1'b0; if (!lt_u) lexc = X_TR + 5'd1; end      // TGEU
+			6'h32: begin we_rf = 1'b0; if (lt_s)  lexc = X_TR + 5'd1; end      // TLT
+			6'h33: begin we_rf = 1'b0; if (lt_u)  lexc = X_TR + 5'd1; end      // TLTU
+			6'h34: begin we_rf = 1'b0; if (eq)    lexc = X_TR + 5'd1; end      // TEQ
+			6'h36: begin we_rf = 1'b0; if (!eq)   lexc = X_TR + 5'd1; end      // TNE
 			6'h38, 6'h3A, 6'h3B, 6'h3C, 6'h3E, 6'h3F:
 				if (!d64_ok) begin we_rf = 1'b0; exc = X_RI + 5'd1; end
 				else res = (fn[1:0] == 2'b00) ? dsll : (fn[1:0] == 2'b10) ? dsrl : dsra;
@@ -564,12 +560,12 @@ module vr4300 #(
 				is_br = 1'b1; take_br = !ltz; likely_skip = rt[1] && ltz;
 				if (rt[4]) begin we_rf = 1'b1; dst = 5'd31; res = sx32(e_pc + 32'd8); end
 			end
-			5'h08: if (!lti_s) exc = X_TR + 5'd1;                           // TGEI
-			5'h09: if (!lti_u) exc = X_TR + 5'd1;                           // TGEIU
-			5'h0A: if (lti_s)  exc = X_TR + 5'd1;                           // TLTI
-			5'h0B: if (lti_u)  exc = X_TR + 5'd1;                           // TLTIU
-			5'h0C: if (a == simm) exc = X_TR + 5'd1;                        // TEQI
-			5'h0E: if (a != simm) exc = X_TR + 5'd1;                        // TNEI
+			5'h08: if (!lti_s) lexc = X_TR + 5'd1;                          // TGEI
+			5'h09: if (!lti_u) lexc = X_TR + 5'd1;                          // TGEIU
+			5'h0A: if (lti_s)  lexc = X_TR + 5'd1;                          // TLTI
+			5'h0B: if (lti_u)  lexc = X_TR + 5'd1;                          // TLTIU
+			5'h0C: if (a == simm) lexc = X_TR + 5'd1;                       // TEQI
+			5'h0E: if (a != simm) lexc = X_TR + 5'd1;                       // TNEI
 			default: exc = X_RI + 5'd1;
 			endcase
 		end
@@ -579,7 +575,7 @@ module vr4300 #(
 		6'h05, 6'h15: begin is_br = 1'b1; take_br = !eq; likely_skip = op[4] && eq; end
 		6'h06, 6'h16: begin is_br = 1'b1; take_br = lez; likely_skip = op[4] && !lez; end
 		6'h07, 6'h17: begin is_br = 1'b1; take_br = !lez; likely_skip = op[4] && lez; end
-		6'h08: begin dst = rt; if (ov_addi) exc = X_OV + 5'd1; else begin we_rf = 1'b1; res = sx32(sumi32); end end
+		6'h08: begin dst = rt; we_rf = 1'b1; res = sx32(sumi32); if (ov_addi) lexc = X_OV + 5'd1; end
 		6'h09: begin dst = rt; we_rf = 1'b1; res = sx32(sumi32); end
 		6'h0A: begin dst = rt; we_rf = 1'b1; res = {63'd0, lti_s}; end
 		6'h0B: begin dst = rt; we_rf = 1'b1; res = {63'd0, lti_u}; end
@@ -646,7 +642,7 @@ module vr4300 #(
 		6'h12, 6'h13: exc = (c0_status[30 + op[0]] ? X_RI : X_CPU) + 5'd1;
 		6'h18: begin dst = rt;
 			if (!d64_ok) exc = X_RI + 5'd1;
-			else if (ov_daddi) exc = X_OV + 5'd1; else begin we_rf = 1'b1; res = sumi; end
+			else begin we_rf = 1'b1; res = sumi; if (ov_daddi) lexc = X_OV + 5'd1; end
 		end
 		6'h19: begin dst = rt; if (d64_ok) begin we_rf = 1'b1; res = sumi; end else exc = X_RI + 5'd1; end
 		6'h1A, 6'h1B: begin dst = rt;                                          // LDL, LDR
@@ -684,13 +680,13 @@ module vr4300 #(
 			if (!d64_ok) exc = X_RI + 5'd1;
 			else begin is_mem = 1'b1; is_load = 1'b1; we_rf = 1'b1; lsel = 3'd6; msize = 2'd3; is_ll = 1'b1; end
 		end
-		6'h38: begin dst = rt; we_rf = 1'b1; is_sc = 1'b1; res = {63'd0, llbit};
-			if (llbit) begin is_mem = 1'b1; is_store = 1'b1; msize = 2'd2; end
+		6'h38: begin dst = rt; we_rf = 1'b1; is_sc = 1'b1; res = {63'd0, llbit_e};
+			if (llbit_e) begin is_mem = 1'b1; is_store = 1'b1; msize = 2'd2; end
 		end
 		6'h3C: begin dst = rt;
 			if (!d64_ok) exc = X_RI + 5'd1;
-			else begin we_rf = 1'b1; is_sc = 1'b1; res = {63'd0, llbit};
-				if (llbit) begin is_mem = 1'b1; is_store = 1'b1; msize = 2'd3; end
+			else begin we_rf = 1'b1; is_sc = 1'b1; res = {63'd0, llbit_e};
+				if (llbit_e) begin is_mem = 1'b1; is_store = 1'b1; msize = 2'd3; end
 			end
 		end
 		default: exc = X_RI + 5'd1;
@@ -764,23 +760,30 @@ module vr4300 #(
 	// =============================================================================
 	// E: what is taken -- the commit point
 	// =============================================================================
-	wire [4:0]  e_exc_any = e_fexc != 5'd0 ? e_fexc : exc != 5'd0 ? exc : mem_exc;
-	wire        e_go    = e_valid && !stall_e && adv_mw;           // the instruction in E completes this clock
+	// M first: an exception it takes, or a replay (its data page is not in the micro-TLB:
+	// fetch it again -- from its branch if it is in a delay slot -- while the page is
+	// looked up). Either drops it and everything behind it.
+	wire        m_kill   = m_valid && (m_lexc != 5'd0 || m_replay);   // (registers only)
+	wire        m_exc_go = adv_mw && m_valid && m_lexc != 5'd0;
+	wire        m_rep_go = adv_mw && m_valid && m_replay;
+	wire        m_go_kill = m_exc_go || m_rep_go;
+	wire [4:0]  e_exc_any = e_fexc != 5'd0 ? e_fexc : exc;
+	wire [4:0]  lexc_any  = lexc != 5'd0 ? lexc : mem_exc;          // for M
+	wire        e_go    = e_valid && !stall_e && adv_mw && !m_kill;  // the instruction in E completes this clock
 	wire        e_int   = e_go && int_pending;
 	wire        e_trap  = e_go && !int_pending && e_exc_any != 5'd0;
 	wire        e_redir_exc = e_int || e_trap;
-	// its data page is not in the micro-TLB: fetch it again (from its branch if
-	// it is in a delay slot) while the page is looked up
-	wire        e_replay = e_go && !int_pending && e_exc_any == 5'd0 && need_page;
-	wire        e_ok    = e_go && !e_redir_exc && !e_replay;       // it runs
+	wire        e_ok    = e_go && !e_redir_exc;                      // it runs
 	wire        e_eret  = e_ok && is_eret;
 	wire        e_taken = e_ok && take_br;
 	wire        e_skip  = e_ok && likely_skip;
 	wire [31:0] vec_base = st_bev ? 32'hBFC0_0200 : 32'h8000_0000;
-	wire        refill  = !st_exl && !e_int && (e_fexc != 5'd0 ? e_frefill : (exc == 5'd0 && mem_refill));
+	wire        refill  = !st_exl && !e_int && e_fexc != 5'd0 && e_frefill;
+	wire        m_refill_v = !st_exl && m_refill;
 	// the TLB refill vector is 080 when addressing is 64-bit in the current mode
 	wire        bits64  = (st_exl || st_erl || st_ksu == 2'b00) ? c0_status[7] : (st_ksu == 2'b01) ? c0_status[6] : c0_status[5];
 	wire [31:0] vector  = vec_base + (refill ? (bits64 ? 32'h080 : 32'h000) : 32'h180);
+	wire [31:0] m_vector = vec_base + (m_refill_v ? (bits64 ? 32'h080 : 32'h000) : 32'h180);
 
 	// =============================================================================
 	// the multiply/divide unit
@@ -838,7 +841,7 @@ module vr4300 #(
 	// take it over -- the test ROM caught a chain whose middle result never came)
 	wire   fpu_start  = e_valid && fp_arith && !fpu_on && !fpl_dep && !fp_pend;
 	always @(posedge clk) begin
-		if (rst || adv) fpu_on <= 1'b0;
+		if (rst || adv || m_go_kill) fpu_on <= 1'b0;
 		else if (fpu_start) fpu_on <= 1'b1;
 	end
 	vr4300_fpu fpu (
@@ -904,7 +907,7 @@ module vr4300 #(
 	wire        f_bad  = f_pc[1:0] != 2'b00 || (!kernel && f_pc[31]);
 	wire        f_mapped = !f_bad && !f_direct;
 	wire        iut_hit = iut_ok && iut_page == f_pc[31:12];
-	assign f_tlb_wait = f_mapped && !iut_hit;
+	assign f_tlb_wait = (f_mapped && !iut_hit) || ti_run;
 	wire        f_page_ok = iut[25] && iut[24];                  // found, and valid
 	assign i_addr   = f_direct ? {3'b000, f_pc[28:0]} : {iut[19:0], f_pc[11:0]};
 	assign i_cached = f_direct ? (fseg == 3'b100) : (iut[22:20] != 3'd2);
@@ -913,8 +916,9 @@ module vr4300 #(
 	wire [4:0]  f_exc = f_bad ? X_ADEL + 5'd1 : (!f_direct && !f_page_ok) ? X_TLBL + 5'd1 : 5'd0;
 
 	// the next fetch address
-	wire [31:0] next_pc = e_redir_exc ? vector
-	                    : e_replay ? (e_bd ? e_pc - 32'd4 : e_pc)
+	wire [31:0] next_pc = m_exc_go ? m_vector
+	                    : m_rep_go ? (m_bd ? m_pc - 32'd4 : m_pc)
+	                    : e_redir_exc ? vector
 	                    : e_eret ? (st_erl ? c0_errorepc : c0_epc)
 	                    : e_taken ? br_to
 	                    : f_pc + 32'd4;
@@ -944,19 +948,20 @@ module vr4300 #(
 			c_nza <= adv ? (dn_rs != 5'd0) : (rs != 5'd0);
 			c_nzb <= adv ? (dn_rt != 5'd0) : (rt != 5'd0);
 			// --- F and D ---------------------------------------------------------------
-			if (adv) begin
+			// (M dropping what is behind it moves F, D and E whatever E was waiting for)
+			if (adv || m_go_kill) begin
 				f_pc <= next_pc;
 				// what F fetched this clock enters D -- unless E redirects (the
 				// fetch behind a taken branch's delay slot, or anything behind an
 				// exception or ERET, is off the path)
-				d_valid   <= !(e_redir_exc || e_eret || e_taken || e_replay);
+				d_valid   <= !(m_go_kill || e_redir_exc || e_eret || e_taken);
 				d_pc      <= f_pc;
 				d_fexc    <= f_exc;
 				d_frefill <= f_mapped && !iut[25];
 				d_noissue <= f_exc != 5'd0;
 				// D moves to E, unless killed: by an exception or ERET in E, or as
 				// the delay slot of a likely branch not taken
-				e_valid <= d_valid && !(e_redir_exc || e_eret || e_skip || e_replay);
+				e_valid <= d_valid && !(m_go_kill || e_redir_exc || e_eret || e_skip);
 				e_pc    <= d_pc;
 				e_ir    <= d_noissue ? 32'd0 : ir;
 				e_fw    <= d_noissue ? 3'd0 : fw_class(ir);
@@ -978,7 +983,7 @@ module vr4300 #(
 			// --- E to M ------------------------------------------------------------------
 			if (adv_mw) begin
 				m_valid  <= e_ok && !(e_valid && stall_e);
-				m_mem    <= is_mem && !(is_sc && !llbit);
+				m_mem    <= is_mem && !(is_sc && !llbit_e);
 				m_load   <= is_load;
 				m_store  <= is_store;
 				m_cache  <= is_cache;
@@ -999,18 +1004,24 @@ module vr4300 #(
 				m_fpl_d   <= fp_ld_d;
 				m_fpl_hi  <= !fp_ld_d && !fr && rt[0];
 				m_fpl_idx <= fr ? rt : {rt[4:1], 1'b0};
-				w_fpl     <= m_fpl;
+				w_fpl     <= m_fpl && !m_kill;
 				w_fpl_d   <= m_fpl_d;
 				w_fpl_hi  <= m_fpl_hi;
 				w_fpl_idx <= m_fpl_idx;
 				m_xmark  <= e_redir_exc;
 				m_xcode  <= e_int ? X_INT : e_exc_any - 5'd1;
-				w_xmark  <= m_xmark;
-				w_xcode  <= m_xcode;
+				m_lexc   <= lexc_any;
+				m_replay <= lexc_any == 5'd0 && need_page;
+				m_refill <= mem_refill;
+				m_bd     <= e_bd;
+				m_va64   <= va64;
+				m_ll     <= is_ll;
+				w_xmark  <= m_xmark || (m_valid && m_lexc != 5'd0);
+				w_xcode  <= m_xmark ? m_xcode : m_lexc - 5'd1;
 				// --- M to W ----------------------------------------------------------
-				w_valid <= m_valid;
+				w_valid <= m_valid && !m_kill;
 				w_load  <= m_load;
-				w_mem   <= m_valid && m_mem;
+				w_mem   <= m_valid && m_mem && !m_kill;
 				w_we_rf <= m_we_rf;
 				w_rd    <= m_rd;
 				w_res   <= m_res;
@@ -1038,7 +1049,7 @@ module vr4300 #(
 	// =============================================================================
 	// M: the data port
 	// =============================================================================
-	assign d_req    = m_valid && m_mem && adv_mw;
+	assign d_req    = m_valid && m_mem && adv_mw && !m_kill;
 	assign d_we     = m_store;
 	assign d_cache  = m_cache;
 	assign d_cop    = m_cop;
@@ -1050,7 +1061,7 @@ module vr4300 #(
 	// =============================================================================
 	// W: align the load
 	// =============================================================================
-	reg  [63:0] ld;
+	reg  [63:0] ld, ldf;                // the aligned load; and the same but for the merging ones
 	wire [63:0] dw = d_rdata;
 	wire [7:0]  lb = dw[63 - 8 * w_off -: 8];
 	wire [15:0] lh = dw[63 - 8 * w_off -: 16];
@@ -1073,25 +1084,28 @@ module vr4300 #(
 			2'd2: ld = ldl;
 			default: ld = ldr;
 			endcase
-		end else begin
-			case (w_lsel)
-			3'd0: ld = {{56{lb[7]}}, lb};
-			3'd1: ld = {56'd0, lb};
-			3'd2: ld = sx16(lh);
-			3'd3: ld = {48'd0, lh};
-			3'd4: ld = sx32(lw);
-			3'd5: ld = {32'd0, lw};
-			default: ld = dw;
-			endcase
-		end
+		end else ld = ldf;
+	end
+	always @(*) begin
+		case (w_lsel)
+		3'd0: ldf = {{56{lb[7]}}, lb};
+		3'd1: ldf = {56'd0, lb};
+		3'd2: ldf = sx16(lh);
+		3'd3: ldf = {48'd0, lh};
+		3'd4: ldf = sx32(lw);
+		3'd5: ldf = {32'd0, lw};
+		default: ldf = dw;
+		endcase
 	end
 	assign w_value = w_load ? ld : w_res;
 
 	// the load in W, forwarded to the ALU alone (see e_hazard): M's result is newer when it
 	// writes the same register; X's and the rest are in a and b already
-	assign fa = (w_valid && w_we_rf && w_load && c_wa && c_nza && !fw_m_a) ? ld : a;
-	assign fb = (w_valid && w_we_rf && w_load && c_wb && c_nzb && !fw_m_b) ? ld : b;
-	wire [4:0]  f_sh   = fn[2] ? fa[4:0] : sa;
+	wire [31:0] ldw32 = w_off[2] ? dw[31:0] : dw[63:32];
+	wire [63:0] ldw = w_lsel[1] ? dw : w_lsel[0] ? {32'd0, ldw32} : sx32(ldw32);   // (6 LD, 5 LWU, 4 LW)
+	assign fa = (w_valid && w_we_rf && w_load && w_fwok && c_wa && c_nza && !fw_m_a) ? ldw : a;
+	assign fb = (w_valid && w_we_rf && w_load && w_fwok && c_wb && c_nzb && !fw_m_b) ? ldw : b;
+	wire [4:0]  f_sh   = sa;                // (variable shifts do not take W's load: fw_class)
 	wire [31:0] f_sum  = fa[31:0] + fb[31:0];
 	wire [31:0] f_dif  = fa[31:0] - fb[31:0];
 	wire [31:0] f_sumi = fa[31:0] + simm[31:0];
@@ -1150,61 +1164,148 @@ module vr4300 #(
 		tlbw_ix <= tlb_wix; tlbw_pm <= pm_w; tlbw_hi <= c0_entryhi;
 		tlbw_lo0 <= c0_entrylo0[29:0]; tlbw_lo1 <= c0_entrylo1[29:0];
 	end
-	assign e_tlb_wait = e_valid && op == 6'h10 && rs[4] && (fn == 6'h01 || fn == 6'h08) && tlbw_q;
+	// MTC0, TLBR and TLBP write COP0 a clock after they commit (c0q_*, below): their commit
+	// fanned out to the enables of a thousand COP0 flip-flops was over 16 ns. Whatever is in
+	// E meanwhile waits that clock -- it may read what is being written (an MFC0, a mode bit
+	// of Status, the ASID) -- so nothing sees the order change. (A clock per MTC0: a few per
+	// interrupt.)
+	reg         c0q_wr, c0q_tlbp, c0q_tlbr;
+	reg  [4:0]  c0q_rd;
+	reg  [63:0] c0q_b;
 	always @(posedge clk) begin
+		c0q_wr   <= !rst && e_ok && c0_wr;
+		c0q_tlbp <= !rst && e_ok && op == 6'h10 && rs[4] && fn == 6'h08;
+		c0q_tlbr <= !rst && e_ok && op == 6'h10 && rs[4] && fn == 6'h01 && !c0_index[5];
+		c0q_rd   <= rd;
+		c0q_b    <= b;
+	end
+	assign e_tlb_wait = e_valid && ((op == 6'h10 && rs[4] && (fn == 6'h01 || fn == 6'h08) && tlbw_q)
+	                                || c0q_wr || c0q_tlbp || c0q_tlbr || tlbp_pend);
+	// --- the TLB's one writer: TLBWI/TLBWR as they land, or the power-on contents ----------
+	// (each entry on a KSEG0 page, which nothing looks up, as libultra's osUnmapTLBAll leaves
+	// them -- krom's tests expect a miss -- written a clock each after a reset, which holds
+	// the pipeline until it is done)
+	always @(posedge clk) begin
+		rst_q <= rst;
+		if (rst && !rst_q) begin ti_run <= 1'b1; ti_k <= 5'd0; end
+		else if (ti_run) begin ti_k <= ti_k + 5'd1; if (ti_k == 5'd31) ti_run <= 1'b0; end
+	end
+	initial begin ti_run = 1'b1; ti_k = 5'd0; rst_q = 1'b0; end
+	wire [4:0]  tw_ix = ti_run ? ti_k : tlbw_ix;
+	wire        tw_we = ti_run || tlbw_q;
+	wire [99:0] tw_e  = ti_run ? {12'd0, 27'h0004_0000 + {22'd0, ti_k}, 2'd0, 8'd0, 1'b0, 25'd0, 25'd0}
+	                           : {tlbw_pm, tlbw_hi[39:13] & ~{15'd0, tlbw_pm}, tlbw_hi[63:62], tlbw_hi[7:0], tlbw_lo0[0] & tlbw_lo1[0],
+	                              tlbw_lo0[25:6], tlbw_lo0[5:3], tlbw_lo0[2], tlbw_lo0[1],
+	                              tlbw_lo1[25:6], tlbw_lo1[5:3], tlbw_lo1[2], tlbw_lo1[1]};
+	always @(posedge clk) if (tw_we) begin
+		case (tw_ix[1:0])
+		2'd0: tb0[tw_ix[4:2]] <= tw_e;
+		2'd1: tb1[tw_ix[4:2]] <= tw_e;
+		2'd2: tb2[tw_ix[4:2]] <= tw_e;
+		default: tb3[tw_ix[4:2]] <= tw_e;
+		endcase
+	end
+	// TLBR's entry (its own read port)
+	reg  [99:0] tr_e;
+	always @(*) begin
+		case (c0_index[1:0])
+		2'd0: tr_e = tb0[c0_index[4:2]];
+		2'd1: tr_e = tb1[c0_index[4:2]];
+		2'd2: tr_e = tb2[c0_index[4:2]];
+		default: tr_e = tb3[c0_index[4:2]];
+		endcase
+	end
+
+	// the micro-TLBs: anything that changes the TLB or the ASID empties them
+	wire        ut_flush = tlbw_q || (e_ok && op == 6'h10 && rs[4] && (fn == 6'h02 || fn == 6'h06))
+	                       || (c0q_wr && c0q_rd == 5'd10) || c0q_tlbr;     // (when EntryHi is written)
+
+	// --- the search: four entries a clock, eight clocks ------------------------------------
+	// For a micro-TLB (kind 0 the fetch's, 1 the data's): the matching entries' fields ORed
+	// together rather than chosen by priority (two entries matching is undefined on the chip),
+	// as {found, valid, dirty, C[2:0], PA[31:12]}. For TLBP (kind 2): the lowest index matching
+	// EntryHi. A TLB write or an ASID change meanwhile makes a micro-TLB's answer stale.
+	reg         ts_busy, ts_done, ts_stale;
+	reg  [1:0]  ts_kind;
+	reg  [2:0]  ts_k;
+	reg  [63:0] ts_va;
+	reg  [7:0]  ts_asid;
+	reg         ts_f, ts_v, ts_d, ts_pf;
+	reg  [2:0]  ts_c;
+	reg  [19:0] ts_psel;
+	reg  [11:0] ts_msel;
+	reg  [4:0]  ts_pidx;
+	wire [99:0] te0 = tb0[ts_k], te1 = tb1[ts_k], te2 = tb2[ts_k], te3 = tb3[ts_k];
+	function automatic [26:0] tsr; input [99:0] e; input [63:0] va; input [7:0] asid;   // {hit, odd's v, d, c, pfn}
+		reg [11:0] m; reg hit, odd;
+	begin
+		m = e[99:88];
+		hit = ((va[39:13] & ~{15'd0, m}) == e[87:61]) && va[63:62] == e[60:59] && (e[50] || e[58:51] == asid);
+		// the half: the address bit just above the page
+		odd = m[0] ? (m[2] ? (m[4] ? (m[6] ? (m[8] ? (m[10] ? va[24] : va[22]) : va[20]) : va[18]) : va[16]) : va[14]) : va[12];
+		tsr = {hit, odd ? {e[0], e[1], e[4:2], e[24:5]} : {e[25], e[26], e[29:27], e[49:30]}};
+	end endfunction
+	wire [26:0] tr0 = tsr(te0, ts_va, ts_asid), tr1 = tsr(te1, ts_va, ts_asid);
+	wire [26:0] tr2 = tsr(te2, ts_va, ts_asid), tr3 = tsr(te3, ts_va, ts_asid);
+	wire [3:0]  ts_hit = {tr3[26], tr2[26], tr1[26], tr0[26]};
+	// the answer, the clock after the last entry
+	wire [24:0] ts_off = {ts_msel, 13'h1FFF} >> 1;
+	wire [31:0] ts_pa  = {ts_psel, 12'd0} | (ts_va[31:0] & {7'd0, ts_off});
+	wire [25:0] ts_res = {ts_f, ts_v, ts_d, ts_c, ts_pa[31:12]};
+	wire        ts_want_p = tlbp_pend;
+	wire        ts_want_d = dreq;
+	wire        ts_want_i = f_mapped && !iut_hit;
+	always @(posedge clk) begin
+		ts_done <= 1'b0;
 		if (rst) begin
-			// power-on: each entry on a KSEG0 page, which nothing looks up (as
-			// libultra's osUnmapTLBAll leaves them; krom's tests expect a miss)
-			for (ti = 0; ti < 32; ti = ti + 1) begin
-				tlb_mask[ti] <= 12'd0; tlb_vpn[ti] <= 27'h0004_0000 + ti; tlb_rgn[ti] <= 2'd0; tlb_asid[ti] <= 8'd0;
-				tlb_g[ti] <= 1'b0; tlb_pfn0[ti] <= 20'd0; tlb_pfn1[ti] <= 20'd0; tlb_c0[ti] <= 3'd0; tlb_c1[ti] <= 3'd0;
-				tlb_d0[ti] <= 1'b0; tlb_d1[ti] <= 1'b0; tlb_v0[ti] <= 1'b0; tlb_v1[ti] <= 1'b0;
+			ts_busy <= 1'b0;
+		end else if (ts_busy) begin
+			ts_f <= ts_f | (|ts_hit);
+			ts_v <= ts_v | (tr0[26] & tr0[25]) | (tr1[26] & tr1[25]) | (tr2[26] & tr2[25]) | (tr3[26] & tr3[25]);
+			ts_d <= ts_d | (tr0[26] & tr0[24]) | (tr1[26] & tr1[24]) | (tr2[26] & tr2[24]) | (tr3[26] & tr3[24]);
+			ts_c <= ts_c | ({3{tr0[26]}} & tr0[23:21]) | ({3{tr1[26]}} & tr1[23:21]) | ({3{tr2[26]}} & tr2[23:21]) | ({3{tr3[26]}} & tr3[23:21]);
+			ts_psel <= ts_psel | ({20{tr0[26]}} & tr0[19:0]) | ({20{tr1[26]}} & tr1[19:0]) | ({20{tr2[26]}} & tr2[19:0]) | ({20{tr3[26]}} & tr3[19:0]);
+			ts_msel <= ts_msel | ({12{tr0[26]}} & te0[99:88]) | ({12{tr1[26]}} & te1[99:88]) | ({12{tr2[26]}} & te2[99:88]) | ({12{tr3[26]}} & te3[99:88]);
+			if (!ts_pf && |ts_hit) begin
+				ts_pf <= 1'b1;
+				ts_pidx <= {ts_k, ts_hit[0] ? 2'd0 : ts_hit[1] ? 2'd1 : ts_hit[2] ? 2'd2 : 2'd3};
 			end
-		end else if (tlbw_q) begin
-			tlb_mask[tlbw_ix] <= tlbw_pm;
-			tlb_vpn[tlbw_ix]  <= tlbw_hi[39:13] & ~{15'd0, tlbw_pm};
-			tlb_rgn[tlbw_ix]  <= tlbw_hi[63:62];
-			tlb_asid[tlbw_ix] <= tlbw_hi[7:0];
-			tlb_g[tlbw_ix]    <= tlbw_lo0[0] & tlbw_lo1[0];
-			tlb_pfn0[tlbw_ix] <= tlbw_lo0[25:6]; tlb_c0[tlbw_ix] <= tlbw_lo0[5:3];
-			tlb_d0[tlbw_ix]   <= tlbw_lo0[2];    tlb_v0[tlbw_ix] <= tlbw_lo0[1];
-			tlb_pfn1[tlbw_ix] <= tlbw_lo1[25:6]; tlb_c1[tlbw_ix] <= tlbw_lo1[5:3];
-			tlb_d1[tlbw_ix]   <= tlbw_lo1[2];    tlb_v1[tlbw_ix] <= tlbw_lo1[1];
+			if (ut_flush) ts_stale <= 1'b1;
+			ts_k <= ts_k + 3'd1;
+			if (ts_k == 3'd7) begin ts_busy <= 1'b0; ts_done <= 1'b1; end
+		end else if (!ts_done && !ti_run && (ts_want_p || ts_want_d || ts_want_i)) begin
+			ts_busy <= 1'b1; ts_k <= 3'd0; ts_stale <= ut_flush;
+			ts_f <= 1'b0; ts_v <= 1'b0; ts_d <= 1'b0; ts_c <= 3'd0; ts_psel <= 20'd0; ts_msel <= 12'd0; ts_pf <= 1'b0; ts_pidx <= 5'd0;
+			ts_asid <= c0_entryhi[7:0];
+			if (ts_want_p)      begin ts_kind <= 2'd2; ts_va <= c0_entryhi; end
+			else if (ts_want_d) begin ts_kind <= 2'd1; ts_va <= dreq_va; end
+			else                begin ts_kind <= 2'd0; ts_va <= {{32{f_pc[31]}}, f_pc}; end
 		end
 	end
-	// TLBP: EntryHi against every entry, the lowest index winning
-	reg         tp_found;
-	reg  [4:0]  tp_idx;
-	always @(*) begin
-		tp_found = 1'b0; tp_idx = 5'd0;
-		for (tj = 31; tj >= 0; tj = tj - 1)
-			if (((c0_entryhi[39:13] & ~{15'd0, tlb_mask[tj]}) == tlb_vpn[tj]) && c0_entryhi[63:62] == tlb_rgn[tj]
-			    && (tlb_g[tj] || tlb_asid[tj] == c0_entryhi[7:0])) begin
-				tp_found = 1'b1; tp_idx = tj[4:0];
-			end
-	end
-	// the micro-TLBs: anything that changes the TLB or the ASID empties them
-	wire        ut_flush = tlbw_q || (e_ok && op == 6'h10 && ((c0_wr && rd == 5'd10) || (rs[4] && (fn == 6'h01 || fn == 6'h02 || fn == 6'h06))));
+
+	// the micro-TLBs: emptied by ut_flush (above)
 	always @(posedge clk) begin
 		if (rst) begin
-			dut_ok <= 1'b0; iut_ok <= 1'b0; dreq <= 1'b0;
+			dut_ok <= 1'b0; iut_ok <= 1'b0; dreq <= 1'b0; tlbp_pend <= 1'b0;
 		end else begin
-			// data: a replay asks; the lookup is from the registered address
-			if (e_replay) begin dreq <= 1'b1; dreq_va <= va64; end
-			else if (dreq) begin
-				dreq <= 1'b0;
-				dut <= tlb_look(dreq_va, c0_entryhi[7:0]);
-				dut_page <= {dreq_va[63:62], dreq_va[39:12]};
+			// data: a replay asks (once: it may replay again before the answer); the lookup is
+			// from the registered address
+			if (m_rep_go && !dreq && !(ts_busy && ts_kind == 2'd1)) begin dreq <= 1'b1; dreq_va <= m_va64; end
+			else if (dreq && !ts_busy && !ts_done && !ti_run && !ts_want_p) dreq <= 1'b0;    // (taken by the search)
+			if (ts_done && ts_kind == 2'd1 && !ts_stale && !ut_flush) begin
+				dut <= ts_res; dut_page <= {ts_va[63:62], ts_va[39:12]};
 			end
 			if (ut_flush) dut_ok <= 1'b0;
-			else if (dreq && !e_replay) dut_ok <= 1'b1;
-			// instructions: a fetch whose page is not held holds everything for a clock
-			if (f_tlb_wait) begin
-				iut <= tlb_look({{32{f_pc[31]}}, f_pc}, c0_entryhi[7:0]);
-				iut_page <= f_pc[31:12];
+			else if (ts_done && ts_kind == 2'd1 && !ts_stale) dut_ok <= 1'b1;
+			// instructions: a fetch whose page is not held holds everything until it is
+			if (ts_done && ts_kind == 2'd0 && !ts_stale && !ut_flush) begin
+				iut <= ts_res; iut_page <= ts_va[31:12];
 			end
 			if (ut_flush) iut_ok <= 1'b0;
-			else if (f_tlb_wait) iut_ok <= 1'b1;
+			else if (ts_done && ts_kind == 2'd0 && !ts_stale) iut_ok <= 1'b1;
+			// TLBP: waiting from the clock after it commits until its answer is written
+			if (c0q_tlbp) tlbp_pend <= 1'b1;
+			else if (ts_done && ts_kind == 2'd2) tlbp_pend <= 1'b0;
 		end
 	end
 
@@ -1231,7 +1332,53 @@ module vr4300 #(
 				if (c0_count + 33'd1 == c0_compare) c0_timer <= 1'b1;
 			end
 			if (adv) rnd <= (rnd == c0_wired[4:0] || rnd == 5'd0) ? 5'd31 : rnd - 5'd1;
-			if (e_redir_exc) begin
+			// an LL leaving M sets the link (an ERET or an MTC0 of LLAddr in E, younger, after)
+			if (adv_mw && m_valid && !m_kill && m_ll) begin llbit <= 1'b1; c0_lladdr <= {4'd0, m_paddr[31:4]}; end
+			// MTC0, a clock after it committed
+			if (c0q_wr) begin
+				c0_latch <= c0q_b;
+				case (c0q_rd)
+				5'd0:  begin c0_index <= c0q_b[5:0]; c0_probe <= c0q_b[31]; end
+				5'd2:  c0_entrylo0 <= {34'd0, c0q_b[29:0]};
+				5'd3:  c0_entrylo1 <= {34'd0, c0q_b[29:0]};
+				5'd4:  c0_context[63:23] <= c0q_b[63:23];
+				5'd5:  c0_pagemask <= {39'd0, c0q_b[24:13], 13'd0};
+				5'd6:  begin c0_wired <= c0q_b[5:0]; rnd <= 5'd31; end
+				5'd9:  c0_count <= {c0q_b[31:0], 1'b0};
+				5'd10: c0_entryhi <= {c0q_b[63:62], 22'd0, c0q_b[39:13], 5'd0, c0q_b[7:0]};
+				5'd11: begin c0_compare <= {c0q_b[31:0], 1'b0}; c0_timer <= 1'b0; end
+				5'd12: c0_status <= (c0q_b[31:0] & ~32'h0020_0000) | (c0_status & 32'h0020_0000);
+				5'd13: c0_cause_ip01 <= {30'd0, c0q_b[9:8]};
+				5'd14: c0_epc <= c0q_b[31:0];
+				5'd16: c0_config <= (c0_config & ~32'h0F00_800F) | (c0q_b[31:0] & 32'h0F00_800F);
+				5'd17: c0_lladdr <= c0q_b[31:0];
+				5'd18: c0_watchlo <= c0q_b[31:0];
+				5'd19: c0_watchhi <= c0q_b[31:0];
+				5'd20: c0_xcontext[63:33] <= c0q_b[63:33];
+				5'd28: c0_taglo <= c0q_b[31:0];
+				5'd30: c0_errorepc <= c0q_b[31:0];
+				default: ;
+				endcase
+			end
+			if (m_exc_go) begin
+				// M's exception: as E's below, for the instruction in M
+				if (!st_exl) begin
+					c0_epc <= m_bd ? m_pc - 32'd4 : m_pc;
+					c0_bd  <= m_bd;
+				end
+				c0_exccode <= m_lexc - 5'd1;
+				c0_ce <= 2'd0;
+				c0_status[1] <= 1'b1;
+				if (m_lexc == X_ADEL + 5'd1 || m_lexc == X_ADES + 5'd1 || m_lexc == X_TLBL + 5'd1 ||
+				    m_lexc == X_TLBS + 5'd1 || m_lexc == X_MOD + 5'd1) begin
+					c0_badvaddr <= m_va64[31:0];
+					c0_context[22:4]  <= m_va64[31:13];
+					c0_xcontext[30:4] <= {{8{m_va64[31]}}, m_va64[31:13]};
+					c0_entryhi[39:13] <= {{8{m_va64[31]}}, m_va64[31:13]};
+					c0_entryhi[63:62] <= {2{m_va64[31]}};
+					c0_xcontext[32:31] <= {2{m_va64[31]}};
+				end
+			end else if (e_redir_exc) begin
 				// the exception: EPC only when not already at exception level
 				if (!st_exl) begin
 					c0_epc <= e_bd ? e_pc - 32'd4 : e_pc;
@@ -1242,53 +1389,28 @@ module vr4300 #(
 				       : (op == 6'h11 || op == 6'h31 || op == 6'h35 || op == 6'h39 || op == 6'h3D) ? 2'd1
 				       : (op == 6'h12) ? 2'd2 : (op == 6'h13) ? 2'd3 : 2'd0;
 				c0_status[1] <= 1'b1;
-				if (!e_int && (e_exc_any == X_ADEL + 5'd1 || e_exc_any == X_ADES + 5'd1 ||
-				               e_exc_any == X_TLBL + 5'd1 || e_exc_any == X_TLBS + 5'd1 || e_exc_any == X_MOD + 5'd1)) begin
-					c0_badvaddr <= e_fexc != 5'd0 ? e_pc : va;
-					c0_context[22:4]  <= (e_fexc != 5'd0 ? e_pc[31:13] : va[31:13]);
-					c0_xcontext[30:4] <= {{8{(e_fexc != 5'd0 ? e_pc[31] : va[31])}}, (e_fexc != 5'd0 ? e_pc[31:13] : va[31:13])};
-					c0_entryhi[39:13] <= {{8{(e_fexc != 5'd0 ? e_pc[31] : va[31])}}, (e_fexc != 5'd0 ? e_pc[31:13] : va[31:13])};
-					c0_entryhi[63:62] <= {2{(e_fexc != 5'd0 ? e_pc[31] : va[31])}};
-					c0_xcontext[32:31] <= {2{(e_fexc != 5'd0 ? e_pc[31] : va[31])}};
+				// (E's address exceptions are the fetch's: the data's are M's, above)
+				if (!e_int && e_fexc != 5'd0 && (e_fexc == X_ADEL + 5'd1 || e_fexc == X_TLBL + 5'd1)) begin
+					c0_badvaddr <= e_pc;
+					c0_context[22:4]  <= e_pc[31:13];
+					c0_xcontext[30:4] <= {{8{e_pc[31]}}, e_pc[31:13]};
+					c0_entryhi[39:13] <= {{8{e_pc[31]}}, e_pc[31:13]};
+					c0_entryhi[63:62] <= {2{e_pc[31]}};
+					c0_xcontext[32:31] <= {2{e_pc[31]}};
 				end
 			end else if (e_eret) begin
 				if (st_erl) c0_status[2] <= 1'b0; else c0_status[1] <= 1'b0;
 				llbit <= 1'b0;
-			end else if (e_ok && c0_wr) begin
-				c0_latch <= b;
-				case (rd)
-				5'd0:  begin c0_index <= b[5:0]; c0_probe <= b[31]; end
-				5'd2:  c0_entrylo0 <= {34'd0, b[29:0]};
-				5'd3:  c0_entrylo1 <= {34'd0, b[29:0]};
-				5'd4:  c0_context[63:23] <= b[63:23];
-				5'd5:  c0_pagemask <= {39'd0, b[24:13], 13'd0};
-				5'd6:  begin c0_wired <= b[5:0]; rnd <= 5'd31; end
-				5'd9:  c0_count <= {b[31:0], 1'b0};
-				5'd10: c0_entryhi <= {b[63:62], 22'd0, b[39:13], 5'd0, b[7:0]};
-				5'd11: begin c0_compare <= {b[31:0], 1'b0}; c0_timer <= 1'b0; end
-				5'd12: c0_status <= (b[31:0] & ~32'h0020_0000) | (c0_status & 32'h0020_0000);
-				5'd13: c0_cause_ip01 <= {30'd0, b[9:8]};
-				5'd14: c0_epc <= b[31:0];
-				5'd16: c0_config <= (c0_config & ~32'h0F00_800F) | (b[31:0] & 32'h0F00_800F);
-				5'd17: c0_lladdr <= b[31:0];
-				5'd18: c0_watchlo <= b[31:0];
-				5'd19: c0_watchhi <= b[31:0];
-				5'd20: c0_xcontext[63:33] <= b[63:33];
-				5'd28: c0_taglo <= b[31:0];
-				5'd30: c0_errorepc <= b[31:0];
-				default: ;
-				endcase
 			end
 			// TLBP: the first entry matching EntryHi (the mask's bits ignored)
-			if (e_ok && op == 6'h10 && rs[4] && fn == 6'h08) begin c0_probe <= !tp_found; c0_index <= tp_found ? {1'b0, tp_idx} : 6'd0; end
+			if (ts_done && ts_kind == 2'd2) begin c0_probe <= !ts_pf; c0_index <= ts_pf ? {1'b0, ts_pidx} : 6'd0; end
 			// TLBR: the entry back into EntryHi, the EntryLos and PageMask
-			if (e_ok && op == 6'h10 && rs[4] && fn == 6'h01 && !c0_index[5]) begin
-				c0_pagemask <= {39'd0, tlb_mask[c0_index[4:0]], 13'd0};
-				c0_entryhi  <= {tlb_rgn[c0_index[4:0]], 22'd0, tlb_vpn[c0_index[4:0]], 5'd0, tlb_asid[c0_index[4:0]]};
-				c0_entrylo0 <= {38'd0, tlb_pfn0[c0_index[4:0]], tlb_c0[c0_index[4:0]], tlb_d0[c0_index[4:0]], tlb_v0[c0_index[4:0]], tlb_g[c0_index[4:0]]};
-				c0_entrylo1 <= {38'd0, tlb_pfn1[c0_index[4:0]], tlb_c1[c0_index[4:0]], tlb_d1[c0_index[4:0]], tlb_v1[c0_index[4:0]], tlb_g[c0_index[4:0]]};
+			if (c0q_tlbr) begin
+				c0_pagemask <= {39'd0, tr_e[99:88], 13'd0};
+				c0_entryhi  <= {tr_e[60:59], 22'd0, tr_e[87:61], 5'd0, tr_e[58:51]};
+				c0_entrylo0 <= {38'd0, tr_e[49:30], tr_e[29:27], tr_e[26], tr_e[25], tr_e[50]};
+				c0_entrylo1 <= {38'd0, tr_e[24:5], tr_e[4:2], tr_e[1], tr_e[0], tr_e[50]};
 			end
-			if (e_ok && is_ll) begin llbit <= 1'b1; c0_lladdr <= {4'd0, pa[31:4]}; end
 		end
 	end
 

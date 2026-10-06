@@ -34,7 +34,8 @@ create_clock -name clk -period $period [get_ports clk]
 if {$impl} {
     # (placed and routed by itself: the module's own paths, without the rest of
     # the chip's congestion -- an optimistic bound, but a real one)
-    opt_design
+    # (opt_design fails on vr4300 with an empty Synth 20-411: placed without it then)
+    if {[catch {opt_design} e]} { puts " opt_design failed: $e -- placing without it" }
     place_design
     phys_opt_design
     route_design

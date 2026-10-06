@@ -61,7 +61,7 @@ class Bus:
     def __init__(self, run):
         self.dmem = bytearray(run['dmem'])
         self.imem = bytearray(run['imem'])
-        self.rdram = bytearray(8 << 20)
+        self.rdram = bytearray(16 << 20)       # (DMA addresses reach 16 MB: a short slice would shrink DMEM)
         for line, d in run['reads']:
             self.rdram[line << 4:(line << 4) + 16] = d
         self.mi_intr = 0
