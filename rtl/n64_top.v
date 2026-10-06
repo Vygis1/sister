@@ -787,7 +787,7 @@ module n64_top #(
 			if (d_replay) begin d_ready_r <= 1'b1; d_from_cache <= 1'b1; end
 
 			// a store waiting for room goes in as soon as there is some
-			if (dp_store && !wb_full) begin
+			if (dp_store && !wb_full && !c_dreq) begin
 				wb_addr[wb_wp[1:0]] <= line_of(dpa); wb_data[wb_wp[1:0]] <= dpline; wb_mask[wb_wp[1:0]] <= dpmask;
 				wb_wp <= wb_wp + 3'd1;
 				dp_store <= 1'b0; d_ready_r <= 1'b1;
@@ -821,12 +821,7 @@ module n64_top #(
 					// first, its read-ahead's window kept the CPU's misses waiting: an I-cache line
 					// took 87 clocks.)
 					d_addr <= RDRAM_LINE + {4'd0, x_ql}; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 2'd1;
-				// (A miss waiting is served whatever the CPU asks this clock: it cannot ask the data
-				// port again before its answer, and a fetch that gives up the one waiting leaves a
-				// fill that installs a line nobody asked for, answering nothing -- see S_IFILL1. With
-				// !c_dreq and !i_req here the CPU's stall decision ran through this whole chain into
-				// d_addr: the N64's longest path outside its units.)
-				end else if (dp_cop) begin
+				end else if (dp_cop && !c_dreq) begin
 					// CACHE: {operation [4:2], cache [1:0]}; 0 = I, 1 = D. Write-backs are
 					// nothing to do (the data cache writes through); the rest invalidate --
 					// by index, or by index when the tag matches (the hit forms)
@@ -834,10 +829,10 @@ module n64_top #(
 					// goes over the four lines that share the chip's index, a clock each)
 					if (cop_idx && dpcop[1:0] == 2'd0 && cop_k != 3'd3) cop_k <= cop_k + 3'd1;   // (the I-cache's)
 					else begin dp_cop <= 1'b0; d_ready_r <= 1'b1; cop_k <= 3'd0; end
-				end else if (dp && rd_ok) begin
+				end else if (dp && !c_dreq && rd_ok) begin
 					d_addr <= line_of(dpa); d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1;
 					d_for <= dpa; st <= dp_fill ? S_DFILL : S_DREAD; pf_b <= 1'b0;
-				end else if (ip && rd_ok) begin
+				end else if (ip && !i_req && rd_ok) begin
 					d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; i_for <= ipa;
 					if (ip_fill) begin d_addr <= line_of({ipa[31:5], 5'd0}); st <= S_IFILL0; if_b <= 1'b0; end
 					else begin d_addr <= line_of(ipa); st <= S_IREAD; end
@@ -1127,7 +1122,7 @@ module n64_top #(
 	// invalidate -- so they are distributed RAM. Written from three places with their
 	// own addresses they were 21,000 flip-flops and a mux over the whole array per
 	// writer: 190,000 LUTs, which no build was ever going to fit.
-	wire         cop_go   = !rst && st == S_IDLE && d_calibrated && !(fill_pending && !run) && wb_empty && dp_cop;
+	wire         cop_go   = !rst && st == S_IDLE && d_calibrated && !(fill_pending && !run) && wb_empty && dp_cop && !c_dreq;
 	// by index (0, 2, and the D-cache's 3): the four lines {cop_k, the chip's index}; the hit
 	// forms (4, 5): the line the address names, invalidated without looking at its tag (it
 	// writes through, so a line dropped that did not match costs only a miss)
@@ -1560,6 +1555,23 @@ module n64_top #(
 	// 8 VI interrupt, 9 AI interrupt, 10/11 the CPU enters / leaves SM64's idle loop.
 	// Two in one clock: the first in that order is kept.
 	// =============================================================================
+	// (debugging, DBG builds) the CPU's last 512 retired instructions -- {pc, we, rd, value} --
+	// frozen at the first TLB, address or bus fault (exception codes 1-7), for finding where a
+	// game went wrong on the board: dbg_sel[28] reads entry dbg_sel[17:8] (oldest first once
+	// frozen), word dbg_sel[27:26] (0 pc, 1 {frozen, code, we, rd}, 2 value hi, 3 value lo)
+	(* ram_style = "block" *) reg [101:0] rt_ram [0:511];
+	reg  [8:0]   rt_wp;
+	reg          rt_frz;
+	reg  [4:0]   rt_code;
+	reg  [101:0] rt_q;
+	always @(posedge clk) begin
+		if (cpu_rst) begin rt_frz <= 1'b0; rt_wp <= 9'd0; end
+		else if (!rt_frz) begin
+			if (tr_valid) begin rt_ram[rt_wp] <= {tr_pc, tr_we, tr_rd, tr_val}; rt_wp <= rt_wp + 9'd1; end
+			if (tr_exc && tr_code >= 5'd1 && tr_code <= 5'd7) begin rt_frz <= 1'b1; rt_code <= tr_code; end
+		end
+		rt_q <= rt_ram[rt_wp + dbg_sel[16:8]];
+	end
 	reg  [27:0]  ev_clk;
 	(* ram_style = "block" *) reg [31:0] ev_ram [0:511];
 	reg  [8:0]   ev_wp;
@@ -1657,6 +1669,13 @@ module n64_top #(
 		endcase
 		// the timeline (above): an entry (dbg_sel[16:8]), or with dbg_sel[30] where it writes next
 		if (dbg_sel[31]) dbg_q <= dbg_sel[30] ? {23'd0, ev_wp} : ev_q;
+		// the retire ring (above)
+		if (dbg_sel[28]) case (dbg_sel[27:26])
+			2'd0: dbg_q <= rt_q[101:70];
+			2'd1: dbg_q <= {rt_frz, 18'd0, rt_code, 1'b0, rt_q[69], 1'b0, rt_q[68:64]};
+			2'd2: dbg_q <= rt_q[63:32];
+			default: dbg_q <= rt_q[31:0];
+			endcase
 		// (a shipping image: VI interrupts, instructions, the AI -- nothing else reads any of the
 		// above, so it all goes)
 		if (DBG == 0)
