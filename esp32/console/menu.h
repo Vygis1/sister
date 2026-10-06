@@ -346,8 +346,10 @@ static uint8_t pad() {
     return o;
   }
   if (c == 5) {          // the SNES's ($4218): B 15, Y 14, select 13, start 12, up 11, down 10, left 9, right 8, A 7
+    // (the pad's cross is the SNES's B and its circle the A, by position; the menu takes cross
+    // to pick and circle to go back, as it does over every other console)
     uint8_t o = 0;
-    if (v & 0x0080) o |= B_A; if (v & 0x8000) o |= B_B; if (v & 0x2000) o |= B_SEL; if (v & 0x1000) o |= B_START;
+    if (v & 0x8000) o |= B_A; if (v & 0x0080) o |= B_B; if (v & 0x2000) o |= B_SEL; if (v & 0x1000) o |= B_START;
     if (v & 0x0800) o |= B_UP; if (v & 0x0400) o |= B_DOWN; if (v & 0x0200) o |= B_LEFT; if (v & 0x0100) o |= B_RIGHT;
     return o;
   }

@@ -3,7 +3,8 @@ where it is from its own log lines in build/pad.log ("menu: buttons .., open|clo
 item I"), so a sequence of presses does not depend on where the menu happened to be.
 
     python tools/menunav.py play CONSOLE_INDEX [GAME_INDEX]   open the menu, pick the console
-                                                             (0 NES, 1 SMS, 2 MD, 3 N64, 4 PS1),
+                                                             (0 NES, 1 SMS, 2 MD, 3 N64, 4 PS1, 5 SNES:
+                                                             those with games),
                                                              then the game; wait for the load
 """
 import os
@@ -21,6 +22,8 @@ PAT = re.compile(r'menu: buttons \w+ \(new \w+\), (open|closed), level (\d+), it
 def state():
     """the menu's state as the last press found it: (open, level, item)"""
     for line in reversed(open(LOG, errors='replace').read().splitlines()):
+        if 'menu: loaded' in line:          # (a load closes the menu; a press since has not logged yet)
+            return False, 1, 0
         m = PAT.search(line)
         if m:
             return m.group(1) == 'open', int(m.group(2)), int(m.group(3))
