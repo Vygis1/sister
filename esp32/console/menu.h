@@ -234,7 +234,7 @@ static const VidSet VSET[] = {
   { "Scaling",          0, 3, { "as the console", "sharp", "smooth", "edge-directed" }, 4 },
   { "Scanlines",        2, 3, { "off", "light", "heavy" }, 3 },
   { "N64 VI filters",   4, 3, { "as the game", "off", "all on" }, 3 },
-  { "Dedither",         6, 1, { "as the game", "always" }, 2 },
+  { "N64 dedither",     6, 1, { "as the game", "always" }, 2 },
   { "N64 gamma",        7, 1, { "as the game", "off" }, 2 },
   { "N64 dither",       8, 3, { "as the game", "off" }, 2 },
 };

@@ -156,7 +156,7 @@ def model(case):
     vf = (opt >> 4) & 3
     aam = (vist >> 8) & 3
     en_aa = not ps1 and ((vf == 0 and aam < 2) or vf == 2)
-    en_dd = not b32 and ((opt >> 6) & 1 if ps1 else ((vf == 0 and (vist >> 16) & 1) or vf == 2 or (opt >> 6) & 1))
+    en_dd = not ps1 and not b32 and ((vf == 0 and (vist >> 16) & 1) or vf == 2 or (opt >> 6) & 1)
     en_dv = not ps1 and ((vf == 0 and (vist >> 4) & 1) or vf == 2)
     en_gm = not ps1 and (vist >> 3) & 1 and not (opt >> 7) & 1
     if not dbl:
@@ -197,10 +197,12 @@ def model(case):
             p = C[2][1 + ch]
             if do_aa:
                 nb = [A[0], A[2], B[0], B[2], C[0], C[4]]
-                vals = sorted([p] + [n[1 + ch] for n in nb if n[0] == 7], reverse=True)
+                # (at 5 bits: exact for a 16-bit frame, whose 8-bit values are 5-bit ones widened)
+                vals = sorted([p >> 3] + [n[1 + ch] >> 3 for n in nb if n[0] == 7], reverse=True)
                 pmax = vals[1] if len(vals) > 1 else vals[0]
                 vals.sort()
                 pmin = vals[1] if len(vals) > 1 else vals[0]
+                pmax, pmin = pmax << 3 | pmax >> 2, pmin << 3 | pmin >> 2
                 d = pmax + pmin - 2 * p
                 t = d * (7 - cv) + 4
                 o = p + (t >> 3)

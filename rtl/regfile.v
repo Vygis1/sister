@@ -194,11 +194,11 @@ module regfile #(
 	wire [31:0] lbuf_rdata;
 	wire        la_we = new_req && bus_we && (bus_addr[31:16] == PAGE_LA);
 
-	// A PlayStation build carries no logic analyser: the board is there to run
-	// the console, and the network is for its picture and its controls. The
+	// A PlayStation or N64 build carries no logic analyser: the board is there to
+	// run the console (and the N64 needs the room: its picture's filters). The
 	// page reads back as unmapped, which the server's analyser panel reports
 	// cleanly; nothing else looks here.
-	generate if (CORE_PS1 == 0) begin : g_la
+	generate if (CORE_PS1 == 0 && CORE_N64 == 0) begin : g_la
 	logic_analyzer #(.DEPTH_MAX(LA_DEPTH), .AW(LA_AW)) u_la (
 		.clk(clk), .rst(rst),
 		.probe(la_probe),

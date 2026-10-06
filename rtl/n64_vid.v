@@ -33,7 +33,7 @@
 //            2 smooth, 3 edge-directed
 //      [3:2] scanlines: 0 off, 1 light, 2 heavy
 //      [5:4] the N64's VI filters: 0 as the game sets them, 1 off, 2 all on
-//      [6]   dedither always (the PlayStation's too)
+//      [6]   dedither always (the N64's: the PlayStation's GPU never dithers)
 //      [7]   no gamma
 //////////////////////////////////////////////////////////////////////////////////
 
@@ -83,7 +83,8 @@ module n64_vid #(
 	wire [1:0] vf   = p2[5:4];
 	wire [1:0] aam  = v2[9:8];
 	wire       en_aa = !PS1 && ((vf == 2'd0 && aam[1] == 1'b0) || vf == 2'd2);
-	wire       en_dd = !b32 && (PS1 ? p2[6] : ((vf == 2'd0 && v2[16]) || vf == 2'd2 || p2[6]));
+	// (not the PlayStation's: its GPU here never dithers, and the image has no room to spare)
+	wire       en_dd = !PS1 && !b32 && ((vf == 2'd0 && v2[16]) || vf == 2'd2 || p2[6]);
 	wire       en_dv = !PS1 && ((vf == 2'd0 && v2[4]) || vf == 2'd2);
 	wire       en_gm = !PS1 && v2[3] && !p2[7];
 	wire [1:0] scl  = !dbl ? 2'd1 : (p2[1:0] != 2'd0) ? p2[1:0] : (!PS1 && aam != 2'd3) ? 2'd0 : 2'd1;   // 0: VI resample
@@ -300,14 +301,17 @@ module n64_vid #(
 	generate for (ch = 0; ch < 3; ch = ch + 1) begin : g_ch
 		wire [7:0] p  = C2[8 * ch +: 8];
 		wire [7:0] n0 = A0[8 * ch +: 8], n1 = A2[8 * ch +: 8], n2 = B0[8 * ch +: 8], n3 = B2[8 * ch +: 8], n4 = C0[8 * ch +: 8], n5 = C4[8 * ch +: 8];
-		// the second largest and the second smallest of the pixel and its full neighbours
-		wire [8:0] mx1, mx2, mn1, mn2;
-		vid_max2 u_mx (.k0({1'b1, p}), .k1({nfull[0], n0}), .k2({nfull[1], n1}), .k3({nfull[2], n2}),
-		               .k4({nfull[3], n3}), .k5({nfull[4], n4}), .k6({nfull[5], n5}), .m1(mx1), .m2(mx2));
-		vid_max2 u_mn (.k0({1'b1, ~p}), .k1({nfull[0], ~n0}), .k2({nfull[1], ~n1}), .k3({nfull[2], ~n2}),
-		               .k4({nfull[3], ~n3}), .k5({nfull[4], ~n4}), .k6({nfull[5], ~n5}), .m1(mn1), .m2(mn2));
-		wire [7:0] pmax = mx2[8] ? mx2[7:0] : mx1[7:0];
-		wire [7:0] pmin = mn2[8] ? ~mn2[7:0] : ~mn1[7:0];
+		// the second largest and the second smallest of the pixel and its full neighbours -- at
+		// five bits, the N64's colour in a 16-bit frame (exact there: the 8-bit values are the
+		// 5-bit ones widened; a 32-bit frame's background is guessed to 5 bits)
+		wire [5:0] mx1, mx2, mn1, mn2;
+		vid_max2 u_mx (.k0({1'b1, p[7:3]}), .k1({nfull[0], n0[7:3]}), .k2({nfull[1], n1[7:3]}), .k3({nfull[2], n2[7:3]}),
+		               .k4({nfull[3], n3[7:3]}), .k5({nfull[4], n4[7:3]}), .k6({nfull[5], n5[7:3]}), .m1(mx1), .m2(mx2));
+		vid_max2 u_mn (.k0({1'b1, ~p[7:3]}), .k1({nfull[0], ~n0[7:3]}), .k2({nfull[1], ~n1[7:3]}), .k3({nfull[2], ~n2[7:3]}),
+		               .k4({nfull[3], ~n3[7:3]}), .k5({nfull[4], ~n4[7:3]}), .k6({nfull[5], ~n5[7:3]}), .m1(mn1), .m2(mn2));
+		wire [4:0] pmax5 = mx2[5] ? mx2[4:0] : mx1[4:0];
+		wire [4:0] pmin5 = mn2[5] ? ~mn2[4:0] : ~mn1[4:0];
+		wire [7:0] pmax = {pmax5, pmax5[4:2]}, pmin = {pmin5, pmin5[4:2]};
 		// out = p + ((pmax + pmin - 2p) * (7 - cvg) + 4) >> 3
 		wire signed [10:0] d  = $signed({3'd0, pmax}) + $signed({3'd0, pmin}) - $signed({2'd0, p, 1'b0});
 		wire signed [14:0] t  = d * $signed({1'b0, 3'd7 - cvg}) + 15'sd4;
@@ -383,16 +387,16 @@ endmodule
 // the largest and second largest of seven keys {valid, value} (a key with valid 0 loses
 // to any with valid 1; m2 has valid 0 when only one key was valid)
 module vid_max2 (
-	input  wire [8:0] k0, k1, k2, k3, k4, k5, k6,
-	output reg  [8:0] m1, m2
+	input  wire [5:0] k0, k1, k2, k3, k4, k5, k6,
+	output reg  [5:0] m1, m2
 );
-	reg [8:0] k [0:6];
+	reg [5:0] k [0:6];
 	integer i; reg taken;
 	always @(*) begin
 		k[0] = k0; k[1] = k1; k[2] = k2; k[3] = k3; k[4] = k4; k[5] = k5; k[6] = k6;
-		m1 = 9'd0;
+		m1 = 6'd0;
 		for (i = 0; i < 7; i = i + 1) if (k[i] > m1) m1 = k[i];
-		m2 = 9'd0; taken = 1'b0;
+		m2 = 6'd0; taken = 1'b0;
 		for (i = 0; i < 7; i = i + 1)
 			if (!taken && k[i] == m1) taken = 1'b1;
 			else if (k[i] > m2) m2 = k[i];
