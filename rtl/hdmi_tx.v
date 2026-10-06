@@ -48,7 +48,10 @@ module hdmi_tx #(
 	parameter AUDIO = 1,                 // 1: HDMI with audio; 0: DVI
 	parameter NULLPK = 0,                // (bring-up) 1: every packet a null packet
 	parameter PKMASK = 4'b1111,          // (bring-up) packets sent: [0] audio, [1] ACR, [2] AVI, [3] Audio InfoFrame
-	parameter FS441 = 0                  // 1: 44.1 kHz audio (the PlayStation's), else 48 kHz
+	parameter FS441 = 0,                 // 1: 44.1 kHz audio (the PlayStation's), else 48 kHz
+	// 0: 640 x 480 at 60 Hz (25 MHz pixels, VIC 1, 4:3); 1: 1280 x 720 at 60 Hz (74.25 MHz, VIC 4,
+	// 16:9, positive syncs). The clocks come from outside for 720p (EXT_CLK).
+	parameter RES = 0
 )(
 	input  wire        clk50,
 	input  wire        rst,
@@ -58,8 +61,8 @@ module hdmi_tx #(
 	input  wire        ext_locked,
 	output wire        pclk,             // the pixel clock, for the source's read side
 	// the source: the pixel at (x, y) next clock, while req
-	output reg  [9:0]  x,
-	output reg  [9:0]  y,
+	output reg  [10:0] x,
+	output reg  [10:0] y,
 	output reg         req,
 	input  wire [23:0] rgb,              // {r, g, b}
 	output wire        frame_start,      // a clock at the start of each frame (y wraps to 0)
@@ -74,8 +77,11 @@ module hdmi_tx #(
 	input  wire [15:0] aud_r,
 	input  wire        aud_tog
 );
-	localparam H_ACT = 640, H_FP = 16, H_SYNC = 96, H_BP = 48, H_TOT = 800;
-	localparam V_ACT = 480, V_FP = 10, V_SYNC = 2,  V_BP = 33, V_TOT = 525;
+	localparam H_ACT = RES ? 1280 : 640, H_FP = RES ? 110 : 16, H_SYNC = RES ? 40 : 96, H_BP = RES ? 220 : 48;
+	localparam H_TOT = H_ACT + H_FP + H_SYNC + H_BP;              // 1650 / 800
+	localparam V_ACT = RES ? 720 : 480,  V_FP = RES ? 5 : 10, V_SYNC = RES ? 5 : 2, V_BP = RES ? 20 : 33;
+	localparam V_TOT = V_ACT + V_FP + V_SYNC + V_BP;              // 750 / 525
+	localparam SYNC_POS = RES ? 1 : 0;                            // 720p's syncs are active high
 
 	// --- clocks --------------------------------------------------------------------
 	wire pclk5, locked;
@@ -104,15 +110,15 @@ module hdmi_tx #(
 	wire pr = prst[3];
 
 	// --- timing ------------------------------------------------------------------------
-	reg  [9:0] hc, vc;
+	reg  [10:0] hc, vc;
 	always @(posedge pclk) begin
-		if (pr) begin hc <= 10'd0; vc <= 10'd0; end
+		if (pr) begin hc <= 11'd0; vc <= 11'd0; end
 		else if (hc == H_TOT - 1) begin
-			hc <= 10'd0;
-			vc <= (vc == V_TOT - 1) ? 10'd0 : vc + 10'd1;
-		end else hc <= hc + 10'd1;
+			hc <= 11'd0;
+			vc <= (vc == V_TOT - 1) ? 11'd0 : vc + 11'd1;
+		end else hc <= hc + 11'd1;
 	end
-	assign frame_start = !pr && hc == 10'd0 && vc == 10'd0;
+	assign frame_start = !pr && hc == 11'd0 && vc == 11'd0;
 	// the request runs a clock ahead of the symbols' de
 	always @(posedge pclk) begin
 		req <= !pr && hc < H_ACT && vc < V_ACT;
@@ -120,21 +126,23 @@ module hdmi_tx #(
 	end
 	reg de, hs, vs;
 	// hd/vd: where the symbols being made now are (de's position: hc two clocks ago)
-	reg [9:0] h1, hd, v1, vd;
+	reg [10:0] h1, hd, v1, vd;
 	always @(posedge pclk) begin
 		de <= req;
-		hs <= !(hc >= H_ACT + H_FP + 1 && hc < H_ACT + H_FP + H_SYNC + 1);     // (a clock behind hc, as req)
-		vs <= !(vc >= V_ACT + V_FP && vc < V_ACT + V_FP + V_SYNC);
+		hs <= SYNC_POS[0] ^ !(hc >= H_ACT + H_FP + 1 && hc < H_ACT + H_FP + H_SYNC + 1);     // (a clock behind hc, as req)
+		vs <= SYNC_POS[0] ^ !(vc >= V_ACT + V_FP && vc < V_ACT + V_FP + V_SYNC);
 		h1 <= hc; hd <= h1; v1 <= vc; vd <= v1;
 	end
 
 	// --- the periods (AUDIO): video preamble and guard band, data island ------------------
 	wire next_act = (vd == V_TOT - 1) || (vd < V_ACT - 1);           // the next line has a picture
-	wire vpre  = AUDIO && next_act && hd >= 10'd790 && hd < 10'd798;
-	wire vgb   = AUDIO && next_act && hd >= 10'd798;
-	wire dpre  = AUDIO && hd >= 10'd644 && hd < 10'd652;
-	wire dgb   = AUDIO && ((hd >= 10'd652 && hd < 10'd654) || (hd >= 10'd718 && hd < 10'd720));
-	wire ddat  = AUDIO && hd >= 10'd654 && hd < 10'd718;
+	// (the island from 4 pixels after the picture -- its preamble, guard band, two packets of
+	// 32, guard band -- and the video preamble and guard band in the line's last 10)
+	wire vpre  = AUDIO && next_act && hd >= H_TOT - 10 && hd < H_TOT - 2;
+	wire vgb   = AUDIO && next_act && hd >= H_TOT - 2;
+	wire dpre  = AUDIO && hd >= H_ACT + 4 && hd < H_ACT + 12;
+	wire dgb   = AUDIO && ((hd >= H_ACT + 12 && hd < H_ACT + 14) || (hd >= H_ACT + 78 && hd < H_ACT + 80));
+	wire ddat  = AUDIO && hd >= H_ACT + 14 && hd < H_ACT + 78;
 
 	// --- encoders: blue with the syncs on channel 0; the preambles' CTL bits on 1 and 2 ----
 	wire [9:0] e0, e1, e2;
@@ -150,9 +158,11 @@ module hdmi_tx #(
 	reg [2:0] at;  reg [15:0] ql [0:7], qr [0:7];  reg [2:0] qw, qrd;  reg [3:0] qn;
 	// (44.1 kHz: 441 a time against 250000 -- 25 MHz / 44100 -- as the ACR says: N 7056,
 	// CTS 31250, exact at 25 MHz)
-	localparam [17:0] A_ADD = FS441 ? 18'd441 : 18'd48, A_TOP = FS441 ? 18'd250000 : 18'd25000;
-	reg [15:0] hl, hr;  reg [17:0] a48;  reg a_new;
-	initial begin hl = 16'd0; hr = 16'd0; a48 = 18'd0; a_new = 1'b0; end
+	// (720p: 74.25 MHz / 48000 = 74250 / 48, and 742500 / 441)
+	localparam [19:0] A_ADD = FS441 ? 20'd441 : 20'd48;
+	localparam [19:0] A_TOP = RES ? (FS441 ? 20'd742500 : 20'd74250) : (FS441 ? 20'd250000 : 20'd25000);
+	reg [15:0] hl, hr;  reg [19:0] a48;  reg a_new;
+	initial begin hl = 16'd0; hr = 16'd0; a48 = 20'd0; a_new = 1'b0; end
 	always @(posedge pclk) begin
 		at <= {at[1:0], aud_tog};
 		if (at[2] != at[1]) begin hl <= aud_l; hr <= aud_r; end
@@ -217,34 +227,38 @@ module hdmi_tx #(
 	// checksum}. (S1:S0 = 10, underscanned: with "no data" a TV overscans, and the menu's
 	// header and footer and the edges of the picture fell off the screen.)
 	// Audio InfoFrame {.., PB1 2 channels, checksum}; or clock regeneration {N, CTS, 0}
-	wire [55:0] avi = {8'h00, 8'h00, 8'h01, 8'h00, 8'h18, 8'h02, 8'h54};   // (PB0: 0x82+0x02+0x0D+0x02+0x18+0x01 = 0xAC, -0xAC = 0x54)
+	// (720p: VIC 4, M 16:9 -- PB2 0x28, PB4 4: 0x91+0x02+0x28+0x04 = 0xBF, -0xBF = 0x41)
+	wire [55:0] avi = RES ? {8'h00, 8'h00, 8'h04, 8'h00, 8'h28, 8'h02, 8'h41}
+	                      : {8'h00, 8'h00, 8'h01, 8'h00, 8'h18, 8'h02, 8'h54};   // (PB0: 0x82+0x02+0x0D+0x02+0x18+0x01 = 0xAC, -0xAC = 0x54)
 	wire [55:0] aif = {8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h01, 8'h70};
-	wire [55:0] acr = FS441 ? {8'h90, 8'h1B, 8'h00, 8'h12, 8'h7A, 8'h00, 8'h00}    // N 7056, CTS 31250
-	                        : {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00};   // N 6144, CTS 25000
+	wire [55:0] acr = RES ? (FS441 ? {8'h80, 8'h18, 8'h00, 8'hD4, 8'h42, 8'h01, 8'h00}    // N 6272, CTS 82500
+	                               : {8'h00, 8'h18, 8'h00, 8'hCA, 8'h22, 8'h01, 8'h00})   // N 6144, CTS 74250
+	                      : (FS441 ? {8'h90, 8'h1B, 8'h00, 8'h12, 8'h7A, 8'h00, 8'h00}    // N 7056, CTS 31250
+	                               : {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00});  // N 6144, CTS 25000
 	// (clock regeneration on every 32nd line, ~980 a second as hdl-util/hdmi sends it -- not
 	// every line; a null packet on the others)
 	wire        acr_line = vd[4:0] == 5'd2;
-	wire [23:0] hb  = (vd == 10'd0) ? 24'h0D0282 : (vd == 10'd1) ? 24'h0A0184 : acr_line ? 24'h000001 : 24'h000000;
-	wire [55:0] b0  = (vd == 10'd0) ? avi : (vd == 10'd1) ? aif : acr_line ? acr : 56'd0;
-	wire [55:0] b1  = (vd > 10'd1 && acr_line) ? acr : 56'd0;
+	wire [23:0] hb  = (vd == 11'd0) ? 24'h0D0282 : (vd == 11'd1) ? 24'h0A0184 : acr_line ? 24'h000001 : 24'h000000;
+	wire [55:0] b0  = (vd == 11'd0) ? avi : (vd == 11'd1) ? aif : acr_line ? acr : 56'd0;
+	wire [55:0] b1  = (vd > 11'd1 && acr_line) ? acr : 56'd0;
 	always @(posedge pclk) begin
 		if (pr) begin qw <= 3'd0; qrd <= 3'd0; qn <= 4'd0; fc <= 8'd0; end
 		else begin
 			if (a_new && qn != 4'd8) begin ql[qw] <= hl; qr[qw] <= hr; qw <= qw + 3'd1; end
-			if (AUDIO && hd == 10'd653) begin
+			if (AUDIO && hd == H_ACT + 13) begin
 				s00 <= {bch(sa0, 56), sa0}; s01 <= {bch(sa1, 56), sa1}; s02 <= {bch(sa2, 56), sa2}; s03 <= {bch(sa3, 56), sa3};
 				hdr0 <= (NULLPK || !PKMASK[0]) ? 32'd0 : {bch({32'd0, ha}, 24), ha};
 				fc <= fcn; qrd <= qrd + take[2:0];
 				s10 <= {bch(b0, 56), b0}; s11 <= {bch(b1, 56), b1}; s12 <= {bch(b1, 56), b1}; s13 <= {bch(b1, 56), b1};
-				hdr1 <= (NULLPK || (vd == 10'd0 ? !PKMASK[2] : vd == 10'd1 ? !PKMASK[3] : !PKMASK[1])) ? 32'd0 : {bch({32'd0, hb}, 24), hb};
+				hdr1 <= (NULLPK || (vd == 11'd0 ? !PKMASK[2] : vd == 11'd1 ? !PKMASK[3] : !PKMASK[1])) ? 32'd0 : {bch({32'd0, hb}, 24), hb};
 			end
-			qn <= qn + {3'd0, a_new && qn != 4'd8} - ((AUDIO && hd == 10'd653) ? take : 4'd0);
+			qn <= qn + {3'd0, a_new && qn != 4'd8} - ((AUDIO && hd == H_ACT + 13) ? take : 4'd0);
 		end
 	end
 
 	// --- the island's and guard bands' symbols, a clock behind like the encoders' ------------
-	wire [4:0]  kk = hd[4:0] - 5'd14;                        // the clock in the packet (654 = 20 x 32 + 14)
-	wire        pk = hd >= 10'd686;
+	wire [4:0]  kk = hd[4:0] - 5'd14;                        // the clock in the packet (H_ACT + 14; H_ACT a multiple of 32)
+	wire        pk = hd >= H_ACT + 46;
 	wire [31:0] hh = pk ? hdr1 : hdr0;
 	wire [63:0] q0 = pk ? s10 : s00, q1 = pk ? s11 : s01, q2 = pk ? s12 : s02, q3 = pk ? s13 : s03;
 	reg  [9:0]  t0, t1, t2;  reg tsel;
