@@ -1167,15 +1167,39 @@ extern const char PAGE_HTML[] PROGMEM;
 #include "menu.h"
 #include "pads.h"
 
+static String bootPins;
+
+// The FPGA link's four wires with pulls only (nothing driven, so nothing can fight the
+// FPGA): each one HIGH / LOW / floating, as a line.
+static String linkPins() {
+  const int pins[4] = { PIN_SCK, PIN_MOSI, PIN_MISO, PIN_CS };
+  const char *names[4] = { "sclk", "mosi", "miso", "cs_n" };
+  String out;
+  for (int i = 0; i < 4; i++) {
+    gpio_reset_pin((gpio_num_t)pins[i]);
+    pinMode(pins[i], INPUT_PULLUP);   delay(5); bool up = digitalRead(pins[i]);
+    pinMode(pins[i], INPUT_PULLDOWN); delay(5); bool dn = digitalRead(pins[i]);
+    pinMode(pins[i], INPUT);
+    out += String("  ") + names[i] + " (GPIO" + pins[i] + ") " +
+           ((up && !dn) ? "floating" : (up && dn) ? "held HIGH" : (!up && !dn) ? "held LOW" : "odd") + "\n";
+  }
+  return out;
+}                      // what the pins saw at power-up (the "pins" command)
+
 void setup() {
   Serial.begin(115200);
   delay(300);
+#if CONFIG_IDF_TARGET_ESP32S3
   Serial.println("\nconsole: ESP32-S3 front door");
+#else
+  Serial.println("\nconsole: ESP32 (T8) front door");
+#endif
 
   // Before ANY peripheral claims a pin. Once SPI owns them through the GPIO
   // matrix they read back what the peripheral drives, not what is wired to
   // them, and the answer becomes confidently wrong.
   String pinMap = sdScanPins();
+  bootPins = pinMap;
 
   // 5 MHz, not 10.
   //
@@ -1301,6 +1325,7 @@ void setup() {
 
   Status s = fpga.status();
   Serial.printf("FPGA: %s", s.alive ? "answering" : "NOT ANSWERING");
+  if (!s.alive) Serial.print("\n" + bootPins);
   if (s.alive) Serial.printf(", protocol %u, core %u", s.version, s.core);
   Serial.println();
 
@@ -1427,6 +1452,41 @@ static void serialCommand(String c) {
     if (job.busy || job.stage.length())
       Serial.println("  job: " + job.stage + " " + job.done + "/" + job.total +
                      (job.error.length() ? ("  ERROR: " + job.error) : ""));
+  } else if (c == "linkraw") {
+    // a status frame's raw bytes at several clocks and both clock phases (the signature
+    // A5 first, when all is well)
+    const uint32_t hzs[5] = { 250000, 1000000, 2000000, 5000000, 8000000 };
+    for (int m = 0; m < 2; m++)
+      for (uint32_t hz : hzs) {
+        fpgaBus.beginTransaction(SPISettings(hz, MSBFIRST, m ? SPI_MODE1 : SPI_MODE0));
+        digitalWrite(PIN_CS, LOW);
+        uint8_t rx[5];
+        rx[0] = fpgaBus.transfer(CMD_STATUS);
+        for (int i = 1; i < 5; i++) rx[i] = fpgaBus.transfer(0x00);
+        digitalWrite(PIN_CS, HIGH);
+        fpgaBus.endTransaction();
+        Serial.printf("  mode %d %7u Hz: %02X %02X %02X %02X %02X\n", m, hz, rx[0], rx[1], rx[2], rx[3], rx[4]);
+        delay(5);
+      }
+  } else if (c == "linkprobe") {
+    // the link's wires with the FPGA held in configuration (PROGRAM_B low: its pins let
+    // go), then after it has loaded again -- which of the two is pulling a wire
+    Serial.println("FPGA running:");
+    Serial.print(linkPins());
+    if (PIN_PROG_B >= 0) {
+      pinMode(PIN_PROG_B, OUTPUT); digitalWrite(PIN_PROG_B, LOW); delay(50);
+      Serial.println("FPGA held in configuration (PROGRAM_B low):");
+      Serial.print(linkPins());
+      pinMode(PIN_PROG_B, INPUT);
+      delay(8000);
+      Serial.println("FPGA loaded again (8 s later):");
+      Serial.print(linkPins());
+    }
+    fpga.begin(5000000);
+    Status st = fpga.status();
+    Serial.printf("  status: %s, protocol %u, core %u\n", st.alive ? "answering" : "SILENT", st.version, st.core);
+  } else if (c == "pins") {
+    Serial.print(bootPins);
   } else if (c == "cores") {
     Serial.println("  " + coreListJson());
   } else if (c.startsWith("disc ")) {

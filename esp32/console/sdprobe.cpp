@@ -295,8 +295,16 @@ String sdScanPins() {
   // a pull changes how the chip boots; 19 and 20 are the USB data lines; 26-37
   // belong to the on-board flash and PSRAM; 43 and 44 are this serial port, and
   // pulling on those would cut off the very message being printed.
+#if CONFIG_IDF_TARGET_ESP32S3
   static const int SAFE[] = {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
                              16, 17, 18, 21, 38, 39, 40, 41, 42, 47, 48};
+#else
+  // The classic ESP32 (the T8) is another map entirely: 6-11 are its flash and 16/17 its
+  // PSRAM -- resetting those hangs the chip until the watchdog restarts it, over and over --
+  // 1 and 3 this serial port, 0/5/12/15 straps (12 sets the flash voltage), and 34-39 inputs
+  // with no pulls to test with.
+  static const int SAFE[] = {2, 4, 13, 14, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
+#endif
   String out = "    what is attached to each pin, measured before anything "
                "else touched them:" + String(char(10));
   bool any = false;
@@ -316,12 +324,23 @@ String sdScanPins() {
     any = true;
     const char *what = (up && down) ? "held HIGH" : (!up && !down) ? "held LOW "
                                                                    : "odd";
+#if CONFIG_IDF_TARGET_ESP32S3
     const char *known = pin == 10 ? "  (FPGA cs_n)"
                       : pin == 11 ? "  (FPGA mosi)"
                       : pin == 12 ? "  (FPGA sclk)"
                       : pin == 13 ? "  (FPGA miso)"
                       : pin == 14 ? "  (PROGRAM_B)"
                                   : "";
+#else
+    const char *known = pin == 18 ? "  (FPGA sclk)"
+                      : pin == 23 ? "  (FPGA mosi)"
+                      : pin == 19 ? "  (FPGA miso)"
+                      : pin == 32 ? "  (PROGRAM_B)"
+                      : pin == 13 ? "  (card cs)"
+                      : pin == 2  ? "  (card miso)"
+                      : pin == 14 ? "  (card clk)"
+                                  : "";
+#endif
     out += "      GPIO" + String(pin) + (pin < 10 ? " " : "") +
            "  " + what + known + char(10);
   }
