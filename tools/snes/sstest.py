@@ -24,9 +24,25 @@ DIR = os.path.join(HERE, '..', '..', 'sim', 'roms', 'snes', 'ss65816')
 REGS = ('pc', 's', 'p', 'a', 'x', 'y', 'dbr', 'd', 'pbr', 'e')
 
 
-def run_one(t, cycles):
+def run_one(t, cycles, bus=False):
     mem = {}
-    c = w65816.CPU(lambda a: mem.get(a, 0), lambda a, v: mem.__setitem__(a, v))
+    seq = []
+
+    def rd(a):
+        v = mem.get(a, 0)
+        seq.append((a, v, 'r'))
+        return v
+
+    def wr(a, v):
+        seq.append((a, v, 'w'))
+        mem[a] = v
+    c = w65816.CPU(rd, wr)
+    io0 = c.io
+
+    def io():
+        seq.append((None, None, 'i'))
+        io0()
+    c.io = io
     i = t['initial']
     for a, v in i['ram']:
         mem[a] = v
@@ -43,13 +59,24 @@ def run_one(t, cycles):
             bad.append('ram[%06x]=%02x want %02x' % (a, mem.get(a, 0), v))
     if cycles and c.cycles != len(t['cycles']):
         bad.append('cycles %d want %d' % (c.cycles, len(t['cycles'])))
+    if bus and not bad:
+        want = []
+        for a, v, pins in t['cycles']:
+            if pins[0] == '-' and pins[1] == '-':
+                want.append((None, None, 'i'))          # (an internal cycle: neither VDA nor VPA)
+            else:
+                want.append((a, v, 'w' if pins[3] == 'w' else 'r'))
+        if seq != want:
+            k = next((k for k in range(min(len(seq), len(want))) if seq[k] != want[k]), min(len(seq), len(want)))
+            bad.append('bus: cycle %d ours %s want %s' % (k, seq[k] if k < len(seq) else '-', want[k] if k < len(want) else '-'))
     return bad, got
 
 
 def main():
     args = sys.argv[1:]
     n = int(args[args.index('--n') + 1]) if '--n' in args else 1000
-    cycles = '--cycles' in args
+    cycles = '--cycles' in args or '--bus' in args
+    bus = '--bus' in args
     ops = [a for a in args if len(a) == 2 and all(ch in '0123456789abcdefABCDEF' for ch in a)]
     ops = [int(o, 16) for o in ops] or list(range(256))
     total = ok_all = 0
@@ -61,7 +88,7 @@ def main():
             tests = json.load(open(path))[:n]
             ok, first = 0, None
             for t in tests:
-                bad, got = run_one(t, cycles)
+                bad, got = run_one(t, cycles, bus)
                 if not bad:
                     ok += 1
                 elif first is None:

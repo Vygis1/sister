@@ -77,7 +77,7 @@ class Snes:
             c.step()
             sp = self.apu.spc
             while sp.cycles * 21 < c.cycles * 7:
-                sp.step()
+                self.apu.step()
             if (c.pbr << 16) | c.pc == pc and self.rom_at(pc) in (0x4C, 0x80):
                 return 'stopped at %06x after %d instructions' % (pc, n)
             if n % 4096 == 0 and (b'Success' in bytes(self.vram_text[-16:]) or b'Failed' in bytes(self.vram_text[-16:])):

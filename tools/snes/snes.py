@@ -202,7 +202,7 @@ class Snes:
     def _catch_up_apu(self):
         sp = self.apu.spc
         while sp.cycles * 21 < self.mc:
-            sp.step()
+            self.apu.step()
 
     # --- $4200-$421F ---------------------------------------------------------------------------
     def io_write(self, r, v):

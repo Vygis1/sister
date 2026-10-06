@@ -906,7 +906,7 @@ OPS[0x44] = _mv(-1)     # MVP
 
 # --- the rest -------------------------------------------------------------------------------
 OPS[0xEA] = lambda c: c.io()                                  # NOP
-OPS[0x42] = lambda c: c.fetch()                               # WDM
+OPS[0x42] = lambda c: (c.io(), setattr(c, 'pc', (c.pc + 1) & 0xFFFF))   # WDM (skips its byte unread)
 OPS[0xCB] = lambda c: (c.io(), c.io(), c.io(), setattr(c, 'waiting', True))   # WAI
 OPS[0xDB] = lambda c: (c.io(), c.io(), c.io(), setattr(c, 'stopped', True))   # STP
 
