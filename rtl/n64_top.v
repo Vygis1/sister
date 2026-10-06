@@ -48,6 +48,8 @@ module n64_top #(
 	parameter [23:0] RDRAM_LINE = 24'h00_0000,     // RDRAM at DDR3 0
 	parameter [23:0] CART_LINE  = 24'h10_0000,     // the cartridge at 16 MB
 	parameter        CLK_HZ     = 50_000_000,      // this core's clock
+	parameter        DBG        = 1,               // 0: the debug window shows only the frame and sound
+	                                               // counts (the rest is gone, and the room with it)
 	parameter [10:0] HALFLINE   = CLK_HZ / 31250   // (one HDMI line, 32 us: see "the VI's clock")
 ) (
 	input  wire         clk,
@@ -1650,6 +1652,16 @@ module n64_top #(
 		endcase
 		// the timeline (above): an entry (dbg_sel[16:8]), or with dbg_sel[30] where it writes next
 		if (dbg_sel[31]) dbg_q <= dbg_sel[30] ? {23'd0, ev_wp} : ev_q;
+		// (a shipping image: VI interrupts, instructions, the AI -- nothing else reads any of the
+		// above, so it all goes)
+		if (DBG == 0)
+			case (dbg_sel[5:0])
+			6'd22: dbg_q <= n_vi_irq;
+			6'd52: dbg_q <= {ai_count, ai_enable, 15'd0, ai_dacrate};
+			6'd53: dbg_q <= {n_ai_lost, n_ai_samp};
+			6'd60: dbg_q <= retired;
+			default: dbg_q <= 32'hDEB0_0000 | {26'd0, dbg_sel[5:0]};
+			endcase
 	end
 
 endmodule

@@ -52,7 +52,7 @@ case "${1:-nes}" in
          EXTRA="-ip $MIG_XCI" ;;
   n64|nintendo64)
          # (at 62.5 MHz: the console's MMCM, 1000 MHz / 16 -- the RCP's own clock)
-         NAME=n64;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:1 -gen CLK_DIV:${N64_DIV:-16}"
+         NAME=n64;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:1 -gen CLK_DIV:${N64_DIV:-16} -gen N64_DBG:${N64_DBG:-1}"
          # RDRAM and the cartridge live in DDR3: the memory controller again.
          EXTRA="-ip $MIG_XCI" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;

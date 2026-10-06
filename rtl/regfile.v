@@ -47,6 +47,7 @@ module regfile #(
 	parameter        CORE_PS1 = 0,
 	parameter        CORE_N64 = 0,
 	parameter        WEBVID   = 0,    // the picture to the web page as well (see eth_top)
+	parameter        N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
 	parameter        CLK_HZ   = 50_000_000   // the console's clock (eth_top's cclk)
 )(
 	input  wire        clk,
@@ -359,7 +360,7 @@ module regfile #(
 	localparam MD_ONLY = (CORE_MD && !CORE_NES && !CORE_SMS);
 
 	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID), .CLK_HZ(CLK_HZ),
+	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .CLK_HZ(CLK_HZ),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),
