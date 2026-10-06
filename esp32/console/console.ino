@@ -49,7 +49,7 @@
 static const int PIN_SCK = 12, PIN_MOSI = 11, PIN_MISO = 13, PIN_CS = 10;
 #else
 // The classic ESP32 (the LilyGO T8: ESP32-WROVER, Bluetooth Classic for the pads). Its
-// PSRAM has GPIO 16/17 and the board's microSD slot GPIO 12/14/27/33, so the FPGA goes on
+// PSRAM has GPIO 16/17 and the board's microSD slot GPIO 2/13/14/15, so the FPGA goes on
 // VSPI's own pins:
 //   GPIO18 -> esp_sclk   U2 pin 7       GPIO23 -> esp_mosi   U2 pin 8
 //   GPIO19 <- esp_miso   U2 pin 9       GPIO5  -> esp_cs_n   U2 pin 10
@@ -78,7 +78,9 @@ static const int PIN_PROG_B = 32, PIN_DONE = -1;
 #if CONFIG_IDF_TARGET_ESP32S3
 static const int PIN_SD_SCK = 5, PIN_SD_MISO = 6, PIN_SD_MOSI = 4, PIN_SD_CS = 7;
 #else
-static const int PIN_SD_SCK = 27, PIN_SD_MISO = 12, PIN_SD_MOSI = 14, PIN_SD_CS = 33;   // the T8's own slot
+// the T8 V1.7.1's own slot (its schematic: IO13 CS/D3, IO15 CMD, IO14 CLK, IO2 D0 -- not the
+// 33/14/12/27 of the repo's old example; IO12 is the flash-voltage strap and is left alone)
+static const int PIN_SD_SCK = 14, PIN_SD_MISO = 2, PIN_SD_MOSI = 15, PIN_SD_CS = 13;
 #endif
 
 static const char *AP_SSID = "console";
