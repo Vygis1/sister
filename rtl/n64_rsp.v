@@ -294,6 +294,33 @@ module n64_rsp #(
 	// latched for the second clock of a vector op
 	reg  [127:0] q_vs, q_vte, q_vtraw;
 	reg  [5:0]   q_fn;
+	// ...and, for the multiplies, the opcode already decoded into the accumulator adder's two
+	// inputs and the result's clamp, a copy for each lane: q_fn's decode and its fanout were
+	// most of the clock on the path through that adder (62.5 MHz)
+	(* max_fanout = 40 *) reg [1:0] q_mbs [0:7];   // base: 0, 0x8000, the accumulator, VMULQ's
+	(* max_fanout = 40 *) reg [2:0] q_mas [0:7];   // addend: prd<<1, VRND's, prd<<16, VMACQ's, prd[31:16], prd, 0
+	(* max_fanout = 40 *) reg [2:0] q_os  [0:7];   // the result: satS, VMULU's, VMACU's, satL, l, m, satQ
+	(* max_fanout = 40 *) reg       q_mul [0:7];   // a multiply (0x00-0x0F)
+	function [1:0] mbs_of; input [5:0] f;
+		case (f) 6'h00, 6'h01: mbs_of = 2'd1; 6'h03: mbs_of = 2'd3; 6'h04, 6'h05, 6'h06, 6'h07: mbs_of = 2'd0; default: mbs_of = 2'd2; endcase
+	endfunction
+	function [2:0] mas_of; input [5:0] f;
+		case (f)
+		6'h00, 6'h01, 6'h08, 6'h09: mas_of = 3'd0;
+		6'h02, 6'h0A: mas_of = 3'd1;
+		6'h03, 6'h07, 6'h0F: mas_of = 3'd2;
+		6'h0B: mas_of = 3'd3;
+		6'h04, 6'h0C: mas_of = 3'd4;
+		6'h05, 6'h06, 6'h0D, 6'h0E: mas_of = 3'd5;
+		default: mas_of = 3'd6;
+		endcase
+	endfunction
+	function [2:0] os_of; input [5:0] f;
+		case (f)
+		6'h01: os_of = 3'd1; 6'h09: os_of = 3'd2; 6'h0C, 6'h0E: os_of = 3'd3; 6'h04, 6'h06: os_of = 3'd4;
+		6'h05: os_of = 3'd5; 6'h03, 6'h0B: os_of = 3'd6; default: os_of = 3'd0;
+		endcase
+	endfunction
 	reg  [4:0]   q_vd, q_vs_n;
 	// A vector op's second clock (v2_pend) runs beside the next instruction, which waits a
 	// clock if it would see that op's result or flags before they are written: a COP2 move
@@ -568,27 +595,26 @@ module n64_rsp #(
 			prd = {{14{prod[n][33]}}, prod[n]};
 			hm = {acch[n], accm[n]};
 			// --- the accumulator's adder ----------------------------------------------------
-			case (q_fn)
-			6'h00, 6'h01: begin mb = 48'h8000; ma = prd << 1; end                   // VMULF VMULU (rounding)
-			6'h08, 6'h09: begin mb = acc48;    ma = prd << 1; end                   // VMACF VMACU
-			6'h02, 6'h0A: begin                                                      // VRNDP VRNDN
-				mb = acc48;
-				ma = ((q_fn == 6'h0A && acch[n][15]) || (q_fn == 6'h02 && !acch[n][15]))
-				   ? (q_vs_n[0] ? {{16{bv[15]}}, bv, 16'd0} : {{32{bv[15]}}, bv}) : 48'd0;
-			end
-			6'h03: begin mb = prod[n][33] ? {32'd31, 16'd0} : 48'd0; ma = prd << 16; end   // VMULQ: (prd, +31 if negative) << 16
-			6'h0B: begin                                                             // VMACQ: {h,m} +- 32
-				mb = acc48;
-				ma = (hm[31] && !hm[5]) ? {32'd32, 16'd0}
-				   : (!hm[31] && hm[31:6] != 26'd0 && !hm[5]) ? {32'hFFFF_FFE0, 16'd0} : 48'd0;
-			end
-			6'h04: begin mb = 48'd0; ma = {32'd0, prod[n][31:16]}; end              // VMUDL
-			6'h0C: begin mb = acc48; ma = {32'd0, prod[n][31:16]}; end              // VMADL
-			6'h05, 6'h06: begin mb = 48'd0; ma = prd; end                            // VMUDM VMUDN
-			6'h0D, 6'h0E: begin mb = acc48; ma = prd; end                            // VMADM VMADN
-			6'h07: begin mb = 48'd0; ma = prd << 16; end                             // VMUDH
-			6'h0F: begin mb = acc48; ma = prd << 16; end                             // VMADH
-			default: begin mb = acc48; ma = 48'd0; end
+			// (VMULF VMULU: 0x8000 + prd<<1; VMACF VMACU: acc + prd<<1; VRNDP VRNDN: acc + b
+			// or b<<16 when the accumulator's sign says; VMULQ: (prd, +31 if negative) << 16;
+			// VMACQ: {h,m} +- 32; VMUDL / VMADL: prd[31:16]; VMUDM VMUDN / VMADM VMADN: prd;
+			// VMUDH / VMADH: prd << 16 -- as q_mbs / q_mas say, decoded when the op was latched)
+			case (q_mbs[n])
+			2'd0: mb = 48'd0;
+			2'd1: mb = 48'h8000;
+			2'd2: mb = acc48;
+			default: mb = prod[n][33] ? {32'd31, 16'd0} : 48'd0;
+			endcase
+			case (q_mas[n])
+			3'd0: ma = prd << 1;
+			3'd1: ma = ((q_fn[3] && acch[n][15]) || (!q_fn[3] && !acch[n][15]))
+			         ? (q_vs_n[0] ? {{16{bv[15]}}, bv, 16'd0} : {{32{bv[15]}}, bv}) : 48'd0;
+			3'd2: ma = prd << 16;
+			3'd3: ma = (hm[31] && !hm[5]) ? {32'd32, 16'd0}
+			         : (!hm[31] && hm[31:6] != 26'd0 && !hm[5]) ? {32'hFFFF_FFE0, 16'd0} : 48'd0;
+			3'd4: ma = {32'd0, prod[n][31:16]};
+			3'd5: ma = prd;
+			default: ma = 48'd0;
 			endcase
 			ms = mb + ma;
 			h = ms[47:32]; m = ms[31:16]; l = ms[15:0];
@@ -615,17 +641,19 @@ module n64_rsp #(
 			eq = av == bv;
 			lt = s18[17];                                                            // (signed, for the compares)
 			c = 1'b0;
-			case (q_fn)
-			6'h00, 6'h02, 6'h07, 6'h08, 6'h0A, 6'h0D, 6'h0F: begin                   // a signed clamp of {h,m}
+			if (q_mul[n]) begin                                                      // the multiplies
 				{n_acch[n], n_accm[n], n_accl[n]} = ms;
-				vout[127 - 16 * n -: 16] = satS;
-			end
-			6'h01: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = h[15] ? 16'h0000 : m[15] ? 16'hFFFF : m; end
-			6'h09: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = h[15] ? 16'h0000 : (h != 16'd0 || m[15]) ? 16'hFFFF : m; end
-			6'h0C, 6'h0E: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = satL; end
-			6'h04, 6'h06: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = l; end
-			6'h05: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = m; end
-			6'h03, 6'h0B: begin {n_acch[n], n_accm[n], n_accl[n]} = ms; vout[127 - 16 * n -: 16] = satQ; end
+				case (q_os[n])
+				3'd0: vout[127 - 16 * n -: 16] = satS;                                   // a signed clamp of {h,m}
+				3'd1: vout[127 - 16 * n -: 16] = h[15] ? 16'h0000 : m[15] ? 16'hFFFF : m;                    // VMULU
+				3'd2: vout[127 - 16 * n -: 16] = h[15] ? 16'h0000 : (h != 16'd0 || m[15]) ? 16'hFFFF : m;    // VMACU
+				3'd3: vout[127 - 16 * n -: 16] = satL;
+				3'd4: vout[127 - 16 * n -: 16] = l;
+				3'd5: vout[127 - 16 * n -: 16] = m;
+				default: vout[127 - 16 * n -: 16] = satQ;
+				endcase
+			end else
+			case (q_fn)
 			6'h10, 6'h11: begin                                                      // VADD VSUB
 				n_accl[n] = s18[15:0];
 				vout[127 - 16 * n -: 16] = (s18[17:15] == 3'b000 || s18[17:15] == 3'b111) ? s18[15:0] : s18[17] ? 16'h8000 : 16'h7FFF;
@@ -1044,6 +1072,9 @@ module n64_rsp #(
 					end else begin
 						// a computational op: operands latched, products registered
 						q_vs <= vsr; q_vte <= vte; q_fn <= fn; q_vd <= vd; q_vs_n <= vs; q_e <= ve; q_de <= ir[13:11];
+						for (k = 0; k < 8; k = k + 1) begin
+							q_mbs[k] <= mbs_of(fn); q_mas[k] <= mas_of(fn); q_os[k] <= os_of(fn); q_mul[k] <= fn[5:4] == 2'd0;
+						end
 						for (k = 0; k < 8; k = k + 1) prod[k] <= mulop(fn, vsr[127 - 16 * k -: 16], vte[127 - 16 * k -: 16]);
 						q_inp <= rc_inp; q_mask <= rc_msk; q_sqrt <= fn[2]; q_dat <= rc_dat;
 						if (rc_dat == 0) begin q_special <= 1'b1; q_data <= 32'h7FFF_FFFF; end
