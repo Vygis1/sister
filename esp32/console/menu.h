@@ -778,7 +778,16 @@ static std::vector<Item> items() {
 }
 static std::vector<std::string> info() {
   std::vector<std::string> v;
-  if (nav.page == P_WIFI) {
+  if (nav.page == P_HOME) {
+    // (out of the box there is no pad yet, and nothing to press to ask for one: Bluetooth
+    // takes new pads from power-up, so say how)
+    pads::Player p[2]; pads::view(p);
+    if (!p[0].on && !p[1].on) {
+      v.push_back("PS4 / PS5:  hold SHARE + PS");
+      v.push_back("Xbox:       hold the pair button");
+      v.push_back("Switch Pro: hold sync");
+    }
+  } else if (nav.page == P_WIFI) {
     if (WiFi.status() == WL_CONNECTED) v.push_back(std::string("address ") + WiFi.localIP().toString().c_str());
     v.push_back(std::string("its own network: ") + AP_SSID + " / " + AP_PASS);
   } else if (nav.page == P_SYSTEM || nav.page == P_SETTINGS) {
@@ -868,7 +877,11 @@ static void draw() {
     ui::centre(26, "circle: back", ui::GREY);
     break;
   default:
-    scr::list(ch, title(), items(), nav.sel, nav.top, info(), note.c_str(), hintsFor(), nav.page == P_HOME ? 2 : 0);
+  {
+    std::string nt = note.c_str();
+    if (nav.page == P_HOME && nt.empty() && !ch.pad1 && !ch.pad2) nt = "No controller yet: pair one now";
+    scr::list(ch, title(), items(), nav.sel, nav.top, info(), nt, hintsFor(), nav.page == P_HOME ? 2 : 0);
+  }
   }
   if (nav.page != P_ABOUT) ui::palette(art::MENU_PAL);
   show();

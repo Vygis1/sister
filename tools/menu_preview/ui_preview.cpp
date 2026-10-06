@@ -28,13 +28,16 @@ int main(int argc, char **argv) {
   else ui::ctrl(1);
 
   using scr::Item;
+  if (which == "homenopad") { ch.pad1 = false; which = "home"; }
+  std::vector<std::string> homeInfo;
+  if (!ch.pad1 && !ch.pad2) homeInfo = { "PS4 / PS5:  hold SHARE + PS", "Xbox:       hold the pair button", "Switch Pro: hold sync" };
   if (which == "home") {
     std::vector<Item> it;
     const char *n[] = { "NES", "Master System", "Mega Drive", "Super NES", "Nintendo 64", "PlayStation" };
     int g[] = { 3, 262, 3, 6, 1, 2 };
     for (int i = 0; i < 6; i++) { Item x; x.text = n[i]; x.value = std::to_string(g[i]) + (g[i] == 1 ? " game" : " games"); x.valueInk = ui::GREY; x.icon = art::G_PAD; x.iconInk = ui::PINK; it.push_back(x); }
     Item s; s.text = "Settings"; s.icon = art::G_GEAR; s.iconInk = ui::YELLOW; s.gap = true; it.push_back(s);
-    scr::list(ch, "CONSOLES", it, 3, top, {}, "", { { art::G_CROSS, "open" }, { art::G_TRIANGLE, "settings" } }, 2);
+    scr::list(ch, "CONSOLES", it, 3, top, homeInfo, homeInfo.empty() ? "" : "No controller yet: pair one now", { { art::G_CROSS, "open" }, { art::G_TRIANGLE, "settings" } }, 2);
   } else if (which == "games") {
     std::vector<Item> it;
     const char *n[] = { "Super Mario World", "The Legend of Zelda - A Link to the Past", "Super Metroid", "Donkey Kong Country", "F-Zero", "Street Fighter II Turbo", "Chrono Trigger", "Secret of Mana", "Yoshi's Island", "Kirby Super Star", "Mega Man X", "Contra III", "Final Fantasy VI", "EarthBound", "Star Fox", "Pilotwings", "Super Castlevania IV", "Mario Kart", "Tetris Attack", "Harvest Moon", "Breath of Fire", "Axelay" };
