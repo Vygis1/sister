@@ -621,7 +621,7 @@ module snes_dsp (
 		W_DEC0 = 5'd6, W_DEC1 = 5'd7, W_DEC2 = 5'd8, W_DEC3 = 5'd9, W_DECN = 5'd10,
 		W_INT = 5'd11, W_ENV = 5'd12, W_PITCH = 5'd13, W_MIX = 5'd14, W_NEXT = 5'd15,
 		W_ECHO0 = 5'd16, W_ECHO1 = 5'd17, W_FIR = 5'd18, W_EOUT = 5'd19, W_EWR = 5'd20, W_END = 5'd21,
-		W_BLK0 = 5'd22, W_BLK1 = 5'd23, W_BLK2 = 5'd24;
+		W_BLK0 = 5'd22, W_BLK1 = 5'd23, W_BLK2 = 5'd24, W_RATES = 5'd26, W_NOISE = 5'd27, W_INT2 = 5'd28, W_FIRD = 5'd29;
 	reg [4:0]  ws;
 	reg [4:0]  wret;                    // where a decode returns
 	reg [2:0]  x;                       // the voice
@@ -640,6 +640,15 @@ module snes_dsp (
 	reg [15:0] ew;
 	reg signed [15:0] fl, fr;
 	reg [3:0]  bufidx;
+	// (timing: the rate test, the Gauss taps and the FIR are spread over clocks)
+	reg [31:0] fires_v;                 // this sample: which of the 32 rates step
+	reg [5:0]  rr;                      // the rate being worked out
+	reg [15:0] rv; reg [3:0] rn; reg [2:0] rk; reg [4:0] rr_d; reg rvalid;
+	reg        iph;                     // the Gauss tap's phase: 0 fetch, 1 multiply-add
+	reg signed [15:0] it_s; reg [10:0] it_g;
+	reg signed [15:0] isamp;
+	reg [3:0]  fk_n;                    // the FIR tap
+	reg signed [31:0] fal, far_;
 
 	wire signed [15:0] noise15 = {noise[14], noise};
 	wire [6:0] vb = {x, 4'h0};
@@ -688,13 +697,46 @@ module snes_dsp (
 			W_IDLE: if (sample) ws <= W_START;
 			W_START: begin
 				counter <= (counter == 16'd0) ? 16'h77FF : counter - 16'd1;
-				if (fires((counter == 16'd0) ? 16'h77FF : counter - 16'd1, R[7'h6C][4:0]))
-					noise <= {noise[0] ^ noise[1], noise[14:1]};
 				every_other <= !every_other;
 				kphase <= !every_other;
 				if (!every_other) begin kon <= new_kon; new_kon <= 8'h00; koff <= R[7'h5C]; end
 				main_l <= 0; main_r <= 0; echo_l <= 0; echo_r <= 0; prev_out <= 0;
 				x <= 3'd0;
+				rr <= 6'd0; rvalid <= 1'b0;
+				ws <= W_RATES;
+			end
+			// which rates step this sample: (counter + offset) % (k << n) == 0, two stages a rate
+			W_RATES: begin : rates
+				reg [3:0] n_; reg [2:0] k_; reg [15:0] off_; reg [15:0] q_;
+				// stage 1: rate rr's shape and the counter plus its offset
+				case (rr[4:0])
+				5'd28: begin k_ = 1; n_ = 2; end
+				5'd29: begin k_ = 3; n_ = 0; end
+				5'd30: begin k_ = 1; n_ = 1; end
+				5'd31: begin k_ = 1; n_ = 0; end
+				default: case ((rr[4:0] - 5'd1) % 3)
+					0: begin k_ = 1; n_ = 4'd11 - (rr[4:0] - 5'd1) / 3; end
+					1: begin k_ = 3; n_ = 4'd9 - (rr[4:0] - 5'd1) / 3; end
+					default: begin k_ = 5; n_ = 4'd8 - (rr[4:0] - 5'd1) / 3; end
+					endcase
+				endcase
+				case ((rr[4:0] - 5'd1) % 3)
+				0: off_ = 16'd0;
+				1: off_ = 16'd1040;
+				default: off_ = 16'd536;
+				endcase
+				rv <= counter + off_; rn <= n_; rk <= k_; rr_d <= rr[4:0]; rvalid <= !rr[5];
+				// stage 2: the test, for the rate before
+				if (rvalid) begin
+					q_ = rv >> rn;
+					fires_v[rr_d] <= (rr_d != 5'd0) && ((rv & ((16'd1 << rn) - 16'd1)) == 16'd0) &&
+					                 (rk == 3'd1 ? 1'b1 : rk == 3'd3 ? (q_ % 3 == 0) : (q_ % 5 == 0));
+				end
+				rr <= rr + 6'd1;
+				if (rr == 6'd32) ws <= W_NOISE;
+			end
+			W_NOISE: begin
+				if (fires_v[R[7'h6C][4:0]]) noise <= {noise[0] ^ noise[1], noise[14:1]};
 				ws <= W_VOICE;
 			end
 
@@ -723,38 +765,48 @@ module snes_dsp (
 					if (kdel[x] == 3'd4 || kdel[x] == 3'd3 || kdel[x] == 3'd2) begin wret <= W_MIX; ws <= W_DEC0; end
 					else ws <= W_MIX;
 				end else begin
-					ik <= 2'd0; iacc <= 20'sd0;
+					ik <= 2'd0; iacc <= 32'sd0; iph <= 1'b0;
 					ws <= W_INT;
 				end
 			end
 
 			// ---------- the Gauss interpolation (or the noise) ----------
 			W_INT: begin
-				gi = vpos[x][11:4];
-				tap = bpos[x] + {1'b0, vpos[x][14:12]} + {2'b0, ik};
-				if (tap >= 4'd12) tap = tap - 4'd12;
-				if (tap >= 4'd12) tap = tap - 4'd12;
-				s16v = buf_[x * 12 + tap];
-				case (ik)
-				2'd0: m32 = $signed({1'b0, gauss_rom(9'h0FF - {1'b0, gi})}) * s16v;
-				2'd1: m32 = $signed({1'b0, gauss_rom(9'h1FF - {1'b0, gi})}) * s16v;
-				2'd2: m32 = $signed({1'b0, gauss_rom(9'h100 + {1'b0, gi})}) * s16v;
-				default: m32 = $signed({1'b0, gauss_rom({1'b0, gi})}) * s16v;
-				endcase
-				case (ik)
-				2'd0, 2'd1: iacc <= iacc + (m32 >>> 10);
-				2'd2: begin acc20 = iacc + (m32 >>> 10); iacc <= {{16{acc20[15]}}, acc20[15:0]}; end   // wraps
-				default: begin
-					acc20 = iacc + (m32 >>> 10);
-					t16 = clamp16(acc20);
-					// out = the 15-bit sample times the envelope
-					s16v = R[7'h3D][x] ? noise15 : (t16 >>> 1);
-					m32 = s16v * $signed({1'b0, env[x]});
-					vout <= (m32 >>> 11) & ~32'sd1;
+				if (!iph) begin
+					// fetch: the tap's sample and its Gauss weight
+					gi = vpos[x][11:4];
+					tap = bpos[x] + {1'b0, vpos[x][14:12]} + {2'b0, ik};
+					if (tap >= 4'd12) tap = tap - 4'd12;
+					if (tap >= 4'd12) tap = tap - 4'd12;
+					it_s <= buf_[x * 12 + tap];
+					case (ik)
+					2'd0: it_g <= gauss_rom(9'h0FF - {1'b0, gi});
+					2'd1: it_g <= gauss_rom(9'h1FF - {1'b0, gi});
+					2'd2: it_g <= gauss_rom(9'h100 + {1'b0, gi});
+					default: it_g <= gauss_rom({1'b0, gi});
+					endcase
+					iph <= 1'b1;
+				end else begin
+					m32 = $signed({1'b0, it_g}) * it_s;
+					iph <= 1'b0;
+					case (ik)
+					2'd0, 2'd1: iacc <= iacc + (m32 >>> 10);
+					2'd2: begin acc20 = iacc + (m32 >>> 10); iacc <= {{16{acc20[15]}}, acc20[15:0]}; end   // wraps
+					default: begin
+						acc20 = iacc + (m32 >>> 10);
+						t16 = clamp16(acc20);
+						isamp <= R[7'h3D][x] ? noise15 : (t16 >>> 1);
+						ws <= W_INT2;
+					end
+					endcase
+					ik <= ik + 2'd1;
 				end
-				endcase
-				ik <= ik + 2'd1;
-				if (ik == 2'd3) ws <= W_ENV;
+			end
+			W_INT2: begin
+				// the 15-bit sample times the envelope
+				m32 = isamp * $signed({1'b0, env[x]});
+				vout <= (m32 >>> 11) & ~32'sd1;
+				ws <= W_ENV;
 			end
 
 			// ---------- the envelope ----------
@@ -785,7 +837,7 @@ module snes_dsp (
 						endcase
 					end
 					if (vmode[x] == DECAY && e13[10:8] == (a1[7] ? a2[7:5] : g[7:5])) vmode[x] <= SUSTAIN;
-					if (fires(counter, rate)) begin
+					if (fires_v[rate]) begin
 						e13 = e13 + estep;
 						hidden[x] <= e13[10:0];
 						e11 = (e13 < 0) ? 11'd0 : (e13 > 13'sd2047) ? 11'h7FF : e13[10:0];
@@ -894,19 +946,27 @@ module snes_dsp (
 				if (ek == 3'd4) begin fir_r[fir_i] <= $signed({ram_q, ew[7:0]}) >>> 1; ws <= W_FIR; end
 				ek <= ek + 3'd1;
 			end
-			W_FIR: begin : fir
-				reg signed [31:0] al, ar; integer k; reg [2:0] fk;
-				al = 0; ar = 0;
-				for (k = 0; k < 7; k = k + 1) begin
-					fk = fir_i + 3'd1 + k[2:0];          // (fir_i - 7 + k, mod 8)
-					al = al + ((fir_l[fk] * $signed(R[{k[2:0], 4'hF}])) >>> 6);
-					ar = ar + ((fir_r[fk] * $signed(R[{k[2:0], 4'hF}])) >>> 6);
+			W_FIR: begin
+				// the seven oldest taps, one a clock (16-bit sums, no overflow handling)
+				fal <= 32'sd0; far_ <= 32'sd0; fk_n <= 4'd0;
+				ws <= W_FIRD;
+			end
+			W_FIRD: begin : fird
+				reg [2:0] fk; reg signed [31:0] al, ar;
+				fk = fir_i + 3'd1 + fk_n[2:0];          // (fir_i - 7 + k, mod 8)
+				if (fk_n != 4'd7) begin
+					al = fal + ((fir_l[fk] * $signed(R[{fk_n[2:0], 4'hF}])) >>> 6);
+					ar = far_ + ((fir_r[fk] * $signed(R[{fk_n[2:0], 4'hF}])) >>> 6);
+					fal <= al; far_ <= ar;
+					fk_n <= fk_n + 4'd1;
+				end else begin
+					// the newest, with the 16-bit wrap first and the clamp after
+					al = {{16{fal[15]}}, fal[15:0]};
+					ar = {{16{far_[15]}}, far_[15:0]};
+					fl <= clamp16(al + ((fir_l[fir_i] * $signed(R[7'h7F])) >>> 6));
+					fr <= clamp16(ar + ((fir_r[fir_i] * $signed(R[7'h7F])) >>> 6));
+					ws <= W_EOUT;
 				end
-				al = {{16{al[15]}}, al[15:0]};
-				ar = {{16{ar[15]}}, ar[15:0]};
-				fl <= clamp16(al + ((fir_l[fir_i] * $signed(R[7'h7F])) >>> 6));
-				fr <= clamp16(ar + ((fir_r[fir_i] * $signed(R[7'h7F])) >>> 6));
-				ws <= W_EOUT;
 			end
 			W_EOUT: begin
 				out_l <= R[7'h6C][6] ? 16'sd0 : clamp16((($signed(main_l[15:0]) * $signed(R[7'h0C])) >>> 7) + ((fl * $signed(R[7'h2C])) >>> 7));

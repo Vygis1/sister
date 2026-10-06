@@ -88,6 +88,10 @@ module snes_cpu (
 	// the chip's own registers, read
 	reg [7:0] own_rd;
 	reg [2:0] rc;
+	// the divider ($4206): restoring, one quotient bit a clock -- 16 clocks, long before
+	// the CPU can read (the chip itself takes 16 of its cycles)
+	reg [15:0] dv_q; reg [8:0] dv_r; reg [7:0] dv_d; reg [4:0] dv_n;
+	reg [8:0] dv_t;
 	always @(*) begin
 		own_rd = mdr;
 		rc = c_off[6:4];
@@ -206,7 +210,7 @@ module snes_cpu (
 				8'h04: wrdiv[7:0] <= d;
 				8'h05: wrdiv[15:8] <= d;
 				8'h06: if (d == 8'h00) begin rddiv <= 16'hFFFF; rdmpy <= wrdiv; end
-				       else begin rddiv <= wrdiv / d; rdmpy <= wrdiv % d; end
+				       else begin dv_q <= wrdiv; dv_r <= 9'd0; dv_d <= d; dv_n <= 5'd16; end   // (a bit a clock)
 				8'h07: htime[7:0] <= d;  8'h08: htime[8] <= d[0];
 				8'h09: vtime[7:0] <= d;  8'h0A: vtime[8] <= d[0];
 				8'h0B: if (d != 8'h00) begin dma_pend <= 1'b1; dma_mask <= d; end
@@ -237,7 +241,7 @@ module snes_cpu (
 		if (rst) begin
 			nmitimen <= 8'h00; memsel <= 8'h00; hdmaen <= 8'h00; wrmpya <= 8'hFF; wrdiv <= 16'hFFFF;
 			htime <= 9'h1FF; vtime <= 9'h1FF; rdnmi <= 1'b0; timeup <= 1'b0; joy1 <= 16'h0; joy2 <= 16'h0;
-			rddiv <= 16'h0; rdmpy <= 16'h0; mdr <= 8'h00;
+			rddiv <= 16'h0; rdmpy <= 16'h0; mdr <= 8'h00; dv_n <= 5'd0;
 			cs <= C_CPU; slot_live <= 1'b0; acc_out <= 1'b0; a1_pending <= 1'b0; a2_pending <= 1'b0;
 			dma_pend <= 1'b0; dma_mask <= 8'h00; hdma_done <= 8'hFF; hdma_do <= 8'h00; todo <= 8'h00;
 			hdma_line_done <= 1'b0; hdma_init_done <= 1'b0; irq_done <= 1'b0;
@@ -247,6 +251,16 @@ module snes_cpu (
 				dasb[i] <= 8'hFF; a2a[i] <= 16'hFFFF; ntrl[i] <= 8'hFF; dunused[i] <= 8'hFF;
 			end
 		end else begin
+			if (dv_n != 5'd0) begin
+				dv_t = {dv_r[7:0], dv_q[15]};
+				if (dv_t >= {1'b0, dv_d}) begin dv_r <= dv_t - {1'b0, dv_d}; dv_q <= {dv_q[14:0], 1'b1}; end
+				else begin dv_r <= dv_t; dv_q <= {dv_q[14:0], 1'b0}; end
+				dv_n <= dv_n - 5'd1;
+				if (dv_n == 5'd1) begin
+					rddiv <= (dv_t >= {1'b0, dv_d}) ? {dv_q[14:0], 1'b1} : {dv_q[14:0], 1'b0};
+					rdmpy <= {8'h00, (dv_t >= {1'b0, dv_d}) ? dv_t[7:0] - dv_d : dv_t[7:0]};
+				end
+			end
 			// ---- the frame's events ----
 			if (mce && h == 11'd0) begin
 				hdma_line_done <= 1'b0;
