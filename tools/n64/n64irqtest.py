@@ -22,12 +22,13 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..'))
 from mipsasm import *  # noqa: E402,F401,F403
 from n64tlbtest import N64Asm, rom  # noqa: E402
+from n64fptest import FPAsm  # noqa: E402
 
 C0_STATUS, C0_CAUSE, C0_COUNT, C0_COMPARE = 12, 13, 9, 11
 
 
 def build(iterations):
-    a = N64Asm(org=0x80000000)
+    a = FPAsm(org=0x80000000)
     a.j('main'); a.nop()
     while a.pc < 0x80000180: a.nop()
     # the general vector: the timer (IP7) -- Compare again, 60..187 ticks on (writing it is the
@@ -61,6 +62,7 @@ def build(iterations):
     a.mfc0(T0, C0_STATUS)
     a.li(T1, 0xFFFFFFF9); a.and_(T0, T0, T1)
     a.ori(T0, T0, 0x8401)
+    a.lui(T1, 0x2000); a.or_(T0, T0, T1)        # CU1: the FPU, for the float checks
     a.mtc0(T0, C0_STATUS)
     a.nop(); a.nop()
 
@@ -96,6 +98,25 @@ def build(iterations):
     a.label('p6')
     a.lw(T4, 32, SP)
     check(T4, A0, 7)
+    # 7: the FPU, while the interrupts come: exact single-precision answers, and the loop's
+    # count through a float and back (a float op takes several clocks: a wider window)
+    a.li(T0, 0x40400000); a.mtc1(T0, 2)        # 3.0
+    a.li(T0, 0x40A00000); a.mtc1(T0, 4)        # 5.0
+    a.mul_s(6, 2, 4)                           # 15.0
+    a.fop(0x03, 8, 6, 2)                       # div.s: 5.0
+    a.li(T0, 0x41800000); a.mtc1(T0, 10)       # 16.0
+    a.fop(0x04, 12, 10, 0)                     # sqrt.s: 4.0
+    a.add_s(14, 8, 12)                         # 9.0
+    a.fop(0x24, 16, 6, 0)                      # cvt.w.s 15.0 -> 15
+    a.mfc1(T1, 16); a.li(T2, 15)
+    check(T1, T2, 8)
+    a.mfc1(T1, 14); a.li(T2, 0x41100000)
+    check(T1, T2, 9)
+    a.mtc1(S5, 18); a.fop(0x20, 20, 18, 0, fmt=20)   # cvt.s.w: the count as a float
+    a.add_s(20, 20, 20)                        # doubled
+    a.fop(0x24, 22, 20, 0)                     # and back
+    a.mfc1(T1, 22); a.addu(T2, S5, S5)
+    check(T1, T2, 10)
     # the values move on; round again
     a.addu(A0, A0, A2); a.addu(A1, A1, A3)
     a.addiu(S5, S5, -1)
