@@ -38,7 +38,7 @@ module tb_n64_rdp;
 	wire [255:0] regs_flat;
 
 	n64_rdp2 dut (
-		.clk(clk), .rst(rst),
+		.clk(clk), .rst(rst), .no_dither(1'b0),
 		.c_we(c_we), .c_idx(c_idx), .c_wd(c_wd), .r_we(1'b0), .r_idx(3'd0), .r_wd(32'd0),
 		.regs_flat(regs_flat),
 		.cf_req(cf_req), .cf_ack(cf_ack), .cf_line(cf_line), .cf_data(cf_data),

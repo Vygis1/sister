@@ -1,71 +1,89 @@
-//////////////////////////////////////////////////////////////////////////////////
-// tb_n64_vid - n64_vid.v behind hdmi_tx (SIM): the fetch side is modelled here --
-// whenever the pixel side wants a new source line, that line of a 320x240 RGBA5551
-// test picture is written into the buffer as RDRAM's lines arrive (16 bytes a word,
-// byte k of the word at bits 8k+7:8k, each pixel big-endian) -- and every pixel of
-// the 640x480 picture hdmi_tx asks for must be its source pixel, doubled, in RGB888.
+// tb_n64_vid - n64_vid's picture, frame for frame, against tools/vidref.py's model.
 //
-//   ./tools/sim.sh tb_n64_vid
-//////////////////////////////////////////////////////////////////////////////////
-`timescale 1ns/1ps
-`default_nettype none
+// tools/vidref.py gen CASE writes the source lines (sim/vid/img.hex: 512 lines of 128
+// 144-bit words) and the settings (sim/vid/cfg.hex); this bench answers the pixel
+// side's line requests the way n64_top / fb_ddr do -- late, a word every other clock --
+// runs hdmi_tx's counters, and writes the third frame to out.hex; vidref.py check
+// compares it with the model. (tools/vidref.py all does every case.)
+`timescale 1ns / 1ps
 
 module tb_n64_vid;
 	reg clk = 0, pclk = 0;
-	always #10 clk = ~clk;                     // 50 MHz
-	always #20 pclk = ~pclk;                   // 25 MHz, unrelated phase
-	wire [9:0] x, y; wire req; wire [23:0] rgb;
-	hdmi_tx #(.SIM(1)) u_tx (.clk50(1'b0), .rst(1'b0), .sim_pclk(pclk), .ext_pclk(1'b0), .ext_pclk5(1'b0), .ext_locked(1'b0),
-		.pclk(), .x(x), .y(y), .req(req), .rgb(rgb), .frame_start(), .tmds_p(), .tmds_n(), .tmds_clk_p(), .tmds_clk_n(),
-		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
+	always #10 clk = ~clk;          // 50 MHz: the slowest console clock
+	always #20 pclk = ~pclk;        // 25 MHz
 
-	reg wr_en = 0; reg [7:0] wr_addr = 0; reg [127:0] wr_data = 0;
-	wire [8:0] want;
-	n64_vid dut (.clk(clk), .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data), .want(want),
-		.width(12'd320), .bpp32(1'b0), .on(1'b1), .pclk(pclk), .x(x), .y(y), .req(req), .rgb(rgb));
+	reg [143:0] img [0:65535];
+	reg [31:0]  cfg [0:7];
+	initial begin
+		$readmemh("../../sim/vid/img.hex", img);
+		$readmemh("../../sim/vid/cfg.hex", cfg);
+	end
+	wire        ps1    = cfg[0][0];
+	wire [11:0] width  = cfg[1][11:0];
+	wire [9:0]  height = cfg[2][9:0];
+	wire        bpp32  = cfg[3][0];
+	wire        hid_ok = cfg[4][0];
+	wire [15:0] opt    = cfg[5][15:0];
+	wire [16:0] vist   = cfg[6][16:0];
+	wire [6:0]  nwords = cfg[7][6:0];
 
-	function [15:0] src; input [8:0] ly; input [9:0] lx; src = {lx[4:0] ^ ly[4:0], lx[9:5] + ly[4:0], ly[7:3], lx[0]}; endfunction
-	function [23:0] to888; input [15:0] p; to888 = {p[15:11], p[15:13], p[10:6], p[10:8], p[5:1], p[5:3]}; endfunction
+	// hdmi_tx's counters: x, y over the whole frame, req in the picture; rgb wanted a clock later
+	reg [9:0] x = 0, y = 0; reg req = 0;
+	always @(posedge pclk) begin
+		if (x == 799) begin x <= 0; y <= (y == 524) ? 10'd0 : y + 10'd1; end else x <= x + 10'd1;
+	end
+	always @(*) req = x < 640 && y < 480;
 
-	// the fetch side: a new wanted line -> its 40 words, a word every few clocks
-	reg [8:0] have = 9'h1FF; integer k, j;
+	// the fetcher: on a new want, wait (as DDR3 would), then a word every other clock
+	reg        wr_en = 0; reg [8:0] wr_addr = 0; reg [143:0] wr_data = 0;
+	wire [8:0] want_n, want_p;
+	wire [8:0] want = ps1 ? want_p : want_n;
+	reg  [8:0] line = 9'h1FF; reg busy = 0; reg [10:0] dly = 0; reg [6:0] k = 0; reg ph = 0;
+	integer seed = 7;
 	always @(posedge clk) begin
 		wr_en <= 1'b0;
-		if (want != have && want < 9'd240) begin : fetch
-			reg [127:0] w;
-			have <= want;
-			for (k = 0; k < 40; k = k + 1) begin
-				for (j = 0; j < 8; j = j + 1) begin
-					// pixel 8k+j: bytes 2j (high) and 2j+1 (low) of the word
-					w[8 * (2 * j) +: 8]     = src(want, 8 * k + j) >> 8;
-					w[8 * (2 * j + 1) +: 8] = src(want, 8 * k + j);
+		if (!busy && want != line) begin
+			line <= want; busy <= 1'b1; k <= 0; ph <= 0;
+			dly <= 11'd200 + ($random(seed) & 11'h1FF);       // 4..14 us before the first word
+		end else if (busy) begin
+			if (dly != 0) dly <= dly - 11'd1;
+			else begin
+				ph <= !ph;
+				if (ph) begin
+					wr_en <= 1'b1; wr_addr <= {line[1:0], k}; wr_data <= img[{line, k}];
+					if (k + 7'd1 >= nwords) busy <= 1'b0; else k <= k + 7'd1;
 				end
-				@(posedge clk); wr_en <= 1'b1; wr_addr <= {want[0], k[6:0]}; wr_data <= w;
-				@(posedge clk); wr_en <= 1'b0;
 			end
 		end
 	end
 
-	// check: the pixel hdmi_tx asked for a clock ago
-	reg [9:0] x1, y1; reg r1;
-	always @(posedge pclk) begin x1 <= x; y1 <= y; r1 <= req; end
-	integer errors = 0, checked = 0, frames = 0;
-	// (the first frame starts with no blanking before it, so its first line was never fetched)
-	always @(posedge pclk) if (x == 10'd0 && y == 10'd0 && req) frames = frames + 1;
-	always @(posedge pclk) if (r1 && frames >= 2) begin
-		checked = checked + 1;
-		if (rgb !== to888(src(y1[9:1], {1'b0, x1[9:1]}))) begin
-			errors = errors + 1;
-			if (errors < 8) $display("tb_n64_vid: (%0d,%0d) got %06x want %06x", x1, y1, rgb, to888(src(y1[9:1], {1'b0, x1[9:1]})));
-		end
+	wire [23:0] rgb_n, rgb_p;
+	n64_vid #(.PS1(0)) u_n (.clk(clk), .wr_en(wr_en && !ps1), .wr_addr(wr_addr), .wr_data(wr_data), .want(want_n),
+		.width(width), .height(height), .bpp32(bpp32), .on(1'b1), .hid_ok(hid_ok), .vist(vist), .opt(opt),
+		.pclk(pclk), .x(x), .y(y), .req(req), .rgb(rgb_n));
+	n64_vid #(.PS1(1)) u_p (.clk(clk), .wr_en(wr_en && ps1), .wr_addr(wr_addr), .wr_data(wr_data), .want(want_p),
+		.width(width), .height(height), .bpp32(1'b0), .on(1'b1), .hid_ok(1'b0), .vist(17'd0), .opt(opt),
+		.pclk(pclk), .x(x), .y(y), .req(req), .rgb(rgb_p));
+	wire [23:0] rgb = ps1 ? rgb_p : rgb_n;
+
+	// the third frame out: the pixel asked for at (x, y) comes on the next clock
+	integer fd, frame = 0, n = 0;
+	reg [9:0] px, py; reg pv = 0;
+	reg under = 0;
+	always @(posedge pclk) begin
+		px <= x; py <= y; pv <= req;
+		if (x == 0 && y == 0) frame = frame + 1;
+		if (frame == 3 && pv) begin $fwrite(fd, "%06x\n", rgb); n = n + 1; end
+		if (frame >= 2 && (ps1 ? u_p.underrun : u_n.underrun)) under = 1;
 	end
 	initial begin
-		// a frame to settle (the first lines are fetched in its blanking), then two checked
-		#(800 * 525 * 40 * 3);
-		$display("tb_n64_vid: %0d pixels checked, %0d wrong", checked, errors);
-		if (errors == 0 && checked >= 614400) $display("tb_n64_vid: all checks passed"); else $display("tb_n64_vid: FAIL");
+		fd = $fopen("out.hex", "w");
+		wait (frame == 4);
+		$fclose(fd);
+		if (under) $display("tb_n64_vid: FAIL - a row reader ran out of pixels");
+		else if (n != 640 * 480) $display("tb_n64_vid: FAIL - %0d pixels", n);
+		else $display("tb_n64_vid: a frame written (%0d pixels), no reader ran dry", n);
 		$finish;
 	end
+	initial begin #60_000_000; $display("tb_n64_vid: TIMEOUT"); $finish; end
 endmodule
-
-`default_nettype wire

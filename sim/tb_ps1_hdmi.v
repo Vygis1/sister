@@ -59,7 +59,7 @@ module tb_ps1_hdmi #(parameter W = 256);
 		end
 	end
 
-	wire lf_we; wire [7:0] lf_addr; wire [127:0] lf_data; wire [8:0] lf_want;
+	wire lf_we; wire [8:0] lf_addr; wire [127:0] lf_data; wire [8:0] lf_want;
 	fb_ddr u_fb (.clk(clk), .rst(rst),
 		.frame_start(fstart), .px_valid(pv), .px_x(px_x), .px_y(px_y), .px_rgb(prgb),
 		.fl_valid(1'b0), .fl_data(128'd0), .fl_x(10'd0), .fl_y(9'd0),
@@ -67,8 +67,9 @@ module tb_ps1_hdmi #(parameter W = 256);
 		.hdmi_on(1'b1), .lf_want(lf_want), .lf_words(W / 8), .lf_we(lf_we), .lf_addr(lf_addr), .lf_data(lf_data),
 		.hr_addr(18'd0), .hr_req(1'b0), .hr_rdata(), .hr_ack(),
 		.m_addr(m_addr), .m_req(m_req), .m_we(m_we), .m_wdata(m_wdata), .m_ready(m_ready), .m_rdata(m_rdata), .m_valid(m_valid));
-	n64_vid #(.PS1(1)) u_vid (.clk(clk), .wr_en(lf_we), .wr_addr(lf_addr), .wr_data(lf_data), .want(lf_want),
-		.width(W), .bpp32(1'b0), .on(1'b1), .pclk(pclk), .x(x), .y(y), .req(req), .rgb(rgb));
+	n64_vid #(.PS1(1)) u_vid (.clk(clk), .wr_en(lf_we), .wr_addr(lf_addr), .wr_data({16'd0, lf_data}), .want(lf_want),
+		.width(W), .height(10'd240), .bpp32(1'b0), .on(1'b1), .hid_ok(1'b0), .vist(17'd0), .opt(16'd0),
+		.pclk(pclk), .x(x), .y(y), .req(req), .rgb(rgb));
 
 	initial begin repeat (8) @(posedge clk); rst = 0; gap = 10; end
 

@@ -21,6 +21,7 @@
 module n64_rdp_raster (
 	input  wire         clk,
 	input  wire         rst,
+	input  wire         no_dither,
 	input  wire         go,
 	output wire         busy,
 	// the primitive (tools/n64/n64rdp.py Tri): x in s.15, y in s.11.2
@@ -286,7 +287,7 @@ module n64_rdp_raster (
 	wire         pw_req;  wire [23:0] pw_line;  wire [127:0] pw_data;  wire [15:0] pw_mask;
 	wire [15:0]  p_dbg;
 	n64_rdp_pix u_pix (
-		.clk(clk), .rst(rst), .busy(p_busy), .drain(p_drain), .ce(pce),
+		.clk(clk), .rst(rst), .no_dither(no_dither), .busy(p_busy), .drain(p_drain), .ce(pce),
 		.om0(om0), .om1(om1), .comb0(comb0), .comb1(comb1),
 		.fog_color(fog_color), .blend_color(blend_color), .prim_color(prim_color), .env_color(env_color),
 		.key_center(key_center), .key_scale(key_scale), .k4(k4), .k5(k5),

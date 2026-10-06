@@ -217,7 +217,7 @@ module ps1_top (
 	input  wire        hdmi_on,
 	input  wire [8:0]  lf_want,        // the line HDMI's line buffer wants next (n64_vid)
 	output wire        lf_we,
-	output wire [7:0]  lf_addr,
+	output wire [8:0]  lf_addr,
 	output wire [127:0] lf_data,
 	input  wire [17:0] fbr_addr,
 	input  wire        fbr_req,

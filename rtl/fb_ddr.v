@@ -61,7 +61,7 @@ module fb_ddr #(
 	input  wire [8:0]  lf_want,
 	input  wire [6:0]  lf_words,
 	output reg         lf_we,
-	output reg  [7:0]  lf_addr,
+	output reg  [8:0]  lf_addr,
 	output reg  [127:0] lf_data,
 
 	// host read-back: a word of the frame
@@ -219,7 +219,7 @@ module fb_ddr #(
 				end
 			end
 			if (lf_wait && m_valid) begin
-				lf_we <= 1'b1; lf_addr <= {lf_line[0], lf_w}; lf_data <= m_rdata;
+				lf_we <= 1'b1; lf_addr <= {lf_line[1:0], lf_w}; lf_data <= m_rdata;
 				lf_wait <= 1'b0;
 				if (lf_w + 7'd1 >= lf_words) begin lf_on <= 1'b0; lf_have <= lf_line; end
 				else lf_w <= lf_w + 7'd1;

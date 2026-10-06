@@ -522,6 +522,7 @@ module console_top #(
 	reg [3:0]  n64_pads;             // which N64 controllers are plugged in
 	reg [10:0] n64_eh_addr;
 	reg        n64_vi_slow;          // the N64's VI at half rate (0x178 bit 0)
+	reg [15:0] vid_opt;              // the picture's settings (0x17C; n64_vid)
 	reg [31:0] n64_dbg_sel;          // what the N64's debug window shows (0x170): [5:0] which, [15:8] a log entry, [25:16] a DMEM word
 	reg [7:0]  n64_eh_wdata;
 	wire [7:0] n64_eh_rdata;
@@ -546,7 +547,7 @@ module console_top #(
 	always @(posedge clk) begin
 		if (rst) begin
 			run <= 1'b0; cpu_halt <= 1'b0; mirror_v <= 1'b0; joy1 <= 16'd0; joy2 <= 16'd0;
-			n64_stick1 <= 16'd0; n64_eep <= 2'd0; n64_pads <= 4'b0001; n64_dbg_sel <= 32'd0; n64_vi_slow <= 1'b0;
+			n64_stick1 <= 16'd0; n64_eep <= 2'd0; n64_pads <= 4'b0001; n64_dbg_sel <= 32'd0; n64_vi_slow <= 1'b0; vid_opt <= 16'd0;
 			mapper_id <= 4'd0; prg_last <= 6'd3; console_sel <= CONSOLE_FIRST;
 			chr_is_ram <= 1'b0;
 			test_mode <= 1'b0;
@@ -579,6 +580,7 @@ module console_top #(
 			16'h016C: begin n64_eh_addr <= wdata[10:0]; n64_eh_wdata <= wdata[23:16]; end   // the EEPROM, a byte
 			16'h0170: n64_dbg_sel <= wdata;                       // the N64's debug window: what 0x174 shows
 			16'h0178: n64_vi_slow <= wdata[0];                         // the N64's VI at half rate
+			16'h017C: vid_opt <= wdata[15:0];                          // the picture's settings (n64_vid; the menu's Video page)
 			16'h001C: begin
 				mapper_id  <= wdata[3:0];
 				prg_last   <= wdata[13:8];
@@ -677,6 +679,7 @@ module console_top #(
 		16'h0170: ctrl_rdata = n64_dbg_sel;
 		16'h0174: ctrl_rdata = n64_dbg_q;
 		16'h0178: ctrl_rdata = {31'd0, n64_vi_slow};
+		16'h017C: ctrl_rdata = {16'd0, vid_opt};
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -1017,7 +1020,7 @@ module console_top #(
 			.fbr_req(from_ddr && sfr), .fbr_word(sfa), .fbr_ack(fbr_ack_w), .fbr_rdata(fbr_rdata_w),   // all 19 bits
 			.fb_words(n64_fb_words), .fb_wpr(n64_fb_wpr), .fb_halve(n64_fb_halve),
 			.audio_lr(audio_lr), .audio_lr_we(audio_lr_we),
-			.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(n64_vid_rgb)
+			.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(n64_vid_rgb), .vid_opt(vid_opt)
 		);
 		assign fb_cap_ready = 1'b1;
 	end else begin : g_n64
@@ -1098,7 +1101,7 @@ module console_top #(
 
 	// --- the PlayStation ----------------------------------------------------------
 	generate if (CORE_PS1) begin : g_ps1
-		wire ps1_lf_we; wire [7:0] ps1_lf_addr; wire [127:0] ps1_lf_data; wire [8:0] ps1_lf_want;
+		wire ps1_lf_we; wire [8:0] ps1_lf_addr; wire [127:0] ps1_lf_data; wire [8:0] ps1_lf_want;
 		ps1_top u_ps1 (
 			.clk(clk), .rst(rst),
 			// The CPU runs when the PlayStation is selected AND the host has
@@ -1143,8 +1146,8 @@ module console_top #(
 		);
 		// HDMI: the frame fb_ddr keeps in DDR3 (captured every frame), a line at a time
 		// into a two-line buffer, doubled -- block RAM is the PlayStation's scarcest thing
-		n64_vid #(.PS1(1)) u_hdmi (.clk(clk), .wr_en(ps1_lf_we), .wr_addr(ps1_lf_addr), .wr_data(ps1_lf_data), .want(ps1_lf_want),
-			.width({2'd0, fb_width}), .bpp32(1'b0), .on(1'b1),
+		n64_vid #(.PS1(1)) u_hdmi (.clk(clk), .wr_en(ps1_lf_we), .wr_addr(ps1_lf_addr), .wr_data({16'd0, ps1_lf_data}), .want(ps1_lf_want),
+			.width({2'd0, fb_width}), .height({1'b0, fb_height}), .bpp32(1'b0), .on(1'b1), .hid_ok(1'b0), .vist(17'd0), .opt(vid_opt),
 			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(ps1_vid_rgb));
 	end else begin : g_ps1
 		assign ps1_vid_rgb = 24'd0;

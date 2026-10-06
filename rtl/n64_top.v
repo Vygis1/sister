@@ -99,6 +99,7 @@ module n64_top #(
 	input  wire [9:0]   vid_y,
 	input  wire         vid_req,
 	output wire [23:0]  vid_rgb,
+	input  wire [15:0]  vid_opt,         // the picture's settings (n64_vid)
 	output wire [17:0]  fb_words,        // the frame, in words
 	output wire [15:0]  fb_wpr,          // a row, in words
 	output wire         fb_halve,        // too big for the stream: every other row is sent
@@ -513,12 +514,13 @@ module n64_top #(
 	reg  [6:0]   hv_rk;               // lines of it back
 	reg  [23:0]  hv_base;             // its first byte in RDRAM
 	reg  [23:0]  hv_org;              // VI_ORIGIN as it was at the top of this HDMI frame
-	reg          hv_we;  reg [7:0] hv_wa;  reg [127:0] hv_wd;
+	reg          hv_we;  reg [8:0] hv_wa;  reg [127:0] hv_wd;
 	wire         hv_bpp32 = vi[0][1:0] == 2'd3;
 	wire [13:0]  hv_stride = hv_bpp32 ? {vi[2][11:0], 2'b00} : {1'b0, vi[2][11:0], 1'b0};
 	wire         hv_go = hv_busy && hv_k != hv_n;
-	n64_vid u_vid (.clk(clk), .wr_en(hv_we), .wr_addr(hv_wa), .wr_data(hv_wd), .want(hv_want),
-		.width(vi[2][11:0]), .bpp32(hv_bpp32), .on(vi[0][1:0] != 2'd0),
+	n64_vid u_vid (.clk(clk), .wr_en(hv_we), .wr_addr(hv_wa), .wr_data({16'd0, hv_wd}), .want(hv_want),
+		.width(vi[2][11:0]), .height(vi[2][11:0] <= 12'd320 ? 10'd240 : 10'd480), .bpp32(hv_bpp32), .on(vi[0][1:0] != 2'd0),
+		.hid_ok(1'b0), .vist(vi[0][16:0]), .opt(vid_opt),
 		.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb));
 	reg  [11:0]  sweep;               // while held: the caches are invalidated, a line a clock
 	reg  [2:0]   cop_k;               // a CACHE op by index: which of the lines (4 I, 8 D) it is on
@@ -654,7 +656,7 @@ module n64_top #(
 			end else if (hv_busy && hv_rk == hv_n) hv_busy <= 1'b0;
 			// its lines, back in the order they were asked for, into n64_vid's half for it
 			if (d_valid && q_head == 3'd3) begin
-				hv_we <= 1'b1; hv_wa <= {hv_line[0], hv_rk}; hv_wd <= d_rdata; hv_rk <= hv_rk + 7'd1;
+				hv_we <= 1'b1; hv_wa <= {hv_line[1:0], hv_rk}; hv_wd <= d_rdata; hv_rk <= hv_rk + 7'd1;
 			end
 			if (fbr_req && !fbr_ack) begin
 				if (fr_v && fr_tag == fr_lidx) begin
@@ -941,7 +943,7 @@ module n64_top #(
 					S_AREAD: begin ad_rd_data <= d_rdata; ad_rd_ack <= 1'b1; end
 					S_RREAD: begin rd_rd_data <= d_rdata; rd_rd_ack <= 1'b1; end
 					S_CREAD: begin cf_data <= d_rdata; cf_ack <= 1'b1; end
-					S_VREAD: begin hv_we <= 1'b1; hv_wa <= {hv_line[0], hv_k}; hv_wd <= d_rdata; hv_k <= hv_k + 7'd1; end
+					S_VREAD: begin hv_we <= 1'b1; hv_wa <= {hv_line[1:0], hv_k}; hv_wd <= d_rdata; hv_k <= hv_k + 7'd1; end
 					// a frame line: in hand now
 					S_FREAD: begin fr_line <= d_rdata; fr_tag <= fr_for; fr_v <= 1'b1; fr_pending <= 1'b0; end
 					default: begin hr_data <= d_rdata; hr_done <= 1'b1; hr_pending <= 1'b0; end
@@ -1515,7 +1517,7 @@ module n64_top #(
 	wire [63:0]  rdp_dbg, rdp_dbg2;
 	wire [87:0]  rdp_log_q;  wire [31:0] rdp_log_n;
 	n64_rdp2 #(.RDRAM_LINE(RDRAM_LINE)) u_rdp (
-		.clk(clk), .rst(rst || !run),
+		.clk(clk), .rst(rst || !run), .no_dither(vid_opt[8]),
 		.c_we(dp_cpu_we), .c_idx(sp_reg_wa[4:2]), .c_wd(sp_reg_wv),
 		.r_we(dp_we_rsp), .r_idx(dp_idx_rsp), .r_wd(dp_wd_rsp),
 		.regs_flat(dp_flat),

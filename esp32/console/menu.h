@@ -223,9 +223,34 @@ static String note;                         // one line under the list: what jus
 static const int LIST_TOP = 5, LIST_ROWS = 20;   // inside the frame (rows 4-25)
 
 // (the consoles, and Settings under them)
-static const int NSET = 2;                  // the settings' rows: at power-up, back
-static int count() { return level == 0 ? (int)consoles.size() + 1 : level == 2 ? NSET : (int)lists[cur].size(); }
 static bool bootLast() { prefs.begin("menu", true); bool v = prefs.getBool("bootlast", false); prefs.end(); return v; }
+
+// The picture's settings: one word into every console (0x17C on its page), as n64_vid
+// reads it -- [1:0] scaling, [3:2] scanlines, [5:4] the N64's VI filters, [6] dedither,
+// [7] no gamma, [8] the N64 draws without dither, [9] the PlayStation does.
+static const uint32_t VID_OPT = NES + 0x17C;
+struct VidSet { const char *name; uint8_t shift, bits; const char *vals[4]; uint8_t n; };
+static const VidSet VSET[] = {
+  { "Scaling",          0, 3, { "as the console", "sharp", "smooth", "edge-directed" }, 4 },
+  { "Scanlines",        2, 3, { "off", "light", "heavy" }, 3 },
+  { "N64 VI filters",   4, 3, { "as the game", "off", "all on" }, 3 },
+  { "Dedither",         6, 1, { "as the game", "always" }, 2 },
+  { "N64 gamma",        7, 1, { "as the game", "off" }, 2 },
+  { "Dither in drawing", 8, 3, { "on", "off" }, 2 },
+};
+static const int NVSET = sizeof(VSET) / sizeof(VSET[0]);
+static const int NSET = 2 + NVSET;          // at power-up, the picture's, back
+static uint32_t vidOpt() { prefs.begin("menu", true); uint32_t v = prefs.getUInt("vid", 0); prefs.end(); return v; }
+static int vidVal(int k) { const VidSet &v = VSET[k]; int x = (vidOpt() >> v.shift) & v.bits; return x == (int)v.bits && v.shift == 8 ? 1 : min(x, v.n - 1); }
+static void vidStep(int k) {
+  const VidSet &v = VSET[k];
+  int x = (vidVal(k) + 1) % v.n;
+  uint32_t o = vidOpt() & ~((uint32_t)v.bits << v.shift);
+  o |= (uint32_t)(v.shift == 8 ? (x ? 3 : 0) : x) << v.shift;    // (both consoles' dither at once)
+  prefs.begin("menu", false); prefs.putUInt("vid", o); prefs.end();
+}
+static void applyVideo() { fpga.busWrite(VID_OPT, vidOpt()); }
+static int count() { return level == 0 ? (int)consoles.size() + 1 : level == 2 ? NSET : (int)lists[cur].size(); }
 // how many fit (a row free under the frame's title and above its bottom)
 static int pageRows() { return level == 0 ? (LIST_ROWS - 2) / 2 + 1 : LIST_ROWS - 2; }
 
@@ -245,6 +270,7 @@ static void draw() {
   if (level == 2) {
     // what the board is, under the settings
     put(3, 17, "board", GREY);
+    put(3, 15, "(the picture's take effect at once)", GREY);
     right(36, 17, st.core == 0 ? String("the shell, protocol ") + st.version
                                : String(cm >= 0 ? MACHINES[cm].name : "a core") + ", protocol " + st.version, GREY);
     put(3, 19, "SD card", GREY);
@@ -272,6 +298,9 @@ static void draw() {
       if (i == 0) {
         put(5, row, "At power-up", WHITE, here);
         right(36, row, bootLast() ? "the last game" : "this menu", YELLOW, here);
+      } else if (i <= NVSET) {
+        put(5, row, VSET[i - 1].name, WHITE, here);
+        right(36, row, VSET[i - 1].vals[vidVal(i - 1)], YELLOW, here);
       } else put(5, row, "Back", WHITE, here);
     } else {
       put(5, row, fit(shown(lists[cur][i].name), 31), WHITE, here);
@@ -679,7 +708,11 @@ static void pick() {
   }
   if (level == 2) {
     if (sel == 0) { bool v = !bootLast(); prefs.begin("menu", false); prefs.putBool("bootlast", v); prefs.end(); }
-    else { level = 0; sel = consSel; top = 0; }
+    else if (sel <= NVSET) {
+      vidStep(sel - 1);
+      Status st = fpga.status();
+      if (st.alive && machineOfCore(st.core) >= 0) applyVideo();
+    } else { level = 0; sel = consSel; top = 0; }
     draw();
     return;
   }
@@ -688,11 +721,23 @@ static void pick() {
   // the N64 game running now: its save to the card while the N64 is still there
   if (eepSize) { eepService(true); eepSize = 0; }
   Status st = fpga.status();
-  if (machineOfCore(st.core) != g.m) {
+  // (and when it is, but the card holds another image of it than the one installed: a
+  // console updated on the card was never installed while it ran -- the newer one is now)
+  bool stale = false;
+  if (machineOfCore(st.core) == g.m) {
+    File cf = SD.open(String("/cores/") + MACHINES[g.m].core + ".bin");
+    if (cf) {
+      prefs.begin("menu", true); String inSlot = prefs.getString("slot", ""); uint32_t inSize = prefs.getUInt("size", 0); prefs.end();
+      stale = inSlot != MACHINES[g.m].core || inSize != (uint32_t)cf.size();
+      cf.close();
+    }
+  }
+  if (machineOfCore(st.core) != g.m || stale) {
     String e = switchTo(g.m);
     if (e.length()) { note = e; open_ = true; osd(1); draw(); return; }
   }
   loadFixes = 0;
+  applyVideo();                             // (before the game runs: a core comes up with 0)
   String e = load(g);
   if (e.length()) { note = e; draw(); return; }
   note = "";

@@ -23,6 +23,7 @@ module n64_rdp2 #(
 ) (
 	input  wire         clk,
 	input  wire         rst,
+	input  wire         no_dither,        // (a setting) colour drawn undithered, whatever the game asks
 	// the registers: a write from the CPU or the RSP (the CPU first), and all of
 	// them for reading
 	input  wire         c_we,
@@ -477,7 +478,7 @@ module n64_rdp2 #(
 	wire [383:0] tsz_all = {tile_sz[0], tile_sz[1], tile_sz[2], tile_sz[3], tile_sz[4], tile_sz[5], tile_sz[6], tile_sz[7]};
 
 	n64_rdp_raster u_raster (
-		.clk(clk), .rst(rst), .go(pr_go), .busy(pr_busy),
+		.clk(clk), .rst(rst), .no_dither(no_dither), .go(pr_go), .busy(pr_busy),
 		.xh(t_xh), .xm(t_xm), .xl(t_xl), .yh(t_yh), .ym(t_ym), .yl(t_yl),
 		.dxhdy(t_dxhdy), .dxmdy(t_dxmdy), .dxldy(t_dxldy), .tflags(t_flags), .tile(t_tile),
 		.at_ra(at_ra), .at_q(at_q),

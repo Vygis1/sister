@@ -29,6 +29,7 @@
 module n64_rdp_pix (
 	input  wire         clk,
 	input  wire         rst,
+	input  wire         no_dither,        // (a setting) no colour dither, whatever the other modes say
 	output wire         busy,             // a pixel in flight, or a line not yet written
 	input  wire         drain,            // the primitive's spans are all in: write the last lines
 	output wire         ce,               // the pipeline moves (the span buffer reads hold on low)
@@ -94,7 +95,7 @@ module n64_rdp_pix (
 	wire force_blend = om1[14], color_on_cvg = om1[7], image_read = om1[6];
 	wire [1:0] cov_mode = om1[9:8];
 	wire [1:0] dith_rgb = om0[7:6], dith_alpha = om0[5:4];
-	wire db_dither = dith_rgb != 2'd3;
+	wire db_dither = dith_rgb != 2'd3 && !no_dither;
 	wire persp_en = om0[19], tlut_en = om0[15], tlut_type = om0[14], sample_quad = om0[13], mid_texel_en = om0[12];
 	wire bilerp0 = om0[11], bilerp1 = om0[10];
 	wire z_cmp = om1[4], z_upd = om1[5];

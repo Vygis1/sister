@@ -48,7 +48,7 @@ module tb_n64_top;
 		.stick1(stick1), .pad_present(4'b0001), .eep_size(2'd0),
 		.eh_we(1'b0), .eh_addr(11'd0), .eh_wdata(8'd0), .eh_rdata(),
 		.audio_lr(), .audio_lr_we(),
-		.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb)
+		.pclk(pclk), .vid_x(vid_x), .vid_y(vid_y), .vid_req(vid_req), .vid_rgb(vid_rgb), .vid_opt(16'd0)
 	);
 
 	// --- DDR3: RDRAM (8 MB) at line 0, the cartridge (16 MB) at line 0x100000 -----------
