@@ -1243,7 +1243,11 @@ module vr4300 #(
 		hit = ((va[39:13] & ~{15'd0, m}) == e[87:61]) && va[63:62] == e[60:59] && (e[50] || e[58:51] == asid);
 		// the half: the address bit just above the page
 		odd = m[0] ? (m[2] ? (m[4] ? (m[6] ? (m[8] ? (m[10] ? va[24] : va[22]) : va[20]) : va[18]) : va[16]) : va[14]) : va[12];
-		tsr = {hit, odd ? {e[0], e[1], e[4:2], e[24:5]} : {e[25], e[26], e[29:27], e[49:30]}};
+		// ({hit, v, d, c, 0, pfn}: 27 bits. It was built 26 wide -- the hit fell off the top, so
+		// [26] was always 0 and every lookup missed: SM64's goddard heap, mapped at 0x04000000,
+		// took a TLB refill on its first load and the game hung. krom's tests never translate
+		// an access through a valid entry; tools/n64/n64tlb64k.py does.)
+		tsr = {hit, odd ? {e[0], e[1], e[4:2], 1'b0, e[24:5]} : {e[25], e[26], e[29:27], 1'b0, e[49:30]}};
 	end endfunction
 	wire [26:0] tr0 = tsr(te0, ts_va, ts_asid), tr1 = tsr(te1, ts_va, ts_asid);
 	wire [26:0] tr2 = tsr(te2, ts_va, ts_asid), tr3 = tsr(te3, ts_va, ts_asid);
