@@ -404,7 +404,7 @@ class CPU:
         if not self.e:
             self.push(self.pbr)
         self.push16(self.pc)
-        self.push(self.p | (0x10 if (self.e and brk) else 0) if self.e else self.p)
+        self.push(((self.p & ~0x10) | (0x10 if brk else 0)) if self.e else self.p)   # (emulation: bit 4 is B)
         self.p = (self.p | I) & ~D
         self.pbr = 0
         vec = vec_emu if self.e else vec_native
@@ -805,7 +805,7 @@ def _brk(c):
 
 def _cop(c):
     c.fetch()
-    c.interrupt(0xFFE4, 0xFFF4)
+    c.interrupt(0xFFE4, 0xFFF4, True)        # (pushes bit 4 set too: only IRQ / NMI clear it)
 
 
 OPS[0x00] = _brk; OPS[0x02] = _cop
