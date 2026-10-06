@@ -523,7 +523,7 @@ module console_top #(
 	reg [5:0]  prg_last;
 	reg [3:0]  console_sel;
 	reg [15:0] joy1, joy2;           // 8 bits for the older cores; the PS1 pad uses all 16
-	reg [15:0] n64_stick1;
+	reg [15:0] n64_stick1, n64_stick2;
 	reg [1:0]  n64_eep;              // the N64 cartridge's EEPROM: 0 none, 1 4 kbit, 2 16 kbit
 	reg [3:0]  n64_pads;             // which N64 controllers are plugged in
 	reg [10:0] n64_eh_addr;
@@ -573,7 +573,7 @@ module console_top #(
 	always @(posedge clk) begin
 		if (rst) begin
 			run <= 1'b0; cpu_halt <= 1'b0; mirror_v <= 1'b0; joy1 <= 16'd0; joy2 <= 16'd0;
-			n64_stick1 <= 16'd0; n64_eep <= 2'd0; n64_pads <= 4'b0001; n64_dbg_sel <= 32'd0; n64_vi_slow <= 1'b0; vid_opt <= 16'd0;
+			n64_stick1 <= 16'd0; n64_stick2 <= 16'd0; n64_eep <= 2'd0; n64_pads <= 4'b0001; n64_dbg_sel <= 32'd0; n64_vi_slow <= 1'b0; vid_opt <= 16'd0;
 			mapper_id <= 4'd0; prg_last <= 6'd3; console_sel <= CONSOLE_FIRST;
 			chr_is_ram <= 1'b0;
 			test_mode <= 1'b0;
@@ -603,6 +603,7 @@ module console_top #(
 			16'h0008: joy1 <= wdata[15:0];
 			16'h000C: joy2 <= wdata[15:0];
 			16'h0164: n64_stick1 <= wdata[15:0];                     // the N64's stick: X [15:8], Y [7:0]
+			16'h018C: n64_stick2 <= wdata[15:0];                     // controller 2's (its buttons: joy2)
 			16'h0168: begin n64_eep <= wdata[1:0]; n64_pads <= wdata[7:4]; end
 			16'h016C: begin n64_eh_addr <= wdata[10:0]; n64_eh_wdata <= wdata[23:16]; end   // the EEPROM, a byte
 			16'h0170: n64_dbg_sel <= wdata;                       // the N64's debug window: what 0x174 shows
@@ -1085,7 +1086,7 @@ module console_top #(
 			.hr_go(hr_go), .hr_line(hr_line), .hr_done(hr_done), .hr_data(hr_data),
 			.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(n64_d_wmask),
 			.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid), .d_calibrated(d_calibrated),
-			.joy1(joy1), .vi_slow(n64_vi_slow), .stick1(n64_stick1), .pad_present(n64_pads), .eep_size(n64_eep),
+			.joy1(joy1), .joy2(joy2), .vi_slow(n64_vi_slow), .stick1(n64_stick1), .stick2(n64_stick2), .pad_present(n64_pads), .eep_size(n64_eep),
 			.eh_we(n64_eh_we), .eh_addr(n64_eh_we ? wdata[10:0] : n64_eh_addr), .eh_wdata(wdata[23:16]), .eh_rdata(n64_eh_rdata),
 			.vi_status(n64_vi_status), .vi_origin(n64_vi_origin), .vi_width(n64_vi_width), .vi_yscale(n64_vi_yscale),
 			.dbg_pc(n64_dbg_pc), .dbg_retired(n64_retired), .dbg_sel(n64_dbg_sel), .dbg_q(n64_dbg_q),

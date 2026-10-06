@@ -1164,8 +1164,8 @@ static void onUpload() {
 
 extern const char PAGE_HTML[] PROGMEM;
 
-#include "menu.h"
 #include "pads.h"
+#include "menu.h"
 
 static String bootPins;
 

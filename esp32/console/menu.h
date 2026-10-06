@@ -1,25 +1,27 @@
 // menu.h - the menu on the TV: the games on the card, listed over the HDMI picture
 // (the console image's osd.v, written through esp_bus.v), picked with the pad, and
 // loaded straight from the card -- the console switched first when the game is for
-// another one (back to the shell, the core installed from /cores, booted).
+// another one (back to the shell, the core installed from /cores, booted). And the
+// settings: the picture, Wi-Fi (a network picked and its password typed on the screen,
+// or a phone shown QR codes), the controllers (pairing, a test, each console's button
+// mapping, two players), the system. At power-up: the start-up logo.
 //
 // Included by console.ino after everything it uses (fpga, the card, installFrom,
-// job, prefs).
+// job, prefs, pads.h). What the pages look like is screens.h's; this is what they do.
 //
-//   START + SELECT together   open the menu (it is open at power-up, on the shell's
-//                             own picture when the shell can draw it: version 2)
-//   UP / DOWN                 move; LEFT / RIGHT a page at a time
-//   A or START                open a console's games / load the game
-//   B                         back to the consoles / back to the game (the menu
-//                             pauses the NES and Master System while it is up)
+//   START + SELECT, or PS / Home   open the menu (it is open at power-up, on the shell's
+//                                  own picture when the shell can draw it: version 2)
+//   UP / DOWN                      move; LEFT / RIGHT, L1 / R1 a page at a time
+//   CROSS (or START)               open / pick / change
+//   CIRCLE                         back (from the consoles: back to the game)
+//   TRIANGLE                       the settings, from the consoles
 //
-// The pad is read back from the board (NES+0x08), wherever it is written from: the
-// PC's pad bridge today, a Bluetooth pad on this chip later.
+// The pads are read on this chip (pads.h), both players driving the menu.
 
 #pragma once
 #include <vector>
 #include <algorithm>
-
+#include "screens.h"
 namespace menu {
 
 // --- the board's registers (as pc/server.py) ------------------------------------
@@ -65,72 +67,40 @@ struct Game { String path, name; int8_t m; uint32_t size; };
 // bus): the menu runs there with no console booted, and installs one when a game wants it.
 static bool shellMenu(const Status &s) { return s.alive && s.core == 0 && s.version >= 2; }
 
-// --- the screen: 40 x 30 cells ----------------------------------------------------
-// osd.v draws them: a cell is [6:0] the character, [8] the selection bar behind it,
-// [10:9] the colour, [11] the header's / footer's lighter background. The font's
-// codes 0x01-0x07 are a frame's corners and lines and a block, 0x0F a diamond.
-static const int COLS = 40, ROWS = 30;
-static uint32_t *cells = (uint32_t *)calloc(COLS * ROWS, 4);   // (heap: static RAM is short beside Bluetooth)
-enum { WHITE = 0, YELLOW = 1, GREY = 2, GREEN = 3 };
-enum : char { G_TL = 0x01, G_TR = 0x02, G_BL = 0x03, G_BR = 0x04, G_HL = 0x05, G_VL = 0x06, G_BLOCK = 0x07, G_DIAMOND = 0x0F,
-              G_CURSOR = 0x10, G_UP = 0x1E, G_DOWN = 0x1F };
-static bool barRow[ROWS];
 
-static bool drawable(char c) { return (uint8_t)c >= 0x20 || (c >= G_TL && c <= G_BLOCK) || c == G_DIAMOND || c == G_CURSOR || c == G_UP || c == G_DOWN; }
-static void put(int col, int row, const String &s, int colour = WHITE, bool hl = false, int width = -1) {
-  if (row < 0 || row >= ROWS) return;
-  int n = width < 0 ? s.length() : width;
-  for (int i = 0; i < n && col + i < COLS; i++) {
-    if (col + i < 0) continue;
-    char ch = i < (int)s.length() ? s[i] : ' ';
-    if (!drawable(ch)) ch = ' ';
-    if ((uint8_t)ch > 0x7E) ch = '?';
-    cells[row * COLS + col + i] = (uint8_t)ch | (hl ? 0x100 : 0) | (colour << 9) | (barRow[row] ? 0x800 : 0);
-  }
+// --- the screen: ui.h's cells, sent to osd.v ---------------------------------------------------
+// (version 2 has the menu's own glyphs and palette; the console images built before it,
+// version 1, get plain characters -- ui.h folds them)
+static const uint32_t OSD_ID = OSD + 0x00, OSD_GLYPHS = OSD + 0x4000;
+static scr::Chrome chrome();
+static void hookUi() {
+  ui::hal.cells = [](int first, const uint32_t *v, int n) { fpga.busWrite(OSD_CELLS + 4 * first, v, n); };
+  ui::hal.reg = [](uint32_t off, uint32_t v) { fpga.busWrite(OSD + off, v); };
+  ui::hal.glyphRows = [](int first, const uint32_t *rows, int n) { fpga.busWrite(OSD_GLYPHS + 4 * first, rows, n); };
 }
-static void putc_(int col, int row, char c, int colour = WHITE, bool hl = false) { put(col, row, String(c), colour, hl); }
-static void centre(int row, const String &s, int colour = WHITE) { put((COLS - (int)s.length()) / 2, row, s, colour); }
-static void right(int endCol, int row, const String &s, int colour = WHITE, bool hl = false) { put(endCol - (int)s.length() + 1, row, s, colour, hl); }
-// a name cut to fit, with an ellipsis
-static String fit(const String &s, int w) { return (int)s.length() <= w ? s : s.substring(0, w - 3) + "..."; }
+// a console image (or the shell) has just come up: what its osd.v is, and the menu's glyphs
+// and palette into it (they do not survive a new bitstream)
+static void freshBoard() {
+  ui::v2 = fpga.busRead(OSD_ID) == 0x4F534432;     // "OSD2"
+  ui::forget();
+  ui::loadGlyphs();
+  ui::palette(art::MENU_PAL);
+}
+static void osd(uint32_t ctrl) { ui::ctrl(ctrl); }
+static void show() { ui::flush(); }
+
+// A message in a box (loading, switching, an error).
+static void message(const String &a, const String &b = "", int colour = ui::WHITE) {
+  scr::message(chrome(), a.c_str(), b.c_str(), colour);
+  show(); osd(1);
+}
+
 // a game's name as shown: without the dump's tags -- "(USA, Europe)", "[!]", "(Rev-A)"
 static String shown(const String &n) {
   int cut = -1;
   for (int i = 1; i < (int)n.length(); i++)
     if ((n[i] == '(' || n[i] == '[') && n[i - 1] == ' ') { cut = i - 1; break; }
   return cut > 0 ? n.substring(0, cut) : n;
-}
-
-// an empty screen: the header bar (rows 0-2) and the footer bar (27-29) lighter
-static void clear() {
-  for (int r = 0; r < ROWS; r++) barRow[r] = r <= 2 || r >= 27;
-  for (int r = 0; r < ROWS; r++) for (int c = 0; c < COLS; c++) cells[r * COLS + c] = ' ' | (barRow[r] ? 0x800 : 0);
-}
-// a frame from (c0, r0) to (c1, r1), a title set into its top edge
-static void frame(int c0, int r0, int c1, int r1, const String &title = "") {
-  putc_(c0, r0, G_TL, GREY); putc_(c1, r0, G_TR, GREY); putc_(c0, r1, G_BL, GREY); putc_(c1, r1, G_BR, GREY);
-  for (int c = c0 + 1; c < c1; c++) { putc_(c, r0, G_HL, GREY); putc_(c, r1, G_HL, GREY); }
-  for (int r = r0 + 1; r < r1; r++) { putc_(c0, r, G_VL, GREY); putc_(c1, r, G_VL, GREY); }
-  if (title.length()) put(c0 + 2, r0, " " + title + " ", WHITE);
-}
-// the header: the name, and what the board is now
-static void header(const String &what) {
-  putc_(2, 1, G_DIAMOND, YELLOW);
-  put(4, 1, "FPGA CONSOLE", YELLOW);
-  right(COLS - 3, 1, what, GREY);
-}
-static void footer(const String &hints) { centre(28, hints, GREY); }
-static void show() { fpga.busWrite(OSD_CELLS, cells, COLS * ROWS); }
-static void osd(uint32_t ctrl) { fpga.busWrite(OSD_CTRL, ctrl); }
-
-// A message in a box (loading, switching, an error).
-static void message(const String &a, const String &b = "", int colour = WHITE) {
-  clear();
-  header("");
-  frame(2, 10, 37, 18);
-  centre(13, fit(a, 32), colour);
-  if (b.length()) centre(15, fit(b, 32), GREY);
-  show(); osd(1);
 }
 
 // --- the card: a folder in /roms for each console ------------------------------------
@@ -218,15 +188,7 @@ static void scan() {
   }
 }
 
-static int level = 0;                       // 0 the consoles, 1 a console's games, 2 the settings
-static int cur = 0;                         // the console whose games are shown
-static int sel = 0, top = 0, consSel = 0;
-static bool (*menuButton)() = nullptr;      // a Bluetooth pad's PS / Home button (pads.h sets it)
-static bool open_ = false, gameIn = false;
-static String note;                         // one line under the list: what just happened
-static const int LIST_TOP = 5, LIST_ROWS = 20;   // inside the frame (rows 4-25)
-
-// (the consoles, and Settings under them)
+// --- the settings --------------------------------------------------------------
 static bool bootLast() { prefs.begin("menu", true); bool v = prefs.getBool("bootlast", false); prefs.end(); return v; }
 
 // The picture's settings: one word into every console (0x17C on its page), as n64_vid
@@ -254,107 +216,7 @@ static void vidStep(int k) {
   prefs.begin("menu", false); prefs.putUInt("vid", o); prefs.end();
 }
 static void applyVideo() { fpga.busWrite(VID_OPT, vidOpt()); }
-static int count() { return level == 0 ? (int)consoles.size() + 1 : level == 2 ? NSET : (int)lists[cur].size(); }
-// how many fit (a row free under the frame's title and above its bottom)
-static int pageRows() { return level == 0 ? (LIST_ROWS - 2) / 2 + 1 : LIST_ROWS - 2; }
-
-static void draw() {
-  clear();
-  Status st = fpga.status();
-  int cm = machineOfCore(st.core);
-  header(cm >= 0 ? String(MACHINES[cm].name) : String(""));
-  int n = count();
-  if (level == 0) frame(1, 4, 38, 25, "CONSOLES");
-  else if (level == 2) frame(1, 4, 38, 25, "SETTINGS");
-  else frame(1, 4, 38, 25, String(MACHINES[cur].name) + "  " + n + (n == 1 ? " game" : " games"));
-  if (level == 0 && consoles.empty()) {
-    centre(11, haveCard ? "no games on the card" : "no SD card", YELLOW);
-    centre(13, "roms/nes  sms  md  n64   discs", GREY);
-  }
-  if (level == 2) {
-    // what the board is, under the settings
-    put(3, 17, "board", GREY);
-    put(3, 15, "(the picture's take effect at once)", GREY);
-    right(36, 17, st.core == 0 ? String("the shell, protocol ") + st.version
-                               : String(cm >= 0 ? MACHINES[cm].name : "a core") + ", protocol " + st.version, GREY);
-    put(3, 19, "SD card", GREY);
-    right(36, 19, haveCard ? String((uint32_t)(SD.totalBytes() >> 30)) + " GB, " + String((uint32_t)((SD.totalBytes() - SD.usedBytes()) >> 30)) + " GB free"
-                           : String("none"), GREY);
-    put(3, 21, "Wi-Fi", GREY);
-    right(36, 21, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("not connected"), GREY);
-  }
-  // (the consoles a line apart -- there are few -- the games one under another)
-  int step = level == 0 ? 2 : 1, rows = pageRows();
-  if (sel < top) top = sel;
-  if (sel >= top + rows) top = sel - rows + 1;
-  for (int r = 0; r < rows && top + r < n; r++) {
-    int i = top + r, row = LIST_TOP + 1 + r * step;
-    bool here = i == sel;
-    put(2, row, "", WHITE, here, 36);                                  // the bar, frame to frame
-    if (here) putc_(3, row, G_CURSOR, YELLOW, true);
-    if (level == 0 && i == (int)consoles.size()) {
-      put(5, row, "Settings", WHITE, here);
-    } else if (level == 0) {
-      int m = consoles[i];
-      put(5, row, MACHINES[m].name, m == cm ? GREEN : WHITE, here);
-      right(36, row, String(lists[m].size()) + (lists[m].size() == 1 ? " game" : " games"), GREY, here);
-    } else if (level == 2) {
-      if (i == 0) {
-        put(5, row, "At power-up", WHITE, here);
-        right(36, row, bootLast() ? "the last game" : "this menu", YELLOW, here);
-      } else if (i <= NVSET) {
-        put(5, row, VSET[i - 1].name, WHITE, here);
-        right(36, row, VSET[i - 1].vals[vidVal(i - 1)], YELLOW, here);
-      } else put(5, row, "Back", WHITE, here);
-    } else {
-      put(5, row, fit(shown(lists[cur][i].name), 31), WHITE, here);
-    }
-  }
-  if (top > 0) putc_(38, LIST_TOP + 1, G_UP, YELLOW);
-  if (top + rows < n) putc_(38, LIST_TOP + LIST_ROWS - 2, G_DOWN, YELLOW);
-  if (level == 1 && n > rows) right(36, 25, " " + String(sel + 1) + "/" + n + " ", GREY);
-  put(2, 26, fit(note, 36), YELLOW);
-  footer(level == 0 ? (gameIn ? "A open    B back to the game" : "A open")
-       : level == 2 ? "A change    B back"
-                    : "A play     B back     L/R page");
-  show();
-}
-
-// --- the pad ----------------------------------------------------------------------
-enum { B_A = 1, B_B = 2, B_SEL = 4, B_START = 8, B_UP = 16, B_DOWN = 32, B_LEFT = 64, B_RIGHT = 128 };
-// The register holds the pad in the running machine's order (the server re-lays it);
-// back to the NES order the menu thinks in.
-static uint8_t pad() {
-  uint32_t v = fpga.busRead(NES_JOY1);
-  uint8_t c = fpga.busRead(NES_CONSOLE) & 0xF;
-  if (c == 2) {          // Mega Drive: up 0, down 1, left 2, right 3, B 4, C 5, A 6, start 7
-    uint8_t o = 0;
-    if (v & 1) o |= B_UP;   if (v & 2) o |= B_DOWN; if (v & 4) o |= B_LEFT; if (v & 8) o |= B_RIGHT;
-    if (v & 16) o |= B_B;   if (v & 32) o |= B_SEL; if (v & 64) o |= B_A;   if (v & 128) o |= B_START;
-    return o;
-  }
-  if (c == 3) {          // the PlayStation's order (pc/server.py _PS1_BITS): cross 14, circle 13, select 0, start 3, up 4, right 5, down 6, left 7
-    uint8_t o = 0;
-    if (v & 0x4000) o |= B_A; if (v & 0x2000) o |= B_B; if (v & 0x0001) o |= B_SEL; if (v & 0x0008) o |= B_START;
-    if (v & 0x0010) o |= B_UP; if (v & 0x0040) o |= B_DOWN; if (v & 0x0080) o |= B_LEFT; if (v & 0x0020) o |= B_RIGHT;
-    return o;
-  }
-  if (c == 4) {          // the N64's order (pc/server.py _N64_BITS): the pad's a 15, b 2, select 1, start 12, up 11, down 10, left 9, right 8
-    uint8_t o = 0;
-    if (v & 0x8000) o |= B_A; if (v & 0x0004) o |= B_B; if (v & 0x0002) o |= B_SEL; if (v & 0x1000) o |= B_START;
-    if (v & 0x0800) o |= B_UP; if (v & 0x0400) o |= B_DOWN; if (v & 0x0200) o |= B_LEFT; if (v & 0x0100) o |= B_RIGHT;
-    return o;
-  }
-  if (c == 5) {          // the SNES's ($4218): B 15, Y 14, select 13, start 12, up 11, down 10, left 9, right 8, A 7
-    // (the pad's cross is the SNES's B and its circle the A, by position; the menu takes cross
-    // to pick and circle to go back, as it does over every other console)
-    uint8_t o = 0;
-    if (v & 0x8000) o |= B_A; if (v & 0x0080) o |= B_B; if (v & 0x2000) o |= B_SEL; if (v & 0x1000) o |= B_START;
-    if (v & 0x0800) o |= B_UP; if (v & 0x0400) o |= B_DOWN; if (v & 0x0200) o |= B_LEFT; if (v & 0x0100) o |= B_RIGHT;
-    return o;
-  }
-  return v & 0xFF;
-}
+static bool splashOn() { prefs.begin("menu", true); bool v = prefs.getBool("splash", true); prefs.end(); return v; }
 
 // --- loading ------------------------------------------------------------------------
 static uint8_t *buf = nullptr;              // 16 kB staging, words in the board's order
@@ -500,6 +362,13 @@ static void cardService() {
   f.close();
 }
 
+// a buffer in the external PSRAM when there is one (internal RAM is short beside Bluetooth:
+// the menu's own stack needs it)
+static uint8_t *bigBuf(size_t n) {
+  void *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+  return (uint8_t *)(p ? p : malloc(n));
+}
+
 // --- the N64's save EEPROM ---------------------------------------------------------
 // Which games have one, and its size, by the game ID at 0x3B (pc/n64_saves.py's table,
 // from the games' own documentation). The EEPROM lives on the board (ctrl 0x16C, a byte
@@ -536,7 +405,7 @@ static void eepBegin(const uint8_t *h) {
   for (int i = 0x20; i < 0x34; i++) { char c = h[i]; name += (isalnum(c) || c == ' ' || c == '-' || c == '_') ? c : '_'; }
   name.trim();
   eepPath = "/saves/n64/" + name + ".eep";
-  if (!eepLast) eepLast = (uint8_t *)malloc(2048);
+  if (!eepLast) eepLast = bigBuf(2048);
   memset(eepLast, 0, 2048);
   File f = SD.open(eepPath);
   if (f) { f.read(eepLast, eepSize); f.close(); }
@@ -547,7 +416,7 @@ static void eepBegin(const uint8_t *h) {
 static void eepService(bool now_ = false) {
   if (!eepSize || !eepPath.length() || (!now_ && millis() - eepCheck < 20000)) return;
   eepCheck = millis();
-  static uint8_t now[2048];
+  static uint8_t *now = bigBuf(2048);
   for (int a = 0; a < eepSize; a++) { fpga.busWrite(N64_EEP, a); now[a] = (fpga.busRead(N64_EEP) >> 16) & 0xFF; }
   if (!memcmp(now, eepLast, eepSize)) return;
   SD.mkdir("/saves"); SD.mkdir("/saves/n64");
@@ -571,7 +440,7 @@ static void srmBegin(const String &rom, uint32_t size) {
   int dot = n.lastIndexOf('.');
   if (dot > 0) n = n.substring(0, dot);
   srmPath = "/saves/snes/" + n + ".srm";
-  if (!srmLast) srmLast = (uint8_t *)malloc(8192);
+  if (!srmLast) srmLast = bigBuf(8192);
   memset(srmLast, 0, 8192);                         // (no save yet: cleared, not the last game's)
   File f = SD.open(srmPath);
   if (f) { f.read(srmLast, size); f.close(); }
@@ -586,7 +455,7 @@ static void srmService(bool now_ = false) {
   srmCheck = millis();
   if (!(fpga.busRead(SNES_HPTR) & 1)) return;      // not written since the last look
   fpga.busWrite(SNES_HPTR, 1u << 31);              // (cleared first: a write while this reads sets it again)
-  static uint8_t now[8192];
+  static uint8_t *now = bigBuf(8192);
   for (uint32_t a = 0; a < srmSize; a += 4) {
     fpga.busWrite(SNES_HPTR, a);
     uint32_t w = fpga.busRead(SNES_HWORD);
@@ -777,30 +646,297 @@ static String switchTo(int m) {
   return String("the ") + M.name + " core did not come up";
 }
 
-static void pick() {
-  if (level == 0 && sel == (int)consoles.size()) {     // Settings
-    consSel = sel; level = 2; sel = 0; top = 0; note = "";
-    draw();
-    return;
+// --- the pages -------------------------------------------------------------------------------
+// Each page is a list of items (screens.h draws it) and what picking one does; B goes back up
+// the way it came. The splash, the keyboard, the QR codes, the pairing page and the pad test
+// are pages of their own.
+enum Page { P_HOME, P_GAMES, P_SETTINGS, P_PICTURE, P_WIFI, P_NETS, P_KEYBOARD, P_QR,
+            P_PADS, P_PAIR, P_TEST, P_MAPS, P_MAP, P_WAITBTN, P_SYSTEM, P_ABOUT };
+struct Nav { Page page; int sel, top; };
+static Nav nav = { P_HOME, 0, 0 };
+static std::vector<Nav> backStack;
+static int cur = 0;                         // the console whose games are shown
+static bool (*menuButton)() = nullptr;      // a pad's PS / Home button (console.ino sets it)
+static bool open_ = false, gameIn = false;
+static volatile bool scanned = false;       // the card's games are listed (begin(), after the task starts)
+static String note;                         // one line under the list: what just happened
+static String gameName;                     // the game in the console now
+static uint32_t pageT0 = 0;                 // when this page came up (the pairing countdown)
+
+// Wi-Fi: the networks the last scan found, the one being typed for
+struct Net { String ssid; int rssi; bool open; };
+static std::vector<Net> nets;
+static String kbFor, kbText;
+static int kbLayer = 0, kbRow = 1, kbCol = 0;
+static bool kbHide = false;
+// mapping: the console's layout and button being set; which of its two pad buttons
+static int mapL = 0, mapB = 0, mapSlot = 0;
+
+static int bars(int rssi) { return rssi > -55 ? 3 : rssi > -67 ? 2 : rssi > -78 ? 1 : 0; }
+static scr::Chrome chrome() {
+  scr::Chrome c;
+  c.wifiBars = WiFi.status() == WL_CONNECTED ? bars(WiFi.RSSI()) : -1;
+  pads::Player p[2]; pads::view(p);
+  c.pad1 = p[0].on; c.pad2 = p[1].on;
+  if (gameIn) c.running = gameName.c_str();
+  return c;
+}
+static std::string padText(const pads::Player &p) {
+  if (!p.on) return "none";
+  std::string s = p.name;
+  if (p.battery >= 0) s += "  " + std::to_string(p.battery) + "%";
+  return s;
+}
+
+// --- each page's items ------------------------------------------------------------------------
+using scr::Item;
+static Item item(const char *t, uint8_t icon = 0, int iconInk = ui::WHITE, const std::string &value = "", int valueInk = ui::GREY, bool gap = false) {
+  Item x; x.text = t; x.icon = icon; x.iconInk = iconInk; x.value = value; x.valueInk = valueInk; x.gap = gap; return x;
+}
+static std::vector<Item> items() {
+  std::vector<Item> v;
+  switch (nav.page) {
+  case P_HOME:
+    if (gameIn) v.push_back(item(("Back to " + gameName).c_str(), art::G_RIGHT, ui::GREEN));
+    for (size_t i = 0; i < consoles.size(); i++) {
+      int m = consoles[i];
+      size_t n = lists[m].size();
+      Item x = item(MACHINES[m].name, art::G_PAD, ui::PINK, std::to_string(n) + (n == 1 ? " game" : " games"));
+      if (i == 0 && gameIn) x.gap = true;
+      v.push_back(x);
+    }
+    v.push_back(item("Settings", art::G_GEAR, ui::YELLOW, "", ui::GREY, true));
+    break;
+  case P_GAMES:
+    for (auto &g : lists[cur]) v.push_back(item(shown(g.name).c_str()));
+    break;
+  case P_SETTINGS: {
+    v.push_back(item("Picture", art::G_HEART, ui::PINK, "scaling, scanlines"));
+    bool on = WiFi.status() == WL_CONNECTED;
+    v.push_back(item("Wi-Fi", on ? art::G_WIFI0 + bars(WiFi.RSSI()) : art::G_WIFI0, on ? ui::WHITE : ui::GREY, on ? WiFi.SSID().c_str() : "not connected"));
+    pads::Player p[2]; pads::view(p);
+    int n = p[0].on + p[1].on;
+    v.push_back(item("Controllers", art::G_PAD, ui::GREEN, std::to_string(n) + " connected"));
+    v.push_back(item("System", art::G_GEAR, ui::YELLOW));
+    v.push_back(item("About", art::G_TICK, ui::BLUE));
+    break; }
+  case P_PICTURE:
+    for (int k = 0; k < NVSET; k++) v.push_back(item(VSET[k].name, 0, 0, VSET[k].vals[vidVal(k)], ui::YELLOW));
+    break;
+  case P_WIFI: {
+    bool on = WiFi.status() == WL_CONNECTED;
+    v.push_back(item("Network", on ? art::G_WIFI0 + bars(WiFi.RSSI()) : art::G_WIFI0, on ? ui::GREEN : ui::GREY,
+                     on ? WiFi.SSID().c_str() : "not connected", on ? ui::WHITE : ui::GREY));
+    v.push_back(item("Choose a network", art::G_RIGHT, ui::WHITE, "", ui::GREY, true));
+    v.push_back(item("Connect with a phone", art::G_QUAD + 15, ui::WHITE, "QR code"));
+    v.push_back(item("Forget this network", art::G_CIRCLE, ui::RED));
+    break; }
+  case P_NETS:
+    for (auto &n : nets) {
+      Item x = item(n.ssid.c_str(), art::G_WIFI0 + bars(n.rssi), ui::WHITE);
+      if (!n.open) x.valueGlyph = art::G_LOCK;
+      v.push_back(x);
+    }
+    v.push_back(item("Scan again", art::G_RIGHT, ui::YELLOW, "", ui::GREY, true));
+    break;
+  case P_PADS: {
+    pads::Player p[2]; pads::view(p);
+    v.push_back(item("Player 1", art::G_PAD, p[0].on ? ui::GREEN : ui::GREY, padText(p[0])));
+    v.push_back(item("Player 2", art::G_PAD, p[1].on ? ui::GREEN : ui::GREY, padText(p[1])));
+    v.push_back(item("Pair a new controller", art::G_BT, ui::BLUE, "", ui::GREY, true));
+    v.push_back(item("Test the controllers", art::G_CROSS, ui::BLUE));
+    v.push_back(item("Button mapping", art::G_SQUARE, ui::PINK));
+    v.push_back(item("Swap players 1 and 2", art::G_RIGHT, ui::WHITE, pads::swapPlayers ? "swapped" : ""));
+    v.push_back(item("Forget paired controllers", art::G_CIRCLE, ui::RED));
+    break; }
+  case P_MAPS:
+    for (int l = 0; l < pads::NLAYOUTS; l++) v.push_back(item(pads::LAYOUTS[l].name, art::G_PAD, ui::PINK));
+    break;
+  case P_MAP: {
+    const pads::Layout &L = pads::LAYOUTS[mapL];
+    for (int i = 0; i < L.n; i++) {
+      std::string s;
+      for (int k = 0; k < 2; k++) {
+        uint8_t b = pads::bind[mapL][i][k];
+        if (b == pads::PB_NONE) continue;
+        if (!s.empty()) s += " / ";
+        s += pads::PB_NAME[b];
+      }
+      v.push_back(item(L.b[i].name, 0, 0, s.empty() ? "-" : s, ui::YELLOW));
+    }
+    v.push_back(item("Back to the usual buttons", art::G_CIRCLE, ui::RED, "", ui::GREY, true));
+    break; }
+  case P_SYSTEM: {
+    v.push_back(item("At power-up", 0, 0, bootLast() ? "the last game" : "this menu", ui::YELLOW));
+    v.push_back(item("Start-up logo", 0, 0, splashOn() ? "on" : "off", ui::YELLOW));
+    v.push_back(item("Show the start-up logo", art::G_HEART, ui::PINK, "", ui::GREY, true));
+    v.push_back(item("Restart the console", art::G_CIRCLE, ui::RED));
+    break; }
+  default: break;
   }
-  if (level == 0) {                         // a console: its games
-    if (consoles.empty()) return;
-    consSel = sel; cur = consoles[sel]; level = 1; sel = 0; top = 0; note = "";
-    draw();
-    return;
+  return v;
+}
+static std::vector<std::string> info() {
+  std::vector<std::string> v;
+  if (nav.page == P_WIFI) {
+    if (WiFi.status() == WL_CONNECTED) v.push_back(std::string("address ") + WiFi.localIP().toString().c_str());
+    v.push_back(std::string("its own network: ") + AP_SSID + " / " + AP_PASS);
+  } else if (nav.page == P_SYSTEM || nav.page == P_SETTINGS) {
+    Status st = fpga.status();
+    int cm = machineOfCore(st.core);
+    v.push_back(std::string("board: ") + (st.core == 0 ? "the shell" : cm >= 0 ? MACHINES[cm].name : "a core") +
+                ", protocol " + std::to_string(st.version) + (ui::v2 ? "" : " (old menu display)"));
+    if (haveCard) v.push_back("SD card: " + std::to_string((uint32_t)(SD.totalBytes() >> 30)) + " GB, " +
+                              std::to_string((uint32_t)((SD.totalBytes() - SD.usedBytes()) >> 30)) + " GB free");
+    else v.push_back("SD card: none");
+  } else if (nav.page == P_PICTURE) {
+    v.push_back("left / right or cross change it; at once");
+  } else if (nav.page == P_MAP) {
+    v.push_back("cross: set the button, square: a second one");
   }
-  if (level == 2) {
-    if (sel == 0) { bool v = !bootLast(); prefs.begin("menu", false); prefs.putBool("bootlast", v); prefs.end(); }
-    else if (sel <= NVSET) {
-      vidStep(sel - 1);
-      Status st = fpga.status();
-      if (st.alive && machineOfCore(st.core) >= 0) applyVideo();
-    } else { level = 0; sel = consSel; top = 0; }
-    draw();
-    return;
+  return v;
+}
+static const char *title() {
+  switch (nav.page) {
+  case P_HOME: return "CONSOLES";
+  case P_SETTINGS: return "SETTINGS";
+  case P_PICTURE: return "PICTURE";
+  case P_WIFI: return "WI-FI";
+  case P_NETS: return "CHOOSE A NETWORK";
+  case P_PADS: return "CONTROLLERS";
+  case P_MAPS: return "BUTTON MAPPING";
+  case P_SYSTEM: return "SYSTEM";
+  default: return "";
   }
-  if (lists[cur].empty()) return;
-  const Game &g = lists[cur][sel];
+}
+static std::vector<scr::Hint> hintsFor() {
+  using H = scr::Hint;
+  switch (nav.page) {
+  case P_HOME: return gameIn ? std::vector<H>{ { art::G_CROSS, "open" }, { art::G_CIRCLE, "back to the game" } }
+                             : std::vector<H>{ { art::G_CROSS, "open" } };
+  case P_GAMES: return { { art::G_CROSS, "play" }, { art::G_CIRCLE, "back" }, { 0, "L1/R1 page" } };
+  case P_PICTURE: case P_SYSTEM: return { { art::G_CROSS, "change" }, { art::G_CIRCLE, "back" } };
+  case P_NETS: return { { art::G_CROSS, "connect" }, { art::G_CIRCLE, "back" } };
+  case P_MAP: return { { art::G_CROSS, "set" }, { art::G_SQUARE, "second" }, { art::G_CIRCLE, "back" } };
+  default: return { { art::G_CROSS, "open" }, { art::G_CIRCLE, "back" } };
+  }
+}
+
+// --- drawing ----------------------------------------------------------------------------------
+static pads::Player testP[2];
+static uint8_t waitFor = pads::PB_NONE;
+static scr::PadView padView(const pads::Player &p) {
+  scr::PadView v;
+  v.on = p.on; v.name = p.name; v.battery = p.battery;
+  const pads::In &i = p.in;
+  v.cross = i.a; v.circle = i.b; v.square = i.x; v.triangle = i.y; v.l1 = i.l1; v.r1 = i.r1; v.l2 = i.l2; v.r2 = i.r2;
+  v.sel = i.sel; v.start = i.start; v.home = i.home; v.up = i.du; v.down = i.dd; v.left = i.dl; v.right = i.dr;
+  v.lx = i.lx; v.ly = i.ly; v.rx = i.rx; v.ry = i.ry;
+  return v;
+}
+static void draw() {
+  scr::Chrome ch = chrome();
+  switch (nav.page) {
+  case P_GAMES: {
+    size_t n = lists[cur].size();
+    std::string t = std::string(MACHINES[cur].name) + "  " + std::to_string(n) + (n == 1 ? " game" : " games");
+    scr::list(ch, t, items(), nav.sel, nav.top, {}, note.c_str(), hintsFor(), 1);
+    break; }
+  case P_KEYBOARD:
+    scr::keyboard(ch, std::string("PASSWORD FOR ") + ui::fit(kbFor.c_str(), 20), kbText.c_str(), kbHide, kbLayer, kbRow, kbCol, note.c_str());
+    break;
+  case P_QR:
+    scr::qrPage(ch, AP_SSID, AP_PASS, std::string("http://") + WiFi.softAPIP().toString().c_str() + "/");
+    break;
+  case P_PAIR: {
+    pads::Player p[2]; pads::view(p);
+    std::vector<std::string> names;
+    for (auto &q : p) if (q.on) names.push_back(q.name);
+    int left = 120 - (int)((millis() - pageT0) / 1000);
+    scr::pairing(ch, left < 0 ? 0 : left, names, note.c_str());
+    break; }
+  case P_TEST:
+    scr::tester(ch, padView(testP[0]), padView(testP[1]));
+    break;
+  case P_WAITBTN: {
+    int left = 6 - (int)((millis() - pageT0) / 1000);
+    scr::waitButton(ch, pads::LAYOUTS[mapL].name, pads::LAYOUTS[mapL].b[mapB].name, left < 0 ? 0 : left);
+    break; }
+  case P_ABOUT:
+    ui::palette(art::SPLASH_PAL);
+    scr::splash(scr::SPLASH_FRAMES);
+    ui::centre(26, "circle: back", ui::GREY);
+    break;
+  default:
+    scr::list(ch, title(), items(), nav.sel, nav.top, info(), note.c_str(), hintsFor(), nav.page == P_HOME ? 2 : 0);
+  }
+  if (nav.page != P_ABOUT) ui::palette(art::MENU_PAL);
+  show();
+  osd(nav.page == P_ABOUT ? 5 : gameIn ? 3 : 1);
+}
+
+static void go(Page p, int sel = 0) {
+  backStack.push_back(nav);
+  nav = { p, sel, 0 };
+  pageT0 = millis();
+  note = "";
+  draw();
+}
+static void closeMenu();
+static void back() {
+  note = "";
+  if (backStack.empty()) { if (gameIn) closeMenu(); return; }
+  nav = backStack.back(); backStack.pop_back();
+  pageT0 = millis();
+  draw();
+}
+
+// --- the splash ---------------------------------------------------------------------------------
+static void splash() {
+  if (!ui::v2) return;                      // (an old display: no logo to draw)
+  ui::palette(art::SPLASH_PAL);
+  osd(5);
+  uint32_t t0 = millis();
+  uint16_t was = pads::menuButtons();
+  for (int f = 0; f <= scr::SPLASH_FRAMES; f++) {
+    scr::splash(f);
+    show();
+    while (millis() - t0 < (uint32_t)(f + 1) * 33) delay(2);
+    uint16_t b = pads::menuButtons();
+    if (b & ~was) break;                    // a button: on with it
+    was = b;
+  }
+  ui::palette(art::MENU_PAL);
+}
+
+// --- Wi-Fi ------------------------------------------------------------------------------------------
+static void scanNets() {
+  message("looking for networks", "a few seconds");
+  int n = WiFi.scanNetworks();
+  nets.clear();
+  for (int i = 0; i < n; i++) {
+    String s = WiFi.SSID(i);
+    if (!s.length()) continue;
+    bool dup = false;
+    for (auto &x : nets) if (x.ssid == s) { dup = true; if (WiFi.RSSI(i) > x.rssi) x.rssi = WiFi.RSSI(i); }
+    if (!dup) nets.push_back({ s, WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN });
+  }
+  WiFi.scanDelete();
+  std::sort(nets.begin(), nets.end(), [](const Net &a, const Net &b) { return a.rssi > b.rssi; });
+  if (nets.size() > 30) nets.resize(30);
+}
+// join it, and keep it for the next power-up (as the web page's join does)
+static bool joinNet(const String &ssid, const String &pass) {
+  message(String("joining ") + ssid, "up to 15 seconds");
+  prefs.begin("net", false); prefs.putString("ssid", ssid); prefs.putString("pass", pass); prefs.end();
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(200);
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// --- picking a game ---------------------------------------------------------------------------
+static void playGame(const Game &g) {
   // the N64 game running now: its save to the card while the N64 is still there
   if (eepSize) { eepService(true); eepSize = 0; }
   if (srmSize) { srmService(true); srmSize = 0; }    // (the SNES's likewise)
@@ -816,27 +952,134 @@ static void pick() {
       cf.close();
     }
   }
+  pads::busBusy = true;
   if (machineOfCore(st.core) != g.m || stale) {
     String e = switchTo(g.m);
-    if (e.length()) { note = e; open_ = true; osd(1); draw(); return; }
+    freshBoard();
+    if (e.length()) { pads::busBusy = false; note = e; open_ = true; draw(); return; }
   }
   loadFixes = 0;
   applyVideo();                             // (before the game runs: a core comes up with 0)
   String e = load(g);
+  pads::busBusy = false;
   if (e.length()) { note = e; draw(); return; }
   note = "";
   gameIn = true; open_ = false;
+  gameName = shown(g.name);
+  backStack.clear(); nav = { P_HOME, 0, 0 };
   osd(0);
   prefs.begin("menu", false); prefs.putString("last", g.path); prefs.end();
   Serial.println("menu: loaded " + g.path + (loadFixes ? " (" + String(loadFixes) + " chunk(s) written again)" : ""));
+}
+
+// --- what a button does on each page -----------------------------------------------------------
+static void pickItem(bool second = false) {
+  int s = nav.sel;
+  switch (nav.page) {
+  case P_HOME: {
+    int k = s;
+    if (gameIn) { if (k == 0) { closeMenu(); return; } k--; }
+    if (k < (int)consoles.size()) { cur = consoles[k]; go(P_GAMES); }
+    else go(P_SETTINGS);
+    break; }
+  case P_GAMES:
+    if (!lists[cur].empty()) playGame(lists[cur][s]);
+    break;
+  case P_SETTINGS:
+    if (s == 0) go(P_PICTURE); else if (s == 1) go(P_WIFI); else if (s == 2) go(P_PADS);
+    else if (s == 3) go(P_SYSTEM); else go(P_ABOUT);
+    break;
+  case P_PICTURE:
+    vidStep(s);
+    { Status st = fpga.status(); if (st.alive && machineOfCore(st.core) >= 0) applyVideo(); }
+    draw();
+    break;
+  case P_WIFI:
+    if (s == 1) { scanNets(); go(P_NETS); }
+    else if (s == 2) go(P_QR);
+    else if (s == 3) {
+      prefs.begin("net", false); prefs.clear(); prefs.end();
+      WiFi.disconnect(false, true);
+      note = "forgotten"; draw();
+    }
+    break;
+  case P_NETS:
+    if (s >= (int)nets.size()) { scanNets(); nav.sel = 0; nav.top = 0; draw(); break; }
+    if (nets[s].open) {
+      bool ok = joinNet(nets[s].ssid, "");
+      back(); note = ok ? "connected: " + WiFi.localIP().toString() : "could not join " + nets[s].ssid; draw();
+    } else {
+      kbFor = nets[s].ssid; kbText = ""; kbLayer = 0; kbRow = 1; kbCol = 0;
+      go(P_KEYBOARD);
+    }
+    break;
+  case P_PADS:
+    if (s == 2) { pads::cmd = pads::CMD_PAIR_ON; go(P_PAIR); }
+    else if (s == 3) go(P_TEST);
+    else if (s == 4) go(P_MAPS);
+    else if (s == 5) {
+      pads::swapPlayers = !pads::swapPlayers;
+      prefs.begin("menu", false); prefs.putBool("swap", pads::swapPlayers); prefs.end();
+      draw();
+    } else if (s == 6) { pads::cmd = pads::CMD_FORGET; note = "paired controllers forgotten: pair them again"; draw(); }
+    break;
+  case P_MAPS:
+    mapL = s; go(P_MAP);
+    break;
+  case P_MAP:
+    if (s >= pads::LAYOUTS[mapL].n) { pads::defaultBinds(mapL); note = "the usual buttons again"; draw(); break; }
+    mapB = s; mapSlot = second ? 1 : 0; waitFor = pads::PB_NONE;
+    go(P_WAITBTN);
+    break;
+  case P_SYSTEM:
+    if (s == 0) { bool v = !bootLast(); prefs.begin("menu", false); prefs.putBool("bootlast", v); prefs.end(); draw(); }
+    else if (s == 1) { bool v = !splashOn(); prefs.begin("menu", false); prefs.putBool("splash", v); prefs.end(); draw(); }
+    else if (s == 2) { splash(); draw(); }
+    else if (s == 3) { message("restarting"); delay(300); fpga.forceShell(); ESP.restart(); }
+    break;
+  default: break;
+  }
+}
+
+// the keyboard's buttons
+static void keyInput(uint16_t edge) {
+  using namespace pads;
+  int cols = scr::kbCols(kbRow);
+  if (edge & M_UP)    { kbRow = (kbRow + scr::KB_ROWS - 1) % scr::KB_ROWS; }
+  if (edge & M_DOWN)  { kbRow = (kbRow + 1) % scr::KB_ROWS; }
+  if (edge & (M_UP | M_DOWN)) { cols = scr::kbCols(kbRow); if (kbCol >= cols) kbCol = cols - 1; }
+  if (edge & M_LEFT)  kbCol = (kbCol + cols - 1) % cols;
+  if (edge & M_RIGHT) kbCol = (kbCol + 1) % cols;
+  if (edge & M_Y) kbLayer = kbLayer == 1 ? 0 : 1;
+  if (edge & M_X) kbHide = !kbHide;
+  if (edge & M_B) { if (kbText.length()) kbText.remove(kbText.length() - 1); else { back(); return; } }
+  bool done = edge & M_START;
+  if (edge & M_A) {
+    int act; char c = scr::keyAt(kbLayer, kbRow, kbCol, act);
+    if (c && c != ' ' && kbText.length() < 63) kbText += c;
+    else if (act == 0) kbLayer = kbLayer == 1 ? 0 : 1;
+    else if (act == 1) kbLayer = kbLayer == 2 ? 0 : 2;
+    else if (act == 2 && kbText.length() < 63) kbText += ' ';
+    else if (act == 3 && kbText.length()) kbText.remove(kbText.length() - 1);
+    else if (act == 4) done = true;
+  }
+  if (done) {
+    bool ok = joinNet(kbFor, kbText);
+    if (ok) {
+      backStack.pop_back();             // (not back to the network list: to Wi-Fi)
+      back();
+      note = "connected: " + WiFi.localIP().toString();
+    } else note = "could not join -- the password?";
+  }
+  draw();
 }
 
 static void openMenu() {
   open_ = true;
   uint32_t c = fpga.busRead(NES_CTRL);
   if (c & 1) fpga.busWrite(NES_CTRL, c | 4);       // pause
+  backStack.clear(); nav = { P_HOME, 0, 0 }; note = "";
   draw();
-  osd(gameIn ? 3 : 1);
 }
 static void closeMenu() {
   open_ = false;
@@ -847,7 +1090,7 @@ static void closeMenu() {
 
 // --- the task -------------------------------------------------------------------
 static void task(void *) {
-  uint8_t was = 0; uint32_t held = 0, lastCheck = 0; bool up = false;
+  uint16_t was = 0; uint32_t held = 0, lastCheck = 0, lastDraw = 0, circleT = 0; bool up = false;
   for (;;) {
     delay(16);
     // is a console image there to draw on?
@@ -857,14 +1100,17 @@ static void task(void *) {
       bool console = s.alive && (machineOfCore(s.core) >= 0 || shellMenu(s));
       if (console && !up) {                          // it came up (power-up, or a core booted by hand)
         up = true;
-        if (!gameIn) { open_ = true; draw(); osd(1); }
-        // (at power-up, in the shell: the last game, if the settings say so)
+        freshBoard();
         static bool first = true;
+        if (first && splashOn()) splash();
+        if (!scanned) { message("reading the card", "a few seconds"); while (!scanned) delay(100); }
+        if (!gameIn) { open_ = true; backStack.clear(); nav = { P_HOME, 0, 0 }; draw(); }
+        // (at power-up, in the shell: the last game, if the settings say so)
         if (first && s.core == 0 && bootLast()) {
           prefs.begin("menu", true); String last = prefs.getString("last", ""); prefs.end();
           for (int m = 0; m < NMACH && last.length(); m++)
             for (int i = 0; i < (int)lists[m].size(); i++)
-              if (lists[m][i].path == last) { level = 1; cur = m; sel = i; pick(); m = NMACH; break; }
+              if (lists[m][i].path == last) { cur = m; playGame(lists[m][i]); m = NMACH; break; }
         }
         first = false;
       }
@@ -874,33 +1120,80 @@ static void task(void *) {
     if (cardIn && millis() - lastCard > 100) { lastCard = millis(); cardService(); }
     if (gameIn) { eepService(); srmService(); }
     bool sysMenu = menuButton && menuButton();
-    uint8_t p = pad();
-    uint8_t edge = p & ~was;
+    uint16_t p = pads::menuButtons();
+    uint16_t edge = p & ~was;
     if (p != was) held = millis();
-    bool rep = (p & (B_UP | B_DOWN)) && millis() - held > 350;
+    bool rep = (p & (pads::M_UP | pads::M_DOWN | pads::M_LEFT | pads::M_RIGHT)) && millis() - held > 350;
     if (rep) held = millis() - 270;                  // ~12 a second once it repeats
     was = p;
-    if (edge) Serial.printf("menu: buttons %02x (new %02x), %s, level %d, item %d\n", p, edge, open_ ? "open" : "closed", level, sel);
+    if (edge) Serial.printf("menu: buttons %04x (new %04x), %s, level %d, item %d\n", p, edge, open_ ? "open" : "closed",
+                            nav.page == P_HOME ? 0 : nav.page == P_GAMES ? 1 : 2, nav.sel);
     if (!open_) {
-      if (sysMenu || ((p & (B_START | B_SEL)) == (B_START | B_SEL) && (edge & (B_START | B_SEL)))) openMenu();
+      if (sysMenu || ((p & (pads::M_START | pads::M_SEL)) == (pads::M_START | pads::M_SEL) && (edge & (pads::M_START | pads::M_SEL)))) openMenu();
       continue;
     }
     if (sysMenu && gameIn) { closeMenu(); continue; }
-    int n = count();
-    if ((edge | (rep ? p : 0)) & B_UP)   { if (sel > 0) sel--; draw(); }
-    if ((edge | (rep ? p : 0)) & B_DOWN) { if (sel + 1 < n) sel++; draw(); }
-    if (edge & B_LEFT)  { sel = max(0, sel - pageRows()); draw(); }
-    if (edge & B_RIGHT) { sel = max(0, min(n - 1, sel + pageRows())); draw(); }
-    if ((edge & B_A) || ((edge & B_START) && !(p & B_SEL))) pick();
-    if (edge & B_B) {
-      if (level == 1 || level == 2) { level = 0; sel = consSel; top = 0; note = ""; draw(); }
-      else if (gameIn) closeMenu();
+    uint16_t press = edge | (rep ? p : 0);
+    // pages that are not lists
+    if (nav.page == P_KEYBOARD) { if (press) keyInput(press); continue; }
+    if (nav.page == P_QR || nav.page == P_ABOUT) { if (edge & (pads::M_B | pads::M_A)) back(); continue; }
+    if (nav.page == P_PAIR) {
+      if (edge & (pads::M_B | pads::M_A)) { back(); continue; }
+      if (millis() - lastDraw > 500) { lastDraw = millis(); draw(); }
+      continue;
+    }
+    if (nav.page == P_TEST) {
+      pads::view(testP);
+      if (p & pads::M_B) { if (!circleT) circleT = millis(); if (millis() - circleT > 1000) { circleT = 0; back(); continue; } }
+      else circleT = 0;
+      if (millis() - lastDraw > 50) { lastDraw = millis(); draw(); }
+      continue;
+    }
+    if (nav.page == P_WAITBTN) {
+      // the first pad button pressed after everything is let go (6 s, then nothing)
+      pads::Player q[2]; pads::view(q);
+      uint8_t b = pads::PB_NONE;
+      for (auto &x : q) if (x.on && b == pads::PB_NONE) b = pads::firstPressed(x.in);
+      if (waitFor == pads::PB_NONE && b == pads::PB_NONE) waitFor = 0xFE;           // all up: listening
+      else if (waitFor == 0xFE && b != pads::PB_NONE) {
+        pads::bind[mapL][mapB][mapSlot] = b;
+        if (mapSlot == 0) pads::bind[mapL][mapB][1] = pads::PB_NONE;
+        pads::saveBinds(mapL);
+        back();
+        note = String(pads::LAYOUTS[mapL].b[mapB].name) + " is now " + pads::PB_NAME[b];
+        draw();
+        continue;
+      }
+      if (millis() - pageT0 > 6000) { back(); continue; }
+      if (millis() - lastDraw > 500) { lastDraw = millis(); draw(); }
+      continue;
+    }
+    // a list
+    int n = (int)items().size();
+    int pageRows = nav.page == P_GAMES ? 18 : 9;
+    bool change = nav.page == P_PICTURE || nav.page == P_SYSTEM;
+    if (press & pads::M_UP)   { if (nav.sel > 0) nav.sel--; else if (n) nav.sel = n - 1; draw(); }
+    if (press & pads::M_DOWN) { if (nav.sel + 1 < n) nav.sel++; else nav.sel = 0; draw(); }
+    if (change && (edge & (pads::M_LEFT | pads::M_RIGHT)) && nav.page == P_PICTURE) { pickItem(); }
+    else if (change && (edge & (pads::M_LEFT | pads::M_RIGHT)) && nav.sel <= 1) { pickItem(); }
+    else {
+      if (edge & (pads::M_LEFT | pads::M_L1)) { nav.sel = max(0, nav.sel - pageRows); draw(); }
+      if (edge & (pads::M_RIGHT | pads::M_R1)) { nav.sel = max(0, min(n - 1, nav.sel + pageRows)); draw(); }
+    }
+    if ((edge & pads::M_A) || ((edge & pads::M_START) && !(p & pads::M_SEL))) pickItem();
+    else if ((edge & pads::M_X) && nav.page == P_MAP) pickItem(true);
+    else if ((edge & pads::M_Y) && nav.page == P_HOME) go(P_SETTINGS);
+    else if (edge & pads::M_B) back();
+    // (the settings pages show live things -- the pads coming and going, Wi-Fi: now and then)
+    if ((nav.page == P_PADS || nav.page == P_SETTINGS || nav.page == P_WIFI || nav.page == P_HOME) && millis() - lastDraw > 1000) {
+      lastDraw = millis(); draw();
     }
   }
 }
 
 static void begin() {
   buf = (uint8_t *)malloc(BUF);
+  hookUi();
   // The board starts in the shell (power-up, or this chip's own reset pulsing
   // PROGRAM_B): start whatever core the slot holds, so the menu has a screen.
   Status s0 = fpga.status();
@@ -915,9 +1208,19 @@ static void begin() {
     }
     Serial.printf("menu: booted the slot's core (%u)\n", fpga.status().core);
   }
+  // The task first -- its stack wants one piece of internal RAM, which Bluetooth leaves
+  // short and the card's list (hundreds of small names) leaves in pieces -- then the card:
+  // the start-up logo plays while it is read.
+  size_t big = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  BaseType_t ok = pdFAIL;
+  uint32_t stack = 0;
+  for (uint32_t st : { 10240u, 9216u, 8192u, 7168u })
+    if ((ok = xTaskCreatePinnedToCore(task, "menu", st, nullptr, 1, nullptr, 1)) == pdPASS) { stack = st; break; }
+  Serial.printf("menu: task %s (stack %u), internal RAM %u free, largest block %u\n", ok == pdPASS ? "running" : "NOT STARTED",
+                (unsigned)stack, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)big);
   scan();
   for (int m : consoles) Serial.printf("menu: %s, %u games\n", MACHINES[m].name, (unsigned)lists[m].size());
-  xTaskCreatePinnedToCore(task, "menu", 8192, nullptr, 1, nullptr, 1);
+  scanned = true;
 }
 
 }  // namespace menu

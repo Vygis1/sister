@@ -34,7 +34,18 @@ os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 import pygame
 from pygame._sdl2 import controller
 
-PORT = sys.argv[sys.argv.index('--port') + 1] if '--port' in sys.argv else 'COM6'
+def _find_port():
+    """the ESP32's USB serial port: the T8's CH9102 (1A86:55D4), else an S3's own USB or CH343"""
+    from serial.tools import list_ports
+    ports = list(list_ports.comports())
+    for vid, pid in ((0x1A86, 0x55D4), (0x303A, None), (0x1A86, None)):
+        for p in ports:
+            if p.vid == vid and (pid is None or p.pid == pid):
+                return p.device
+    return 'COM6'
+
+
+PORT = sys.argv[sys.argv.index('--port') + 1] if '--port' in sys.argv else _find_port()
 TOOLS = ('127.0.0.1', 5557)
 TRIG = 12000                # a trigger past this is pressed (0..32767)
 

@@ -12,7 +12,18 @@ the chip has fallen off the network, which is exactly when you need it.
 """
 import os, sys, time, serial
 
-PORT = os.environ.get("ESP_PORT", "COM6")    # ESP_PORT: the ESP32's USB serial port
+def _find_port():
+    """the ESP32's USB serial port: the T8's CH9102 (1A86:55D4), else an S3's own USB or CH343"""
+    from serial.tools import list_ports
+    ports = list(list_ports.comports())
+    for vid, pid in ((0x1A86, 0x55D4), (0x303A, None), (0x1A86, None)):
+        for p in ports:
+            if p.vid == vid and (pid is None or p.pid == pid):
+                return p.device
+    return "COM6"
+
+
+PORT = os.environ.get("ESP_PORT") or _find_port()    # ESP_PORT: the ESP32's USB serial port
 BAUD = 115200
 
 

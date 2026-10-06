@@ -77,6 +77,7 @@ module n64_top #(
 	input  wire         d_calibrated,
 	// --- for the host ---------------------------------------------------------------
 	input  wire [15:0]  joy1,
+	input  wire [15:0]  joy2,            // controller 2's buttons (as joy1)
 	input  wire         vi_slow,        // the VI at half rate (the game at half speed)
 	output wire [31:0]  vi_status,
 	output wire [31:0]  vi_origin,
@@ -107,6 +108,7 @@ module n64_top #(
 	output wire         fb_halve,        // too big for the stream: every other row is sent
 	// --- the controllers and the save chip (n64_pif.v) --------------------------------------
 	input  wire [15:0]  stick1,          // controller 1's stick: X [15:8], Y [7:0], signed
+	input  wire [15:0]  stick2,          // controller 2's
 	input  wire [3:0]   pad_present,     // which controllers are plugged in
 	input  wire [1:0]   eep_size,        // the cartridge's EEPROM: 0 none, 1 4 kbit, 2 16 kbit
 	input  wire         eh_we,           // the EEPROM from the host (saving and loading it)
@@ -1162,7 +1164,7 @@ module n64_top #(
 		.cpu_wsel({c_dbe[3:0] != 4'd0, c_dbe[7:4] != 4'd0}), .cpu_wdata(c_dwdata), .ram_flat(pif_flat),
 		.dma_we(pif_dma_we), .dma_widx(pif_dma_idx), .dma_wdata(pif_dma_data), .dma_last(pif_dma_last),
 		.go_run(pif_go), .busy(pif_busy),
-		.pad0({joy1, stick1}), .pad1(32'd0), .pad2(32'd0), .pad3(32'd0), .pad_present(pad_present),
+		.pad0({joy1, stick1}), .pad1({joy2, stick2}), .pad2(32'd0), .pad3(32'd0), .pad_present(pad_present),
 		.eep_size(eep_size), .eh_we(eh_we), .eh_addr(eh_addr), .eh_wdata(eh_wdata), .eh_rdata(eh_rdata)
 	);
 
