@@ -4,7 +4,7 @@ This is the stand-alone console: a TV over HDMI, a menu on the screen, games and
 cores on an SD card, PlayStation 4 / 5 (or Xbox, Switch) pads over Bluetooth. No PC
 is needed once it is set up.
 
-It plays **NES, Master System, Mega Drive, Nintendo 64 and PlayStation**, one at a
+It plays **NES, Master System, Mega Drive, Super NES, Nintendo 64 and PlayStation**, one at a
 time: each console is its own FPGA image, and the board becomes whichever one you
 pick from the menu.
 
@@ -87,10 +87,11 @@ commands are in [esp32/README.md](../esp32/README.md)).
 
 ## The SD card
 
-    /cores/nes.bin  sms.bin  md.bin  n64.bin  ps1.bin     the consoles
+    /cores/nes.bin  sms.bin  md.bin  snes.bin  n64.bin  ps1.bin     the consoles
     /roms/nes/      *.nes
     /roms/sms/      *.sms
     /roms/md/       *.md *.gen
+    /roms/snes/     *.sfc *.smc
     /roms/n64/      *.z64 *.n64 *.v64
     /discs/         PlayStation discs: .bin, raw 2352-byte sectors, one data track
     /bios/          the PlayStation BIOS (SCPH1001.BIN or another 512 kB SCPH*.BIN)
@@ -119,6 +120,9 @@ then the game starts. Picking another game for the same console takes a few seco
 flashes quickly; the ESP32 remembers it after that. Xbox: the pairing button on top.
 Switch Pro: the sync button. Two pads can be connected.
 
+On the Super NES the buttons go by position: cross is B, circle A, square Y, triangle X,
+L1 / R1 the shoulders.
+
 Saves: the PlayStation's memory card and the N64's EEPROM are written to `/saves`
 within seconds of the game saving.
 
@@ -142,6 +146,7 @@ the picture's take effect at once, in the game behind the menu):
 | NES | Full speed, sound right. Mappers 0-4 and 7 (NROM, MMC1, UxROM, CNROM, MMC3, AxROM). |
 | Master System | Full speed. |
 | Mega Drive | Full speed, stereo. Cartridges up to 4 MB. |
+| Super NES | New. Passes the CPU and sound-CPU test ROMs on the board. LoROM and HiROM cartridges up to 6 MB; no add-on chips (Super FX, SA-1, DSP-1...). Save RAM is 8 kB and is not yet written to the card. Hi-res screens are shown 256 wide. No commercial game tried yet. |
 | PlayStation | Boots the real BIOS, plays commercial games (Crash Bandicoot at 30 fps), memory card, CD audio from the disc image. |
 | Nintendo 64 | Runs Super Mario 64, slower than the real console in busy scenes; the RDP (graphics) is still being completed. |
 
