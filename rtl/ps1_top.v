@@ -37,7 +37,12 @@
 
 `default_nettype none
 
-module ps1_top (
+module ps1_top #(
+	// the core's clock. Everything timed in clocks -- the console-rate enable, the drive, the
+	// pad port, the GPU's 60 Hz raster -- is worked out from it, so it can run faster than 50 MHz
+	// and the console still keeps the console's time (only the CPU and the drawing are quicker)
+	parameter CLK_HZ = 50_000_000
+) (
 	input  wire        clk,
 	input  wire        rst,        // resets the memory infrastructure
 	input  wire        cpu_run,    // 0 holds the CPU and GPU (while the BIOS loads)
@@ -252,10 +257,11 @@ module ps1_top (
 	wire        dma_hog, dma_in_flight;
 	wire        dma_gpu_active;
 	reg  [19:0] pace_acc;
-	reg         sys_ce;                  // 33.8688 MHz, as an enable on the 50 MHz clock
+	reg         sys_ce;                  // 33.8688 MHz, as an enable on the core's clock
+	localparam [19:0] PACE_DEN = CLK_HZ / 100;
 	always @(posedge clk) begin
 		if (rst) begin pace_acc <= 20'd0; sys_ce <= 1'b0; end
-		else if (pace_acc + 20'd338688 >= 20'd500000) begin pace_acc <= pace_acc + 20'd338688 - 20'd500000; sys_ce <= 1'b1; end
+		else if (pace_acc + 20'd338688 >= PACE_DEN) begin pace_acc <= pace_acc + 20'd338688 - PACE_DEN; sys_ce <= 1'b1; end
 		else begin pace_acc <= pace_acc + 20'd338688; sys_ce <= 1'b0; end
 	end
 	// While a DMA is in flight -- paused on a full GPU FIFO or not -- the
@@ -629,7 +635,7 @@ module ps1_top (
 	wire [8:0]  fpx_y;
 	wire [15:0] fpx_rgb;
 
-	ps1_gpu gpu (
+	ps1_gpu #(.CLK_HZ(CLK_HZ)) gpu (
 		.clk(clk), .rst(core_rst),
 		.sel(gpu_hit & c_req & cpu_ce), .we(c_we), .a4(c_addr[2]), .dma_active(dma_gpu_active), .cap_every_vsync(cap_every_vsync), .gpu_fast(gpu_fast), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun),
 		.wdata(c_dout), .rdata(gpu_rdata),
@@ -885,7 +891,7 @@ module ps1_top (
 	// the controller port: SIO0 with a digital pad in slot 1
 	wire [31:0] sio_rdata;
 	wire        sio_irq;
-	ps1_sio u_sio (
+	ps1_sio #(.SHIFT_CYCLES(1400 * (CLK_HZ / 1000) / 50000)) u_sio (
 		.clk(clk), .rst(core_rst),
 		.sel(pad_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[3:0]), .be(c_be), .wdata(c_dout), .rdata(sio_rdata),
 		.buttons(joy1), .buttons2(joy2), .irq(sio_irq), .card2_in(card2_in),
@@ -903,7 +909,8 @@ module ps1_top (
 	wire        cd_tick;                         // the SPU's 44.1 kHz tick (made further down)
 	wire [23:0] cd_fill_lba; wire [3:0] cd_fill_room; wire cd_fill_run; wire [31:0] cd_dbg, cd_dbg_cmds, cd_dbg_setloc, cd_dbg_seek, cd_dbg_hdr;
 	assign cd_fill_lba_o = cd_fill_lba; assign cd_fill_room_o = cd_fill_room; assign cd_fill_run_o = cd_fill_run; assign cd_dbg_o = cd_dbg; assign cd_dbg_cmds_o = cd_dbg_cmds; assign cd_dbg_setloc_o = cd_dbg_setloc; assign cd_dbg_seek_o = cd_dbg_seek; assign cd_dbg_hdr_o = cd_dbg_hdr; assign cd_dma_words_o = cd_dma_words;
-	ps1_cdrom u_cd (
+	ps1_cdrom #(.ACK_CYCLES(20000 * (CLK_HZ / 1000) / 50000), .SECOND_CYCLES(120000 * (CLK_HZ / 1000) / 50000),
+	            .SEEK_CYCLES(CLK_HZ / 25), .SECTOR_1X(CLK_HZ / 75), .SECTOR_2X(CLK_HZ / 150)) u_cd (
 		.clk(clk), .rst(core_rst),
 		.sel(cd_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[3:0]), .be(c_be), .wdata(c_dout), .rdata(cd_rdata),
 		.irq(cd_irq),

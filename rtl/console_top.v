@@ -1103,7 +1103,7 @@ module console_top #(
 	// --- the PlayStation ----------------------------------------------------------
 	generate if (CORE_PS1) begin : g_ps1
 		wire ps1_lf_we; wire [8:0] ps1_lf_addr; wire [127:0] ps1_lf_data; wire [8:0] ps1_lf_want;
-		ps1_top u_ps1 (
+		ps1_top #(.CLK_HZ(CLK_HZ)) u_ps1 (
 			.clk(clk), .rst(rst),
 			// The CPU runs when the PlayStation is selected AND the host has
 			// released it (run=1), which the host sets after the BIOS is loaded.

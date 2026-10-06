@@ -49,7 +49,9 @@
 
 `default_nettype none
 
-module ps1_gpu (
+module ps1_gpu #(
+	parameter CLK_HZ = 50_000_000    // (the raster's 60 Hz and the swap waits are worked out from it)
+) (
 	input  wire        clk,
 	input  wire        rst,
 
@@ -280,9 +282,9 @@ module ps1_gpu (
 	reg [9:0]  vrange0, vrange1;
 
 	// ==================================================================================
-	// raster timing: free-running, 60 Hz, from 50 MHz
+	// raster timing: free-running, 60 Hz, from the core's clock (3168 clocks a line at 50 MHz)
 	// ==================================================================================
-	localparam LINE_CYC = 3168, LINES = 263, ACTIVE_LINES = 240;
+	localparam LINE_CYC = CLK_HZ / (60 * 263), LINES = 263, ACTIVE_LINES = 240;
 	reg [11:0] rc_x;
 	reg [8:0]  rc_y;
 	reg        frame_tick;
@@ -295,8 +297,8 @@ module ps1_gpu (
 	// different half every frame, which is what the flicker was. Waiting a
 	// couple of milliseconds lets the swap happen first.
 	reg [19:0] post_vsync;
-	localparam [19:0] SWAP_WAIT = 20'd100000;   // 2 ms at 50 MHz
-	localparam [19:0] LATE      = 20'd750000;   // 15 ms: give up waiting for idle
+	localparam [19:0] SWAP_WAIT = CLK_HZ / 500;     // 2 ms
+	localparam [19:0] LATE      = CLK_HZ / 1000 * 15;   // 15 ms: give up waiting for idle
 	wire       swap_done = (post_vsync == SWAP_WAIT);
 
 	// vertical sync arms exactly one capture; see the note by SC_IDLE
@@ -1323,7 +1325,7 @@ module ps1_gpu (
 	// ==================================================================================
 	// the pixel pipeline: polygons and rectangles, two pixels a clock (ps1_raster.v)
 	// ==================================================================================
-	ps1_raster u_raster (
+	ps1_raster #(.CLK_HZ(CLK_HZ)) u_raster (
 		.clk(clk), .rst(rst),
 		.start(r_start), .busy(r_busy), .always_in(r_rect),
 		.bx0(r_bx0), .bx1(r_bx1), .by0(r_by0), .by1(r_by1),

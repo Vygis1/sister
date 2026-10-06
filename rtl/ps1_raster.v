@@ -35,7 +35,9 @@
 
 `default_nettype none
 
-module ps1_raster (
+module ps1_raster #(
+	parameter CLK_HZ = 50_000_000    // (the console-pace mode's rate is worked out from it)
+) (
 	input  wire        clk,
 	input  wire        rst,
 
@@ -199,8 +201,8 @@ module ps1_raster (
 	reg         pace_go;
 	always @(posedge clk) begin
 		if (rst) begin pace_acc <= 20'd0; pace_go <= 1'b0; end
-		else if (pace_acc + 20'd266000 >= 20'd500000) begin pace_acc <= pace_acc + 20'd266000 - 20'd500000; pace_go <= 1'b1; end
-		else begin pace_acc <= pace_acc + 20'd266000; pace_go <= 1'b0; end
+		else if (pace_acc + 20'd266000 >= CLK_HZ / 100) begin pace_acc <= pace_acc + 20'd266000 - CLK_HZ / 100; pace_go <= 1'b1; end
+		else begin pace_acc <= pace_acc + 20'd266000; pace_go <= 1'b0; end   // (CLK_HZ / 100 < 2^20: under 104 MHz)
 	end
 	wire slow_prim = is_tex || is_gour || is_semi;
 	wire pace_ok   = !pace || !slow_prim || pace_go;
