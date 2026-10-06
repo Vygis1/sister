@@ -122,6 +122,19 @@ Switch Pro: the sync button. Two pads can be connected.
 Saves: the PlayStation's memory card and the N64's EEPROM are written to `/saves`
 within seconds of the game saving.
 
+**Settings** (the last entry under the consoles; A changes the one highlighted, and
+the picture's take effect at once, in the game behind the menu):
+
+| | |
+|---|---|
+| **At power-up** | this menu, or straight into the last game |
+| **Scaling** (N64, PlayStation) | *as the console* (the N64 smooths across the line, as its video chip does), *sharp* (each pixel doubled), *smooth* (blended both ways), *edge-directed* (diagonal edges rounded off) |
+| **Scanlines** | off, light, heavy -- dark lines between the picture's, as a CRT showed them |
+| **N64 VI filters** | *as the game* asks the N64's video chip: edge anti-aliasing, dither removal, the divot filter; or *off* (the raw picture), or *all on* |
+| **Dedither** | *as the game*, or *always*: takes the checkerboard dither out of 16-bit colour |
+| **N64 gamma** | *as the game*, or *off* |
+| **N64 dither** | *as the game*, or *off*: the N64 draws with no dither at all (smooth colour, a little banding) |
+
 ## How well each console runs
 
 | Console | State |

@@ -236,7 +236,7 @@ static const VidSet VSET[] = {
   { "N64 VI filters",   4, 3, { "as the game", "off", "all on" }, 3 },
   { "Dedither",         6, 1, { "as the game", "always" }, 2 },
   { "N64 gamma",        7, 1, { "as the game", "off" }, 2 },
-  { "Dither in drawing", 8, 3, { "on", "off" }, 2 },
+  { "N64 dither",       8, 3, { "as the game", "off" }, 2 },
 };
 static const int NVSET = sizeof(VSET) / sizeof(VSET[0]);
 static const int NSET = 2 + NVSET;          // at power-up, the picture's, back
