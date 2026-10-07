@@ -911,10 +911,16 @@ module ps1_top #(
 	wire        cd_tick;                         // the SPU's 44.1 kHz tick (made further down)
 	wire [23:0] cd_fill_lba; wire [3:0] cd_fill_room; wire cd_fill_run; wire [31:0] cd_dbg, cd_dbg_cmds, cd_dbg_setloc, cd_dbg_seek, cd_dbg_hdr;
 	assign cd_fill_lba_o = cd_fill_lba; assign cd_fill_room_o = cd_fill_room; assign cd_fill_run_o = cd_fill_run; assign cd_dbg_o = cd_dbg; assign cd_dbg_cmds_o = cd_dbg_cmds; assign cd_dbg_setloc_o = cd_dbg_setloc; assign cd_dbg_seek_o = cd_dbg_seek; assign cd_dbg_hdr_o = cd_dbg_hdr; assign cd_dma_words_o = cd_dma_words;
+	// The processor's enable for an I/O access: cpu_ce without its cache terms, which an
+	// uncached address never waits on (cpu_ready is then just !gp0_wait && !gpuread_wait).
+	// The same value for every access these devices see -- and the caches' hit logic is no
+	// longer in front of their registers' write enables (52.6 MHz missed by 0.57 ns there).
+	wire        cpu_ce_io = d_calibrated && !gp0_wait && !gpuread_wait && !vz_active_w && !dma_block && !dma_ram_wait
+	                        && !cpu_halt && (cpu_fast || sys_ce);
 	ps1_cdrom #(.ACK_CYCLES((CLK_HZ / 1000) * 2 / 5), .SECOND_CYCLES((CLK_HZ / 1000) * 12 / 5),
 	            .SEEK_CYCLES(CLK_HZ / 25), .SECTOR_1X(CLK_HZ / 75), .SECTOR_2X(CLK_HZ / 150)) u_cd (
 		.clk(clk), .rst(core_rst),
-		.sel(cd_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[3:0]), .be(c_be), .wdata(c_dout), .rdata(cd_rdata),
+		.sel(cd_hit & c_req & cpu_ce_io), .we(c_we), .addr(c_addr[3:0]), .be(c_be), .wdata(c_dout), .rdata(cd_rdata),
 		.irq(cd_irq),
 		.dma_rd(cd_dma_rd), .dma_rdata(cd_dma_rdata), .dma_rvalid(cd_dma_rvalid),
 		.fill_lba(cd_fill_lba), .fill_room(cd_fill_room), .fill_run(cd_fill_run),
@@ -994,7 +1000,7 @@ module ps1_top #(
 	assign cd_tick = spu_tick;
 	ps1_spu u_spu (
 		.clk(clk), .rst(core_rst),
-		.sel(spu_hit & c_req & cpu_ce), .we(c_we), .addr(c_addr[9:0]), .be(c_be), .wdata(c_dout), .rdata(spu_rdata),
+		.sel(spu_hit & c_req & cpu_ce_io), .we(c_we), .addr(c_addr[9:0]), .be(c_be), .wdata(c_dout), .rdata(spu_rdata),
 		.tick(spu_tick), .irq(spu_irq),
 		.cd_l(cd_audio_l), .cd_r(cd_audio_r),
 		.dma_wr(spu_dma_wr), .dma_wdata(spu_dma_wdata), .dma_ready(spu_dma_ready),

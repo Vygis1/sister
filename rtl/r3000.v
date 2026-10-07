@@ -283,6 +283,10 @@ module r3000 (
 	reg [31:0] mul_a, mul_b;
 	reg        mul_sgn;
 	reg [63:0] mul_p;
+	// the product every clock, not only on the processor's enable: its operands change only
+	// when a multiply starts, so it is the same value at the same clock -- and the enable
+	// (the caches' hit logic) is no longer in front of the multiplier's registers
+	always @(posedge clk) mul_p <= $signed({mul_sgn & mul_a[31], mul_a}) * $signed({mul_sgn & mul_b[31], mul_b});
 	wire       hl_busy = div_busy || mul_busy;
 	reg [4:0]  div_wait_rd;
 
@@ -412,7 +416,6 @@ module r3000 (
 
 			// the multiplier runs on its own: 33 x 33 signed covers MULTU too
 			if (mul_busy) begin
-				mul_p   <= $signed({mul_sgn & mul_a[31], mul_a}) * $signed({mul_sgn & mul_b[31], mul_b});
 				mul_cnt <= mul_cnt - 2'd1;
 				if (mul_cnt == 2'd1) begin mul_busy <= 1'b0; HI <= mul_p[63:32]; LO <= mul_p[31:0]; end
 			end
