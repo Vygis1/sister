@@ -46,7 +46,7 @@ case "${1:-nes}" in
          # unroutable. It cost a build to find out.
          EXTRA="-ip $MIG_XCI" ;;
   ps1|playstation)
-         NAME=ps1;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:1 -gen CLK_DIV:${PS1_DIV:-20}"
+         NAME=ps1;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:1 -gen CLK_DIV:${PS1_DIV:-20} -gen PS1_DBG:${PS1_DBG:-1}"
          # The PlayStation keeps 1 MB of VRAM in DDR3, so like the Mega Drive it
          # needs the memory controller. Its boot program is baked into the core.
          EXTRA="-ip $MIG_XCI" ;;

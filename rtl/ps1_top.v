@@ -41,7 +41,9 @@ module ps1_top #(
 	// the core's clock. Everything timed in clocks -- the console-rate enable, the drive, the
 	// pad port, the GPU's 60 Hz raster -- is worked out from it, so it can run faster than 50 MHz
 	// and the console still keeps the console's time (only the CPU and the drawing are quicker)
-	parameter CLK_HZ = 50_000_000
+	parameter CLK_HZ = 50_000_000,
+	// the debug hardware (performance counters, event ring, GTE write trace): 0 for a shipping image
+	parameter DBG    = 1
 ) (
 	input  wire        clk,
 	input  wire        rst,        // resets the memory infrastructure
@@ -330,7 +332,7 @@ module ps1_top #(
 	(* ram_style = "distributed" *) reg [31:0] gw_pc [0:63];
 	(* ram_style = "distributed" *) reg [31:0] gw_d  [0:63];
 	(* ram_style = "distributed" *) reg [5:0]  gw_r  [0:63];
-	always @(posedge clk) if (gte_wr_ok && !gte_snap_busy) begin
+	always @(posedge clk) if (DBG && gte_wr_ok && !gte_snap_busy) begin
 		gw_pc[gw_wp] <= dbg_pc; gw_d[gw_wp] <= c2_wdata; gw_r[gw_wp] <= {c2_wctl, c2_wreg}; gw_wp <= gw_wp + 6'd1;
 	end
 	wire [5:0] gw_ra = gw_wp + gte_wt_idx;
@@ -1155,7 +1157,7 @@ module ps1_top #(
 	always @(posedge clk) begin
 		ev_clk <= ev_clk + 29'd1;
 		ev_disp_d <= dbg_disp; ev_dma_d <= dma_gpu_active; ev_draw_d <= ev_draw;
-		if (rst) ev_p <= 6'd0;
+		if (rst || !DBG) ev_p <= 6'd0;
 		else if (dbg_disp[18:0] != ev_disp_d[18:0]) begin ev_ring[ev_p] <= {3'd0, ev_clk}; ev_p <= ev_p + 6'd1; end
 		else if (ev_draw_d && !ev_draw)             begin ev_ring[ev_p] <= {3'd3, ev_clk}; ev_p <= ev_p + 6'd1; end
 		else if (dma_gpu_active && !ev_dma_d)       begin ev_ring[ev_p] <= {3'd1, ev_clk}; ev_p <= ev_p + 6'd1; end
@@ -1171,7 +1173,7 @@ module ps1_top #(
 		// and the reset was 2,048 flip-flops on the global reset net: the worst
 		// path of the build at 0.002 ns of slack, 18.7 ns of pure routing from
 		// the reset register to their reset pins (2026-09-27).
-		begin
+		if (DBG) begin
 			perf[0] <= perf[0] + 32'd1;
 			if (d_req && d_ready)            perf[1] <= perf[1] + 32'd1;
 			if (c_req && !cpu_ce)            perf[2] <= perf[2] + 32'd1;

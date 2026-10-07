@@ -78,6 +78,11 @@ module console_top #(
 	// and the cartridge are in DDR3.
 	parameter CORE_N64 = 0,
 	parameter N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
+	// The PlayStation's debug hardware -- the performance counters, the event ring, the GTE
+	// snapshot and write trace, the PC / register / GP0 / DMA-list traces: ~9,000 bits of
+	// flip-flops and their logic on a chip at 99.9% of its slices. 0 for a shipping image: each
+	// one's write is gated off, never written it is a constant, and synthesis removes it.
+	parameter PS1_DBG  = 1,
 	// The Super Nintendo (snes_top.v). Its own image; the cartridge in DDR3.
 	parameter CORE_SNES = 0,
 	parameter WEBVID   = 0,    // the picture to the web page as well (see eth_top); without it the stream registers read 0
@@ -1200,7 +1205,7 @@ module console_top #(
 	// --- the PlayStation ----------------------------------------------------------
 	generate if (CORE_PS1) begin : g_ps1
 		wire ps1_lf_we; wire [8:0] ps1_lf_addr; wire [127:0] ps1_lf_data; wire [8:0] ps1_lf_want;
-		ps1_top #(.CLK_HZ(CLK_HZ)) u_ps1 (
+		ps1_top #(.CLK_HZ(CLK_HZ), .DBG(PS1_DBG)) u_ps1 (
 			.clk(clk), .rst(rst),
 			// The CPU runs when the PlayStation is selected AND the host has
 			// released it (run=1), which the host sets after the BIOS is loaded.
@@ -1219,7 +1224,7 @@ module console_top #(
 			.dbg_gpu_wr(ps1_dbg_gpu_wr), .dbg_mem(ps1_dbg_mem), .dbg_daddr(ps1_dbg_daddr),
 			.dbg_irq(ps1_dbg_irq), .dbg_gpu_st(ps1_dbg_gpu_st),
 			.dbg_cause(ps1_dbg_cause), .dbg_epc(ps1_dbg_epc),
-			.gte_snap_arm(gte_snap_arm), .gte_snap_go(gte_snap_go), .gte_snap_skip(gte_snap_skip), .gte_snap_idx(gte_snap_idx),
+			.gte_snap_arm(PS1_DBG ? gte_snap_arm : 1'b0), .gte_snap_go(gte_snap_go), .gte_snap_skip(gte_snap_skip), .gte_snap_idx(gte_snap_idx),
 			.gte_snap_data(gte_snap_data), .gte_snap_word(gte_snap_word), .gte_snap_state(gte_snap_state),
 			.gte_wt_idx(gte_wt_idx), .gte_wt_pc(gte_wt_pc), .gte_wt_data(gte_wt_data), .gte_wt_reg(gte_wt_reg), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
 			.cd_fill_lba_o(cd_fill_lba), .cd_fill_room_o(cd_fill_room), .cd_fill_run_o(cd_fill_run), .cd_dbg_o(cd_dbg), .cd_dbg_cmds_o(cd_dbg_cmds), .cd_dbg_setloc_o(cd_dbg_setloc), .cd_dbg_seek_o(cd_dbg_seek), .cd_dbg_hdr_o(cd_dbg_hdr), .cd_trace_idx(cd_trace_idx), .cc_flush(cc_flush), .cc_flush_busy(cc_flush_busy), .cd_trace_data(cd_trace_data), .cd_trace_wp(cd_trace_wp), .cd_dma_words_o(cd_dma_words),
@@ -1333,7 +1338,7 @@ module console_top #(
 	wire nt_bad = (ps1_node_hdr[23:0] != 24'hFFFFFF) && (ps1_node_hdr[1:0] != 2'b00 || ps1_node_hdr[23:21] != 3'd0);   // the terminator is not a link
 	always @(posedge clk) begin
 		if (rst || !run) begin nt_wr <= 4'd0; nt_frozen <= 1'b0; end
-		else if (ps1_node_v && !nt_frozen) begin
+		else if (PS1_DBG && ps1_node_v && !nt_frozen) begin
 			ntrace_a[nt_wr] <= ps1_node_addr; ntrace_h[nt_wr] <= ps1_node_hdr; nt_wr <= nt_wr + 4'd1;
 			if (nt_bad || gpw_frozen) nt_frozen <= 1'b1;   // a bad link, or the drawing engine stalled mid-command: keep the last 16 headers
 		end
@@ -1346,7 +1351,7 @@ module console_top #(
 		if (rst) begin gpw_n <= 6'd0; gpw_frozen <= 1'b0; gpw_stall <= 20'd0; gpw_arm_seen <= gpw_arm_tog; end
 		else begin
 			if (gpw_arm_seen != gpw_arm_tog) begin gpw_arm_seen <= gpw_arm_tog; gpw_frozen <= 1'b0; gpw_stall <= 20'd0; end
-			else if (!gpw_frozen && ps1_gpu_pop) begin gpw[gpw_n] <= ps1_gpu_popword; gpw_n <= gpw_n + 6'd1; end
+			else if (PS1_DBG && !gpw_frozen && ps1_gpu_pop) begin gpw[gpw_n] <= ps1_gpu_popword; gpw_n <= gpw_n + 6'd1; end
 			// waiting for arguments (D_ARG = 2) with nothing in the FIFO: a stall
 			// of a million clocks (20 ms) is a stream that ended mid-command
 			if (ps1_dbg_gpu_st[24 +: 6] == 6'd2 && ps1_dbg_gpu_st[11:0] == 12'd0) begin
@@ -1379,7 +1384,7 @@ module console_top #(
 	wire [31:0] rw_val = (ps1_wb_en_d && ps1_wb_reg_d == ps1_rsel[4:0]) ? ps1_wb_val_d : ps1_wa_val_d;
 	always @(posedge clk) begin
 		if (rst || !run) begin rw_wr <= 4'd0; rw_frozen <= 1'b0; end
-		else if (rw_hit && !rw_frozen) begin
+		else if (PS1_DBG && rw_hit && !rw_frozen) begin
 			rwtrace_pc[rw_wr] <= ps1_pc_d; rwtrace_v[rw_wr] <= rw_val; rw_wr <= rw_wr + 4'd1;
 			if (rw_freeze_pc == 32'd0 && rw_val == rw_freeze_val && ps1_pc_d[31:16] == 16'h8005) rw_frozen <= 1'b1;
 		end
@@ -1396,7 +1401,7 @@ module console_top #(
 			// one entry per COMMITTED instruction: its address and its word.
 			// Recording every PC value instead left out delay slots and put in
 			// fetches that were never run, and the trace read like a CPU bug.
-			if (ps1_dbg_exec) begin
+			if (PS1_DBG && ps1_dbg_exec) begin
 				pctrace[pct_wr] <= ps1_dbg_pc; pitrace[pct_wr] <= ps1_dbg_word;
 				pct_wr <= pct_wr + 4'd1; pct_last <= ps1_dbg_pc;
 			end
