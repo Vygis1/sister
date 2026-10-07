@@ -101,6 +101,10 @@ def tools_server():
             if q[:2] == 'P ':                 # a tool pressing buttons: in place of the pad for 0.3 s
                 override[0], override[1] = q, time.time() + 0.3
                 f.write(b'ok\n'); f.flush(); continue
+            if q[:2] == 'S ':                 # a line for the ESP32's serial console ("state"): what it
+                with cmd_lock:                # prints comes out here, as everything else does
+                    write(q[2:] + '\n')
+                f.write(b'ok\n'); f.flush(); continue
             if not q or q[0] not in 'RWD':
                 continue
             with cmd_lock:

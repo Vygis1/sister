@@ -33,6 +33,7 @@
 #include <SD.h>
 #include "link.h"
 #include "sdprobe.h"
+#include "xa.h"
 
 // --- wiring ------------------------------------------------------------------
 // ESP32-S3. The bus names differ from the classic ESP32 -- FSPI and HSPI rather
@@ -195,8 +196,10 @@ static const uint8_t *discSectorAt(uint32_t lba) {
 // FPGA link, not the card.
 //
 // The ring: sector L lives in slot L % WINDOW, and ringLba[slot] says which
-// sector is in it. The reader never runs more than WINDOW past rdWant, so a slot
-// it overwrites always holds a sector the drive has already moved beyond.
+// sector is in it. The reader never runs more than AHEAD past rdWant, so the
+// BEHIND sectors the drive has just moved beyond are still there: the XA task
+// below decodes audio sectors the drive has already had.
+static const uint32_t    BEHIND = 64, AHEAD = WINDOW - BEHIND;   // (XA: a sector can be 40 behind when its turn comes)
 static volatile uint32_t rdWant = 0;          // the sector the drive wants next (set by the drive task)
 static volatile bool     rdBusy = false;      // the reader is inside a card read
 static uint32_t          rdNext = 0;          // the next sector the reader will read
@@ -216,18 +219,20 @@ static void discReopen() {
   Serial.println(discFile ? "disc: reopened the image" : "disc: the image will not open");
 }
 
+static void xaService();                       // (below, with the XA decoder)
+
 static void cardReaderTask(void *) {
   for (;;) {
     if (!discIn || discHttp || !discWin) { vTaskDelay(10 / portTICK_PERIOD_MS); continue; }
     uint32_t want = rdWant;
     // the drive went somewhere the ring does not hold: start reading there
     if (ringLba[want % WINDOW] != want && rdNext != want) rdNext = want;
-    if (rdNext >= want + WINDOW || rdNext >= discSectors) { vTaskDelay(1); continue; }
+    if (rdNext >= want + AHEAD || rdNext >= discSectors) { vTaskDelay(1); continue; }
     // up to 8 sectors in one read, contiguous in the ring and not past the limit
     uint32_t slot = rdNext % WINDOW;
     uint32_t n = 8;
     if (n > WINDOW - slot) n = WINDOW - slot;
-    if (n > want + WINDOW - rdNext) n = want + WINDOW - rdNext;
+    if (n > want + AHEAD - rdNext) n = want + AHEAD - rdNext;
     if (n > discSectors - rdNext) n = discSectors - rdNext;
     for (uint32_t k = 0; k < n; k++) ringLba[slot + k] = 0xFFFFFFFF;   // about to change under the drive
     rdBusy = true;
@@ -278,12 +283,106 @@ static const uint8_t *discSectorCard(uint32_t lba) {
   return discWin + (size_t)(lba % WINDOW) * 2352;
 }
 
+// --- XA audio: decoded here, for the drive --------------------------------------------
+//
+// The drive queues the LBA of every XA audio sector the game lets through (console 0x13C:
+// [31:27] how many, [23:0] the oldest; a write of 1 takes it), and plays 44.1 kHz stereo out
+// of a 4096-sample FIFO filled through the window at 0x6000. 0x140 = {flushes [31:24], the
+// game filters [16], samples in the FIFO [12:0]}: a new flush count -- a seek, a pause, a new
+// read -- starts the decoder over, as the chip's does. The PC did this when it served the disc
+// (pc/server.py XaPump); off the card nobody did, and Gran Turismo 2 played no music. xa.h is
+// that decoder, checked word for word against it (tools/ps1/xatest.py).
+static const uint32_t XA_CTRL = 0x00080000;
+static const uint32_t XA_PEND = 16384;        // decoded words waiting for room in the FIFO
+static uint32_t *xaPend = nullptr, *xaOut = nullptr;
+// a sound group at a time through internal RAM (xa.h: PSRAM in the inner loop cost 28 ms a sector)
+// (allocated after the menu's task: as static data they cost the menu the one piece of internal
+// RAM its stack wants, and it did not start)
+static uint8_t  *xaChIn = nullptr;
+static uint32_t *xaChOut = nullptr;
+// one sector into the pending ring at `head`; the words made
+static uint32_t xaDecodeInto(xa::Decoder &dec, const uint8_t *sec, uint32_t head) {
+  dec.begin(sec);
+  uint32_t made = 0;
+  for (int ci = 0; ci < 18; ci++) {
+    memcpy(xaChIn, sec + 24 + ci * 128, 128);
+    int n = dec.chunk(xaChIn, xaChOut);
+    for (int i = 0; i < n; i++) xaPend[(head + made + i) % XA_PEND] = xaChOut[i];
+    made += n;
+  }
+  return made;
+}
+static uint8_t  *xaSec = nullptr;             // the sector being decoded, copied out of the ring
+static volatile uint32_t xaDecoded = 0, xaMissed = 0, xaPushed = 0;
+static volatile uint32_t xaUs = 0, xaUsMax = 0;   // the last / longest decode of a sector, microseconds
+static volatile uint32_t xaMissLba = 0, xaMissHeld = 0, xaMissWant = 0;   // the last miss: wanted, the slot's, the drive's
+
+static const uint8_t *discSectorBehind(uint32_t lba) {
+  if (!discWin || ringLba[lba % WINDOW] != lba) return nullptr;
+  __sync_synchronize();
+  return discWin + (size_t)(lba % WINDOW) * 2352;
+}
+
+// Called from loop() on core 1, every few milliseconds while the drive task says a PlayStation
+// runs with a disc from the card. Not a task of its own: a stack must come out of internal RAM,
+// which the menu and Bluetooth leave in pieces (created after the menu it failed one boot in
+// two). Not the drive task on core 0: Bluetooth and Wi-Fi preempt it there, and the disc feed
+// fell to 100 sectors a second. Not the card reader: it sits in card reads, and the queue's
+// sectors were 75-120 old -- gone from the ring -- by the time it looked.
+static volatile bool xaRun = false;           // set by the drive task: the PlayStation core is up, a disc in
+static xa::Decoder xaDec;
+static int      xaGen = -1;
+static uint32_t xaHead = 0, xaTail = 0;       // xaPend is a ring: words [xaTail, xaHead)
+static uint32_t xaLast = 0;
+
+static void xaService() {
+  if (!xaRun) { xaGen = -1; return; }
+  if (!xaPend || discHttp || millis() - xaLast < 4) return;
+  xaLast = millis();
+  xa::Decoder &dec = xaDec; int &gen = xaGen; uint32_t &head = xaHead, &tail = xaTail;
+  {
+    uint32_t st = fpga.busRead(XA_CTRL + 0x140);
+    int g = st >> 24; bool filt = (st >> 16) & 1; uint32_t level = st & 0x1FFF;
+    if (g != gen) { gen = g; dec.reset(); head = tail = 0; }
+    uint32_t q = fpga.busRead(XA_CTRL + 0x13C);
+    while ((q >> 27) && head - tail <= XA_PEND - xa::MAX_OUT) {
+      uint32_t lba = q & 0xFFFFFF;
+      fpga.busWrite(XA_CTRL + 0x13C, 1);
+      // (copied out, then the label looked at again: a reader running ahead could have
+      // started on that slot while it was being copied)
+      uint8_t *sec = xaSec;
+      const uint8_t *src = discSectorBehind(lba);
+      bool have = src != nullptr;
+      if (have) { memcpy(sec, src, 2352); __sync_synchronize(); have = ringLba[lba % WINDOW] == lba; }
+      if (!have) { xaMissed++; xaMissLba = lba; xaMissHeld = ringLba[lba % WINDOW]; xaMissWant = rdWant; }
+      else if (dec.accept(sec, filt)) {
+        uint32_t t0 = micros();
+        head += xaDecodeInto(dec, sec, head);
+        xaUs = micros() - t0; if (xaUs > xaUsMax) xaUsMax = xaUs;
+        xaDecoded++;
+      }
+      q = fpga.busRead(XA_CTRL + 0x13C);
+    }
+    int room = 4096 - (int)level - 32;
+    if (room > 0 && head != tail) {
+      uint32_t k = head - tail;
+      if (k > (uint32_t)room) k = room;
+      if (k > 1024) k = 1024;
+      uint32_t t = tail % XA_PEND;
+      if (k > XA_PEND - t) k = XA_PEND - t;           // (one contiguous stretch a write)
+      fpga.busWrite(XA_CTRL + 0x6000, xaPend + t, k);
+      tail += k; xaPushed += k;
+    }
+  }
+}
+
 static void discTask(void *) {
   for (;;) {
-    if (!discIn) { vTaskDelay(20 / portTICK_PERIOD_MS); continue; }
+    if (!discIn) { xaRun = false; vTaskDelay(20 / portTICK_PERIOD_MS); continue; }
     CdStatus st = fpga.cdStatus();
-    if (!st.alive || st.core != CORE_PS1_ID) { vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
-    if (!st.disc) { fpga.cdDisc(true); vTaskDelay(1); continue; }   // the core was reset: tell it again
+    if (!st.alive || st.core != CORE_PS1_ID) { xaRun = false; vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
+    if (!st.disc) { xaRun = false; fpga.cdDisc(true); vTaskDelay(1); continue; }   // the core was reset: tell it again
+    xaRun = true;
     if (!st.running || st.room == 0 || st.lba >= discSectors) {
       discIdle++;
       if (discHttp) discPump(); else rdWant = st.lba;                  // idle time is read-ahead time
@@ -1241,6 +1340,11 @@ void setup() {
   // same core as loop() that starves the web server and the serial console
   // together -- the board goes completely deaf while the drive is being fed,
   // which looked exactly like a crash.
+  xaOut  = (uint32_t *)ps_malloc(xa::MAX_OUT * 4);
+  xaSec  = (uint8_t *)ps_malloc(2352);
+  xaPend = (xaOut && xaSec) ? (uint32_t *)ps_malloc(XA_PEND * 4) : nullptr;   // (xaPend set: XA on)
+  if (!xaPend) Serial.println("xa: no PSRAM for the decoder: no CD audio");
+  xaDec.reset();
   xTaskCreatePinnedToCore(discTask, "disc", 8192, nullptr, 2, nullptr, 0);
   // the card reader on the OTHER core: the two buses then work at once (see
   // cardReaderTask). It spends its waits blocked in the SD driver, not spinning,
@@ -1395,6 +1499,9 @@ void setup() {
   server.begin();
   Serial.println("web server up");
   menu::begin();
+  xaChIn  = (uint8_t *)heap_caps_malloc(128, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  xaChOut = (uint32_t *)heap_caps_malloc(xa::MAX_CHUNK * 4, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!xaChIn || !xaChOut) { Serial.println("xa: no internal RAM for the decoder: no CD audio"); xaPend = nullptr; }
   pads::begin();
   menu::menuButton = []() { bool m = pads::menuPressed; pads::menuPressed = false; return m; };
 }
@@ -1458,9 +1565,30 @@ static void serialCommand(String c) {
                    ", protocol " + st.version + ", core " + st.core +
                    (st.busy ? ", busy" : ", idle"));
     Serial.println("  card: " + sdWhy);
+    Serial.printf("  XA: %u sectors decoded, %u not in the ring, %u samples sent\n",
+                  (unsigned)xaDecoded, (unsigned)xaMissed, (unsigned)xaPushed);
+    Serial.printf("  XA decode: %u us a sector (longest %u)\n", (unsigned)xaUs, (unsigned)xaUsMax);
+    Serial.printf("  XA last miss: sector %u, its slot held %d, the drive wanted %u\n",
+                  (unsigned)xaMissLba, (int)xaMissHeld, (unsigned)xaMissWant);
     if (job.busy || job.stage.length())
       Serial.println("  job: " + job.stage + " " + job.done + "/" + job.total +
                      (job.error.length() ? ("  ERROR: " + job.error) : ""));
+  } else if (c == "xabench") {
+    // the XA decoder's speed on this chip: a 37.8 kHz stereo sector of noise, ten times
+    static xa::Decoder d; d.reset();
+    uint8_t *sec = (uint8_t *)malloc(2352); uint32_t *out = (uint32_t *)ps_malloc(xa::MAX_OUT * 4);
+    if (sec && out && xaChIn && xaChOut) {
+      for (int i = 0; i < 2352; i++) sec[i] = (uint8_t)(i * 37 + 11);
+      sec[19] = 0x01;
+      for (int ci = 0; ci < 18; ci++) for (int b = 0; b < 8; b++) sec[24 + ci * 128 + 4 + b] = (uint8_t)((b & 3) << 4 | 8);
+      uint32_t t0 = micros(); int n = 0;
+      for (int k = 0; k < 10; k++) {
+        d.begin(sec); n = 0;
+        for (int ci = 0; ci < 18; ci++) { memcpy(xaChIn, sec + 24 + ci * 128, 128); n += d.chunk(xaChIn, xaChOut); }
+      }
+      Serial.printf("  xabench: %u us a sector (%d words), CPU %u MHz\n", (unsigned)((micros() - t0) / 10), n, (unsigned)getCpuFrequencyMhz());
+    }
+    free(sec); free(out);
   } else if (c == "linkraw") {
     // a status frame's raw bytes at several clocks and both clock phases (the signature
     // A5 first, when all is well)
@@ -1629,6 +1757,7 @@ static void serialCommand(String c) {
 void loop() {
   server.handleClient();
   pads::poll();
+  xaService();
 
   static String line;
   while (Serial.available()) {

@@ -113,8 +113,8 @@ static void freshBoard() {
   ui::v2 = fpga.busRead(OSD_ID) == 0x4F534432;     // "OSD2"
   // The glyphs again only when the board has lost them -- a new bitstream: palette entry 7
   // is black only once this menu has set it (osd.v powers up with orange there). Sending
-  // ~500 words when they were still there cost a PlayStation game its disc: they went over
-  // the link while the drive waited for sectors, and Crash loaded corrupt code.
+  // ~500 words when they were still there held up a PlayStation game's disc feed on the same
+  // link -- which made the drive's ring-restart race (fixed in ps1_cdrom.v, sb_stale) likelier.
   bool kept = ui::v2 && fpga.busRead(OSD + 0x5C) == 0x000000;
   ui::forget();
   if (!kept) { ui::loadGlyphs(); Serial.println("menu: the board's glyphs loaded"); }
