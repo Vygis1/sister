@@ -22,7 +22,10 @@ module tb_cd_feed;
 		.clk(clk), .rst(rst), .sel(sel), .we(we), .addr(addr), .be(be), .wdata(wdata), .rdata(rdata), .irq(irq),
 		.dma_rd(1'b0), .dma_rdata(), .dma_rvalid(),
 		.disc_in(disc_in), .fill_lba(fill_lba), .fill_room(fill_room), .fill_run(fill_run),
-		.sb_we(sb_we), .sb_addr(sb_addr), .sb_data(sb_data), .sb_done(sb_done), .sb_lba(sb_lba), .sb_abort(1'b0), .dbg(dbg));
+		.sb_we(sb_we), .sb_addr(sb_addr), .sb_data(sb_data), .sb_done(sb_done), .sb_lba(sb_lba), .sb_abort(1'b0), .dbg(dbg),
+		// every input added since tied, so none simulates as X
+		.ev_v(1'b0), .ev_data(32'd0), .trace_idx(6'd0), .toc_we(1'b0), .toc_addr(8'd0), .toc_data(32'd0), .tick(1'b0),
+		.xa_pop(1'b0), .xa_we(1'b0), .xa_wdata(32'd0));
 	cd_feed feed (
 		.clk(clk), .rst(rst), .spi_sclk(sclk), .spi_mosi(mosi), .spi_miso(miso), .spi_cs_n(cs_n),
 		.fill_lba(fill_lba), .fill_room(fill_room), .fill_run(fill_run), .disc_in(disc_in),
@@ -48,7 +51,8 @@ module tb_cd_feed;
 	end endtask
 	task cd_disc; input v; reg [7:0] d; begin cs_lo; spi_byte(8'h32, d); spi_byte({7'd0, v}, d); cs_hi; end endtask
 	function [7:0] img; input [23:0] lba; input [11:0] k; begin
-		img = (k == 12) ? bcd(((lba + 150) / 75) / 60) : (k == 13) ? bcd(((lba + 150) / 75) % 60) : (k == 14) ? bcd((lba + 150) % 75) : (k == 15) ? 8'h02 :
+		img = (k == 0 || k == 11) ? 8'h00 : (k < 11) ? 8'hFF :   // sync: a data sector (audio has none)
+		      (k == 12) ? bcd(((lba + 150) / 75) / 60) : (k == 13) ? bcd(((lba + 150) / 75) % 60) : (k == 14) ? bcd((lba + 150) % 75) : (k == 15) ? 8'h02 :
 		      (k >= 16 && k < 20) ? 8'h55 : (lba * 7 + k) & 8'hFF; end endfunction
 	function [7:0] bcd; input [7:0] b; bcd = ((b / 8'd10) << 4) | (b % 8'd10); endfunction
 	task cd_sector; input [23:0] lba; input integer nbytes; integer k; reg [7:0] d; begin
@@ -101,7 +105,8 @@ module tb_cd_feed;
 		cd_status(); check(st[0] == 8'hA5 && st[2] == 8'h50, "status: signature and the PlayStation core id");
 		$display("      status bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x  (feed.cmd=%02x rn=%0d)", st[0],st[1],st[2],st[3],st[4],st[5],st[6],st[7],st[8],st[9], feed.cmd, feed.rn);
 		check(st[4] == 8'd0, "no disc until the ESP32 says so");
-		command(8'h1A); wait_int(n); wait_int(n); check(n == 5 && rsp[0] == 8'h08, "GetID without a disc: INT5 no-disc");
+		// (one INT5 at once, stat|error and 80h not ready: as the drive answers and tb_ps1_cdrom checks)
+		command(8'h1A); wait_int(n); check(n == 5 && rsp[0] == 8'h11 && rsp[1] == 8'h80, "GetID without a disc: INT5 11h 80h");
 		cd_disc(1);
 		cd_status(); check(st[4] == 8'd1, "the disc is in");
 		$display("      status bytes: %02x %02x %02x %02x %02x  disc_in=%0d", st[0],st[1],st[2],st[3],st[4], disc_in);
