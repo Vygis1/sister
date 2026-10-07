@@ -1085,7 +1085,14 @@ static void apiInstallCard() {
   if (!haveCard) { server.send(409, "text/plain", "no card fitted"); return; }
   cardCore = server.arg("core");
   job.busy = true; job.error = ""; job.stage = "starting"; job.done = job.total = 0;
-  xTaskCreatePinnedToCore(installTask, "install", 8192, nullptr, 1, nullptr, 1);
+  // (the task's stack comes out of internal RAM, which the menu, Bluetooth and the XA decoder
+  // leave in pieces: when it is not there, say so -- unchecked, the job stayed "starting" and
+  // busy for ever, and every install after it was refused. Picking a game installs from inside
+  // the menu's own task when the card's core differs from the slot's, which always works.)
+  if (xTaskCreatePinnedToCore(installTask, "install", 8192, nullptr, 1, nullptr, 1) != pdPASS) {
+    job.busy = false; job.stage = ""; job.error = "no memory for the install task: pick a game of that console in the menu instead";
+    server.send(503, "text/plain", job.error); return;
+  }
   server.send(200, "text/plain", "ok");
 }
 
@@ -1705,7 +1712,11 @@ static void serialCommand(String c) {
     if (!haveCard) { Serial.println("  no card"); return; }
     cardCore = c.substring(8); cardCore.trim();
     job.busy = true; job.error = ""; job.stage = "starting";
-    xTaskCreate(installTask, "install", 8192, nullptr, 1, nullptr);
+    if (xTaskCreate(installTask, "install", 8192, nullptr, 1, nullptr) != pdPASS) {
+      job.busy = false; job.stage = "";
+      Serial.println("  no memory for the install task: pick a game of that console in the menu instead");
+      return;
+    }
     Serial.println("  installing " + cardCore + " from the card");
   } else if (c == "wstatus") {
     int st = WiFi.status();
