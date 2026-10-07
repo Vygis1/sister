@@ -81,6 +81,8 @@ module r3000 (
 	output reg  [4:0]  c2_reg,      // (combinational: see below)
 	output reg  [31:0] c2_wdata,
 	input  wire [31:0] c2_rdata,    // the register at c2_reg, control if c2_ctl
+	output wire [4:0]  c2_wreg,     // the register a WRITE goes to, and whether control: registered with
+	output wire        c2_wctl,     // c2_we and c2_wdata, never c2_reg (see below)
 	output reg         c2_cmd,      // COP2: execute c2_word
 	output reg  [24:0] c2_word,
 	input  wire        c2_busy,
@@ -334,6 +336,13 @@ module r3000 (
 	// path -- right when the move followed another fast instruction, wrong when
 	// it arrived through a fetch (a cache miss): the read then used the last
 	// register WRITTEN, and a game's square root read LZCS back instead of LZCR.
+	// ...and a WRITE has lines of its own. It is registered (c2_we/c2_wdata with c2_reg_r), so it
+	// reaches the GTE the clock after its instruction -- the clock a move OUT right behind it puts
+	// ITS register number on c2_reg. Through c2_reg the write went to the register being read:
+	// libgte's MulMatrix0 does `mtc2 t2,d2 / mfc2 v1,d9`, VXY1 landed in IR1, and Gran Turismo 2's
+	// matrices came out with an empty middle row and column -- every vertex on one line.
+	assign c2_wreg = c2_reg_r;
+	assign c2_wctl = c2_ctl_r;
 	always @(*) begin
 		c2_reg = c2_reg_r;
 		c2_ctl = c2_ctl_r;

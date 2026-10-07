@@ -36,7 +36,7 @@ module tb_ps1_gtece;
 	wire        busy;
 
 	ps1_gte dut (.gte_old(4'd0), .clk(clk), .rst(rst),
-		.we(we), .ctl(ctl), .reg_i(reg_i), .wdata(wdata), .rdata(rdata),
+		.we(we), .ctl(ctl), .reg_i(reg_i), .wreg_i(reg_i), .wctl(ctl), .wdata(wdata), .rdata(rdata),
 		.cmd(cmd), .word(word), .busy(busy),
 		.snap_arm(1'b0), .snap_go(1'b0), .snap_skip(16'd0), .snap_idx(7'd0), .snap_data(), .snap_word(), .snap_state());
 

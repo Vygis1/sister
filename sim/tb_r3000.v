@@ -33,14 +33,17 @@ module tb_r3000;
 	// a real GTE behind the processor: the moves to and from it, and the
 	// interlock on a running command, are the processor's business too
 	wire        c2_we, c2_ctl, c2_cmd, c2_busy;
-	wire [4:0]  c2_reg;
+	wire [4:0]  c2_reg, c2_wreg; wire c2_wctl;
 	wire [31:0] c2_wdata, c2_rdata;
 	wire [24:0] c2_word;
 	ps1_gte gte (
 		.gte_old(4'd0),
 		.clk(clk), .rst(rst),
-		.we(c2_we), .ctl(c2_ctl), .reg_i(c2_reg), .wdata(c2_wdata), .rdata(c2_rdata),
-		.cmd(c2_cmd), .word(c2_word), .busy(c2_busy)
+		.we(c2_we), .ctl(c2_ctl), .reg_i(c2_reg), .wreg_i(c2_wreg), .wctl(c2_wctl), .wdata(c2_wdata), .rdata(c2_rdata),
+		.cmd(c2_cmd), .word(c2_word), .busy(c2_busy),
+		// the debug snapshot tied off: left open its inputs are X, `!snap_take` with them, and no
+		// command ever started -- every GTE result read 0
+		.snap_arm(1'b0), .snap_go(1'b0), .snap_skip(16'd0), .snap_idx(7'd0), .snap_data(), .snap_word(), .snap_state()
 	);
 
 	r3000 dut (
@@ -49,7 +52,7 @@ module tb_r3000;
 		.fetch_addr(fetch_addr), .fetch_hit(fetch_hit), .fetch_word(fetch_word),
 		.fetching(), .no_overlap(!overlap),
 		.irq(irq),
-		.c2_we(c2_we), .c2_ctl(c2_ctl), .c2_reg(c2_reg), .c2_wdata(c2_wdata), .c2_rdata(c2_rdata),
+		.c2_we(c2_we), .c2_ctl(c2_ctl), .c2_reg(c2_reg), .c2_wreg(c2_wreg), .c2_wctl(c2_wctl), .c2_wdata(c2_wdata), .c2_rdata(c2_rdata),
 		.c2_cmd(c2_cmd), .c2_word(c2_word), .c2_busy(c2_busy),
 		.dbg_pc(pc), .dbg_ir(ir), .dbg_halted(halted)
 	);

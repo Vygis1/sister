@@ -528,6 +528,22 @@ class Gen:
         for v, want in ((0x00000001, 31), (0x00800000, 8), (0x0000003E, 26), (0xFFFFFF80, 25), (0x80000000, 1), (0, 32), (0xFFFFFFFF, 32), (0x12345678, 3)):
             a.li(T0, v); a.mtc2(T0, 30); a.nop(); a.nop(); a.mfc2(T2, 31); a.nop(); self.check(T2, want)
             a.cop2(0x0400012); a.li(T0, v); a.mtc2(T0, 30); a.nop(); a.nop(); a.mfc2(T2, 31); a.nop(); self.check(T2, want)   # NCLIP running
+        # A move IN right behind a move OUT, as libgte's MulMatrix0 does it (mtc2 t2,d2 / mfc2 v1,d9):
+        # the write is registered and reaches the GTE a clock later, when the read's register number
+        # is on the shared lines -- the write landed in the register being read. Gran Turismo 2's
+        # matrices lost their middle row and column to it, and every vertex fell on one line.
+        a.li(T0, 0x1111); a.mtc2(T0, 9); a.nop(); a.nop()                    # IR1 = 0x1111
+        a.li(T0, 0x10000000); a.mtc2(T0, 2); a.mfc2(T2, 9); a.nop()          # VXY1, then read IR1 at once
+        self.check(T2, 0x1111)
+        a.mfc2(T2, 2); a.nop(); self.check(T2, 0x10000000)                   # ...and VXY1 has its value
+        a.mfc2(T2, 9); a.nop(); self.check(T2, 0x1111)                       # ...and IR1 kept its own
+        a.li(T0, 0x00ABCDEF); a.ctc2(T0, 5); a.nop(); a.nop()                # TRX
+        a.li(T0, 0x02000300); a.ctc2(T0, 0); a.cfc2(T2, 5); a.nop()          # RT11RT12, then read TRX at once
+        self.check(T2, 0x00ABCDEF)
+        a.cfc2(T2, 0); a.nop(); self.check(T2, 0x02000300)
+        a.li(T0, 0x7654321); a.sw(T0, 0x40, S0); a.li(T0, 0x2222); a.mtc2(T0, 10); a.nop(); a.nop()
+        a.lwc2(4, 0x40, S0); a.mfc2(T2, 10); a.nop(); self.check(T2, 0x2222)  # LWC2 VXY2, then read IR2
+        a.mfc2(T2, 4); a.nop(); self.check(T2, 0x7654321)
         # the same RAM through KSEG0 and KSEG1 is the same RAM
         a.li(T0, 0x0BADF00D); a.sw(T0, 0x20, S0)
         a.li(S1, SCRATCH | 0x80000000); a.lw(T2, 0x20, S1); a.nop(); self.check(T2, 0x0BADF00D)

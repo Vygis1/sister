@@ -13,7 +13,7 @@ module tb_gte_snap;
 	reg arm = 0, go = 0; reg [15:0] skip = 0; reg [6:0] idx = 0;
 	wire [31:0] sdata; wire [24:0] sword; wire [1:0] sstate;
 	ps1_gte dut (.gte_old(4'd0), .clk(clk), .rst(rst),
-		.we(we), .ctl(ctl), .reg_i(reg_i), .wdata(wdata), .rdata(rdata),
+		.we(we), .ctl(ctl), .reg_i(reg_i), .wreg_i(reg_i), .wctl(ctl), .wdata(wdata), .rdata(rdata),
 		.cmd(cmd), .word(word), .busy(busy),
 		.snap_arm(arm), .snap_go(go), .snap_skip(skip), .snap_idx(idx), .snap_data(sdata), .snap_word(sword), .snap_state(sstate));
 	integer errors = 0, t;

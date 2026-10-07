@@ -42,7 +42,9 @@ module ps1_gte (
 
 	input  wire        we,          // MTC2/CTC2/LWC2
 	input  wire        ctl,         // control bank rather than data
-	input  wire [4:0]  reg_i,
+	input  wire [4:0]  reg_i,       // the register READ (rdata), and whether control: ctl
+	input  wire [4:0]  wreg_i,      // the register WRITTEN (with we/wdata), and whether control
+	input  wire        wctl,
 	input  wire [31:0] wdata,
 	output reg  [31:0] rdata,       // combinational read of reg_i/ctl
 
@@ -778,8 +780,8 @@ module ps1_gte (
 			for (k = 0; k < 32; k = k + 1) begin d[k] <= 0; c[k] <= 0; end
 			run <= 1'b0; step <= 0; vi <= 0; ir3q <= 0;
 		end else if (we && !run && !snap_hold) begin
-			if (ctl) c[reg_i] <= wdata;
-			else case (reg_i)
+			if (wctl) c[wreg_i] <= wdata;
+			else case (wreg_i)
 				5'd7:  d[7]  <= {16'd0, wdata[15:0]};
 				5'd15: begin d[12] <= d[13]; d[13] <= d[14]; d[14] <= wdata; d[15] <= wdata; end
 				5'd28: begin d[28] <= {17'd0, wdata[14:0]};
@@ -788,7 +790,7 @@ module ps1_gte (
 				             d[11] <= {17'd0, wdata[14:10], 7'd0}; end
 				5'd29, 5'd31: ;
 				5'd30: begin d[30] <= wdata; d[31] <= {26'd0, leadcount(wdata)}; end
-				default: d[reg_i] <= wdata;
+				default: d[wreg_i] <= wdata;
 			endcase
 		end else if ((cmd_go && !run && !snap_hold && !snap_take) || snap_start) begin
 			op <= cw[5:0]; sf <= cw[19]; lm <= cw[10];

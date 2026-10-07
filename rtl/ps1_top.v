@@ -293,7 +293,7 @@ module ps1_top #(
 
 	// COP2 (the GTE) hangs off the CPU's coprocessor-2 port
 	wire        c2_we, c2_ctl, c2_cmd, c2_busy;
-	wire [4:0]  c2_reg;
+	wire [4:0]  c2_reg, c2_wreg; wire c2_wctl;
 	wire [31:0] c2_wdata, c2_rdata;
 	wire [24:0] c2_word;
 
@@ -304,7 +304,7 @@ module ps1_top #(
 		.fetch_addr(cpu_fa), .fetch_hit(cpu_fa_hit), .fetch_word(cpu_fa_word), .fetching(cpu_fetching),
 		.no_overlap(no_overlap),
 		.irq({5'd0, cpu_irq}),
-		.c2_we(c2_we), .c2_ctl(c2_ctl), .c2_reg(c2_reg), .c2_wdata(c2_wdata),
+		.c2_we(c2_we), .c2_ctl(c2_ctl), .c2_reg(c2_reg), .c2_wreg(c2_wreg), .c2_wctl(c2_wctl), .c2_wdata(c2_wdata),
 		.c2_rdata(c2_rdata), .c2_cmd(c2_cmd), .c2_word(c2_word), .c2_busy(c2_busy),
 		.dbg_pc(dbg_pc), .dbg_ir(), .dbg_exec(dbg_exec), .dbg_rsel(dbg_rsel), .dbg_rval(dbg_rval), .dbg_a0(dbg_a0), .dbg_a1(dbg_a1), .dbg_ra(dbg_ra), .dbg_sp(dbg_sp),
 		.dbg_wa_en(dbg_wa_en), .dbg_wa_reg(dbg_wa_reg), .dbg_wa_val(dbg_wa_val), .dbg_wb_en(dbg_wb_en), .dbg_wb_reg(dbg_wb_reg), .dbg_wb_val(dbg_wb_val), .dbg_halted(),
@@ -314,7 +314,7 @@ module ps1_top #(
 	ps1_gte gte (
 		.gte_old(gte_old),
 		.clk(clk), .rst(core_rst),
-		.we(c2_we), .ctl(c2_ctl), .reg_i(c2_reg), .wdata(c2_wdata), .rdata(c2_rdata),
+		.we(c2_we), .ctl(c2_ctl), .reg_i(c2_reg), .wreg_i(c2_wreg), .wctl(c2_wctl), .wdata(c2_wdata), .rdata(c2_rdata),
 		.cmd(c2_cmd), .word(c2_word), .busy(c2_busy),
 		.snap_arm(gte_snap_arm), .snap_go(gte_snap_go), .snap_skip(gte_snap_skip), .snap_idx(gte_snap_idx),
 		.snap_data(gte_snap_data), .snap_word(gte_snap_word), .snap_state(gte_snap_state),
@@ -331,7 +331,7 @@ module ps1_top #(
 	(* ram_style = "distributed" *) reg [31:0] gw_d  [0:63];
 	(* ram_style = "distributed" *) reg [5:0]  gw_r  [0:63];
 	always @(posedge clk) if (gte_wr_ok && !gte_snap_busy) begin
-		gw_pc[gw_wp] <= dbg_pc; gw_d[gw_wp] <= c2_wdata; gw_r[gw_wp] <= {c2_ctl, c2_reg}; gw_wp <= gw_wp + 6'd1;
+		gw_pc[gw_wp] <= dbg_pc; gw_d[gw_wp] <= c2_wdata; gw_r[gw_wp] <= {c2_wctl, c2_wreg}; gw_wp <= gw_wp + 6'd1;
 	end
 	wire [5:0] gw_ra = gw_wp + gte_wt_idx;
 	assign gte_wt_pc = gw_pc[gw_ra]; assign gte_wt_data = gw_d[gw_ra]; assign gte_wt_reg = gw_r[gw_ra];
