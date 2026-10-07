@@ -107,14 +107,26 @@ module ps1_spu #(
 	// Everything 1F801C00h..1F801FFFh as written, for reading back; the live
 	// values (ENVX, LSAX, ENDX, SPUSTAT, the current volumes) are answered from
 	// the engine instead.
-	reg [31:0] r [0:255];
-	initial for (i = 0; i < 256; i = i + 1) r[i] = 32'd0;
+	// A byte lane an array, each written once a clock: as one 32-bit array written a lane at a
+	// time, synthesis built it in 8,192 flip-flops and a 256-way read multiplexer, most of the
+	// SPU's flip-flops on a chip out of slices. The CD volume (1DB0h), which the mixer reads
+	// every sample, is kept beside it.
+	(* ram_style = "distributed" *) reg [7:0] r0 [0:255];
+	(* ram_style = "distributed" *) reg [7:0] r1 [0:255];
+	(* ram_style = "distributed" *) reg [7:0] r2 [0:255];
+	(* ram_style = "distributed" *) reg [7:0] r3 [0:255];
+	reg [31:0] cdvol = 32'd0;              // r[6Ch]
+	initial for (i = 0; i < 256; i = i + 1) begin r0[i] = 8'd0; r1[i] = 8'd0; r2[i] = 8'd0; r3[i] = 8'd0; end
 	wire [7:0] wi = addr[9:2];
-	always @(posedge clk) if (sel && we) begin
-		if (be[0]) r[wi][7:0]   <= wdata[7:0];
-		if (be[1]) r[wi][15:8]  <= wdata[15:8];
-		if (be[2]) r[wi][23:16] <= wdata[23:16];
-		if (be[3]) r[wi][31:24] <= wdata[31:24];
+	always @(posedge clk) if (sel && we && be[0]) r0[wi] <= wdata[7:0];
+	always @(posedge clk) if (sel && we && be[1]) r1[wi] <= wdata[15:8];
+	always @(posedge clk) if (sel && we && be[2]) r2[wi] <= wdata[23:16];
+	always @(posedge clk) if (sel && we && be[3]) r3[wi] <= wdata[31:24];
+	always @(posedge clk) if (sel && we && wi == 8'h6C) begin
+		if (be[0]) cdvol[7:0]   <= wdata[7:0];
+		if (be[1]) cdvol[15:8]  <= wdata[15:8];
+		if (be[2]) cdvol[23:16] <= wdata[23:16];
+		if (be[3]) cdvol[31:24] <= wdata[31:24];
 	end
 
 	// the voice registers again, one array per field, for the engine to read by voice
@@ -788,12 +800,12 @@ module ps1_spu #(
 					// CD audio, at the CD volume: into the mix (SPUCNT bit 0) and the
 					// reverb (bit 2); and the tick's capture
 					if (spucnt[0]) begin
-						sumL <= sumL + (mul(cd_l, r[8'h6C][15:0]) >>> 15);
-						sumR <= sumR + (mul(cd_r, r[8'h6C][31:16]) >>> 15);
+						sumL <= sumL + (mul(cd_l, cdvol[15:0]) >>> 15);
+						sumR <= sumR + (mul(cd_r, cdvol[31:16]) >>> 15);
 					end
 					if (spucnt[2]) begin
-						revL <= revL + (mul(cd_l, r[8'h6C][15:0]) >>> 15);
-						revR <= revR + (mul(cd_r, r[8'h6C][31:16]) >>> 15);
+						revL <= revL + (mul(cd_l, cdvol[15:0]) >>> 15);
+						revR <= revR + (mul(cd_r, cdvol[31:16]) >>> 15);
 					end
 					if (spucnt[15]) begin
 						cap_v0 <= cd_l; cap_v1 <= cd_r; cap_v2 <= v1_out; cap_v3 <= v3_out;
@@ -905,7 +917,7 @@ module ps1_spu #(
 	// =============================================================================
 	// register reads (same clock)
 	// =============================================================================
-	wire [31:0] rq = r[wi];
+	wire [31:0] rq = {r3[wi], r2[wi], r1[wi], r0[wi]};
 	wire [15:0] stat = {4'd0, cap_i[8], !f_empty || cpu_hw_v || dma_w_n != 2'd0 || dr_st != 2'd0,
 	                    spucnt[5:4] == 2'd2 && f_empty, spucnt[5:4] == 2'd3,
 	                    (spucnt[5:4] == 2'd2 && f_empty) || spucnt[5:4] == 2'd3,
