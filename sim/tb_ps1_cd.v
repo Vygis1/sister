@@ -22,7 +22,11 @@ module tb_ps1_cd;
 		.clk(clk), .rst(rst), .sel(sel), .we(we), .addr(addr), .be(be), .wdata(wdata), .rdata(rdata), .irq(irq),
 		.dma_rd(dma_rd), .dma_rdata(dma_rdata), .dma_rvalid(dma_rvalid),
 		.disc_in(1'b1), .fill_lba(fill_lba), .fill_room(fill_room), .fill_run(fill_run),
-		.sb_we(sb_we), .sb_addr(sb_addr), .sb_data(sb_data), .sb_done(sb_done), .sb_lba(sb_lba), .sb_abort(1'b0), .dbg(dbg));
+		.sb_we(sb_we), .sb_addr(sb_addr), .sb_data(sb_data), .sb_done(sb_done), .sb_lba(sb_lba), .sb_abort(1'b0), .dbg(dbg),
+		// every input added since tied, so none simulates as X (ev_v as X stopped the trace's
+		// writes, and with them the drive's own block: the bench failed at its first sector)
+		.ev_v(1'b0), .ev_data(32'd0), .trace_idx(6'd0), .toc_we(1'b0), .toc_addr(8'd0), .toc_data(32'd0), .tick(1'b0),
+		.xa_pop(1'b0), .xa_we(1'b0), .xa_wdata(32'd0));
 
 	integer errors = 0;
 	task check; input c; input [8*72:1] m; begin if (c) $display("  ok   %0s", m); else begin errors = errors + 1; $display("  FAIL %0s", m); end end endtask
@@ -54,7 +58,8 @@ module tb_ps1_cd;
 	// --- the image and the feeder ------------------------------------------------------
 	function [7:0] bcd; input [7:0] b; bcd = ((b / 8'd10) << 4) | (b % 8'd10); endfunction
 	function [7:0] img; input [23:0] lba; input [11:0] k; begin
-		img = (k == 12) ? bcd(((lba + 150) / 75) / 60) : (k == 13) ? bcd(((lba + 150) / 75) % 60) : (k == 14) ? bcd((lba + 150) % 75) : (k == 15) ? 8'h02 :   // header: the sector's own MSF, mode 2
+		img = (k == 0 || k == 11) ? 8'h00 : (k < 11) ? 8'hFF :                                       // sync: a data sector (audio has none)
+		      (k == 12) ? bcd(((lba + 150) / 75) / 60) : (k == 13) ? bcd(((lba + 150) / 75) % 60) : (k == 14) ? bcd((lba + 150) % 75) : (k == 15) ? 8'h02 :   // header: the sector's own MSF, mode 2
 		      (k == 16) ? 8'h00 : (k == 17) ? 8'h00 : (k == 18) ? 8'h08 : (k == 19) ? 8'h00 :   // subheader: form 1
 		      (lba * 7 + k) & 8'hFF; end endfunction
 	integer fed = 0; reg feeding = 0;
@@ -110,7 +115,9 @@ module tb_ps1_cd;
 			if (dma_rdata !== w) begin if (bad < 3) $display("      word %0d: got %08x want %08x", i, dma_rdata, w); bad = bad + 1; end
 		end
 		check(bad == 0, "DMA: 512 words of LBA 18 correct");
-		command(8'h11); wait_int(n); check(n == 3 && rsp[2] == 8'h00 && rsp[3] == 8'h02 && rsp[4] == 8'h19, "GetlocP: 00:02:19 after three sectors");
+		command(8'h11); wait_int(n); // (track, index, the time in the track, then on the disc: track 1 starts at 00:02:00)
+		check(n == 3 && rsp[0] == 8'h01 && rsp[2] == 8'h00 && rsp[3] == 8'h00 && rsp[4] == 8'h19 && rsp[5] == 8'h00 && rsp[6] == 8'h02 && rsp[7] == 8'h19,
+		      "GetlocP: track 1 00:00:19, disc 00:02:19 after three sectors");
 		command(8'h10); wait_int(n); check(n == 3 && nrsp == 8 && rsp[3] == 8'h02 && rsp[6] == 8'h08, "GetlocL: the sector's header and subheader");
 		command(8'h09); wait_int(n); check(n == 3, "Pause: INT3"); wait_int(n); check(n == 2, "Pause: INT2");
 		repeat (20000) @(negedge clk);
@@ -155,6 +162,31 @@ module tb_ps1_cd;
 			check(bad == 0, "libcd: the sector asked for, via DMA");
 			command(8'h09); wait_int(n); check(n == 3, "libcd: Pause INT3"); wait_int(n); check(n == 2, "libcd: Pause INT2");
 		end
+		// The BIOS reads a PS-X EXE's header, then Setloc(next)+ReadN for the rest; when the
+		// transport is part way through that next sector as ReadN starts the ring again, the
+		// frame must not be taken (its start went into another slot): Crash got its header
+		// sector as its first 2048 bytes of code.
+		$display("--- a frame in flight when ReadN starts the ring again ---");
+		feeding = 0; repeat (3000) @(negedge clk);
+		param(8'h00); param(8'h15); param(8'h25); command(8'h02); wait_int(n);   // 00:15:25 = LBA 1000
+		command(8'h06); wait_int(n);
+		while (!(fill_run && fill_lba == 24'd1000)) @(negedge clk);
+		deliver(24'd1000);
+		wait_int(n); check(n == 1, "restart: INT1 for LBA 1000");
+		setidx(0); wr8(3, 8'h80); rd8(2, v); check(v == img(1000, 24), "restart: LBA 1000's data");
+		param(8'h00); param(8'h15); param(8'h26); command(8'h02); wait_int(n);   // 00:15:26 = LBA 1001
+		fork
+			deliver(24'd1001);
+			begin while (sb_addr != 12'd1800) @(negedge clk); command(8'h06); end   // (it acts 200 clocks on)
+		join
+		feeding = 1;
+		wait_int(n); check(n == 3, "restart: ReadN INT3");
+		wait_int(n); check(n == 1, "restart: INT1 after the seek");
+		setidx(0); wr8(3, 8'h80);
+		bad = 0;
+		for (i = 0; i < 2048; i = i + 1) begin rd8(2, v); if (v != img(1001, 24 + i)) bad = bad + 1; end
+		check(bad == 0, "restart: the sector is LBA 1001, not the slot's old contents");
+		if (bad) $display("      %0d bytes wrong (LBA 1000's byte 24 is %02x, 1001's %02x)", bad, img(1000, 24), img(1001, 24));
 		if (errors == 0) $display("tb_ps1_cd: all checks passed"); else $display("tb_ps1_cd: %0d FAIL(s)", errors);
 		$finish;
 	end

@@ -1,6 +1,8 @@
 """Compare the game's executable in RAM against the bytes on the disc.
 
-    python tools/ps1/ps1exeverify.py [lines-to-sample] [disc.bin]   (0 = every line)
+    python tools/ps1/ps1exeverify.py [lines-to-sample] [disc.bin] [--pad]   (0 = every line)
+
+--pad goes through pc/pad.py's tool port (the ESP32 link) instead of the old Ethernet one.
 
 The disc image is the argument, or PS1_DISC. HDR_LBA below is where
 Crash Bandicoot (USA) keeps its PS-X EXE.
@@ -38,9 +40,28 @@ def disc_text(img):
     return taddr, tsize, data[:tsize]
 
 
+class PadLink:
+    """the same three calls over pc/pad.py's tool port"""
+    def __init__(self):
+        import socket
+        self.f = socket.create_connection(("127.0.0.1", 5557), timeout=10).makefile("rwb")
+
+    def read(self, a):
+        self.f.write(b"R %x\n" % a); self.f.flush()
+        return int(self.f.readline().decode().strip(), 16)
+
+    def write(self, a, v):
+        self.f.write(b"W %x %x\n" % (a, v)); self.f.flush(); self.f.readline()
+
+    def read_block(self, a, n):
+        return [self.read(a + 4 * i) for i in range(n)]
+
+
 def main():
-    nums = [a for a in sys.argv[1:] if a.isdigit()]
-    img = next((a for a in sys.argv[1:] if not a.isdigit()), IMG)
+    pad = "--pad" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--pad"]
+    nums = [a for a in args if a.isdigit()]
+    img = next((a for a in args if not a.isdigit()), IMG)
     if not img:
         sys.exit("give the disc image as an argument or set PS1_DISC to your own dump")
     nsample = int(nums[0]) if nums else 3000
@@ -48,7 +69,7 @@ def main():
     print("disc: %s loads at %08x, %d bytes (%d lines of 16)"
           % ("PS-X EXE", taddr, tsize, tsize // 16))
 
-    l = fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
+    l = PadLink() if pad else fl.Link(fl.DEFAULT_HOST, 5005, timeout=1.0, retries=4)
     l.write(N + 0x118, 1)
     for _ in range(400):
         if not (l.read(N + 0x118) & 1):

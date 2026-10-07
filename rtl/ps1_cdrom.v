@@ -344,7 +344,15 @@ module ps1_cdrom #(
 		else                  sb_audio <= sb_audio | (sb_data != ((sb_addr == 12'd11) ? 8'h00 : 8'hFF));
 	end
 	reg  [7:0]  slot_audio;           // which ring slots hold audio sectors
-	wire        sb_take = sb_done && (sb_lba == fill_lba) && (held < 4'd7)
+	// A frame that began before the ring started again is never taken. Its first bytes went
+	// into the slot being filled THEN, the rest into slot 0, and its label and header -- both
+	// read at the start -- can name the sector the new read wants: the BIOS reads Crash's
+	// header (112018), the drive reads ahead, the transport is part way through 112019 when
+	// Setloc(112019)+ReadN restarts the ring, and slot 0 -- still the header -- went to the
+	// game as its first 2048 bytes of code. One boot in three to five on the board. The
+	// transport sends the sector the drive wants next, so a refused frame comes again.
+	reg         sb_stale;
+	wire        sb_take = sb_done && !sb_stale && (sb_lba == fill_lba) && (held < 4'd7)
 	                      && ((hdr_lba == fill_lba) || playing || seek_then_play || sb_audio);
 	reg  [15:0] sb_mislabelled;      // frames whose header did not match their label (a debug count)
 	always @(posedge clk) if (rst) sb_mislabelled <= 16'd0; else if (sb_done && (sb_lba == fill_lba) && (hdr_lba != fill_lba)) sb_mislabelled <= sb_mislabelled + 16'd1;
@@ -399,8 +407,10 @@ module ps1_cdrom #(
 			cur_slot <= 3'd0; cur_v <= 1'b0; fifo_slot <= 3'd0; fifo_rd <= 12'd0; fifo_end <= 12'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0;
 			r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; r_cnt <= 4'd0; ld_cnt <= 4'd0; r_base <= 24'd0; fill_lba <= 24'd0;
 			dma_rdata <= 32'd0; dma_rvalid <= 1'b0; dma_st <= 3'd0; int1_fire <= 1'b0; dma_dry <= 8'd0;
+			sb_stale <= 1'b0;
 		end else begin
 			dma_rvalid <= 1'b0; int1_fire <= 1'b0;
+			if (sb_we && sb_addr == 12'd0) sb_stale <= 1'b0;     // (a frame starting now goes where it should)
 
 			// ---- the ring: a sector arrives, a sector is taken ----
 			if (sb_take) begin
@@ -594,7 +604,7 @@ module ps1_cdrom #(
 							playing <= 1'b0; seek_then_play <= 1'b0; pl_v <= 1'b0;
 							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
 							sec_timer <= 22'd0;
-							if (loc_v) begin fill_lba <= loc; r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0; end
+							if (loc_v) begin fill_lba <= loc; r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0; sb_stale <= 1'b1; end
 							rsp[0] <= (stat & 8'h1F) | 8'h42; rsp_wr <= 5'd1; int_flag <= 3'd3;
 						end
 					8'h06, 8'h1B: if (!disc_in) begin
@@ -611,7 +621,7 @@ module ps1_cdrom #(
 							if (loc_v) begin                                 // a new place: seek there first
 								stat <= (stat & 8'h1F) | 8'h42;
 								seeking <= 1'b1; reading <= 1'b0; seek_then_read <= 1'b1;
-								fill_lba <= loc; r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0;
+								fill_lba <= loc; r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0; sb_stale <= 1'b1;
 							end else begin
 								stat <= (stat & 8'h1F) | 8'h22;
 								reading <= 1'b1;
@@ -670,7 +680,7 @@ module ps1_cdrom #(
 							stat <= (stat & 8'h1F) | 8'h82;
 							reading <= 1'b0; seek_then_read <= 1'b0; pl_v <= 1'b0; rep_nib <= 8'hFF;
 							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
-							r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0;
+							r_wp <= 3'd0; r_rp <= 3'd0; r_lp <= 3'd0; bfrd <= 1'b0; bfrd_pend <= 1'b0; slot_skip <= 8'd0; sb_stale <= 1'b1;
 							if (prm_wr != 5'd0 && prm[0] != 8'h00) begin    // a track: go to its start
 								play_trk <= tq_a;
 								loc <= tq_lba[23:0];
