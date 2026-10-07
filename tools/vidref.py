@@ -29,6 +29,9 @@ CASES = {
     'ps1':        (1, 320, 240, 0, 0, 0x0000, 0),
     'ps1_dd':     (1, 256, 224, 0, 0, 0x0043, 0),                     # 256 wide (centred), dedither, edge
     'ps1_smooth': (1, 320, 240, 0, 0, 0x0042 | 0x4, 0),               # smooth + light scanlines
+    'ps1_512':    (1, 512, 240, 0, 0, 0x0042 | 0x4, 0),               # hi-res across, 240 down: doubled down only, centred, sharp
+    'ps1_368':    (1, 368, 240, 0, 0, 0x0000, 0),                     # 368 wide
+    'ps1_480i':   (1, 512, 480, 0, 0, 0x0000, 0),                     # 512 x 480 interlaced: 1:1, centred
 }
 
 H_TOT, V_TOT = 800, 525
@@ -149,10 +152,11 @@ def model(case):
     lines = source_words(case)
     ppw = 4 if b32 else 8
     b32 = b32 and not ps1
-    dbl = w <= 320
+    hdbl, vdbl = w <= 320, (h if h else 1) <= 240
+    dbl = hdbl and vdbl
     hgt = h if h else 1
-    xoff = 320 - w if dbl else 0
-    span = 2 * w if dbl else w
+    xoff = 320 - w if hdbl else 320 - (w >> 1)
+    span = 2 * w if hdbl else w
     vf = (opt >> 4) & 3
     aam = (vist >> 8) & 3
     en_aa = not ps1 and ((vf == 0 and aam < 2) or vf == 2)
@@ -232,14 +236,14 @@ def model(case):
 
     out = [[(0, 0, 0)] * 640 for _ in range(480)]
     for Y in range(480):
-        s = Y >> 1 if dbl else Y
+        s = Y >> 1 if vdbl else Y
         if s >= hgt:
             continue
         for X in range(640):
             rel = X - xoff
             if rel < 0 or rel >= span:
                 continue
-            j = rel >> 1 if dbl else rel
+            j = rel >> 1 if hdbl else rel
             qx = dbl and (rel & 1)
             qy = dbl and (Y & 1)
             # (every neighbour filtered: row s, the row above it, the row below)

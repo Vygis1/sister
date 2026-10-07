@@ -73,13 +73,19 @@ module n64_vid #(
 		w1 <= width; w2 <= w1; h1 <= height; h2 <= h1; b1 <= bpp32; b2 <= b1; o1 <= on; o2 <= o1;
 		k1 <= hid_ok; k2 <= k1; v1 <= vist; v2 <= v1; p1 <= opt; p2 <= p1;
 	end
-	wire       dbl  = w2 <= 12'd320;                      // shown doubled
+	// doubled across when 320 wide or less, down when 240 lines or less -- each on its own:
+	// the PlayStation's 368-, 512- and 640-wide modes are 240 lines (they were drawn into the
+	// top half, undoubled); the filters and scanlines want both (dbl), else it is drawn sharp
+	wire       hdbl = w2 <= 12'd320;
+	wire       vdbl = h2 <= 10'd240;
+	wire       dbl  = hdbl && vdbl;
 	wire       b32  = !PS1 && b2;
 	wire [9:0] wpx  = w2[9:0];                            // (640 at most)
 	wire [9:0] hgt  = (h2 == 10'd0) ? 10'd1 : h2;
 	// a doubled picture narrower than 320 is centred: it starts (640 - 2w) / 2 in
-	wire [9:0] xoff = dbl ? 10'd320 - wpx : 10'd0;
-	wire [10:0] span = dbl ? {wpx, 1'b0} : {1'b0, wpx};
+	// (and one wider than that is centred too: 512 starts at 64)
+	wire [9:0] xoff = hdbl ? 10'd320 - wpx : 10'd320 - {1'b0, wpx[9:1]};
+	wire [10:0] span = hdbl ? {wpx, 1'b0} : {1'b0, wpx};
 	wire [1:0] vf   = p2[5:4];
 	wire [1:0] aam  = v2[9:8];
 	wire       en_aa = !PS1 && ((vf == 2'd0 && aam[1] == 1'b0) || vf == 2'd2);
@@ -99,7 +105,7 @@ module n64_vid #(
 	end
 	wire [9:0]  cn  = (co == H_TOT - 1) ? 10'd0 : co + 10'd1;     // next clock's column (same line while it matters)
 	wire [10:0] reln = {1'b0, cn} - {1'b0, xoff};
-	wire        adv_n = cn >= xoff && cn < 10'd640 && reln < span && reln != 11'd0 && (!dbl || !reln[0]);
+	wire        adv_n = cn >= xoff && cn < 10'd640 && reln < span && reln != 11'd0 && (!hdbl || !reln[0]);
 	// the line being made ready (the next one from the blanking on)
 	wire [9:0]  cyn = (cy == V_TOT - 1) ? 10'd0 : cy + 10'd1;
 	wire [9:0]  cyp = (co >= 10'd640) ? cyn : cy;
@@ -111,7 +117,7 @@ module n64_vid #(
 	// holds, and a row fetched below them would land on one of them)
 	reg [8:0] want_p;
 	wire [9:0] want_r = (cyp >= 10'd480) ? ((cyp == V_TOT - 2) ? 10'd1 : (cyp == V_TOT - 1) ? 10'd2 : 10'd0)
-	                                     : (dbl ? {1'b0, cyp[9:1]} : cyp) + 10'd3;
+	                                     : (vdbl ? {1'b0, cyp[9:1]} : cyp) + 10'd3;
 	always @(posedge pclk) want_p <= (want_r >= hgt) ? hgt[8:0] - 9'd1 : want_r[8:0];
 	reg [8:0] wa, wb;
 	always @(posedge clk) begin
@@ -217,7 +223,7 @@ module n64_vid #(
 	always @(posedge pclk) q <= lbuf[ra];
 
 	// the rows of the line after this one
-	wire [9:0] s_n  = dbl ? {1'b0, cyn[9:1]} : cyn;       // the row the next line shows
+	wire [9:0] s_n  = vdbl ? {1'b0, cyn[9:1]} : cyn;      // the row the next line shows
 	wire       pre_n = cyn == V_TOT - 1;                   // (the line before the picture: row 0 into the store)
 	wire [9:0] s_c  = pre_n ? 10'd0 : (s_n + 10'd1 >= hgt) ? s_n : s_n + 10'd1;   // its window's row
 	wire [9:0] s_up = (s_c == 10'd0) ? 10'd0 : s_c - 10'd1;
@@ -282,7 +288,7 @@ module n64_vid #(
 			sl0 <= s_up[1:0]; sl1 <= s_c[1:0]; sl2 <= s_dn[1:0];
 			ln_vis <= vis_n; wm <= 10'd0;
 			// (the store: row s+1 written on the first of row s's lines, beside row s read)
-			ls_pre <= pre_n; ls_rd <= pre_n ? 1'b1 : s_n[0]; ls_wr <= pre_n || (vis_n && (!dbl || !cyn[0]));
+			ls_pre <= pre_n; ls_rd <= pre_n ? 1'b1 : s_n[0]; ls_wr <= pre_n || (vis_n && (!vdbl || !cyn[0]));
 			ln_odd <= cyn[0];
 			st <= ((vis_n || pre_n) && o2) ? ST_WAIT : ST_IDLE;
 			if (cy == 10'd0) underrun <= 1'b0;
