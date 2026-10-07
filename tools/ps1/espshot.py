@@ -18,7 +18,10 @@ def read_block(f, addr, n):
         line = f.readline().decode().strip()
         h = line[2:] if line.startswith('= ') else line      # (pad.py hands it on without the "= ")
         if len(h) >= 8 * n:
-            return [int(h[8 * i:8 * i + 8], 16) for i in range(n)]
+            try:
+                return [int(h[8 * i:8 * i + 8], 16) for i in range(n)]
+            except ValueError:                               # (other output mixed into the reply)
+                continue
     raise RuntimeError('block read at %x: %r' % (addr, line[:80]))
 
 

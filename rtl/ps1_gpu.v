@@ -1435,7 +1435,14 @@ module ps1_gpu #(
 	                      && (!sc_crop || (src_y >= sc_ylo && src_y <= sc_yhi));
 	// every write the engine makes, and the picture row it lands on
 	wire [8:0]  wr_y    = v_addr[19:11];
+	// Rows under 240 only (so textures below a y=0 buffer cannot widen it), and the flip keeps
+	// only those inside the window it shows: a buffer shown at y=256 was cropped to whatever had
+	// been drawn up above it -- rows never on screen -- and came out black. Gran Turismo 2 shows
+	// its movies at y=256. (Counting every row instead cropped a buffer to rows drawn in the SAME
+	// rows of another buffer beside it: the crop knows rows, not columns.)
 	wire        wr_go   = v_req && v_we && v_ack && (wr_y < 9'd240);
+	wire [9:0]  dwin_hi = {1'b0, disp_y} + (vres480 ? 10'd479 : 10'd239);
+	wire [8:0]  dwin_h9 = dwin_hi[9] ? 9'd511 : dwin_hi[8:0];
 	// A wide picture is captured at half width -- every other column -- so the
 	// odd columns were being walked one at a time to emit nothing at all: 256
 	// clocks a row, 61,440 a capture, 23% of it, spent stepping past pixels the
@@ -1482,7 +1489,9 @@ module ps1_gpu #(
 				flips_recent <= 2'd3;
 				// the buffer just flipped to was drawn over the interval that has
 				// just ended, so the rows written over it are exactly its bound
-				sc_ylo <= wr_lo; sc_yhi <= wr_hi;
+				// (an empty overlap -- lo past hi -- means no crop: nothing drawn there was seen)
+				sc_ylo <= (wr_lo > disp_y)  ? wr_lo : disp_y;
+				sc_yhi <= (wr_hi < dwin_h9) ? wr_hi : dwin_h9;
 				wr_lo  <= 9'd511; wr_hi <= 9'd0;
 				if (flip_alt || every_flip) begin
 					flip_pend <= 1'b1;

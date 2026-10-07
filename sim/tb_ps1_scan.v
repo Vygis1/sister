@@ -392,6 +392,7 @@ module tb_ps1_scan;
 		capture("512 wide, scan_hold pulsing");
 		hold_on = 0;
 
+
 		$display("the drawing engine competing for the same cache");
 		draw_on = 1;
 		capture("512 wide, engine drawing elsewhere");
@@ -424,6 +425,20 @@ module tb_ps1_scan;
 			gp1(32'h0500_0000 | (k[0] ? 32'd512 : 32'd0));
 			capture(k[0] ? "flipping: a capture after moving to 512"
 			             : "flipping: a capture after moving to 0");
+		end
+
+		$display("buffers at y=256, something drawn above them (a movie's buffers in Gran Turismo 2)");
+		// The crop keeps the rows drawn since the last flip. Counting only rows under 240, a
+		// write up there with the picture at y=256 kept rows that were never on screen, and the
+		// whole capture came out black. Draw a strip at rows 100-109 (x 640 on: outside the
+		// window), flip, and every capture must still be the whole picture. (Last: the strip is in
+		// other scenarios' windows, and their checks do not model the crop.)
+		setmode(10'd640, 9'd256, 2'd1);          // (x 640 on: the fills earlier scenarios made are at x 0-639)
+		for (k = 0; k < 4; k = k + 1) begin
+			gp0(32'h0200_7FFF); gp0({16'd100, 16'd640}); gp0({16'd10, 16'd384});
+			repeat (20000) @(posedge clk);
+			gp1(32'h0500_0000 | (k[0] ? 32'd672 : 32'd640) | (32'd256 << 10));
+			capture(k[0] ? "y=256: a capture after flipping to 672,256" : "y=256: a capture after flipping to 640,256");
 		end
 
 		if (errors == 0) $display("tb_ps1_scan: all checks passed -- the capture reads out what video memory holds");
