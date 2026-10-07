@@ -1082,20 +1082,21 @@ class N64:
     # --- the boot, without a PIF ROM -------------------------------------------------------
     def fast_boot(self):
         rom = self.rom
-        entry = int.from_bytes(rom[8:12], 'big')
+        cic, seed, back = cic_of(rom)
+        entry = (int.from_bytes(rom[8:12], 'big') - back) & 0xFFFFFFFF
         size = min(1 << 20, max(0, len(rom) - 0x1000))
         pa = entry & 0x1FFFFFFF
         self.rdram[pa:pa + size] = rom[0x1000:0x1000 + size]
         self.dmem[0:0x1000] = rom[0:0x1000].ljust(0x1000, b'\0')
         # what IPL3 leaves in low memory: TV type, ROM base, reset type, CIC, version, size
         for off, val in ((0x300, 1), (0x304, 0), (0x308, 0xB0000000), (0x30C, 0),
-                         (0x310, 0x3F), (0x314, 0), (0x318, self.RDRAM)):
+                         (0x310, seed), (0x314, 0), (0x318, self.RDRAM)):
             self.rdram[off:off + 4] = val.to_bytes(4, 'big')
         c = self.cpu
         c.status = STATUS_AFTER_IPL3
         c.r[29] = 0xFFFFFFFFA4001FF0                  # sp
         c.r[20] = 1                                   # s4: NTSC
-        c.r[22] = 0x3F                                # s6: CIC seed (6102)
+        c.r[22] = seed                                # s6: the CIC's seed
         c.pc = sx32(entry)
         c.npc = (c.pc + 4) & M64
         self.vi[0] = 0
@@ -1108,7 +1109,7 @@ class N64:
         at the reset address instead of from outside -- the way the hardware does
         it, so a trace of this machine and of the RTL start at one place."""
         self.fast_boot()
-        words = boot_stub(int.from_bytes(self.rom[8:12], 'big'))
+        words = boot_stub((int.from_bytes(self.rom[8:12], 'big') - cic_of(self.rom)[2]) & 0xFFFFFFFF, cic_of(self.rom)[1])
         for i, w in enumerate(words):
             self.pifrom[4 * i:4 * i + 4] = w.to_bytes(4, 'big')
         c = self.cpu
@@ -1149,7 +1150,19 @@ class N64:
 STATUS_AFTER_IPL3 = 0x241000E0
 
 
-def boot_stub(entry):
+# The cartridge's boot chip (CIC), known by the CRC32 of its boot code (ROM 0x40-0xFFF), as
+# emulators know it: the seed IPL3 leaves in s6 (and at 0x80000310 here), and how far below
+# the header's entry point the game is loaded and started (6103: 1 MB, 6106: 2 MB).
+CICS = {0x6170A4A1: (6101, 0x3F, 0), 0x90BB6CB5: (6102, 0x3F, 0), 0x0B050EE0: (6103, 0x78, 0x100000),
+        0x98BC2C86: (6105, 0x91, 0), 0xACC8580A: (6106, 0x85, 0x200000), 0x009E9EA3: (7102, 0x3F, 0)}
+
+
+def cic_of(rom):
+    """(cic, seed, entry offset) for a ROM; an unknown boot code is taken as 6102"""
+    return CICS.get(zlib.crc32(bytes(rom[0x40:0x1000])) & 0xFFFFFFFF, (6102, 0x3F, 0))
+
+
+def boot_stub(entry, seed=0x3F):
     """what runs at the reset address instead of the PIF ROM: Status, the stack,
     the CIC registers the boot code leaves (s4 = NTSC, s6 = the 6102 seed), and a
     jump to the game's entry point"""
@@ -1158,7 +1171,7 @@ def boot_stub(entry):
     a = Asm(org=0xBFC00000)
     a.lui(T0, STATUS_AFTER_IPL3 >> 16); a.ori(T0, T0, STATUS_AFTER_IPL3 & 0xFFFF); a.mtc0(T0, 12)
     a.lui(SP, 0xA400); a.ori(SP, SP, 0x1FF0)
-    a.ori(S4, ZERO, 1); a.ori(S6, ZERO, 0x3F)
+    a.ori(S4, ZERO, 1); a.ori(S6, ZERO, seed)
     a.lui(T0, entry >> 16); a.ori(T0, T0, entry & 0xFFFF)
     a.jr(T0); a.nop()
     return a.words()
