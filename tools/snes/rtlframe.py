@@ -21,6 +21,9 @@ def main():
     open(os.path.join(ROOT, 'build', 'tb_snes_frames.txt'), 'w').write('%d\n' % n)
     r = subprocess.run(['bash', './tools/simwip.sh', 'tb_snes_top'], cwd=ROOT, capture_output=True, text=True)
     print('\n'.join(l for l in r.stdout.splitlines() if 'tb_snes_top' in l or 'rom ' in l or 'frame ' in l))
+    if 'all checks passed' not in r.stdout:
+        print('the bench did not finish: no comparison (a path with a space? the bench reads it with %s)')
+        sys.exit(1)
     os.remove(os.path.join(ROOT, 'build', 'tb_snes_rom.txt'))
     os.remove(os.path.join(ROOT, 'build', 'tb_snes_frames.txt'))
     rtl = [int(l, 16) for l in open(os.path.join(ROOT, 'build', 'snes_rtl_frame.txt'))]

@@ -53,6 +53,13 @@ module snes_apu (
 	reg [2:0] t_en;
 	reg [7:0] t_div [0:2], t_stage [0:2];
 	reg [3:0] t_out [0:2];
+	reg [6:0] cyc;                       // SPC700 cycles, mod 128
+	// a timer's output counter steps this clock (timers 0 / 1 on cycle 127 of 128, timer 2 every 16)
+	wire [2:0] t_tick;
+	wire       t01_now = spc_ce && cyc == 7'h7F, t2_now = spc_ce && cyc[3:0] == 4'hF;
+	assign t_tick[0] = t01_now && t_en[0] && (t_stage[0] + 8'd1 == t_div[0]);
+	assign t_tick[1] = t01_now && t_en[1] && (t_stage[1] + 8'd1 == t_div[1]);
+	assign t_tick[2] = t2_now  && t_en[2] && (t_stage[2] + 8'd1 == t_div[2]);
 	reg [7:0] aux [0:1];
 	assign cpu_rdata = to_cpu[cpu_port];
 
@@ -97,13 +104,17 @@ module snes_apu (
 			4'h3: s_din = dsp_rdata;
 			4'h4, 4'h5, 4'h6, 4'h7: s_din = to_spc[s_addr[1:0]];
 			4'h8, 4'h9: s_din = aux[s_addr[0]];
-			default: s_din = {4'h0, t_out[s_addr[3:0] - 4'hD]};
+			// (a read in the clock a timer ticks sees the tick, as the model does -- returned, then
+			// cleared -- else the tick is lost; Super Mario World's driver waits on $FD in an
+			// 8-cycle loop, which locks onto the 128-cycle tick and lost every one: it hung)
+			4'hD: s_din = {4'h0, t_out[0] + {3'd0, t_tick[0]}};
+			4'hE: s_din = {4'h0, t_out[1] + {3'd0, t_tick[1]}};
+			default: s_din = {4'h0, t_out[2] + {3'd0, t_tick[2]}};
 		endcase
 		else if (s_addr >= 16'hFFC0 && ipl_on) s_din = ipl(s_addr[5:0]);
 	end
 
 	// --- the clocks of the timers and the DSP: in 16-cycle steps of the SPC700 -------------------
-	reg [6:0] cyc;                       // SPC700 cycles, mod 128
 	integer i;
 	always @(posedge clk) begin
 		dsp_sample <= 1'b0;
