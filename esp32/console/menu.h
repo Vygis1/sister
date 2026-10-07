@@ -61,7 +61,36 @@ static int machineOfCore(uint8_t id) {
   return -1;
 }
 
-struct Game { String path, name; int8_t m; uint32_t size; };
+// A game's path and name live in a pool in the external PSRAM, the lists likewise: hundreds
+// of small Strings in internal RAM left it in pieces too small for Wi-Fi's buffers and the
+// card's DMA (the web server stopped answering).
+struct Game { const char *path, *name; int8_t m; uint32_t size; };
+template <class T> struct PsAlloc {
+  typedef T value_type;
+  PsAlloc() = default;
+  template <class U> PsAlloc(const PsAlloc<U> &) {}
+  T *allocate(size_t n) { void *p = heap_caps_malloc(n * sizeof(T), MALLOC_CAP_SPIRAM); if (!p) p = malloc(n * sizeof(T)); return (T *)p; }
+  void deallocate(T *p, size_t) { free(p); }
+  bool operator==(const PsAlloc &) const { return true; }
+  bool operator!=(const PsAlloc &) const { return false; }
+};
+static std::vector<char *> poolChunks;
+static size_t poolLeft = 0;
+static char *poolAt = nullptr;
+static const char *pooled(const String &s) {
+  size_t n = s.length() + 1;
+  if (n > poolLeft) {
+    size_t sz = n > 16384 ? n : 16384;
+    char *c = (char *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+    if (!c) c = (char *)malloc(sz);
+    poolChunks.push_back(c); poolAt = c; poolLeft = sz;
+  }
+  char *r = poolAt;
+  memcpy(r, s.c_str(), n);
+  poolAt += n; poolLeft -= n;
+  return r;
+}
+static void poolClear() { for (char *c : poolChunks) free(c); poolChunks.clear(); poolLeft = 0; poolAt = nullptr; }
 
 // The shell draws the menu itself from version 2 (osd.v and the pad register on its own
 // bus): the menu runs there with no console booted, and installs one when a game wants it.
@@ -107,7 +136,7 @@ static String shown(const String &n) {
 // /roms/nes, /roms/sms, /roms/md (or genesis, megadrive), /roms/n64. A game loose in
 // /roms itself is moved into its console's folder, by its extension, the first time
 // the card is seen; anything not recognised (a BIOS, a .bin) stays where it is.
-static std::vector<Game> lists[NMACH];
+static std::vector<Game, PsAlloc<Game>> lists[NMACH];
 static std::vector<int> consoles;          // the machines with a folder, in order
 
 static int machineOfFolder(String n) {
@@ -145,6 +174,7 @@ static void tidy() {
 }
 static void scan() {
   for (auto &l : lists) l.clear();
+  poolClear();
   consoles.clear();
   if (!haveCard) return;
   tidy();
@@ -173,7 +203,7 @@ static void scan() {
         bool ok = m != 4 || (lo.endsWith(".bin") && !lo.startsWith("scph"));
         if (!f.isDirectory() && n.length() && n[0] != '.' && ok) {
           int dot = n.lastIndexOf('.');
-          lists[m].push_back({ dir + "/" + n, dot > 0 ? n.substring(0, dot) : n, (int8_t)m, (uint32_t)f.size() });
+          lists[m].push_back({ pooled(dir + "/" + n), pooled(dot > 0 ? n.substring(0, dot) : n), (int8_t)m, (uint32_t)f.size() });
         }
         f.close();
       }
@@ -181,9 +211,7 @@ static void scan() {
     }
   }
   for (int m = 0; m < NMACH; m++) {
-    std::sort(lists[m].begin(), lists[m].end(), [](const Game &a, const Game &b) {
-      String x = a.name, y = b.name; x.toLowerCase(); y.toLowerCase(); return x < y;
-    });
+    std::sort(lists[m].begin(), lists[m].end(), [](const Game &a, const Game &b) { return strcasecmp(a.name, b.name) < 0; });
     if (!lists[m].empty()) consoles.push_back(m);
   }
 }
@@ -488,7 +516,7 @@ static String findBios() {
 static String load(const Game &g) {
   if (g.m != 4) cardIn = false;
   File f = SD.open(g.path);
-  if (!f) return "cannot open " + g.path;
+  if (!f) return String("cannot open ") + g.path;
   uint32_t size = f.size();
   if (size > MACHINES[g.m].limit) { f.close(); return "too big for the " + String(MACHINES[g.m].name); }
   probeChecksum();
@@ -541,7 +569,7 @@ static String load(const Game &g) {
     if (!ok) return "the BIOS file ended early";
     fpga.busWrite(NES_FILL_END, 1);
     if (!cardInsert()) Serial.println("menu: no memory card (" + String(CARD_PATH) + ")");
-    if (!discInsert(g.path)) return "cannot open the disc " + g.path;
+    if (!discInsert(g.path)) return String("cannot open the disc ") + g.path;
     fpga.busWrite(VID_CTRL, 3);
     fpga.busWrite(NES_CTRL, 1);
     return "";
@@ -991,7 +1019,7 @@ static void playGame(const Game &g) {
   backStack.clear(); nav = { P_HOME, 0, 0 };
   osd(0);
   prefs.begin("menu", false); prefs.putString("last", g.path); prefs.end();
-  Serial.println("menu: loaded " + g.path + (loadFixes ? " (" + String(loadFixes) + " chunk(s) written again)" : ""));
+  Serial.println(String("menu: loaded ") + g.path + (loadFixes ? " (" + String(loadFixes) + " chunk(s) written again)" : ""));
 }
 
 // --- what a button does on each page -----------------------------------------------------------
@@ -1132,7 +1160,7 @@ static void task(void *) {
           prefs.begin("menu", true); String last = prefs.getString("last", ""); prefs.end();
           for (int m = 0; m < NMACH && last.length(); m++)
             for (int i = 0; i < (int)lists[m].size(); i++)
-              if (lists[m][i].path == last) { cur = m; playGame(lists[m][i]); m = NMACH; break; }
+              if (last.equals(lists[m][i].path)) { cur = m; playGame(lists[m][i]); m = NMACH; break; }
         }
         first = false;
       }

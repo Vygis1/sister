@@ -1021,6 +1021,9 @@ static void onLibraryUpload() {
     if (libIsRom) {
       SD.mkdir("/roms");
       libPath = "/roms/" + libName;
+      // (a name with a folder in it -- "ps1/Some Disc.bin" -- gets the folder made)
+      int slash = libPath.lastIndexOf('/');
+      if (slash > 5) SD.mkdir(libPath.substring(0, slash));
     } else {
       if (libName.endsWith(".bin"))
         libName = libName.substring(0, libName.length() - 4);
@@ -1441,6 +1444,12 @@ static void serialCommand(String c) {
     return;
   }
   if (c == "state") {
+    // (internal RAM first: Wi-Fi's buffers come out of it, and beside Bluetooth it is short)
+    Serial.printf("  internal RAM %u free, largest piece %u, lowest ever %u; PSRAM %u free\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                  (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     // (not while a core is being installed: a status frame in the middle of the
     // flash traffic is the one thing seen to spoil an install's read-back)
     if (job.busy) { Serial.println("  job: " + job.stage + " " + job.done + "/" + job.total); return; }
