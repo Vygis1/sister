@@ -13,12 +13,13 @@ FB = 0x100000
 
 
 def read_block(f, addr, n):
-    f.write(b'D %x %x\n' % (addr, n)); f.flush()
-    line = f.readline().decode().strip()
-    h = line[2:] if line.startswith('= ') else line          # (pad.py hands it on without the "= ")
-    if len(h) < 8 * n:
-        raise RuntimeError('block read at %x: %r' % (addr, line[:80]))
-    return [int(h[8 * i:8 * i + 8], 16) for i in range(n)]
+    for attempt in range(4):                                 # (a reply cut short on the serial link: ask again)
+        f.write(b'D %x %x\n' % (addr, n)); f.flush()
+        line = f.readline().decode().strip()
+        h = line[2:] if line.startswith('= ') else line      # (pad.py hands it on without the "= ")
+        if len(h) >= 8 * n:
+            return [int(h[8 * i:8 * i + 8], 16) for i in range(n)]
+    raise RuntimeError('block read at %x: %r' % (addr, line[:80]))
 
 
 def png(path, w, h, rgb):
