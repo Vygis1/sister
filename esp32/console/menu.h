@@ -111,8 +111,13 @@ static void hookUi() {
 // and palette into it (they do not survive a new bitstream)
 static void freshBoard() {
   ui::v2 = fpga.busRead(OSD_ID) == 0x4F534432;     // "OSD2"
+  // The glyphs again only when the board has lost them -- a new bitstream: palette entry 7
+  // is black only once this menu has set it (osd.v powers up with orange there). Sending
+  // ~500 words when they were still there cost a PlayStation game its disc: they went over
+  // the link while the drive waited for sectors, and Crash loaded corrupt code.
+  bool kept = ui::v2 && fpga.busRead(OSD + 0x5C) == 0x000000;
   ui::forget();
-  ui::loadGlyphs();
+  if (!kept) { ui::loadGlyphs(); Serial.println("menu: the board's glyphs loaded"); }
   ui::palette(art::MENU_PAL);
 }
 static void osd(uint32_t ctrl) { ui::ctrl(ctrl); }
@@ -1143,11 +1148,16 @@ static void task(void *) {
   uint16_t was = 0; uint32_t held = 0, lastCheck = 0, lastDraw = 0, circleT = 0; bool up = false;
   for (;;) {
     delay(16);
-    // is a console image there to draw on?
+    // is a console image there to draw on? (gone only after three looks in a row say so: one
+    // status frame lost on a busy link made a running game look new, and the glyphs went in
+    // again over its disc feed)
     if (millis() - lastCheck > 1000 || !up) {
       lastCheck = millis();
       Status s = fpga.status();
       bool console = s.alive && (machineOfCore(s.core) >= 0 || shellMenu(s));
+      static int misses = 0;
+      if (console) misses = 0;
+      else if (up && ++misses < 3) console = true;   // (not yet: look again)
       if (console && !up) {                          // it came up (power-up, or a core booted by hand)
         up = true;
         freshBoard();
