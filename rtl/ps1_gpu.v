@@ -157,6 +157,7 @@ module ps1_gpu #(
 	output reg [8:0]   fl_y,
 	output wire [9:0]  disp_w,      // how many VRAM columns the display shows
 	output wire        disp_v480,   // ...and that it is 480 lines (interlaced): the capture has 480 rows
+	output wire        cap_weave,   // this capture is one field of a 480i picture (fb_ddr weave)
 
 	output reg         vblank,
 	output reg         hblank,
@@ -1435,10 +1436,18 @@ module ps1_gpu #(
 	// width: HDMI shows 640 x 480 1:1. One field (every other row) and every other column was
 	// what the old network stream could carry, and it left a quarter of each glyph of a
 	// high-resolution menu (Gran Turismo 2's, 512 x 480i): unreadable.
-	wire [8:0]  sc_last = sc_v480 ? 9'd479 : 9'd239;
-	wire [28:0] s_next = vaddr(sc_x + sx, sc_y + sy);
-	wire [8:0]  src_y   = sc_y + sy;
-	wire        row_lit = disp_on && ({1'b0, sy} < sc_lines)
+	// ...except interlaced with the GPU drawing one field a frame (il_skip): then the rows of the
+	// field NOT on screen are being drawn while it shows, and a pass over all 480 read them half
+	// drawn -- the top of Gran Turismo 2's menu fine, the lower part broken, lines of the PS logo
+	// out of place. So each capture is the field on screen (stable: the GPU does not touch it),
+	// its rows only, into rows 2k + field; the next field's capture fills in the others (weave).
+	reg         sc_il;
+	wire [8:0]  out_y   = sc_il ? {sy[7:0], sc_field} : sy;
+	assign cap_weave = sc_il;
+	wire [8:0]  sc_last = (sc_v480 && !sc_il) ? 9'd479 : 9'd239;
+	wire [28:0] s_next = vaddr(sc_x + sx, sc_y + out_y);
+	wire [8:0]  src_y   = sc_y + out_y;
+	wire        row_lit = disp_on && ({1'b0, out_y} < sc_lines)
 	                      && (!sc_crop || (src_y >= sc_ylo && src_y <= sc_yhi));
 	// every write the engine makes, and the picture row it lands on
 	wire [8:0]  wr_y    = v_addr[19:11];
@@ -1462,11 +1471,11 @@ module ps1_gpu #(
 	wire [7:0]  b24  = !ox24[0] ? h24b[7:0]  : h24b[15:8];
 	// ...and where the one after that lives, so SC_EMIT can tell whether it is
 	// inside the line already in hand.
-	wire [28:0] s_after = vaddr(sc_x + sx + sx_step, sc_y + sy);
+	wire [28:0] s_after = vaddr(sc_x + sx + sx_step, sc_y + out_y);
 
 	always @(posedge clk) begin
 		if (rst) begin sc <= SC_IDLE; s_req <= 1'b0; px_valid <= 1'b0; sx <= 0; sy <= 0; ox <= 0; fpx_valid <= 1'b0; scan_start <= 1'b0; scan_done <= 1'b0; scan_abort <= 1'b0; arm_ticks <= 2'd0; want_scan <= 1'b1; flip_pend <= 1'b0; flip_alt <= 1'b0; flips_recent <= 2'd0; disp_x_d <= 0; disp_y_d <= 0; sc_abort <= 1'b0; fl_valid <= 1'b0; sc_lmode <= 1'b0; sc_ldec <= 1'b0; fl_half_v <= 1'b0;
-		               sc_x <= 0; sc_y <= 0; sc_w <= 10'd320; sc_lines <= 10'd240; sc_v480 <= 1'b0; sc_field <= 1'b0;
+		               sc_x <= 0; sc_y <= 0; sc_w <= 10'd320; sc_lines <= 10'd240; sc_v480 <= 1'b0; sc_field <= 1'b0; sc_il <= 1'b0;
 		               wr_lo <= 9'd511; wr_hi <= 9'd0; sc_ylo <= 9'd0; sc_yhi <= 9'd511; sc_crop <= 1'b0;
 		               sline_v <= 1'b0; sline_tag <= 25'd0; sline <= 128'd0; end
 		else begin
@@ -1538,12 +1547,12 @@ module ps1_gpu #(
 			SC_IDLE: if (scan_enable && want_scan
 			          && (flip_pend                // a double-buffered game: at its flip, and only then
 			              || flips_recent == 2'd0 && (
-			                 il_skip && !field       // 480i: the even field, when it is the one on screen
+			                 il_skip                 // 480i: every field, the one on screen (see out_y)
 			              || !il_skip && (!busy && f_empty && !dma_active)
 			              && (frame_len == 20'd0 || post_vsync >= capture_at)
 			              || !il_skip && (frame_len != 20'd0 && post_vsync >= late_at
 			                  && (arm_ticks == 2'd3 || cap_every_vsync))))) begin
-					sc_field <= 1'b0; sc_abort <= 1'b0;
+					sc_field <= field; sc_il <= il_skip; sc_abort <= 1'b0;
 					sc_crop  <= flip_pend && !vres480 && (sc_ylo <= sc_yhi);   // (the bounds are rows under 240)   // a flipping game, and it drew something
 					sx <= 0; sy <= 0; ox <= 0; substep <= 0;
 					step <= (hres == 2'd0) ? 2'd1 : (hres == 2'd1) ? 2'd1 : 2'd2;   // 256/320 -> 1:1, 512/640 -> 2:1
@@ -1585,7 +1594,7 @@ module ps1_gpu #(
 							fl_valid <= 1'b1;
 							fl_data  <= row_lit ? s_line : 128'd0;
 							fl_x     <= sx;
-							fl_y     <= sy;
+							fl_y     <= out_y;
 						end else if (!fl_half_v) begin
 							// first of a pair: thinned and held
 							fl_half   <= row_lit ? thin4(s_line) : 64'd0;
@@ -1596,7 +1605,7 @@ module ps1_gpu #(
 							fl_data   <= {row_lit ? thin4(s_line) : 64'd0,
 							              fl_half};
 							fl_x      <= (sx - 10'd8) >> 1;
-							fl_y      <= sy;
+							fl_y      <= out_y;
 							fl_half_v <= 1'b0;
 						end
 						if (sx + 10'd8 >= sc_w) begin
@@ -1621,7 +1630,7 @@ module ps1_gpu #(
 					end else begin
 						begin
 							fpx_valid <= 1'b1;
-							fpx_x <= ox24; fpx_y <= sy;
+							fpx_x <= ox24; fpx_y <= out_y;
 							fpx_rgb <= row_lit ? {1'b0, b24[7:3], g24[7:3], r24[7:3]} : 16'd0;
 						end
 						ph24 <= 1'b0;
@@ -1649,7 +1658,7 @@ module ps1_gpu #(
 						// on these, and a blanked display used to starve it. Black is
 						// what a blanked display shows anyway.
 						fpx_valid <= 1'b1;
-						fpx_x <= sx; fpx_y <= sy;
+						fpx_x <= sx; fpx_y <= out_y;
 						fpx_rgb <= row_lit ? half(sword, (sc_x + sx) & 1) : 16'd0;
 					end
 					// two pixels per word; emit those that land on output columns

@@ -664,7 +664,7 @@ module ps1_top #(
 	wire [127:0] gfl_data;
 	wire [9:0]   gfl_x;
 	wire [8:0]   gfl_y;
-	wire [9:0]  fpx_x, gpu_disp_w; wire gpu_v480;
+	wire [9:0]  fpx_x, gpu_disp_w; wire gpu_v480, gpu_weave;
 	wire [8:0]  fpx_y;
 	wire [15:0] fpx_rgb;
 
@@ -683,7 +683,7 @@ module ps1_top #(
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
 		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_popword(dbg_gpu_popword), .dbg_disp(dbg_disp), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
-		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w), .disp_v480(gpu_v480),
+		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w), .disp_v480(gpu_v480), .cap_weave(gpu_weave),
 		.scan_lines(fb_want && !fs_en),
 		.fl_valid(gfl_valid), .fl_data(gfl_data), .fl_x(gfl_x), .fl_y(gfl_y)
 	);
@@ -713,14 +713,14 @@ module ps1_top #(
 	// the display frame in DDR3 (see fb_ddr.v): 640 x 240 x RGB555 at 4 MB
 	fb_ddr u_fb (
 		.clk(clk), .rst(rst),
-		.frame_start(scan_start), .px_valid(fpx_valid), .px_x(fpx_x), .px_y(fpx_y), .px_rgb(fpx_rgb),
+		.frame_start(scan_start), .frame_abort(scan_abort), .px_valid(fpx_valid), .px_x(fpx_x), .px_y(fpx_y), .px_rgb(fpx_rgb),
 		.fl_valid(gfl_valid), .fl_data(gfl_data), .fl_x(gfl_x), .fl_y(gfl_y),
 		.hold(fb_hold), .want(fb_want),
 		.cap_go(fb_cap_go), .cap_ready(fb_cap_ready),
 		.hr_addr(fbr_addr), .hr_req(fbr_req), .hr_rdata(fbr_rdata), .hr_ack(fbr_ack),
 		.m_addr(fb_m_addr), .m_req(fb_m_req), .m_we(fb_m_we), .m_wdata(fb_m_wdata),
 		.m_ready(fb_m_ready), .m_rdata(fb_m_rdata), .m_valid(fb_m_valid),
-		.hdmi_on(hdmi_on), .lf_want(lf_want), .lf_words(fb_width[9:3] + {6'd0, fb_width[2:0] != 3'd0}),
+		.hdmi_on(hdmi_on), .weave(gpu_weave), .lf_want(lf_want), .lf_words(fb_width[9:3] + {6'd0, fb_width[2:0] != 3'd0}),
 		.lf_we(lf_we), .lf_addr(lf_addr), .lf_data(lf_data)
 	);
 	// Wide modes are captured at half width: the scanout emits every other

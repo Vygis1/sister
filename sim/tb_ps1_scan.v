@@ -187,7 +187,7 @@ module tb_ps1_scan;
 	// the geometry this capture was started with, taken from the scanout itself
 	// rather than guessed: a flip in the middle changes what the registers say
 	// but not what the capture already committed to.
-	reg [9:0] c_x, c_w; reg [8:0] c_y; reg [9:0] c_lines; integer c_rows;
+	reg [9:0] c_x, c_w; reg [8:0] c_y; reg [9:0] c_lines; integer c_rows; reg c_il, c_field; integer vr;
 
 	// How long a capture takes, and what it costs the memory. On the board this
 	// is the whole problem: a capture that outlasts one of the machine's frames
@@ -220,7 +220,7 @@ module tb_ps1_scan;
 			gen  <= gen + 1;
 			npx  <= 0;
 			ovf  <= 0;
-			c_x  <= gpu.sc_x; c_y <= gpu.sc_y; c_w <= gpu.sc_w; c_lines <= gpu.sc_lines; c_rows <= gpu.sc_last + 1;
+			c_x  <= gpu.sc_x; c_y <= gpu.sc_y; c_w <= gpu.sc_w; c_lines <= gpu.sc_lines; c_rows <= gpu.sc_last + 1; c_il <= gpu.sc_il; c_field <= gpu.sc_field;
 		end else if (fpx_valid) begin
 			if (fpx_x < FW && fpx_y < FH) begin
 				gotv[fpx_y * FW + fpx_x] <= fpx_rgb;
@@ -238,8 +238,9 @@ module tb_ps1_scan;
 	task verify; input [511:0] name; begin
 		bad = 0; missing = 0; shown = 0;
 		ow = c_w;                                    // full width (HDMI shows it 1:1)
-		for (vy = 0; vy < c_rows; vy = vy + 1)
+		for (vr = 0; vr < c_rows; vr = vr + 1)
 			for (vx = 0; vx < ow; vx = vx + 1) begin
+				vy = c_il ? (2 * vr + c_field) : vr;      // (an interlaced capture is one field: its rows)
 				idx = vy * FW + vx;
 				want16 = ({1'b0, vy[8:0]} < c_lines)
 				         ? pat(c_x + vx, c_y + vy[8:0])
@@ -279,8 +280,9 @@ module tb_ps1_scan;
 	task verify24; input [511:0] name; begin
 		bad = 0; missing = 0; shown = 0;
 		ow = c_w;
-		for (vy = 0; vy < c_rows; vy = vy + 1)
+		for (vr = 0; vr < c_rows; vr = vr + 1)
 			for (vx = 0; vx < ow; vx = vx + 1) begin
+				vy = c_il ? (2 * vr + c_field) : vr;      // (an interlaced capture is one field: its rows)
 				idx = vy * FW + vx;
 				for (bk = 0; bk < 3; bk = bk + 1) begin
 					want16 = pat(c_x + ((vx * 3 + bk) >> 1), c_y + vy[8:0]);
@@ -418,8 +420,9 @@ module tb_ps1_scan;
 		gp1(32'h0700_0000 | (32'd240 << 10));
 		gp1(32'h0800_0025);                      // 320 wide, 480 lines, interlaced
 		gp1(32'h0500_0000 | 32'd640);            // (x 640 on: earlier scenarios filled rows 300-399 below it)
-		capture("320 x 480i at vram 640,0, both fields");
-		capture("320 x 480i at vram 640,0, again");
+		capture("320 x 480i at vram 640,0: a field");
+		capture("320 x 480i at vram 640,0: the next field");
+		capture("320 x 480i at vram 640,0: and the next");
 		gp1(32'h0800_0002);                      // (back to 512 x 240)
 		want24 = 0;
 

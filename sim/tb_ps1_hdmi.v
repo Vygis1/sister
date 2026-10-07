@@ -61,7 +61,7 @@ module tb_ps1_hdmi #(parameter W = 256);
 
 	wire lf_we; wire [8:0] lf_addr; wire [127:0] lf_data; wire [8:0] lf_want;
 	fb_ddr u_fb (.clk(clk), .rst(rst),
-		.frame_start(fstart), .px_valid(pv), .px_x(px_x), .px_y(px_y), .px_rgb(prgb),
+		.frame_start(fstart), .frame_abort(1'b0), .weave(1'b0), .px_valid(pv), .px_x(px_x), .px_y(px_y), .px_rgb(prgb),
 		.fl_valid(1'b0), .fl_data(128'd0), .fl_x(10'd0), .fl_y(9'd0),
 		.hold(hold), .want(want), .cap_go(1'b0), .cap_ready(),
 		.hdmi_on(1'b1), .lf_want(lf_want), .lf_words(W / 8), .lf_we(lf_we), .lf_addr(lf_addr), .lf_data(lf_data),

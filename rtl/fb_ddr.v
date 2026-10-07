@@ -37,6 +37,10 @@ module fb_ddr #(
 
 	// the picture, full width, one pixel at a time
 	input  wire        frame_start,     // the scanout begins a frame
+	// ...or gives one up part way (the game flipped under it). Without this the next frame_start
+	// called the cut-short capture complete and it went on screen: the top new, the rest the
+	// frame before last -- in a race, the car jumping back a few centimetres now and then.
+	input  wire        frame_abort,
 	input  wire        px_valid,
 	input  wire [9:0]  px_x,
 	input  wire [8:0]  px_y,
@@ -58,6 +62,11 @@ module fb_ddr #(
 	// line buffer (n64_vid with PS1=1): lf_words 128-bit words of line lf_want, written
 	// to {line[0], word}
 	input  wire        hdmi_on,
+	// Interlaced (480i, the GPU drawing one field a frame): each capture is the field on screen,
+	// its rows only, and the two fields make one frame -- so they go into the frame HDMI is
+	// showing, not the other one (alternate captures into alternate frames would leave each
+	// frame with one field fresh and the other never written).
+	input  wire        weave,
 	input  wire [8:0]  lf_want,
 	input  wire [6:0]  lf_words,
 	output reg         lf_we,
@@ -93,7 +102,7 @@ module fb_ddr #(
 	// while HDMI read it, showed pixels of two frames: a blink's eye pixels one frame
 	// wrong.) Without HDMI it is the one frame, as it always was.
 	reg         disp_b, pend;
-	wire        cap_b     = hdmi_on ? ~disp_b : 1'b0;
+	wire        cap_b     = hdmi_on ? (weave ? disp_b : ~disp_b) : 1'b0;
 	wire [23:0] cap_base  = FB_LINE + (cap_b ? 24'h00_A000 : 24'd0);
 	wire [23:0] disp_base = FB_LINE + ((hdmi_on && disp_b) ? 24'h00_A000 : 24'd0);
 	wire [23:0] px_line = cap_base + px_y * STRIDE + {17'd0, px_x[9:3]};
@@ -164,14 +173,16 @@ module fb_ddr #(
 				// the top of HDMI's frame: a finished capture goes on screen
 				if (lf_want == 9'd0 && pend) begin disp_b <= ~disp_b; pend <= 1'b0; end
 			end
-			if (frame_start) begin
+			if (frame_abort && capturing) begin
+				capturing <= 1'b0; armed <= 1'b1; cur_v <= 1'b0;   // dropped; the next one is taken
+			end else if (frame_start) begin
 				if (armed) begin capturing <= 1'b1; armed <= 1'b0; rc_v <= 1'b0; end
 				else if (capturing) begin capturing <= 1'b0; finishing <= 1'b1; end   // the frame is complete
 			end
 			// ready once the frame's last line has been written
 			if (finishing && !cur_v && q_empty && !wr_busy && !push) begin
 				cap_ready <= 1'b1; finishing <= 1'b0;
-				pend <= hdmi_on;
+				pend <= hdmi_on && !weave;
 			end
 
 			// --- gather pixels into lines ------------------------------------------
