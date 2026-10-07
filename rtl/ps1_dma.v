@@ -22,8 +22,8 @@
 // Channel 2 is the GPU, in both directions. Channel 6 is the ordering table
 // clear: writes BCR words BACKWARDS from MADR, each holding the address of the
 // one before it, ending in $FFFFFF -- an empty display list ready to be filled.
-// The BIOS uses 6 then 2 to draw its screen, so those two are complete. The
-// rest (MDEC, CD, SPU, PIO) are registers that finish the moment they start,
+// The BIOS uses 6 then 2 to draw its screen, so those two are complete. 0 / 1 are the
+// MDEC's (ps1_mdec.v), 3 the CD's, 4 the SPU's. The rest (PIO) are registers that finish the moment they start,
 // which is enough for the BIOS to believe they exist. Each gets real when the
 // device behind it does.
 //
@@ -75,6 +75,15 @@ module ps1_dma (
 	output reg         spu_rd,
 	input  wire [31:0] spu_rdata,
 	input  wire        spu_rvalid,
+	// the MDEC (channels 0 and 1): a 32-word block each time it asks (dreq), the CPU running in
+	// between -- it decodes the next frame's data while the MDEC decodes this one
+	output reg         mdec_wr,       // channel 0: gp0_data into the MDEC's input FIFO
+	input  wire        mdec_in_ready,
+	input  wire        mdec_dreq0,
+	output wire        mdec_pop,      // channel 1: the word on mdec_rdata is taken
+	input  wire [31:0] mdec_rdata,
+	input  wire        mdec_rvalid,
+	input  wire        mdec_dreq1,
 
 	output wire        irq,
 	// The chip's DMA owns the bus for a block transfer (sync mode 0, and the
@@ -126,16 +135,18 @@ module ps1_dma (
 	// which channels are asking: enabled in DPCR, started, and (in mode 0)
 	// triggered
 	reg [6:0] want;
-	// the device behind the block paths: the GPU's, or on channel 4 the SPU's
-	wire        dev_ready  = (cur == 3'd4) ? spu_ready  : gp0_ready;
-	wire        dev_rvalid = (cur == 3'd4) ? spu_rvalid : gpu_rvalid;
-	wire [31:0] dev_rdata  = (cur == 3'd4) ? spu_rdata  : gpu_rdata;
+	// the device behind the block paths: the GPU's, on channel 4 the SPU's, on 0 / 1 the MDEC's
+	wire        dev_ready  = (cur == 3'd4) ? spu_ready  : (cur == 3'd0) ? mdec_in_ready : gp0_ready;
+	wire        dev_rvalid = (cur == 3'd4) ? spu_rvalid : (cur == 3'd1) ? mdec_rvalid : gpu_rvalid;
+	wire [31:0] dev_rdata  = (cur == 3'd4) ? spu_rdata  : (cur == 3'd1) ? mdec_rdata : gpu_rdata;
 	assign      spu_data   = gp0_data;
 	integer k;
 	always @(*) begin
 		for (k = 0; k < 7; k = k + 1)
 			want[k] = dpcr[k*4 + 3] && chcr[k][24]
-			          && (chcr[k][10:9] != 2'd0 || chcr[k][28]);
+			          && (chcr[k][10:9] != 2'd0 || chcr[k][28])
+			          // (the MDEC's: only while it asks for a block)
+			          && (k != 0 || mdec_dreq0) && (k != 1 || mdec_dreq1);
 	end
 
 	integer i;
@@ -147,13 +158,14 @@ module ps1_dma (
 			dpcr <= 32'h0765_4321; dicr <= 32'd0;
 			st <= S_IDLE; cur <= 3'd0;
 			r_req <= 1'b0; r_we <= 1'b0; gp0_wr <= 1'b0; gpu_rd <= 1'b0; dbg_node_v <= 1'b0; spu_wr <= 1'b0; spu_rd <= 1'b0;
-			cd_rd <= 1'b0; cd_go <= 1'b0; cd_go_info <= 32'd0; cd_words <= 16'd0;
+			cd_rd <= 1'b0; cd_go <= 1'b0; cd_go_info <= 32'd0; cd_words <= 16'd0; mdec_wr <= 1'b0;
 		end else begin
 			r_req  <= 1'b0;
 			gp0_wr <= 1'b0;
 			gpu_rd <= 1'b0;
 			spu_wr <= 1'b0;
 			spu_rd <= 1'b0;
+			mdec_wr <= 1'b0;
 			cd_rd <= 1'b0;
 			cd_go <= 1'b0;
 			dbg_node_v <= 1'b0;
@@ -208,6 +220,11 @@ module ps1_dma (
 						blocks <= (chcr[4][10:9] == 2'd0) ? 16'd1 : bcr[4][31:16];
 						st <= chcr[4][0] ? S_RD : S_GRD;
 					end
+					// The MDEC: one block per request (its words in BCR's low half), then back to
+					// the arbiter with MADR and the block count saved, as the chip does in sync
+					// mode 1 -- so channel 1 can drain what channel 0 fed in between.
+					3'd0: begin words <= {16'd0, bcr[0][15:0]}; blocks <= 16'd1; st <= S_RD; end
+					3'd1: begin words <= {16'd0, bcr[1][15:0]}; blocks <= 16'd1; st <= S_GRD; end
 					3'd6: begin                                     // OTC
 						words <= {16'd0, bcr[6][15:0]};
 						st <= S_OTC;
@@ -240,7 +257,7 @@ module ps1_dma (
 					st <= S_GP0;
 				end else r_req <= 1'b1;   // hold until the cache takes it
 			S_GP0: if (dev_ready) begin
-					if (cur == 3'd4) spu_wr <= 1'b1; else gp0_wr <= 1'b1;
+					if (cur == 3'd4) spu_wr <= 1'b1; else if (cur == 3'd0) mdec_wr <= 1'b1; else gp0_wr <= 1'b1;
 					addr     <= chcr[cur][1] ? addr - 24'd4 : addr + 24'd4;
 					words    <= words - 32'd1;
 					st <= S_RD;
@@ -294,7 +311,7 @@ module ps1_dma (
 					if (blocks <= 16'd1) st <= S_DONE;
 					else begin blocks <= blocks - 16'd1; words <= {16'd0, bcr[cur][15:0]}; end
 				end else begin
-					if (cur == 3'd4) spu_rd <= 1'b1; else gpu_rd <= 1'b1;
+					if (cur == 3'd4) spu_rd <= 1'b1; else if (cur != 3'd1) gpu_rd <= 1'b1;
 					st <= S_GWR;
 				end
 			// gpu_rd is held until the word arrives: a one-cycle pulse while the
@@ -305,7 +322,7 @@ module ps1_dma (
 					r_wdata <= dev_rdata;
 					r_req   <= 1'b1;
 					st <= S_GWRW;
-				end else if (cur == 3'd4) spu_rd <= 1'b1; else gpu_rd <= 1'b1;
+				end else if (cur == 3'd4) spu_rd <= 1'b1; else if (cur != 3'd1) gpu_rd <= 1'b1;
 			S_GWRW: if (r_ack) begin
 					addr  <= addr + 24'd4;
 					words <= words - 32'd1;
@@ -341,6 +358,11 @@ module ps1_dma (
 						addr <= next;
 						next <= 24'hFF_FFFF;
 						st <= S_LL;
+					end else if (cur <= 3'd1 && chcr[cur][10:9] == 2'd1 && bcr[cur][31:16] > 16'd1) begin
+						// an MDEC block done, more to come: back to the arbiter, not finished
+						bcr[cur][31:16] <= bcr[cur][31:16] - 16'd1;
+						madr[cur]       <= addr;
+						st <= S_IDLE;
 					end else begin
 						chcr[cur][24] <= 1'b0;                 // not busy
 						chcr[cur][28] <= 1'b0;
@@ -374,6 +396,8 @@ module ps1_dma (
 			endcase
 	end
 	assign dbg_dma = {st, cur, chcr[2][24], next};
+	// channel 1 takes the MDEC's word the clock it writes it to RAM
+	assign mdec_pop = (st == S_GWR) && (cur == 3'd1) && mdec_rvalid;
 	// ...and from the moment such a transfer is ASKED for: the BIOS starts the
 	// ordering-table clear while a linked list is still being drawn, and expects
 	// the table clean by its next instruction. Queued or running, it owns the bus.

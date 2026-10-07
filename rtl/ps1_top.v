@@ -326,6 +326,7 @@ module ps1_top #(
 	wire dma_hit  = io_hit && (c_addr[15:7] == 9'b0001_0000_1);   // 0x1080..0x10FF
 	wire mem_ctl  = io_hit && (c_addr[15:7] == 9'b0001_0000_0);   // 0x1000..0x107F
 	wire cd_hit   = io_hit && (c_addr[15:4] == 12'h180);
+	wire mdec_hit = io_hit && (c_addr[15:4] == 12'h182);
 	wire pad_hit  = io_hit && (c_addr[15:4] == 12'h104);
 	wire spu_hit  = io_hit && (c_addr[15:10] == 6'b0001_11);       // 0x1C00..0x1FFF: the SPU (1E00+ are its current volumes)
 	wire cached   = ram_hit || bios_hit;
@@ -957,6 +958,15 @@ module ps1_top #(
 		.wdata(c_dout), .rdata(tmr_rdata), .irq(tmr_irq)
 	);
 
+	// the MDEC (1F801820h / 24h), on DMA channels 0 and 1
+	wire        mdec_wr, mdec_in_ready, mdec_dreq0, mdec_pop, mdec_rvalid, mdec_dreq1;
+	wire [31:0] mdec_rdata, mdec_odata;
+	ps1_mdec u_mdec (
+		.clk(clk), .rst(core_rst),
+		.sel(mdec_hit & c_req & cpu_ce_io), .we(c_we), .a2(c_addr[2]), .wdata(c_dout), .rdata(mdec_rdata),
+		.in_wr(mdec_wr), .in_data(gp0_data), .in_ready(mdec_in_ready), .dreq0(mdec_dreq0),
+		.out_rd(mdec_pop), .out_data(mdec_odata), .out_valid(mdec_rvalid), .dreq1(mdec_dreq1)
+	);
 	ps1_dma u_dma (
 		.clk(clk), .rst(core_rst),
 		.sel(dma_hit & c_req & cpu_ce), .we(c_we), .a(c_addr[7:0]),
@@ -968,6 +978,8 @@ module ps1_top #(
 		.cd_rd(cd_dma_rd), .cd_rdata(cd_dma_rdata), .cd_rvalid(cd_dma_rvalid), .cd_go(cd_dma_go), .cd_go_info(cd_dma_go_info), .cd_words(cd_dma_words),
 		.spu_wr(spu_dma_wr), .spu_data(spu_dma_wdata), .spu_ready(spu_dma_ready),
 		.spu_rd(spu_dma_rd), .spu_rdata(spu_dma_rdata), .spu_rvalid(spu_dma_rvalid),
+		.mdec_wr(mdec_wr), .mdec_in_ready(mdec_in_ready), .mdec_dreq0(mdec_dreq0),
+		.mdec_pop(mdec_pop), .mdec_rdata(mdec_odata), .mdec_rvalid(mdec_rvalid), .mdec_dreq1(mdec_dreq1),
 		.hog(dma_hog), .in_flight(dma_in_flight),
 		.gpu_active(dma_gpu_active),
 		.dbg_node_v(dbg_node_v), .dbg_node_addr(dbg_node_addr), .dbg_node_hdr(dbg_node_hdr),
@@ -1032,6 +1044,7 @@ module ps1_top #(
 		else if (tmr_hit)   din_r <= tmr_rdata;
 		else if (dma_hit)   din_r <= dma_rdata;
 		else if (cd_hit)    din_r <= cd_rdata;
+		else if (mdec_hit)  din_r <= mdec_rdata;
 		else if (pad_hit)   din_r <= sio_rdata;
 		else                din_r <= stub_rdata;
 	end
