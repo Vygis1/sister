@@ -272,6 +272,36 @@ module tb_ps1_scan;
 		if (bad != 0)     $display("      %0d of %0d pixels held the WRONG PIXEL", bad, ow * FH);
 	end endtask
 
+	// 24-bit display (GP1(08h) bit 4): pixel n is the three bytes at byte 3n of the row -- red,
+	// green, blue -- and goes out as RGB555. Movies are played this way (Gran Turismo 2's intro).
+	reg [7:0] b24 [0:2];
+	integer bk;
+	task verify24; input [511:0] name; begin
+		bad = 0; missing = 0; shown = 0;
+		ow = (c_w > 10'd320) ? (c_w >> 1) : c_w;
+		for (vy = 0; vy < FH; vy = vy + 1)
+			for (vx = 0; vx < ow; vx = vx + 1) begin
+				idx = vy * FW + vx;
+				for (bk = 0; bk < 3; bk = bk + 1) begin
+					want16 = pat(c_x + ((((c_w > 10'd320) ? vx * 2 : vx) * 3 + bk) >> 1), c_y + vy[8:0]);
+					b24[bk] = ((((c_w > 10'd320) ? vx * 2 : vx) * 3 + bk) & 1) ? want16[15:8] : want16[7:0];
+				end
+				want16 = ({1'b0, vy[8:0]} < c_lines) ? {1'b0, b24[2][7:3], b24[1][7:3], b24[0][7:3]} : 16'd0;
+				if (gotg[idx] != gen) missing = missing + 1;
+				else if (gotv[idx] !== want16) begin
+					bad = bad + 1;
+					if (shown < 6) begin
+						shown = shown + 1;
+						$display("      24-bit: at column %0d row %0d wanted %04x, got %04x", vx, vy, want16, gotv[idx]);
+					end
+				end
+			end
+		$display("  %0s: %0d pixels, window %0dx%0d at vram %0d,%0d", name, npx, ow, FH, c_x, c_y);
+		check(missing == 0 && bad == 0 && ovf == 0 && npx == ow * FH, name);
+		if (missing != 0) $display("      %0d of %0d pixels never arrived", missing, ow * FH);
+		if (bad != 0)     $display("      %0d of %0d pixels held the WRONG PIXEL", bad, ow * FH);
+	end endtask
+
 	// Wait for a whole capture, and for one that STARTED after the test asked
 	// for it: a capture already running when the display mode was set is half a
 	// frame of the old mode, and judging it against the new one is the
@@ -279,6 +309,7 @@ module tb_ps1_scan;
 	// through, and the abort is not a failure either -- the next one is what
 	// has to be right.
 	integer guard;
+	reg want24 = 0;
 	task capture; input [511:0] name; begin
 		guard = 0;
 		@(negedge clk);
@@ -288,7 +319,7 @@ module tb_ps1_scan;
 			$display("  FAIL %0s: no capture finished", name); errors = errors + 1;
 		end else begin
 			@(negedge clk);
-			verify(name);
+			if (want24) verify24(name); else verify(name);
 		end
 	end endtask
 
@@ -369,6 +400,18 @@ module tb_ps1_scan;
 		$display("a 320-wide picture");
 		setmode(10'd0, 9'd0, 2'd1);
 		capture("320 wide at vram 0, quiet");
+
+		$display("24-bit colour (a movie), 320 wide");
+		gp1(32'h0800_0011);                      // 320 wide, 24-bit
+		want24 = 1;
+		capture("24-bit 320 wide at vram 0");
+		capture("24-bit 320 wide at vram 0, again");
+		gp1(32'h0500_0000 | 32'd100 | (32'd16 << 10));
+		capture("24-bit 320 wide at vram 100,16 (an odd start)");
+		gp1(32'h0800_0013);                      // 640 wide, 24-bit: half width, as the others
+		gp1(32'h0500_0000);
+		capture("24-bit 640 wide at vram 0");
+		want24 = 0;
 
 		$display("buffers flipping while the capture runs");
 		// A real game flips at its own pace, not at a tidy moment: change where

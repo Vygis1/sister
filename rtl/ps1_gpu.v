@@ -1397,6 +1397,14 @@ module ps1_gpu #(
 	reg        sc_ldec;       // ...and every other pixel is dropped, so two make one
 	reg [63:0] fl_half;       // the first of a pair, already thinned
 	reg        fl_half_v;
+	// 24-bit colour (GP1(08h) bit 4), the way movies are shown: pixel n is the three bytes at
+	// byte 3n of the row -- red, green, blue -- so two VRAM columns make each one, and every other
+	// pixel starts in the column the last one ended in. Read here as 16-bit pixels, a movie was
+	// colour noise on the screen (Gran Turismo 2's intro).
+	reg        sc_24;         // this capture is of a 24-bit picture
+	reg        ph24;          // ...the second column of the pixel is next
+	reg [15:0] hw24;          // ...the first column, in hand
+	reg [9:0]  ox24;          // ...the pixel
 
 	// every other pixel of a VRAM line: four of the eight, in order
 	function [63:0] thin4;
@@ -1432,7 +1440,12 @@ module ps1_gpu #(
 	// odd columns were being walked one at a time to emit nothing at all: 256
 	// clocks a row, 61,440 a capture, 23% of it, spent stepping past pixels the
 	// capture does not want. The step skips them.
-	wire [9:0]  sx_step = (sc_w > 10'd320) ? 10'd2 : 10'd1;
+	wire [9:0]  sx_step = (sc_w > 10'd320 && !sc_24) ? 10'd2 : 10'd1;
+	// the 24-bit pixel in hand: an even one starts on a column's low byte, an odd one on its high
+	wire [15:0] h24b = half(sword, (sc_x + sx) & 1);
+	wire [7:0]  r24  = !ox24[0] ? hw24[7:0]  : hw24[15:8];
+	wire [7:0]  g24  = !ox24[0] ? hw24[15:8] : h24b[7:0];
+	wire [7:0]  b24  = !ox24[0] ? h24b[7:0]  : h24b[15:8];
 	// ...and where the one after that lives, so SC_EMIT can tell whether it is
 	// inside the line already in hand.
 	wire [28:0] s_after = vaddr(sc_x + sx + sx_step,
@@ -1521,7 +1534,8 @@ module ps1_gpu #(
 					step <= (hres == 2'd0) ? 2'd1 : (hres == 2'd1) ? 2'd1 : 2'd2;   // 256/320 -> 1:1, 512/640 -> 2:1
 					sc_x <= disp_x; sc_y <= disp_y; sc_w <= disp_w;
 					// decided once, for the whole frame
-					sc_lmode  <= scan_lines && (disp_x[2:0] == 3'd0)
+					sc_24 <= bpp24; ph24 <= 1'b0; ox24 <= 10'd0;
+					sc_lmode  <= scan_lines && !bpp24 && (disp_x[2:0] == 3'd0)
 					             && ((disp_w <= 10'd320) ? (disp_w[2:0] == 3'd0)
 					                                     : (disp_w[3:0] == 4'd0));
 					sc_ldec   <= (disp_w > 10'd320);
@@ -1582,7 +1596,35 @@ module ps1_gpu #(
 						sc <= SC_EMIT;
 				end
 			SC_EMIT: if (sc_abort) begin sc <= SC_IDLE; sc_abort <= 1'b0; scan_abort <= 1'b1; want_scan <= 1'b1; sline_v <= 1'b0; fl_half_v <= 1'b0; end
-				else begin
+				else if (sc_24) begin
+					if (!ph24) begin
+						// the pixel's first column; the second is the next one
+						hw24 <= h24b; ph24 <= 1'b1;
+						sx <= sx + 10'd1;
+						if (!scan_hold && sline_v && (s_after[28:4] == sline_tag)) sword <= sline[s_after[3:2]*32 +: 32];
+						else sc <= SC_RD;
+					end else begin
+						if (sc_w <= 10'd320 || !ox24[0]) begin   // (a wide picture at half width, as the others)
+							fpx_valid <= 1'b1;
+							fpx_x <= (sc_w > 10'd320) ? {1'b0, ox24[9:1]} : ox24; fpx_y <= sy;
+							fpx_rgb <= row_lit ? {1'b0, b24[7:3], g24[7:3], r24[7:3]} : 16'd0;
+						end
+						ph24 <= 1'b0;
+						if (ox24 + 10'd1 >= sc_w) begin
+							ox24 <= 10'd0; ox <= 0; sx <= 0; substep <= 0;
+							if (sy == 9'd239) begin sc <= SC_IDLE; scan_done <= 1'b1; end else begin sy <= sy + 9'd1; sc <= SC_RD; end
+						end else begin
+							ox24 <= ox24 + 10'd1;
+							// an odd pixel ends on its second column's high byte: the next starts a
+							// column on; an even one ends on its low byte: the next starts right there
+							if (ox24[0]) begin
+								sx <= sx + 10'd1;
+								if (!scan_hold && sline_v && (s_after[28:4] == sline_tag)) sword <= sline[s_after[3:2]*32 +: 32];
+								else sc <= SC_RD;
+							end
+						end
+					end
+				end else begin
 					// every pixel, full width, to the frame in DDR3
 					// a 512/640-wide picture is captured at half width (every other
 					// pixel): the frame crosses the register link at about 1 MB/s, so
