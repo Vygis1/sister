@@ -549,6 +549,20 @@ module console_top #(
 	// the SNES cartridge's shape, from the loader (it reads the header): [0] HiROM,
 	// [15:8] log2 of the ROM's size, [23:16] log2 of the save RAM's (0: none)
 	reg  [23:0] snes_cfg;
+	// the PlayStation GTE's debug snapshot (ps1_gte.v): 0x190 [31] armed [30] go (run the command
+	// it stopped at) [15:0] commands to skip (read: [26:25] {stopped after, stopped before},
+	// [24:0] the command word); 0x194 the register, [5] control (read: its value)
+	reg         gte_snap_arm = 1'b0, gte_snap_go = 1'b0; reg [15:0] gte_snap_skip = 16'd0; reg [6:0] gte_snap_idx = 7'd0;
+	wire [31:0] gte_snap_data; wire [24:0] gte_snap_word; wire [1:0] gte_snap_state;
+	// ...and its write trace: 0x198 the entry (0 oldest .. 63 newest); 0x19C its PC, 0x1A0 its
+	// value, 0x1A4 {control, register}
+	reg  [5:0]  gte_wt_idx = 6'd0;
+	wire [31:0] gte_wt_pc, gte_wt_data; wire [5:0] gte_wt_reg;
+	always @(posedge clk) if (ctrl_we && off == 16'h0198) gte_wt_idx <= wdata[5:0];
+	always @(posedge clk) begin
+		if (ctrl_we && off == 16'h0190) begin gte_snap_arm <= wdata[31]; gte_snap_go <= wdata[30]; gte_snap_skip <= wdata[15:0]; end
+		if (ctrl_we && off == 16'h0194) gte_snap_idx <= wdata[6:0];
+	end
 	// the SNES's save RAM from the loader: 0x184 the pointer (a write reads the word there into
 	// 0x188; bit 31 also clears the written flag, which a read of 0x184 gives in bit 0), 0x188
 	// the word (a write puts it at the pointer and moves the pointer on)
@@ -710,6 +724,11 @@ module console_top #(
 		16'h0178: ctrl_rdata = {31'd0, n64_vi_slow};
 		16'h017C: ctrl_rdata = {16'd0, vid_opt};
 		16'h0180: ctrl_rdata = {8'd0, snes_cfg};
+		16'h0190: ctrl_rdata = {5'd0, gte_snap_state, gte_snap_word};
+		16'h0194: ctrl_rdata = gte_snap_data;
+		16'h019C: ctrl_rdata = gte_wt_pc;
+		16'h01A0: ctrl_rdata = gte_wt_data;
+		16'h01A4: ctrl_rdata = {26'd0, gte_wt_reg};
 		16'h0184: ctrl_rdata = {31'd0, snes_dirty};
 		16'h0188: ctrl_rdata = snes_hword;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
@@ -1199,7 +1218,10 @@ module console_top #(
 			.dbg_gpu_pop(ps1_gpu_pop), .dbg_gpu_popword(ps1_gpu_popword),
 			.dbg_gpu_wr(ps1_dbg_gpu_wr), .dbg_mem(ps1_dbg_mem), .dbg_daddr(ps1_dbg_daddr),
 			.dbg_irq(ps1_dbg_irq), .dbg_gpu_st(ps1_dbg_gpu_st),
-			.dbg_cause(ps1_dbg_cause), .dbg_epc(ps1_dbg_epc), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
+			.dbg_cause(ps1_dbg_cause), .dbg_epc(ps1_dbg_epc),
+			.gte_snap_arm(gte_snap_arm), .gte_snap_go(gte_snap_go), .gte_snap_skip(gte_snap_skip), .gte_snap_idx(gte_snap_idx),
+			.gte_snap_data(gte_snap_data), .gte_snap_word(gte_snap_word), .gte_snap_state(gte_snap_state),
+			.gte_wt_idx(gte_wt_idx), .gte_wt_pc(gte_wt_pc), .gte_wt_data(gte_wt_data), .gte_wt_reg(gte_wt_reg), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
 			.cd_fill_lba_o(cd_fill_lba), .cd_fill_room_o(cd_fill_room), .cd_fill_run_o(cd_fill_run), .cd_dbg_o(cd_dbg), .cd_dbg_cmds_o(cd_dbg_cmds), .cd_dbg_setloc_o(cd_dbg_setloc), .cd_dbg_seek_o(cd_dbg_seek), .cd_dbg_hdr_o(cd_dbg_hdr), .cd_trace_idx(cd_trace_idx), .cc_flush(cc_flush), .cc_flush_busy(cc_flush_busy), .cd_trace_data(cd_trace_data), .cd_trace_wp(cd_trace_wp), .cd_dma_words_o(cd_dma_words),
 			.dbg_icv_pc(ps1_icv_pc), .dbg_icv_got(ps1_icv_got), .dbg_icv_want(ps1_icv_want), .dbg_icv_n(ps1_icv_n),
 			.dbg_exec(ps1_dbg_exec), .dbg_rsel(ps1_rsel), .dbg_rval(ps1_rval),
@@ -1230,6 +1252,8 @@ module console_top #(
 			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(ps1_vid_rgb));
 	end else begin : g_ps1
 		assign ps1_vid_rgb = 24'd0;
+		assign gte_snap_data = 32'd0; assign gte_snap_word = 25'd0; assign gte_snap_state = 2'd0;
+		assign gte_wt_pc = 32'd0; assign gte_wt_data = 32'd0; assign gte_wt_reg = 6'd0;
 		if (!CORE_N64 && (CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS) begin : g_md_lr
 			// the Mega Drive's (or the SNES's) two channels, for HDMI's stereo: 48000 times a
 			// second (the SNES's 32 kHz held)

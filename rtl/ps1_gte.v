@@ -48,11 +48,35 @@ module ps1_gte (
 
 	input  wire        cmd,         // start a command
 	input  wire [24:0] word,
-	output wire        busy
+	output wire        busy,
+	// A debug snapshot, nothing copied: armed, the GTE stops at the (skip+1)-th command after
+	// arming BEFORE running it (busy: the processor waits at its next GTE instruction), and the
+	// registers are read where they are, through the read port, as MFC2/CFC2 would see them
+	// (idx [5] control, [4:0] the register); `go` runs the command and the GTE stops again
+	// when it is done; disarming lets the game go on. tools/ps1/gtesnap.py replays it through
+	// tools/ps1/gte.py. (A first version copied all 64 registers aside: 2,000 LUTs and 2,000
+	// flip-flops, and the console no longer fitted the chip.)
+	input  wire        snap_arm,
+	input  wire        snap_go,
+	input  wire [15:0] snap_skip,
+	input  wire [6:0]  snap_idx,
+	output wire [31:0] snap_data,
+	output reg  [24:0] snap_word,
+	output wire [1:0]  snap_state,   // {stopped after, stopped before}
+	output wire        wr_ok,        // a register write taken this clock (for the write trace in ps1_top)
+	output wire        snap_busy     // the snapshot has taken a command (the trace stops)
 );
 	reg [31:0] d [0:31];
 	reg [31:0] c [0:31];
 	integer k;
+	reg [15:0] snap_n; reg [1:0] sst;           // 0 counting, 1 stopped before, 2 running it, 3 stopped after
+	wire snap_hold = (sst == 2'd1) || (sst == 2'd3);
+	assign snap_state = {sst == 2'd3, sst == 2'd1};
+	wire [4:0] rri  = snap_hold ? snap_idx[4:0] : reg_i;    // the read port: the snapshot's while stopped
+	wire       rctl = snap_hold ? snap_idx[5]   : ctl;
+	assign snap_data = rdata;
+	assign snap_busy = (sst != 2'd0);
+
 
 	// --- sign helpers ----------------------------------------------------------
 	function signed [63:0] sx16; input [15:0] v; sx16 = {{48{v[15]}}, v}; endfunction
@@ -365,29 +389,29 @@ module ps1_gte (
 		// we handed back all 32 bits as written. Checked against a real machine
 		// (JaCzekanski's gte-fuzz log): a game that reads IR1 back got 00008000
 		// from us where the chip gives ffff8000, which is -32768 read as +32768.
-		if (ctl) begin
-			if (reg_i == 31) begin
+		if (rctl) begin
+			if (rri == 31) begin
 				rdata = c[31] & 32'h7FFFF000;
 				if (rdata & 32'h7F87E000) rdata = rdata | 32'h80000000;
-			end else if (gte_old[0]) rdata = c[reg_i];
-			else case (reg_i)
+			end else if (gte_old[0]) rdata = c[rri];
+			else case (rri)
 				// RT33, L33, LB3, H, DQA, ZSF3, ZSF4: sixteen bits, sign extended.
 				// H is unsigned and still comes back sign extended -- a quirk of
 				// the chip, and the fuzz log confirms it.
 				5'd4, 5'd12, 5'd20, 5'd26, 5'd27, 5'd29, 5'd30:
-					rdata = {{16{c[reg_i][15]}}, c[reg_i][15:0]};
-				default: rdata = c[reg_i];
+					rdata = {{16{c[rri][15]}}, c[rri][15:0]};
+				default: rdata = c[rri];
 			endcase
-		end else case (reg_i)
+		end else case (rri)
 			5'd1, 5'd3, 5'd5,                          // VZ0..VZ2
 			5'd8, 5'd9, 5'd10, 5'd11:                  // IR0..IR3
-				rdata = gte_old[0] ? d[reg_i] : {{16{d[reg_i][15]}}, d[reg_i][15:0]};
+				rdata = gte_old[0] ? d[rri] : {{16{d[rri][15]}}, d[rri][15:0]};
 			5'd7,                                      // OTZ
 			5'd16, 5'd17, 5'd18, 5'd19:                // SZ0..SZ3: unsigned
-				rdata = gte_old[0] ? d[reg_i] : {16'd0, d[reg_i][15:0]};
+				rdata = gte_old[0] ? d[rri] : {16'd0, d[rri][15:0]};
 			5'd15:        rdata = d[14];
 			5'd28, 5'd29: rdata = {17'd0, c5b, c5g, c5r};
-			default:      rdata = d[reg_i];
+			default:      rdata = d[rri];
 		endcase
 	end
 
@@ -406,7 +430,8 @@ module ps1_gte (
 	// the one-clock gap -- and a write in that gap (`we && !run` below) was
 	// dropped. A game's square root wrote LZCS there, read a stale LZCR, and
 	// overflowed.
-	assign busy = run || cmd;
+	assign busy = run || cmd || snap_hold || (sst == 2'd2);
+	assign wr_ok = we && !run && !snap_hold;          // (the engine's write condition, below)   // (no clock free between the run and the stop after it)
 	// A command is taken on the EDGE of `cmd`, never on the level, so nothing can
 	// ever make the sequencer run the same one twice (see r3000.v). The register
 	// WRITE line stays level-sensitive: the processor asserts it on consecutive
@@ -418,6 +443,7 @@ module ps1_gte (
 		if (rst) cmd_d <= 1'b0; else cmd_d <= cmd;
 	end
 	wire cmd_go = cmd && !cmd_d;
+	wire [24:0] cw = (sst == 2'd1) ? snap_word : word;     // (the snapshot's command, when it lets it run)
 	wire [4:0] shamt = sf ? 5'd12 : 5'd0;
 
 	reg signed [63:0] macw0, macw1, macw2;     // unshifted accumulators between steps
@@ -727,6 +753,21 @@ module ps1_gte (
 		endcase
 	end endtask
 
+	// --- the debug snapshot (see the ports) ----------------------------------------
+	wire snap_take  = snap_arm && (sst == 2'd0) && cmd_go && !run && (snap_n == snap_skip);
+	wire snap_start = (sst == 2'd1) && snap_go;          // the command held back, run now
+	always @(posedge clk) begin
+		if (rst || !snap_arm) begin
+			snap_n <= 16'd0; sst <= 2'd0;
+		end else case (sst)
+			2'd0: if (snap_take) begin snap_word <= word; sst <= 2'd1; end
+			      else if (cmd_go && !run) snap_n <= snap_n + 16'd1;
+			2'd1: if (snap_go) sst <= 2'd2;
+			2'd2: if (!run) sst <= 2'd3;                      // (run rose with the step into 2)
+			default: ;
+		endcase
+	end
+
 	// ==========================================================================
 	// the clocked engine
 	// ==========================================================================
@@ -736,7 +777,7 @@ module ps1_gte (
 		if (rst) begin
 			for (k = 0; k < 32; k = k + 1) begin d[k] <= 0; c[k] <= 0; end
 			run <= 1'b0; step <= 0; vi <= 0; ir3q <= 0;
-		end else if (we && !run) begin
+		end else if (we && !run && !snap_hold) begin
 			if (ctl) c[reg_i] <= wdata;
 			else case (reg_i)
 				5'd7:  d[7]  <= {16'd0, wdata[15:0]};
@@ -749,9 +790,9 @@ module ps1_gte (
 				5'd30: begin d[30] <= wdata; d[31] <= {26'd0, leadcount(wdata)}; end
 				default: d[reg_i] <= wdata;
 			endcase
-		end else if (cmd_go && !run) begin
-			op <= word[5:0]; sf <= word[19]; lm <= word[10];
-			mx <= word[18:17]; vx <= word[16:15]; cv <= word[14:13];
+		end else if ((cmd_go && !run && !snap_hold && !snap_take) || snap_start) begin
+			op <= cw[5:0]; sf <= cw[19]; lm <= cw[10];
+			mx <= cw[18:17]; vx <= cw[16:15]; cv <= cw[14:13];
 			step <= 0; vi <= 0; c[31] <= 32'd0; ir3q <= 1'b0; run <= 1'b1;
 		end else if (run) begin
 			step <= step + 6'd1;

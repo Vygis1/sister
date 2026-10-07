@@ -61,8 +61,11 @@ module ps1_mdec (
 	reg [15:0] to_come;               // its words still to arrive in the FIFO (for dreq0)
 	reg [5:0]  tix;                   // table upload index (words)
 	reg        tcol;                  // the quant upload has the chroma table too
-	reg [7:0]  qt [0:127];            // luma 0-63, chroma 64-127 (by zigzag index)
-	reg [12:0] sc [0:63];             // the scale table >> 3: [f*8 + p]
+	// The tables are kept a word as it came per entry -- four quant bytes, two scale halves --
+	// so each upload is ONE write: written four (two) entries a clock, synthesis built them in
+	// flip-flops (1,900 of them, and the console stopped fitting the chip).
+	reg [31:0] qtw [0:31];            // quant bytes, luma 0-63 then chroma 64-127 (by zigzag index), four a word
+	reg [25:0] scw [0:31];            // the scale table >> 3, [f*8 + p], two a word
 	wire       mono = !depth[1];
 
 	// --- the block being read in ---------------------------------------------------------------
@@ -98,10 +101,12 @@ module ps1_mdec (
 	// --- the state machine ----------------------------------------------------------------------
 	localparam S_IDLE = 4'd0, S_CMD = 4'd1, S_TBL = 4'd2, S_WORD = 4'd3, S_HALF = 4'd4, S_DQ = 4'd5,
 	           S_P1 = 4'd6, S_P1W = 4'd7, S_P2 = 4'd8, S_P2W = 4'd9, S_BEND = 4'd10, S_COL = 4'd11,
-	           S_MONO = 4'd12, S_COLW = 4'd13;
+	           S_MONO = 4'd12, S_COLW = 4'd13, S_DQ1 = 4'd14, S_DQ2 = 4'd15;
 	reg [3:0]  st;
 	reg [2:0]  i_a, i_b;              // IDCT: the output index pair (u / y, then y / x)
 	reg [2:0]  i_k;                   // and the sum's term
+	wire [25:0] sc_w = scw[{i_k, i_b[2:1]}];
+	wire [12:0] sc_q = i_b[0] ? sc_w[25:13] : sc_w[12:0];   // sc[{i_k, i_b}]
 	reg signed [31:0] acc;
 	reg        mac_v; reg signed [15:0] mac_c; reg signed [12:0] mac_m;
 	reg        last_term;
@@ -112,9 +117,15 @@ module ps1_mdec (
 
 	// dequantisation: the coefficient at k from level (10-bit signed)
 	reg signed [9:0]  dq_lvl; reg [5:0] dq_k;
-	wire [7:0]  dq_qt  = qt[{(mono || blk >= 3'd2) ? 1'b0 : 1'b1, dq_k}];
-	wire [13:0] dq_q   = (dq_k == 6'd0) ? {6'd0, dq_qt} : dq_qt * qs;
-	wire signed [24:0] dq_p0 = dq_lvl * $signed({1'b0, dq_q});
+	wire [6:0]  dq_qi  = {(mono || blk >= 3'd2) ? 1'b0 : 1'b1, dq_k};
+	wire [31:0] dq_qw  = qtw[dq_qi[6:2]];
+	wire [7:0]  dq_qt  = dq_qw[8 * dq_qi[1:0] +: 8];
+	// Three clocks, S_DQ1 -> S_DQ2 -> S_DQ: in one, the table read, both multiplies and the
+	// rounding were 25 levels and 20.9 ns, the worst path in the console (it failed 52.6 MHz
+	// by 2.4 ns). dq_lvl, dq_k, qs and blk hold still through all three.
+	wire [13:0] dq_q_w = (dq_k == 6'd0) ? {6'd0, dq_qt} : dq_qt * qs;
+	reg  [13:0] dq_q;                                      // S_DQ1: the quant step
+	reg  signed [24:0] dq_p0;                              // S_DQ2: times the level
 	wire signed [24:0] dq_p  = (dq_k == 6'd0) ? dq_p0 : (dq_p0 >>> 3);
 	wire signed [29:0] dq_c0 = (dq_q == 14'd0) ? $signed({dq_lvl, 5'd0})
 	                         : (dq_lvl > 0) ? ((dq_p <<< 4) - 30'sd8) : (dq_lvl < 0) ? ((dq_p <<< 4) + 30'sd8) : 30'sd0;
@@ -203,12 +214,8 @@ module ps1_mdec (
 			S_TBL: if (left == 16'd0) begin kind <= 2'd0; busy <= 1'b0; st <= S_IDLE; end
 				else if (icnt != 6'd0) begin
 					pop_in = 1'b1;
-					if (kind == 2'd2)
-						for (n = 0; n < 4; n = n + 1) qt[{tix, 2'd0} + n] <= ififo[ir][8 * n +: 8];
-					else begin
-						sc[{tix[4:0], 1'b0}] <= ififo[ir][15:3];
-						sc[{tix[4:0], 1'b1}] <= ififo[ir][31:19];
-					end
+					if (kind == 2'd2) qtw[tix[4:0]] <= ififo[ir];
+					else              scw[tix[4:0]] <= {ififo[ir][31:19], ififo[ir][15:3]};
 					tix <= tix + 6'd1;
 					left <= left - 16'd1;
 				end
@@ -230,13 +237,13 @@ module ps1_mdec (
 							qs <= hw[15:10]; cval <= 64'd0;
 							dq_lvl <= hw[9:0]; dq_k <= 6'd0; k <= 7'd0;
 							dc_next <= 1'b0;
-							st <= S_DQ;
+							st <= S_DQ1;
 						end else st <= S_BEND;          // (padding: on to the next halfword)
 					end else begin
 						if ({1'b0, k} + {2'b0, hw[15:10]} + 8'd1 <= 8'd63) begin
 							k <= k + {1'b0, hw[15:10]} + 7'd1;
 							dq_lvl <= hw[9:0]; dq_k <= k[5:0] + hw[15:10] + 6'd1;
-							st <= S_DQ;
+							st <= S_DQ1;
 						end else begin
 							// past 63: the block is done (the level is dropped)
 							k <= 7'd64;
@@ -245,6 +252,8 @@ module ps1_mdec (
 						end
 					end
 				end
+			S_DQ1: begin dq_q <= dq_q_w; st <= S_DQ2; end
+			S_DQ2: begin dq_p0 <= dq_lvl * $signed({1'b0, dq_q}); st <= S_DQ; end
 			S_DQ: begin
 					coef[zz(dq_k)] <= dq_c; cval[zz(dq_k)] <= 1'b1;
 					if (dq_k == 6'd63) begin
@@ -261,7 +270,7 @@ module ps1_mdec (
 			S_P1: begin
 					mac_v <= 1'b1;
 					mac_c <= cval[{i_k, i_a}] ? {{1{coef[{i_k, i_a}][14]}}, coef[{i_k, i_a}]} : 16'sd0;
-					mac_m <= sc[{i_k, i_b}];
+					mac_m <= sc_q;
 					i_k <= i_k + 3'd1;
 					if (i_k == 3'd7) st <= S_P1W;
 				end
@@ -278,7 +287,7 @@ module ps1_mdec (
 			S_P2: begin
 					mac_v <= 1'b1;
 					mac_c <= tt[{i_a, i_k}];
-					mac_m <= sc[{i_k, i_b}];
+					mac_m <= sc_q;
 					i_k <= i_k + 3'd1;
 					if (i_k == 3'd7) st <= S_P2W;
 				end

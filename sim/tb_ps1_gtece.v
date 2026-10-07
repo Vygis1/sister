@@ -37,7 +37,8 @@ module tb_ps1_gtece;
 
 	ps1_gte dut (.gte_old(4'd0), .clk(clk), .rst(rst),
 		.we(we), .ctl(ctl), .reg_i(reg_i), .wdata(wdata), .rdata(rdata),
-		.cmd(cmd), .word(word), .busy(busy));
+		.cmd(cmd), .word(word), .busy(busy),
+		.snap_arm(1'b0), .snap_go(1'b0), .snap_skip(16'd0), .snap_idx(7'd0), .snap_data(), .snap_word(), .snap_state());
 
 	// how many times the sequencer actually started a command
 	integer runs = 0;

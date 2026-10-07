@@ -125,6 +125,18 @@ module ps1_top #(
 	// the CPU's last exception: COP0 CAUSE and EPC
 	output wire [31:0] dbg_cause,
 	output wire [31:0] dbg_epc,
+	// the GTE's debug snapshot (ps1_gte.v)
+	input  wire        gte_snap_arm,
+	input  wire        gte_snap_go,
+	input  wire [15:0] gte_snap_skip,
+	input  wire [6:0]  gte_snap_idx,
+	output wire [31:0] gte_snap_data,
+	output wire [24:0] gte_snap_word,
+	output wire [1:0]  gte_snap_state,
+	input  wire [5:0]  gte_wt_idx,      // the GTE write trace: entry (0 = the oldest of the 64)
+	output wire [31:0] gte_wt_pc,       // ...the processor's PC as the write was taken
+	output wire [31:0] gte_wt_data,     // ...the value
+	output wire [5:0]  gte_wt_reg,      // ...{control, register}
 	// the DMA engine: state, channel, ch2 busy, next-pointer
 	output wire [31:0] dbg_dma,
 	// the last four GP0 opcodes the GPU dispatched
@@ -303,8 +315,26 @@ module ps1_top #(
 		.gte_old(gte_old),
 		.clk(clk), .rst(core_rst),
 		.we(c2_we), .ctl(c2_ctl), .reg_i(c2_reg), .wdata(c2_wdata), .rdata(c2_rdata),
-		.cmd(c2_cmd), .word(c2_word), .busy(c2_busy)
+		.cmd(c2_cmd), .word(c2_word), .busy(c2_busy),
+		.snap_arm(gte_snap_arm), .snap_go(gte_snap_go), .snap_skip(gte_snap_skip), .snap_idx(gte_snap_idx),
+		.snap_data(gte_snap_data), .snap_word(gte_snap_word), .snap_state(gte_snap_state),
+		.wr_ok(gte_wr_ok), .snap_busy(gte_snap_busy)
 	);
+	// The GTE write trace: the last 64 register writes (MTC2, CTC2, LWC2) with the PC they were
+	// taken at, stopped while the snapshot holds a command -- so stopped before an RTPS it shows
+	// what loaded the matrix the RTPS uses, from which code. Gran Turismo 2 projected every
+	// vertex onto one line: its rotation matrix had a zero middle row, and the GTE itself
+	// checked right against the model on 30 of the game's commands.
+	wire gte_wr_ok, gte_snap_busy;
+	reg  [5:0]  gw_wp = 6'd0;
+	(* ram_style = "distributed" *) reg [31:0] gw_pc [0:63];
+	(* ram_style = "distributed" *) reg [31:0] gw_d  [0:63];
+	(* ram_style = "distributed" *) reg [5:0]  gw_r  [0:63];
+	always @(posedge clk) if (gte_wr_ok && !gte_snap_busy) begin
+		gw_pc[gw_wp] <= dbg_pc; gw_d[gw_wp] <= c2_wdata; gw_r[gw_wp] <= {c2_ctl, c2_reg}; gw_wp <= gw_wp + 6'd1;
+	end
+	wire [5:0] gw_ra = gw_wp + gte_wt_idx;
+	assign gte_wt_pc = gw_pc[gw_ra]; assign gte_wt_data = gw_d[gw_ra]; assign gte_wt_reg = gw_r[gw_ra];
 
 	// ================================================================================
 	// CPU address decode
