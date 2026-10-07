@@ -19,13 +19,14 @@ module tb_ps1_cddma;
 	wire px_valid; wire [8:0] px_x, px_y; wire [7:0] px_rgb; wire [31:0] pc;
 	// the drive's transport
 	wire [23:0] fill_lba; wire [3:0] fill_room; wire fill_run;
+	reg  cc_flush = 0; wire cc_flush_busy;
 	reg  sb_we = 0; reg [11:0] sb_addr = 0; reg [7:0] sb_data = 0; reg sb_done = 0; reg [23:0] sb_lba = 0;
 	ps1_top dut (
 		.card2_fill(0), .card2_in(0), .joy2(0),
 		.toc_addr(0), .toc_data(0), .toc_we(0), .xa_pop(0), .xa_wdata(0), .xa_we(0), // inputs this bench does not drive, tied: an open input simulates as X
-		.cap_every_vsync(0), .cc_flush(0), .cd_trace_idx(0), .dbg_perf_sel(0), .dbg_rsel(0), .dbg_watch(0), .fb_cap_go(0), .fbr_addr(0), .fbr_req(0), .hr_go(0), .hr_line(0), .joy1(0), .vram_flush(0), .dma_relax(1'b0), .ev_idx(6'd0), .card_in(1'b0), .card_fill(1'b0), .card_wq_pop(1'b0), .card_wq_clr(1'b0), 
+		.cap_every_vsync(0), .cc_flush(cc_flush), .cc_flush_busy(cc_flush_busy), .cd_trace_idx(0), .dbg_perf_sel(0), .dbg_rsel(0), .dbg_watch(0), .fb_cap_go(0), .fbr_addr(0), .fbr_req(0), .hr_go(0), .hr_line(0), .joy1(0), .vram_flush(0), .dma_relax(1'b0), .ev_idx(6'd0), .card_in(1'b0), .card_fill(1'b0), .card_wq_pop(1'b0), .card_wq_clr(1'b0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
-		.gte_old(4'd0),
+		.gte_old(4'd0), .gte_snap_arm(1'b0), .gte_snap_go(1'b0), .gte_snap_skip(16'd0), .gte_snap_idx(7'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),
 		.host_windex(host_windex), .host_we(host_we), .host_wdata(host_wdata),
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),
@@ -116,13 +117,18 @@ module tb_ps1_cddma;
 			$display("      drive: seek_then_read=%0d sec_timer=%0d pos=%0d r_base=%0d r_wp=%0d r_rp=%0d r_lp=%0d held=%0d loc_v=%0d mode=%02h int_mask=%02h", dut.u_cd.seek_then_read, dut.u_cd.sec_timer, dut.u_cd.pos, dut.u_cd.r_base, dut.u_cd.r_wp, dut.u_cd.r_rp, dut.u_cd.r_lp, dut.u_cd.held, dut.u_cd.loc_v, dut.u_cd.mode, dut.u_cd.int_mask);
 		end
 		else $display("  ok   the program finished after %0d cycles, %0d sectors fed", cycles, fed);
-		// three reads the game's way: LBA 16, 18, 24 into three buffers, checked through the write-back cache
+		// three reads the game's way: LBA 16, 18, 24 into three buffers, read out of memory after
+		// the processor's write-back cache is flushed into it (as tools/ps1/ps1exeverify.py does
+		// on the board: the bench peeked into the cache's arrays, and has read nonsense since the
+		// cache moved to block RAM)
+		@(negedge clk); cc_flush = 1; @(negedge clk); cc_flush = 0;
+		@(negedge clk); i = 0; while (cc_flush_busy && i < 2000000) begin @(negedge clk); i = i + 1; end
+		repeat (100) @(negedge clk);
 		for (j = 0; j < 3; j = j + 1) begin
 			bad = 0;
 			for (i = 0; i < 2048; i = i + 1) begin
 				la = 24'h01_0000 + ((24'h100000 + j * 24'h1000 + i) >> 4);
-				if (dut.ccache.valid[la[8:0]] && dut.ccache.tag[la[8:0]] == la[24:9]) l = dut.ccache.data[la[8:0]];
-				else l = mem[la];
+				l = mem[la];
 				got = l[(i % 16) * 8 +: 8];
 				if (got !== img(lbas[j], 24 + i)) begin if (bad < 3) $display("      read %0d byte %0d: got %02h want %02h", j, i, got, img(lbas[j], 24 + i)); bad = bad + 1; end
 			end
