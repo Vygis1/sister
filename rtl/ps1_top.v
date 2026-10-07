@@ -662,7 +662,7 @@ module ps1_top #(
 	wire [127:0] gfl_data;
 	wire [9:0]   gfl_x;
 	wire [8:0]   gfl_y;
-	wire [9:0]  fpx_x, gpu_disp_w;
+	wire [9:0]  fpx_x, gpu_disp_w; wire gpu_v480;
 	wire [8:0]  fpx_y;
 	wire [15:0] fpx_rgb;
 
@@ -681,7 +681,7 @@ module ps1_top #(
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
 		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_popword(dbg_gpu_popword), .dbg_disp(dbg_disp), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
-		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w),
+		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w), .disp_v480(gpu_v480),
 		.scan_lines(fb_want && !fs_en),
 		.fl_valid(gfl_valid), .fl_data(gfl_data), .fl_x(gfl_x), .fl_y(gfl_y)
 	);
@@ -725,8 +725,9 @@ module ps1_top #(
 	// pixel, so a 512-wide display is 256 columns and 640 is 320. Reporting 320
 	// for both packed a 512 game's 256-pixel rows into 320-pixel rows on the
 	// page: the picture sheared into repeats of itself.
-	assign fb_width  = (gpu_disp_w > 10'd320) ? {1'b0, gpu_disp_w[9:1]} : gpu_disp_w;
-	assign fb_height = 9'd240;
+	// full width and, for a 480-line mode, 480 rows (ps1_gpu's capture): HDMI shows them 1:1
+	assign fb_width  = gpu_disp_w;
+	assign fb_height = gpu_v480 ? 9'd480 : 9'd240;
 
 	// the draw port goes through a write combiner (see vram_wc.v): a line of
 	// pixels per cache access instead of one, and no DDR3 fetch for a full line

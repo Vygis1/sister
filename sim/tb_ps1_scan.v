@@ -177,7 +177,7 @@ module tb_ps1_scan;
 	end endtask
 
 	// --- what came out of the capture ---------------------------------------
-	localparam FW = 640, FH = 240;
+	localparam FW = 640, FH = 480;   // (a 480-line picture is captured whole: both fields)
 	reg [15:0] gotv  [0:FW*FH-1];
 	reg [31:0] gotg  [0:FW*FH-1];
 	reg [31:0] gen = 0;
@@ -187,7 +187,7 @@ module tb_ps1_scan;
 	// the geometry this capture was started with, taken from the scanout itself
 	// rather than guessed: a flip in the middle changes what the registers say
 	// but not what the capture already committed to.
-	reg [9:0] c_x, c_w; reg [8:0] c_y; reg [9:0] c_lines;
+	reg [9:0] c_x, c_w; reg [8:0] c_y; reg [9:0] c_lines; integer c_rows;
 
 	// How long a capture takes, and what it costs the memory. On the board this
 	// is the whole problem: a capture that outlasts one of the machine's frames
@@ -220,7 +220,7 @@ module tb_ps1_scan;
 			gen  <= gen + 1;
 			npx  <= 0;
 			ovf  <= 0;
-			c_x  <= gpu.sc_x; c_y <= gpu.sc_y; c_w <= gpu.sc_w; c_lines <= gpu.sc_lines;
+			c_x  <= gpu.sc_x; c_y <= gpu.sc_y; c_w <= gpu.sc_w; c_lines <= gpu.sc_lines; c_rows <= gpu.sc_last + 1;
 		end else if (fpx_valid) begin
 			if (fpx_x < FW && fpx_y < FH) begin
 				gotv[fpx_y * FW + fpx_x] <= fpx_rgb;
@@ -237,12 +237,12 @@ module tb_ps1_scan;
 	// Check the frame the capture just finished. `name` says which scenario.
 	task verify; input [511:0] name; begin
 		bad = 0; missing = 0; shown = 0;
-		ow = (c_w > 10'd320) ? (c_w >> 1) : c_w;     // wide pictures come at half width
-		for (vy = 0; vy < FH; vy = vy + 1)
+		ow = c_w;                                    // full width (HDMI shows it 1:1)
+		for (vy = 0; vy < c_rows; vy = vy + 1)
 			for (vx = 0; vx < ow; vx = vx + 1) begin
 				idx = vy * FW + vx;
 				want16 = ({1'b0, vy[8:0]} < c_lines)
-				         ? pat((c_w > 10'd320) ? (c_x + vx * 2) : (c_x + vx), c_y + vy[8:0])
+				         ? pat(c_x + vx, c_y + vy[8:0])
 				         : 16'd0;
 				if (gotg[idx] != gen) missing = missing + 1;
 				else begin
@@ -253,23 +253,23 @@ module tb_ps1_scan;
 							shown = shown + 1;
 							$display("      at column %0d row %0d: wanted %04x (vram %0d,%0d) -- got %04x, which is vram column %0d row %0d",
 							         vx, vy, want16,
-							         (c_w > 10'd320) ? (c_x + vx*2) : (c_x + vx), c_y + vy[8:0],
+							         c_x + vx, c_y + vy[8:0],
 							         got16, got16[8:0], got16[15:9]);
 						end
 					end
 				end
 			end
 		$display("  %0s: %0d pixels, window %0dx%0d at vram %0d,%0d, %0d lines lit",
-		         name, npx, ow, FH, c_x, c_y, c_lines);
+		         name, npx, ow, c_rows, c_x, c_y, c_lines);
 		$display("      cost: %0d clocks, %0d vram lines read (%0d per row), %0d clocks waiting for them (%0d%%)",
-		         cap_clks, cap_lines, cap_lines / FH, cap_wait, (100 * cap_wait) / (cap_clks == 0 ? 1 : cap_clks));
+		         cap_clks, cap_lines, cap_lines / c_rows, cap_wait, (100 * cap_wait) / (cap_clks == 0 ? 1 : cap_clks));
 		$display("      %0d runs out to memory -- %0d.%0d lines per run",
 		         cap_trips, cap_lines / (cap_trips == 0 ? 1 : cap_trips),
 		         (10 * cap_lines / (cap_trips == 0 ? 1 : cap_trips)) % 10);
 		if (ovf != 0) $display("      %0d pixels landed outside the frame", ovf);
-		check(missing == 0 && bad == 0 && ovf == 0 && npx == ow * FH, name);
-		if (missing != 0) $display("      %0d of %0d pixels never arrived", missing, ow * FH);
-		if (bad != 0)     $display("      %0d of %0d pixels held the WRONG PIXEL", bad, ow * FH);
+		check(missing == 0 && bad == 0 && ovf == 0 && npx == ow * c_rows, name);
+		if (missing != 0) $display("      %0d of %0d pixels never arrived", missing, ow * c_rows);
+		if (bad != 0)     $display("      %0d of %0d pixels held the WRONG PIXEL", bad, ow * c_rows);
 	end endtask
 
 	// 24-bit display (GP1(08h) bit 4): pixel n is the three bytes at byte 3n of the row -- red,
@@ -278,13 +278,13 @@ module tb_ps1_scan;
 	integer bk;
 	task verify24; input [511:0] name; begin
 		bad = 0; missing = 0; shown = 0;
-		ow = (c_w > 10'd320) ? (c_w >> 1) : c_w;
-		for (vy = 0; vy < FH; vy = vy + 1)
+		ow = c_w;
+		for (vy = 0; vy < c_rows; vy = vy + 1)
 			for (vx = 0; vx < ow; vx = vx + 1) begin
 				idx = vy * FW + vx;
 				for (bk = 0; bk < 3; bk = bk + 1) begin
-					want16 = pat(c_x + ((((c_w > 10'd320) ? vx * 2 : vx) * 3 + bk) >> 1), c_y + vy[8:0]);
-					b24[bk] = ((((c_w > 10'd320) ? vx * 2 : vx) * 3 + bk) & 1) ? want16[15:8] : want16[7:0];
+					want16 = pat(c_x + ((vx * 3 + bk) >> 1), c_y + vy[8:0]);
+					b24[bk] = ((vx * 3 + bk) & 1) ? want16[15:8] : want16[7:0];
 				end
 				want16 = ({1'b0, vy[8:0]} < c_lines) ? {1'b0, b24[2][7:3], b24[1][7:3], b24[0][7:3]} : 16'd0;
 				if (gotg[idx] != gen) missing = missing + 1;
@@ -296,10 +296,10 @@ module tb_ps1_scan;
 					end
 				end
 			end
-		$display("  %0s: %0d pixels, window %0dx%0d at vram %0d,%0d", name, npx, ow, FH, c_x, c_y);
-		check(missing == 0 && bad == 0 && ovf == 0 && npx == ow * FH, name);
-		if (missing != 0) $display("      %0d of %0d pixels never arrived", missing, ow * FH);
-		if (bad != 0)     $display("      %0d of %0d pixels held the WRONG PIXEL", bad, ow * FH);
+		$display("  %0s: %0d pixels, window %0dx%0d at vram %0d,%0d", name, npx, ow, c_rows, c_x, c_y);
+		check(missing == 0 && bad == 0 && ovf == 0 && npx == ow * c_rows, name);
+		if (missing != 0) $display("      %0d of %0d pixels never arrived", missing, ow * c_rows);
+		if (bad != 0)     $display("      %0d of %0d pixels held the WRONG PIXEL", bad, ow * c_rows);
 	end endtask
 
 	// Wait for a whole capture, and for one that STARTED after the test asked
@@ -412,6 +412,15 @@ module tb_ps1_scan;
 		gp1(32'h0800_0013);                      // 640 wide, 24-bit: half width, as the others
 		gp1(32'h0500_0000);
 		capture("24-bit 640 wide at vram 0");
+		want24 = 0;
+
+		$display("480 lines interlaced (a high-resolution menu: Gran Turismo 2's is 512 x 480i)");
+		gp1(32'h0700_0000 | (32'd240 << 10));
+		gp1(32'h0800_0025);                      // 320 wide, 480 lines, interlaced
+		gp1(32'h0500_0000 | 32'd640);            // (x 640 on: earlier scenarios filled rows 300-399 below it)
+		capture("320 x 480i at vram 640,0, both fields");
+		capture("320 x 480i at vram 640,0, again");
+		gp1(32'h0800_0002);                      // (back to 512 x 240)
 		want24 = 0;
 
 		$display("buffers flipping while the capture runs");

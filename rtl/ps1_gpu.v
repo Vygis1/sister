@@ -156,6 +156,7 @@ module ps1_gpu #(
 	output reg [9:0]   fl_x,
 	output reg [8:0]   fl_y,
 	output wire [9:0]  disp_w,      // how many VRAM columns the display shows
+	output wire        disp_v480,   // ...and that it is 480 lines (interlaced): the capture has 480 rows
 
 	output reg         vblank,
 	output reg         hblank,
@@ -1425,12 +1426,18 @@ module ps1_gpu #(
 	wire [9:0] vr_lines   = vrange1 - vrange0;
 	wire [9:0] disp_lines = vres480 ? {vr_lines[8:0], 1'b0} : vr_lines;
 	// the horizontal resolution, in VRAM columns
+	assign disp_v480 = vres480;
 	assign disp_w = hres368 ? 10'd368 : (hres == 2'd0) ? 10'd256 : (hres == 2'd1) ? 10'd320 : (hres == 2'd2) ? 10'd512 : 10'd640;
 
 	// where the next pixel pair lives
 	reg         sc_field;     // the field this capture reads (480i: the one on screen)
-	wire [28:0] s_next = vaddr(sc_x + sx, sc_v480 ? (sc_y + {sy[7:0], sc_field}) : (sc_y + sy));
-	wire [8:0]  src_y   = sc_v480 ? (sc_y + {sy[7:0], sc_field}) : (sc_y + sy);
+	// A 480-line picture is captured whole now -- both fields, 480 rows -- and a wide one at full
+	// width: HDMI shows 640 x 480 1:1. One field (every other row) and every other column was
+	// what the old network stream could carry, and it left a quarter of each glyph of a
+	// high-resolution menu (Gran Turismo 2's, 512 x 480i): unreadable.
+	wire [8:0]  sc_last = sc_v480 ? 9'd479 : 9'd239;
+	wire [28:0] s_next = vaddr(sc_x + sx, sc_y + sy);
+	wire [8:0]  src_y   = sc_y + sy;
 	wire        row_lit = disp_on && ({1'b0, sy} < sc_lines)
 	                      && (!sc_crop || (src_y >= sc_ylo && src_y <= sc_yhi));
 	// every write the engine makes, and the picture row it lands on
@@ -1447,7 +1454,7 @@ module ps1_gpu #(
 	// odd columns were being walked one at a time to emit nothing at all: 256
 	// clocks a row, 61,440 a capture, 23% of it, spent stepping past pixels the
 	// capture does not want. The step skips them.
-	wire [9:0]  sx_step = (sc_w > 10'd320 && !sc_24) ? 10'd2 : 10'd1;
+	wire [9:0]  sx_step = 10'd1;
 	// the 24-bit pixel in hand: an even one starts on a column's low byte, an odd one on its high
 	wire [15:0] h24b = half(sword, (sc_x + sx) & 1);
 	wire [7:0]  r24  = !ox24[0] ? hw24[7:0]  : hw24[15:8];
@@ -1455,8 +1462,7 @@ module ps1_gpu #(
 	wire [7:0]  b24  = !ox24[0] ? h24b[7:0]  : h24b[15:8];
 	// ...and where the one after that lives, so SC_EMIT can tell whether it is
 	// inside the line already in hand.
-	wire [28:0] s_after = vaddr(sc_x + sx + sx_step,
-	                            sc_v480 ? (sc_y + {sy[7:0], sc_field}) : (sc_y + sy));
+	wire [28:0] s_after = vaddr(sc_x + sx + sx_step, sc_y + sy);
 
 	always @(posedge clk) begin
 		if (rst) begin sc <= SC_IDLE; s_req <= 1'b0; px_valid <= 1'b0; sx <= 0; sy <= 0; ox <= 0; fpx_valid <= 1'b0; scan_start <= 1'b0; scan_done <= 1'b0; scan_abort <= 1'b0; arm_ticks <= 2'd0; want_scan <= 1'b1; flip_pend <= 1'b0; flip_alt <= 1'b0; flips_recent <= 2'd0; disp_x_d <= 0; disp_y_d <= 0; sc_abort <= 1'b0; fl_valid <= 1'b0; sc_lmode <= 1'b0; sc_ldec <= 1'b0; fl_half_v <= 1'b0;
@@ -1538,7 +1544,7 @@ module ps1_gpu #(
 			              || !il_skip && (frame_len != 20'd0 && post_vsync >= late_at
 			                  && (arm_ticks == 2'd3 || cap_every_vsync))))) begin
 					sc_field <= 1'b0; sc_abort <= 1'b0;
-					sc_crop  <= flip_pend && (sc_ylo <= sc_yhi);   // a flipping game, and it drew something
+					sc_crop  <= flip_pend && !vres480 && (sc_ylo <= sc_yhi);   // (the bounds are rows under 240)   // a flipping game, and it drew something
 					sx <= 0; sy <= 0; ox <= 0; substep <= 0;
 					step <= (hres == 2'd0) ? 2'd1 : (hres == 2'd1) ? 2'd1 : 2'd2;   // 256/320 -> 1:1, 512/640 -> 2:1
 					sc_x <= disp_x; sc_y <= disp_y; sc_w <= disp_w;
@@ -1547,7 +1553,7 @@ module ps1_gpu #(
 					sc_lmode  <= scan_lines && !bpp24 && (disp_x[2:0] == 3'd0)
 					             && ((disp_w <= 10'd320) ? (disp_w[2:0] == 3'd0)
 					                                     : (disp_w[3:0] == 4'd0));
-					sc_ldec   <= (disp_w > 10'd320);
+					sc_ldec   <= 1'b0;                  // (full width: no thinning)
 					fl_half_v <= 1'b0;
 					sc_lines <= disp_lines; sc_v480 <= vres480;
 					sline_v  <= 1'b0;
@@ -1595,7 +1601,7 @@ module ps1_gpu #(
 						end
 						if (sx + 10'd8 >= sc_w) begin
 							sx <= 0; ox <= 0; substep <= 0; fl_half_v <= 1'b0;
-							if (sy == 9'd239) begin sc <= SC_IDLE; scan_done <= 1'b1; end
+							if (sy == sc_last) begin sc <= SC_IDLE; scan_done <= 1'b1; end
 							else begin sy <= sy + 9'd1; sc <= SC_RD; end
 						end else begin
 							sx <= sx + 10'd8;
@@ -1613,15 +1619,15 @@ module ps1_gpu #(
 						if (!scan_hold && sline_v && (s_after[28:4] == sline_tag)) sword <= sline[s_after[3:2]*32 +: 32];
 						else sc <= SC_RD;
 					end else begin
-						if (sc_w <= 10'd320 || !ox24[0]) begin   // (a wide picture at half width, as the others)
+						begin
 							fpx_valid <= 1'b1;
-							fpx_x <= (sc_w > 10'd320) ? {1'b0, ox24[9:1]} : ox24; fpx_y <= sy;
+							fpx_x <= ox24; fpx_y <= sy;
 							fpx_rgb <= row_lit ? {1'b0, b24[7:3], g24[7:3], r24[7:3]} : 16'd0;
 						end
 						ph24 <= 1'b0;
 						if (ox24 + 10'd1 >= sc_w) begin
 							ox24 <= 10'd0; ox <= 0; sx <= 0; substep <= 0;
-							if (sy == 9'd239) begin sc <= SC_IDLE; scan_done <= 1'b1; end else begin sy <= sy + 9'd1; sc <= SC_RD; end
+							if (sy == sc_last) begin sc <= SC_IDLE; scan_done <= 1'b1; end else begin sy <= sy + 9'd1; sc <= SC_RD; end
 						end else begin
 							ox24 <= ox24 + 10'd1;
 							// an odd pixel ends on its second column's high byte: the next starts a
@@ -1638,19 +1644,19 @@ module ps1_gpu #(
 					// a 512/640-wide picture is captured at half width (every other
 					// pixel): the frame crosses the register link at about 1 MB/s, so
 					// 300 KB was six frames a second and 150 KB is twelve or more
-					if (sx < sc_w && (sc_w <= 10'd320 || sx[0] == 1'b0)) begin
+					if (sx < sc_w) begin
 						// Always, even with the display off: the frame streamer waits
 						// on these, and a blanked display used to starve it. Black is
 						// what a blanked display shows anyway.
 						fpx_valid <= 1'b1;
-						fpx_x <= (sc_w > 10'd320) ? {1'b0, sx[9:1]} : sx; fpx_y <= sy;
+						fpx_x <= sx; fpx_y <= sy;
 						fpx_rgb <= row_lit ? half(sword, (sc_x + sx) & 1) : 16'd0;
 					end
 					// two pixels per word; emit those that land on output columns
 					// (with the step skipping the odd columns, every pixel the
 					// capture takes is one output column)
-					if (ox < 9'd320 && (sx_step == 10'd2 || substep == 2'd0)) begin
-						px_valid <= disp_on;
+					if (ox < 9'd320 && substep == 2'd0) begin
+						px_valid <= disp_on && (sy < 9'd240);   // (the old 320 x 240 preview)
 						px_x <= ox; px_y <= sy;
 						px_rgb <= ({1'b0, sy} < sc_lines) ? rgb332(half(sword, (sc_x + sx) & 1)) : 8'd0;
 						ox <= ox + 9'd1;
@@ -1673,7 +1679,7 @@ module ps1_gpu #(
 					if (sx + sx_step >= sc_w || sx >= 10'd640 + 10'd2) begin
 						// next row
 						ox <= 0; sx <= 0; substep <= 0;
-						if (sy == 9'd239) begin sc <= SC_IDLE; scan_done <= 1'b1; end else begin sy <= sy + 9'd1; sc <= SC_RD; end
+						if (sy == sc_last) begin sc <= SC_IDLE; scan_done <= 1'b1; end else begin sy <= sy + 9'd1; sc <= SC_RD; end
 					// The line in hand is EIGHT pixels. Going back through SC_RD
 					// between them spent a clock a pixel asking a question already
 					// answered -- the tag is the one just read. Take the next word

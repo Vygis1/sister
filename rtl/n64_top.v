@@ -303,6 +303,12 @@ module n64_top #(
 	// and Y_SCALE (2.10) framebuffer lines to 240 on screen, 480 at most
 	// (registered, a step at a time: it changes when the VI is set up, and two
 	//  multiplies in a row were feeding the network core's frame counter)
+	// The HDMI picture's height: 480 lines when Y_SCALE (2.10) steps more than 1.5 framebuffer
+	// lines a line, 240 otherwise. It used to be guessed from the width -- 480 for anything wider
+	// than 320 -- and a 640 x 240 picture (Super Smash Bros.' menus) was shown as 480 lines from a
+	// 240-line framebuffer: stretched twice as tall, the bottom half whatever memory came after
+	// it. (A compare, not vi_h's multiply: the N64 image is at 99% and that missed by 24 slices.)
+	wire        vi_h480 = vi[13][11:0] >= 12'h600;
 	reg  [21:0] vi_h22;
 	reg  [9:0]  vi_h;
 	reg  [15:0] fb_wpr_r;
@@ -524,7 +530,7 @@ module n64_top #(
 	wire [13:0]  hv_stride = hv_bpp32 ? {vi[2][11:0], 2'b00} : {1'b0, vi[2][11:0], 1'b0};
 	wire         hv_go = hv_busy && hv_k != hv_n;
 	n64_vid u_vid (.clk(clk), .wr_en(hv_we), .wr_addr(hv_wa), .wr_data({16'd0, hv_wd}), .want(hv_want),
-		.width(vi[2][11:0]), .height(vi[2][11:0] <= 12'd320 ? 10'd240 : 10'd480), .bpp32(hv_bpp32), .on(vi[0][1:0] != 2'd0),
+		.width(vi[2][11:0]), .height(vi_h480 ? 10'd480 : 10'd240), .bpp32(hv_bpp32), .on(vi[0][1:0] != 2'd0),   // (see vi_h480)
 		.hid_ok(1'b0), .vist(vi[0][16:0]), .opt(vid_opt),
 		.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb));
 	reg  [11:0]  sweep;               // while held: the caches are invalidated, a line a clock

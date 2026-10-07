@@ -1,5 +1,5 @@
 //////////////////////////////////////////////////////////////////////////////////
-// fb_ddr.v - the display frame in DDR3: 640 x 240 x 16-bit RGB555, captured on
+// fb_ddr.v - the display frame in DDR3: up to 640 x 480 x 16-bit RGB555, captured on
 // request, read back by the host.
 //
 // The block-RAM framebuffer is 320 x 240 x 8 bits because that is what fits
@@ -86,7 +86,7 @@ module fb_ddr #(
 	reg [23:0]  cur_line;
 	reg [127:0] cur_data;
 	reg         cur_v;
-	// Two frames for HDMI (the second 0x5000 lines -- 320 kB -- after the first): the
+	// Two frames for HDMI (the second 0xA000 lines -- 640 kB, room for 640 x 480 -- after the first): the
 	// capture writes the one not on screen, a finished capture waits (pend) until
 	// HDMI starts its next frame and takes it, and no new capture starts meanwhile --
 	// so the frame on screen is never written while it is read. (One frame, written
@@ -94,8 +94,8 @@ module fb_ddr #(
 	// wrong.) Without HDMI it is the one frame, as it always was.
 	reg         disp_b, pend;
 	wire        cap_b     = hdmi_on ? ~disp_b : 1'b0;
-	wire [23:0] cap_base  = FB_LINE + (cap_b ? 24'h00_5000 : 24'd0);
-	wire [23:0] disp_base = FB_LINE + ((hdmi_on && disp_b) ? 24'h00_5000 : 24'd0);
+	wire [23:0] cap_base  = FB_LINE + (cap_b ? 24'h00_A000 : 24'd0);
+	wire [23:0] disp_base = FB_LINE + ((hdmi_on && disp_b) ? 24'h00_A000 : 24'd0);
 	wire [23:0] px_line = cap_base + px_y * STRIDE + {17'd0, px_x[9:3]};
 	wire [23:0] fl_line = cap_base + fl_y * STRIDE + {17'd0, fl_x[9:3]};
 	wire        fl_take = capturing && fl_valid;
@@ -159,7 +159,7 @@ module fb_ddr #(
 			// (HDMI: the next frame is armed as soon as this one is in)
 			if (cap_go || (hdmi_on && !armed && !capturing && !finishing && !pend)) begin armed <= 1'b1; cap_ready <= 1'b0; finishing <= 1'b0; end
 			// a line wanted that is not in the buffer: fetch it
-			if (hdmi_on && !lf_on && lf_want != lf_have && lf_want < 9'd240) begin
+			if (hdmi_on && !lf_on && lf_want != lf_have && lf_want < 9'd480) begin
 				lf_on <= 1'b1; lf_line <= lf_want; lf_w <= 7'd0;
 				// the top of HDMI's frame: a finished capture goes on screen
 				if (lf_want == 9'd0 && pend) begin disp_b <= ~disp_b; pend <= 1'b0; end
