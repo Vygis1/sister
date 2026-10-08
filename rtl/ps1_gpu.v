@@ -177,6 +177,7 @@ module ps1_gpu #(
 	output wire [31:0] dbg_popword,
 	output wire [31:0] dbg_disp,    // where the display points, and its mode
 	output wire        dbg_behind,  // at work on a command and behind the console's time for it
+	output wire [11:0] dbg_live,    // {behind, raster busy, waits: texel, destination, queue, palette, ds}
 	output wire [31:0] dbg_draw,    // the drawing area and offset
 	// VRAM->CPU accounting, for the read-back the BIOS hangs on: words the
 	// engine produced, words the CPU took, words the DMA took, and reads of
@@ -298,9 +299,11 @@ module ps1_gpu #(
 	// ==================================================================================
 	// raster timing: free-running, 60 Hz, from the core's clock (3168 clocks a line at 50 MHz)
 	// ==================================================================================
-	// the console's line: 3413 video clocks of 53.693182 MHz (NTSC), so frames come at 59.826 Hz,
-	// not 60 (ps1-tests timers: a frame measured on Timer0 was 6% short). Kept inside 32 bits.
-	localparam LINE_CYC = (CLK_HZ / 1000) * 3413 / 53693, LINES = 263, ACTIVE_LINES = 240;
+	// the console's line: 3413 video clocks, and the video clock is the system clock x 11/7 --
+	// 53.2224 MHz, not the NTSC 53.693 it was taken for -- so frames come at 59.29 Hz (DuckStation's
+	// constants; the console's own ps1-tests timers log: a frame of 571,212 system clocks, which
+	// its 16-bit timer shows as 112.5k, where ours were 0.8% short). Kept inside 32 bits.
+	localparam LINE_CYC = (CLK_HZ / 1000) * 3413 / 53222, LINES = 263, ACTIVE_LINES = 240;
 	reg  [19:0] dot_acc;
 	wire [19:0] dot_div = (CLK_HZ / 1000) * (hres368 ? 7 : (hres == 2'd0) ? 10 : (hres == 2'd1) ? 8 : (hres == 2'd2) ? 5 : 4);
 	reg [11:0] rc_x;
@@ -355,10 +358,10 @@ module ps1_gpu #(
 			frame_tick <= 1'b0;
 			if (frame_tick) begin post_vsync <= 0; frame_len <= post_vsync; end
 			else if (post_vsync != {20{1'b1}}) post_vsync <= post_vsync + 1'b1;
-			// a dot at the console's rate: the 53.693 MHz video clock divided by 10, 8, 5, 4 or 7
+			// a dot at the console's rate: the 53.222 MHz video clock divided by 10, 8, 5, 4 or 7
 			// by the horizontal resolution (psx-spx) -- Timer0 counts these (ps1-tests timers)
-			if (dot_acc + 20'd53693 >= dot_div) begin dot_acc <= dot_acc + 20'd53693 - dot_div; dot_ce <= 1'b1; end
-			else begin dot_acc <= dot_acc + 20'd53693; dot_ce <= 1'b0; end
+			if (dot_acc + 20'd53222 >= dot_div) begin dot_acc <= dot_acc + 20'd53222 - dot_div; dot_ce <= 1'b1; end
+			else begin dot_acc <= dot_acc + 20'd53222; dot_ce <= 1'b0; end
 			if (rc_x == LINE_CYC - 1) begin
 				rc_x <= 0;
 				// The field turns at the START of vertical blanking, not at the end:
@@ -432,7 +435,7 @@ module ps1_gpu #(
 		hres368,                    // 16
 		tex_off,                    // 15 texture disable
 		1'b0,                       // 14 reverse
-		1'b0,                       // 13 interlace field
+		!interlace || field,        // 13 interlace field: always 1 when not interlaced (psx-spx)
 		mask_chk,                   // 12
 		mask_set,                   // 11
 		draw_display,               // 10
@@ -481,7 +484,7 @@ module ps1_gpu #(
 	reg        is_gour, is_tex, is_quad, is_semi, is_raw;
 	// the console's time for the command just taken starts now: its setup, in GPU ticks
 	// (DuckStation's table, by quad / shaded / textured; a rectangle's is 16)
-	reg        p_clr;
+	reg        p_clr, clut_flush;
 	reg [9:0]  p_setup;
 	function [9:0] poly_setup; input q, g, t;
 		case ({q, g, t})
@@ -526,7 +529,35 @@ module ps1_gpu #(
 	reg [31:0] gq0;
 	reg [55:0] grem;
 	wire [55:0] gqdd = gq0 * dd;    // 56 bits: in a concatenation the product would be cut to 32
-	wire [31:0] gfix = (grem[55:0] >= {32'd0, dd}) ? gq0 + 32'd1 : gq0;
+	// the gradient pipeline (D_GRADW): what each stage carries along with its number
+	reg  [3:0]  gi;                  // the next to start
+	reg         gi_done;
+	reg         pv0, pv1, pv2, pv3, pv4;
+	reg  [3:0]  pq0, pq1, pq2, pq3, pq4;
+	reg         pn2, pn3, pn4;
+	reg  [47:0] pm2, pm3;
+	reg  [31:0] pg4;
+	wire [3:0]  gq_end = (is_gour && !is_tex) ? 4'd5 : 4'd9;
+	function [97:0] rstep2;          // two restoring steps of 2^48 / d: {remainder, quotient}
+		input [48:0] r, q; input [23:0] d; input first;
+		reg [48:0] t, r1, q1;
+		begin
+			t = {r[47:0], 1'b0};
+			if (t >= {25'd0, d}) begin r1 = t - {25'd0, d}; q1 = {q[47:0], 1'b1}; end
+			else begin r1 = t; q1 = {q[47:0], 1'b0}; end
+			t = {r1[47:0], first};
+			if (t >= {25'd0, d}) begin r1 = t - {25'd0, d}; q1 = {q1[47:0], 1'b1}; end
+			else begin r1 = t; q1 = {q1[47:0], 1'b0}; end
+			rstep2 = {r1, q1};
+		end
+	endfunction
+	wire [31:0] gfix_q = (grem[55:0] >= {32'd0, dd}) ? pg4 + 32'd1 : pg4;
+	// The chip keeps twelve fraction bits of a gradient, truncated toward zero (Mednafen's and
+	// DuckStation's (det(attr) * 4096) / det, measured against hardware): sixteen made the
+	// Gouraud and texture steps a little steeper than the console's, and ps1-tests gpu/triangle
+	// and gpu/uv-interpolation came out a colour or a texel off along their gradients.
+	// floor(floor(16a/b)/16) = floor(a/b): the magnitude's low four bits go.
+	wire [31:0] gfix   = {gfix_q[31:4], 4'd0};
 
 	// the pixel in flight
 	reg [9:0]  wx;
@@ -705,6 +736,7 @@ module ps1_gpu #(
 	// 480i, drawing to the display area prohibited: only the field not on
 	// screen is drawn (see ps1_raster.v); a line's pixels obey it as well
 	wire il_skip = interlace && vres480 && !draw_display;
+	wire il_mode = interlace && vres480;                  // the display is 480i
 	wire in_area = (px >= $signed({1'b0, da_x0})) && (px <= $signed({1'b0, da_x1}))
 	            && (py >= $signed({2'b0, da_y0})) && (py <= $signed({2'b0, da_y1}))
 	            && px >= 0 && py >= 0 && px < 1024 && py < 512
@@ -782,6 +814,7 @@ module ps1_gpu #(
 		end else begin
 			fifo_flush <= 1'b0;
 			p_clr      <= 1'b0;   // a pulse (the decode below raises it)
+			clut_flush <= 1'b0;   // likewise
 			gp1_abort  <= 1'b0;   // a pulse; the GP1 handler below may set it again this clock
 			// v_req is a held request, not a pulse: once a draw state raises it,
 			// keep it high until the VRAM cache acknowledges. The cache only
@@ -856,7 +889,7 @@ module ps1_gpu #(
 					second <= 1'b0;
 					// the environment commands need no arguments: do them now
 					case (f_head[31:24])
-					8'h00, 8'h01: begin busy <= 1'b0; end
+					8'h00, 8'h01: begin busy <= 1'b0; clut_flush <= f_head[24]; end   // 01: clear the cache (this word's, not the last command's)
 					8'h1F: begin irq <= 1'b1; busy <= 1'b0; end
 					8'hE1: begin tp_x <= f_head[3:0]; tp_y <= f_head[4]; tp_abr <= f_head[6:5]; tflip_x <= f_head[12]; tflip_y <= f_head[13];
 					             tp_depth <= f_head[8:7]; dither <= f_head[9]; draw_display <= f_head[10];
@@ -992,7 +1025,7 @@ module ps1_gpu #(
 					end else begin
 						x0 <= vx[1]; y0 <= vy[1]; x1 <= vx[2]; y1 <= vy[2]; x2 <= vx[3]; y2 <= vy[3];
 					end
-					gq <= 4'd0;
+					gq <= is_gour ? 4'd0 : 4'd6;              // (flat shading: from u)
 					ds <= D_GRAD;
 				end
 
@@ -1020,99 +1053,82 @@ module ps1_gpu #(
 						ds <= D_NEXT;
 					end else begin
 						dcnt <= 6'd0;
-						ds <= D_GRADW;
+						// only the gradients the primitive uses: a flat one needs none (it went
+						// through 1/area and all ten anyway -- 110 clocks where the console
+						// takes 17), a flat-shaded textured one only u and v
+						ds <= (is_gour || is_tex) ? D_GRADW : D_GDONE;
 					end
 				end
 
 			// ten gradients, each a 48/24 division taking 48 steps; the numerators
 			// are the "cross products" of the attribute with the edges
 			D_GRADW: begin
-					// Ten gradients over one area. Dividing each one took 48 clocks,
-					// 500 a triangle, which for a game's thousands of small triangles
-					// is a whole frame of nothing. So: 1/area once (49 clocks), then
-					// every gradient is a multiply and a one-step correction, and the
-					// result is bit for bit the truncated quotient the divider gave.
+					// 1/area once, two quotient bits a clock (25 clocks; it was one a clock, 49),
+					// then the gradients ONE A CLOCK through the six steps that each used to take
+					// in turn -- numerator, magnitude, product, quotient, remainder, store. A
+					// Gouraud textured triangle spent 110 clocks here where the console spends
+					// about 180 on its whole setup, and a small quad came out 1.4x the console's
+					// time (tb_ps1_gpu: 375 clocks against ~270).
 					if (dcnt == 6'd0) begin
 						dd <= area[23] ? -area : area;
-						rcq <= 49'd0; rcr <= 49'd0; gph <= 3'd0;
+						rcq <= 49'd0; rcr <= 49'd0;
+						gi <= gq; gi_done <= 1'b0; pv0 <= 1'b0; pv1 <= 1'b0; pv2 <= 1'b0; pv3 <= 1'b0; pv4 <= 1'b0;
 						dcnt <= 6'd1;
-					end else if (dcnt <= 6'd49) begin
-						// 2^48 / |area|, restoring: the numerator's only set bit
-						// comes down on the first step
-						if ({rcr[47:0], dcnt == 6'd1} >= {25'd0, dd}) begin
-							rcr <= {rcr[47:0], dcnt == 6'd1} - {25'd0, dd};
-							rcq <= {rcq[47:0], 1'b1};
-						end else begin
-							rcr <= {rcr[47:0], dcnt == 6'd1};
-							rcq <= {rcq[47:0], 1'b0};
-						end
+					end else if (dcnt <= 6'd25) begin
+						// 2^48 / |area|, restoring, as 50 steps on 0.1.0...0 (the leading 0
+						// makes the count even; its quotient bit is 0 and falls off the top)
+						{rcr, rcq} <= rstep2(rcr, rcq, dd, dcnt == 6'd1);
 						dcnt <= dcnt + 6'd1;
 					end else begin
-						case (gph)
-						3'd0: begin
-							case (gq)
-							4'd0:  dnum <= gnum_x(vi(0, 0), vi(0, 1), vi(0, 2));
-							4'd1:  dnum <= gnum_y(vi(0, 0), vi(0, 1), vi(0, 2));
-							4'd2:  dnum <= gnum_x(vi(1, 0), vi(1, 1), vi(1, 2));
-							4'd3:  dnum <= gnum_y(vi(1, 0), vi(1, 1), vi(1, 2));
-							4'd4:  dnum <= gnum_x(vi(2, 0), vi(2, 1), vi(2, 2));
-							4'd5:  dnum <= gnum_y(vi(2, 0), vi(2, 1), vi(2, 2));
-							4'd6:  dnum <= gnum_x(vi(3, 0), vi(3, 1), vi(3, 2));
-							4'd7:  dnum <= gnum_y(vi(3, 0), vi(3, 1), vi(3, 2));
-							4'd8:  dnum <= gnum_x(vi(4, 0), vi(4, 1), vi(4, 2));
-							default: dnum <= gnum_y(vi(4, 0), vi(4, 1), vi(4, 2));
+						// stage 5: store
+						if (pv4) begin
+							case (pq4)
+							4'd0: dr_dx <= pn4 ? -gfix : gfix;
+							4'd1: dr_dy <= pn4 ? -gfix : gfix;
+							4'd2: dg_dx <= pn4 ? -gfix : gfix;
+							4'd3: dg_dy <= pn4 ? -gfix : gfix;
+							4'd4: db_dx <= pn4 ? -gfix : gfix;
+							4'd5: db_dy <= pn4 ? -gfix : gfix;
+							4'd6: du_dx <= pn4 ? -gfix : gfix;
+							4'd7: du_dy <= pn4 ? -gfix : gfix;
+							4'd8: dv_dx <= pn4 ? -gfix : gfix;
+							default: dv_dy <= pn4 ? -gfix : gfix;
 							endcase
-							gph <= 3'd1;
+							// NOT start_row() here: the gradient this clock writes is still on its
+							// way to the register (one clock, once a primitive -- see D_GDONE)
+							if (pq4 == gq_end) begin dcnt <= 6'd0; ds <= D_GDONE; end
 						end
-						3'd1: begin
-							dneg <= dnum[47] ^ area[23];
-							nmag <= dnum[47] ? -dnum : dnum;
-							gph <= 3'd2;
-						end
-						3'd2: begin
-							// |num| is |X| << 16, so |num| / |area| = |X| * (2^48 / |area|) / 2^32
-							gprod <= nmag[39:16] * rcq;
-							gph <= 3'd3;
-						end
-						3'd3: begin
-							// the reciprocal was rounded down, so this is the quotient or one under
-							gq0  <= gprod[63:32];
-							gph <= 3'd4;
-						end
-						3'd4: begin
-							grem <= {8'd0, nmag} - gqdd;
-							gph <= 3'd5;
-						end
-						default: begin
-							case (gq)
-							4'd0: dr_dx <= dneg ? -gfix : gfix;
-							4'd1: dr_dy <= dneg ? -gfix : gfix;
-							4'd2: dg_dx <= dneg ? -gfix : gfix;
-							4'd3: dg_dy <= dneg ? -gfix : gfix;
-							4'd4: db_dx <= dneg ? -gfix : gfix;
-							4'd5: db_dy <= dneg ? -gfix : gfix;
-							4'd6: du_dx <= dneg ? -gfix : gfix;
-							4'd7: du_dy <= dneg ? -gfix : gfix;
-							4'd8: dv_dx <= dneg ? -gfix : gfix;
-							default: dv_dy <= dneg ? -gfix : gfix;
-							endcase
-							gph <= 3'd0;
-							if (gq == 4'd9 || (!is_gour && gq == 4'd1 && !is_tex)
-							    || (!is_gour && !is_tex)) begin
-								// NOT start_row() here. The gradient this clock
-								// writes is still on its way to the register, so
-								// start_row would read the one the PREVIOUS
-								// primitive left -- dv_dy for a textured polygon.
-								// The starting v was then off by the old gradient
-								// times the distance from vertex 0 to the top of
-								// the box, and the polygon sampled the wrong rows
-								// of its texture. One clock, once a primitive.
-								dcnt <= 6'd0;
-								ds <= D_GDONE;
-							end else
-								gq <= gq + 4'd1;
-						end
+						// stage 4: the remainder, and so whether the quotient is one under
+						pv4 <= pv3; pq4 <= pq3; pn4 <= pn3; pg4 <= gq0;
+						grem <= {8'd0, pm3} - gqdd;
+						// stage 3: the quotient (the reciprocal was rounded down: it or one under)
+						pv3 <= pv2; pq3 <= pq2; pn3 <= pn2; pm3 <= pm2;
+						gq0 <= gprod[63:32];
+						// stage 2: |num| is |X| << 16, so |num| / |area| = |X| * (2^48 / |area|) / 2^32
+						pv2 <= pv1; pq2 <= pq1; pn2 <= dneg; pm2 <= nmag;
+						gprod <= nmag[39:16] * rcq;
+						// stage 1: the magnitude and the sign
+						pv1 <= pv0; pq1 <= pq0;
+						dneg <= dnum[47] ^ area[23];
+						nmag <= dnum[47] ? -dnum : dnum;
+						// stage 0: the numerator of the next gradient, while there is one
+						pv0 <= (gi <= gq_end) && !gi_done; pq0 <= gi;
+						case (gi)
+						4'd0:  dnum <= gnum_x(vi(0, 0), vi(0, 1), vi(0, 2));
+						4'd1:  dnum <= gnum_y(vi(0, 0), vi(0, 1), vi(0, 2));
+						4'd2:  dnum <= gnum_x(vi(1, 0), vi(1, 1), vi(1, 2));
+						4'd3:  dnum <= gnum_y(vi(1, 0), vi(1, 1), vi(1, 2));
+						4'd4:  dnum <= gnum_x(vi(2, 0), vi(2, 1), vi(2, 2));
+						4'd5:  dnum <= gnum_y(vi(2, 0), vi(2, 1), vi(2, 2));
+						4'd6:  dnum <= gnum_x(vi(3, 0), vi(3, 1), vi(3, 2));
+						4'd7:  dnum <= gnum_y(vi(3, 0), vi(3, 1), vi(3, 2));
+						4'd8:  dnum <= gnum_x(vi(4, 0), vi(4, 1), vi(4, 2));
+						default: dnum <= gnum_y(vi(4, 0), vi(4, 1), vi(4, 2));
 						endcase
+						if (gi <= gq_end && !gi_done) begin
+							if (gi == gq_end) gi_done <= 1'b1;
+							else gi <= gi + 4'd1;
+						end
 					end
 				end
 
@@ -1547,21 +1563,33 @@ module ps1_gpu #(
 	// the attribute values at the box corner: vertex 0's, walked by the gradients
 	function signed [11:0] smax; input signed [11:0] a, b; smax = (a > b) ? a : b; endfunction
 	function signed [11:0] smin; input signed [11:0] a, b; smin = (a < b) ? a : b; endfunction
+	// The vertex the attributes are taken from: the LEFTMOST, with the chip's ties (DuckStation's
+	// rasteriser, after Mednafen) -- in the order it is handed the triangle, which for a quad's
+	// second half is (v2, v1, v3): our n = 1, 0, 2.
+	function [1:0] leftmost;
+		input signed [11:0] xa, xb, xc; input [1:0] na, nb, nc;
+		leftmost = (xb <= xa) ? ((xc <= xb) ? nc : nb) : (xc < xa) ? nc : na;
+	endfunction
 	task start_row;
 		reg signed [31:0] r0, g0, b0, u0, v0;
 		reg signed [11:0] ddx, ddy;
+		reg [1:0] lm;
+		reg signed [11:0] xl, yl;
 		begin
-			ddx = bx0 - x0; ddy = by0 - y0;
+			lm = second ? leftmost(x1, x0, x2, 2'd1, 2'd0, 2'd2) : leftmost(x0, x1, x2, 2'd0, 2'd1, 2'd2);
+			xl = (lm == 2'd0) ? x0 : (lm == 2'd1) ? x1 : x2;
+			yl = (lm == 2'd0) ? y0 : (lm == 2'd1) ? y1 : y2;
+			ddx = bx0 - xl; ddy = by0 - yl;
 			// 8.16 fixed point, like the gradients (16 fraction bits): the
 			// attribute's 8 bits belong at [23:16]. vi() is 16 bits wide, and
 			// placing it at [23:8] put the vertex colour at 1/256 of itself --
 			// every shaded polygon started from black and showed only its
 			// gradient (the SCE diamond came out as a black-to-green ramp).
-			r0 = {8'd0, vi(0, 0), 8'd0} << 8;
-			g0 = {8'd0, vi(1, 0), 8'd0} << 8;
-			b0 = {8'd0, vi(2, 0), 8'd0} << 8;
-			u0 = {8'd0, vi(3, 0), 8'd0} << 8;
-			v0 = {8'd0, vi(4, 0), 8'd0} << 8;
+			r0 = {8'd0, vi(0, lm), 8'd0} << 8;
+			g0 = {8'd0, vi(1, lm), 8'd0} << 8;
+			b0 = {8'd0, vi(2, lm), 8'd0} << 8;
+			u0 = {8'd0, vi(3, lm), 8'd0} << 8;
+			v0 = {8'd0, vi(4, lm), 8'd0} << 8;
 			// ...plus half a step: the chip rounds an interpolated colour or texture
 			// coordinate to the nearest, not down (ps1-tests gpu/uv-interpolation: a strip
 			// from texel 0 to texel 1 turns to texel 1 half way across, and ours never did)
@@ -1593,7 +1621,7 @@ module ps1_gpu #(
 		.tw_mx(tw_mx), .tw_my(tw_my), .tw_ox(tw_ox), .tw_oy(tw_oy),
 		.no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun),
 		.da_x0(da_x0), .da_x1(da_x1), .da_y0(da_y0), .da_y1(da_y1), .mask_set(mask_set), .mask_chk(mask_chk),
-		.il_skip(il_skip), .il_field(field), .pace(!gpu_fast), .pace_clr(p_clr), .pace_setup(p_setup), .pace_behind(r_behind),
+		.il_skip(il_skip), .il_field(field), .pace(!gpu_fast), .clut_flush(clut_flush), .pace_clr(p_clr), .pace_setup(p_setup), .pace_behind(r_behind),
 		.v_addr(r_v_addr), .v_req(r_v_req), .v_we(r_v_we), .v_be(r_v_be), .v_wdata(r_v_wdata), .v_around(r_v_around), .v_lin(r_v_lin), .v_one(r_v_one),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack && r_busy),
 		.tx_valid(tx_valid), .tx_addr(tx_addr), .tx_line(tx_line),
@@ -1799,15 +1827,22 @@ module ps1_gpu #(
 			// frame_len is zero until a whole frame has gone by -- and in a
 			// testbench that may never happen -- so fall back to taking one
 			// whenever nothing is being drawn.
+			// A 480i picture is taken a field at a time, as each field turns, whatever the game
+			// does -- what a television shows. It was a field at a time only while the game drew
+			// with GP0(E1) bit 10 clear, and a whole frame at a time otherwise; the BIOS changes
+			// that bit between its passes, so its logo screens went from one to the other capture
+			// by capture, and HDMI between two sets of buffers -- one of them holding whatever
+			// had last been captured that way, the game before the reset among it. That was the
+			// boot screens' tearing and the old game's picture in them.
 			SC_IDLE: if (scan_enable && want_scan
-			          && (flip_pend                // a double-buffered game: at its flip, and only then
+			          && (il_mode ? (il_fresh && (field != il_last))
+			              : (flip_pend                // a double-buffered game: at its flip, and only then
 			              || flips_recent == 2'd0 && (
-			                 il_skip && il_fresh && (field != il_last)   // 480i: as each field turns, the fields in turn
-			              || !il_skip && (!busy && f_empty && !dma_active)
+			                 (!busy && f_empty && !dma_active)
 			              && (frame_len == 20'd0 || post_vsync >= capture_at)
-			              || !il_skip && (frame_len != 20'd0 && post_vsync >= late_at
-			                  && (arm_ticks == 2'd3 || cap_every_vsync))))) begin
-					sc_field <= field; sc_il <= il_skip; sc_abort <= 1'b0;
+			              || (frame_len != 20'd0 && post_vsync >= late_at
+			                  && (arm_ticks == 2'd3 || cap_every_vsync)))))) begin
+					sc_field <= field; sc_il <= il_mode; sc_abort <= 1'b0;
 					il_fresh <= 1'b0; il_last <= field;
 					sc_crop  <= flip_pend && !vres480 && (sc_ylo <= sc_yhi);   // (the bounds are rows under 240)   // a flipping game, and it drew something
 					sx <= 0; sy <= 0; ox <= 0; substep <= 0;
@@ -1973,6 +2008,7 @@ module ps1_gpu #(
 	assign dbg_gpu  = {disp_on, busy, ds[5:0], cmd[7:0], argc[3:0], f_count[11:0]};   // fits 32 bits: the count is capped for display
 	assign dbg_gpu2 = cmd_hist;
 	assign dbg_behind = (ds != D_IDLE) && r_behind;
+	assign dbg_live   = {dbg_behind, r_busy, r_st_tex, r_st_dst, r_st_full, r_st_clut, ds[5:0]};
 	assign dbg_pop = f_pop; assign dbg_popword = f_head; assign dbg_pophead = f_pop && (ds == D_IDLE);
 	assign dbg_in_v    = f_push || (wr_r && a4_r);
 	assign dbg_in_type = f_push ? {1'b0, dma_wr} : 2'd2;

@@ -269,9 +269,10 @@ module regfile #(
 			.buf_addr(sel_addr[14:2]),
 			.buf_rdata(abuf_rdata)
 		);
-	end else if (CORE_SNES) begin : g_nosyn
-		// (the SNES: no PC-side sound ring -- HDMI takes aud_s directly -- and its 8 block
-		// RAMs go to the console instead)
+	end else if (CORE_SNES || CORE_PS1) begin : g_nosyn
+		// (the SNES and the PlayStation: no PC-side sound ring -- HDMI takes aud_s directly, and
+		// the PC that polled it over the network is gone -- and its block RAMs go to the console:
+		// the PlayStation's sixteen double its processor's cache)
 		assign syn_rdata = 32'd0; assign syn_err = 1'b0; assign abuf_rdata = 32'd0;
 	end else begin : g_nosyn
 		// The PlayStation's own ring: stereo, 44.1 kHz, at the same addresses

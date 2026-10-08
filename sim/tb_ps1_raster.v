@@ -43,7 +43,7 @@ module tb_ps1_raster;
 		.tw_mx(tw_mx), .tw_my(tw_my), .tw_ox(tw_ox), .tw_oy(tw_oy),
 		.no_tcache(1'b0), .no_ccache(1'b0), .no_trun(1'b0),
 		.da_x0(da_x0), .da_x1(da_x1), .da_y0(da_y0), .da_y1(da_y1), .mask_set(mask_set), .mask_chk(mask_chk),
-		.il_skip(il_skip), .il_field(il_field), .pace(pace), .pace_clr(start), .pace_setup(10'd0),
+		.il_skip(il_skip), .il_field(il_field), .pace(pace), .clut_flush(1'b0), .pace_clr(start), .pace_setup(10'd0),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata), .v_around(v_around), .v_lin(v_lin_w), .v_one(v_one_w),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack),
 		.tx_valid(x_valid), .tx_addr(x_addr), .tx_line(x_line),

@@ -793,6 +793,18 @@ module r3000 (
 		k_rsv <= operand(insn[25:21]);
 		k_ea  <= operand(insn[25:21]) + {{16{insn[15]}}, insn[15:0]};
 	end
+	// The tag model's memories have ONE write each, so they are LUT RAM: icv written from two
+	// places (the flush and a miss) was 1,024 flip-flops behind 256-way multiplexers.
+	wire [7:0]  k_ln    = k_pc[11:4];
+	wire [16:0] k_tg    = k_pc[28:12];
+	wire        k_same  = (ict[k_ln] == k_tg);
+	wire        k_hit   = k_same && icv[k_ln][k_pc[3:2]];
+	wire        k_miss  = k_v && (k_pc[31:29] != 3'b101) && !k_hit;
+	wire        icv_we  = isc_inv || k_miss;
+	wire [7:0]  icv_wa  = isc_inv ? isc_addr[11:4] : k_ln;
+	wire [3:0]  icv_wd  = isc_inv ? 4'd0 : ((k_same ? icv[k_ln] : 4'd0) | (4'b1111 << k_pc[3:2]));
+	always @(posedge clk) if (icv_we) icv[icv_wa] <= icv_wd;
+	always @(posedge clk) if (k_miss && !isc_inv) ict[k_ln] <= k_tg;
 	always @(posedge clk) begin : console_clock
 		reg [31:0] w, va, ea, rsv;
 		reg [5:0]  o, f;
@@ -802,7 +814,6 @@ module r3000 (
 		reg [16:0] tg;
 		reg        hit;
 		t_take <= 1'b0;
-		if (isc_inv) icv[isc_addr[11:4]] <= 4'd0;          // the BIOS's cache flush
 		if (k_v) begin
 			w = k_w; o = w[31:26]; f = w[5:0]; rs_n = w[25:21];
 			rsv = k_rsv;
@@ -814,12 +825,9 @@ module r3000 (
 				if (k_pc[28:23] == 6'd0)          c = c + 9'd4;
 				else if (k_pc[28:19] == 10'h3F8)  c = c + 9'd24;
 			end else begin
-				hit = (ict[ln] == tg) && icv[ln][k_pc[3:2]];
-				if (!hit) begin
+				hit = k_hit;
+				if (!hit)
 					c = c + {7'd0, 2'd3 - k_pc[3:2]} + 9'd1;     // the words from here to the line's end
-					ict[ln] <= tg;
-					icv[ln] <= ((ict[ln] == tg) ? icv[ln] : 4'd0) | (4'b1111 << k_pc[3:2]);
-				end
 			end
 			// a load that goes out on the bus waits for the write buffer to empty first: a store
 			// to RAM keeps the bus ~7 cycles (ps1-tests dma/chain-looping: a load/add/store

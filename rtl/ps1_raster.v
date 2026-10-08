@@ -86,6 +86,7 @@ module ps1_raster #(
 	// 1.5x; a quad half off the screen half the time). The old pace took the console for
 	// 106 Mpx/s flat and let flat primitives run free: ours drew them 1.55x too fast.
 	input  wire        pace,
+	input  wire        clut_flush,        // GP0(01): the cached palette is forgotten
 	input  wire        pace_clr,          // a command taken: its time starts now...
 	input  wire [9:0]  pace_setup,        // ...after this many ticks of setup
 	output wire        pace_behind,       // more console time in hand than spent: slower than the console
@@ -466,8 +467,9 @@ module ps1_raster #(
 	reg [4:0]   cl_req;                             // the line the outstanding read is for
 	wire [127:0] clC0 = cdata[ixC0[7:3]];
 	wire [127:0] clC1 = cdata[ixC1[7:3]];
-	wire [15:0] texC0 = (tp_depth == 2'd2) ? hwC0 : clC0[ixC0[2:0]*16 +: 16];
-	wire [15:0] texC1 = (tp_depth == 2'd2) ? hwC1 : clC1[ixC1[2:0]*16 +: 16];
+	// (depth 3, "reserved", is 15-bit direct as on the chip -- ps1-tests gpu/clut-cache)
+	wire [15:0] texC0 = tp_depth[1] ? hwC0 : clC0[ixC0[2:0]*16 +: 16];
+	wire [15:0] texC1 = tp_depth[1] ? hwC1 : clC1[ixC1[2:0]*16 +: 16];
 	wire [24:0] cl_base  = vaddr({clut[5:0], 4'd0}, clut[14:6]) >> 4;
 	wire [5:0]  cl_lines = (tp_depth == 2'd0) ? 6'd2 : 6'd32;
 	// Where the copy IN HAND came from, which is not always where the primitive
@@ -476,7 +478,7 @@ module ps1_raster #(
 	// current stays in the cache and comes back wrong the next time it is used.
 	wire [24:0] cl_hbase  = vaddr({cl_tag[5:0], 4'd0}, cl_tag[14:6]) >> 4;
 	wire [5:0]  cl_hlines = (cl_depth == 2'd0) ? 6'd2 : 6'd32;
-	wire        cl_need  = is_tex && (tp_depth != 2'd2);
+	wire        cl_need  = is_tex && !tp_depth[1];
 	// The chip's palette cache (ps1-tests gpu/clut-cache): loaded again only when the palette's
 	// address changes, or when an 8-bit texture wants the 256 entries a 4-bit load (16) did not
 	// bring. A 256-entry load serves a 4-bit texture too, and drawing over the palette in VRAM,
@@ -615,8 +617,12 @@ module ps1_raster #(
 	// so they were written twice and saved nothing. Wait for the offering to
 	// stop, and the demands drop to one per run.
 	// a line the run brought back that belongs to the palette being loaded
-	wire [24:0] cl_off_d  = tx_addr - cl_base;
-	wire        cl_off_in = cl_loading && tx_valid && !no_trun && (cl_off_d < {19'd0, cl_lines});
+	// a palette that runs off the right of VRAM wraps round to the left of the same row
+	// (ps1-tests gpu/clut-cache: 256 entries at x = 960)
+	wire [6:0]  cl_off7   = tx_addr[6:0] - cl_base[6:0];
+	wire [24:0] cl_off_d  = {18'd0, cl_off7};
+	wire        cl_off_in = cl_loading && tx_valid && !no_trun && (tx_addr[24:7] == cl_base[24:7])
+	                        && (cl_off7 < {1'b0, cl_lines});
 	wire [4:0]  cl_off_i  = cl_off_d[4:0];
 	wire        cl_wr_dem = (fs == F_REQ) && f_ack && (fwho == 2'd2);
 	// The store has ONE write port, so an offer that lands on the same clock as
@@ -760,7 +766,7 @@ module ps1_raster #(
 			case (fs)
 			// not when a write is pending, nor when F is taking one this clock
 			F_IDLE: if (want_fetch && !wreq && !(mvE && (landE0 || landE1))) begin
-					if (cl_loading && (cl_wait == 4'd0)) begin fwho <= 2'd2; faddr <= {cl_base + {20'd0, cl_next}, 4'd0}; cl_req <= cl_next; end
+					if (cl_loading && (cl_wait == 4'd0)) begin fwho <= 2'd2; faddr <= {cl_base[24:7], cl_base[6:0] + {2'd0, cl_next}, 4'd0}; cl_req <= cl_next; end
 					else if (want_dst)   begin fwho <= 2'd1; faddr <= waE; dst_run <= 1'b1; end
 					else                 begin fwho <= 2'd0; faddr <= (needC0 && !hitC0) ? taC0 : taC1; dst_run <= 1'b0; end
 					fs <= F_REQ;
@@ -794,6 +800,7 @@ module ps1_raster #(
 				cl_v <= 1'b0; cl_have <= 32'd0;
 			end
 			if (inv_en && dl_v && dl_a == inv_line) dl_v <= 1'b0;
+			if (clut_flush) begin cl_v <= 1'b0; cl_have <= 32'd0; end   // GP0(01)
 		end
 	end
 endmodule

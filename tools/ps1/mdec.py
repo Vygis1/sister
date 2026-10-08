@@ -89,6 +89,20 @@ def to15(r, g, b, signed, bit15):
     return w ^ 0x4210 if signed else w
 
 
+def rgb_frac(yv, cb, cr):
+    """the same sums in 1/256ths, before any rounding"""
+    return (yv * 256 + 359 * cr,
+            yv * 256 + ((-88 * cb) & ~0x1F) + ((-183 * cr) & ~0x07),
+            yv * 256 + 454 * cb)
+
+
+def to15f(r, g, b, signed, bit15):
+    """15-bit from the unrounded sums: + 128 and half a step, the top five bits, clamped"""
+    f = lambda v: max(0, min(31, (v + 0x8400) >> 11))
+    w = f(r) | f(g) << 5 | f(b) << 10 | (bit15 << 15)
+    return w ^ 0x4210 if signed else w
+
+
 class Mdec:
     def __init__(self):
         self.qt_y = [0] * 64
@@ -218,15 +232,20 @@ class Mdec:
 
     def _emit_colour(self):
         cr, cb = self.blocks[0], self.blocks[1]
-        pix = []                          # the 16x16 macroblock, row-major
-        for y in range(16):
-            for x in range(16):
-                yb = self.blocks[2 + (y >> 3) * 2 + (x >> 3)]
-                yv = yb[(y & 7) * 8 + (x & 7)]
-                c = (y >> 1) * 8 + (x >> 1)
-                pix.append(rgb(yv, cb[c], cr[c]))
-        if self.depth == 3:               # 15-bit: two a word
-            hw = [to15(r, g, b, self.signed, self.bit15) for r, g, b in pix]
+        # the 16x16 macroblock as the chip sends it: Y1 Y2 Y3 Y4, 8x8 each, row by row
+        # (DMA1 puts them in 16-pixel rows as it writes RAM; the port gives them as they are)
+        pix = []; fpix = []
+        for b in range(4):
+            for yy in range(8):
+                for xx in range(8):
+                    y = (b >> 1) * 8 + yy; x = (b & 1) * 8 + xx
+                    yb = self.blocks[2 + (y >> 3) * 2 + (x >> 3)]
+                    yv = yb[(y & 7) * 8 + (x & 7)]
+                    c = (y >> 1) * 8 + (x >> 1)
+                    pix.append(rgb(yv, cb[c], cr[c]))
+                    fpix.append(rgb_frac(yv, cb[c], cr[c]))
+        if self.depth == 3:               # 15-bit: two a word, rounded once from the fraction
+            hw = [to15f(*f, self.signed, self.bit15) for f in fpix]
             for i in range(0, 256, 2):
                 self.out.append(hw[i] | hw[i + 1] << 16)
         else:                             # 24-bit: R G B bytes, packed

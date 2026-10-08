@@ -153,6 +153,7 @@ module ps1_top #(
 	// our clocks the GPU worked behind the console's time for its command
 	output reg  [31:0] lost_cpu,
 	output reg  [31:0] lost_gpu,
+	output wire [31:0] dbg_live,     // now: why the processor waits, and what the GPU is doing
 	output wire [31:0] dbg_draw,
 	output wire [31:0] dbg_v2c,     // VRAM->CPU word accounting (see ps1_gpu)
 	output wire [31:0] dbg_c0,      // and the size that transfer asked for
@@ -328,6 +329,7 @@ module ps1_top #(
 	wire        t_take; wire [6:0] t_cost;
 	wire        cpu_go = cpu_fast || (credit > 0);
 	wire        gpu_behind;
+	wire [11:0] gpu_live;
 	always @(posedge clk)
 		if (rst) begin lost_cpu <= 32'd0; lost_gpu <= 32'd0; end
 		else begin
@@ -415,6 +417,7 @@ module ps1_top #(
 	wire cd_hit   = io_hit && (c_addr[15:4] == 12'h180);
 	wire mdec_hit = io_hit && (c_addr[15:4] == 12'h182);
 	wire mdec_rd_stall;
+	wire [1:0] mdec_depth;
 	wire pad_hit  = io_hit && (c_addr[15:4] == 12'h104);
 	wire spu_hit  = io_hit && (c_addr[15:10] == 6'b0001_11);       // 0x1C00..0x1FFF: the SPU (1E00+ are its current volumes)
 	wire cached   = ram_hit || bios_hit;
@@ -646,7 +649,7 @@ module ps1_top #(
 	// If this is tried again: give the run its own arbiter port, or let it be
 	// preempted, so it cannot push the engine's reads back. Do not simply turn
 	// it on again.
-	ps1_cache #(.IDXBITS(12), .FAST_ACK(1), .BRAM(1)) ccache (
+	ps1_cache #(.IDXBITS(13), .FAST_ACK(1), .BRAM(1)) ccache (
 		.flush(cc_flush), .flush_busy(cc_flush_busy), .inv_v(1'b0), .inv_line(25'd0),
 		.clk(clk), .rst(core_rst),   // a program is loaded under the cache's feet: forget every line
 		// the buffered store first; the processor's reads only once it is gone
@@ -742,7 +745,7 @@ module ps1_top #(
 		.px_valid(px_valid), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb),
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
 		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_pophead(dbg_gpu_pophead), .dbg_popword(dbg_gpu_popword),
-		.dbg_in_v(gin_v), .dbg_in_type(gin_type), .dbg_in_word(gin_word), .dbg_disp(dbg_disp), .dbg_behind(gpu_behind), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
+		.dbg_in_v(gin_v), .dbg_in_type(gin_type), .dbg_in_word(gin_word), .dbg_disp(dbg_disp), .dbg_behind(gpu_behind), .dbg_live(gpu_live), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
 		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w), .disp_v480(gpu_v480), .cap_weave(gpu_weave), .cap_field(gpu_wfield),
 		.scan_lines(fb_want && !fs_en),
@@ -1062,7 +1065,7 @@ module ps1_top #(
 		.clk(clk), .rst(core_rst),
 		.sel(mdec_hit & c_req & cpu_ce_io), .we(c_we), .a2(c_addr[2]), .wdata(c_dout), .rdata(mdec_rdata),
 		.in_wr(mdec_wr), .in_data(gp0_data), .in_ready(mdec_in_ready), .dreq0(mdec_dreq0),
-		.out_rd(mdec_pop), .out_data(mdec_odata), .out_valid(mdec_rvalid), .dreq1(mdec_dreq1), .rd_stall(mdec_rd_stall)
+		.out_rd(mdec_pop), .out_data(mdec_odata), .out_valid(mdec_rvalid), .dreq1(mdec_dreq1), .rd_stall(mdec_rd_stall), .out_depth(mdec_depth)
 	);
 	ps1_dma u_dma (
 		.clk(clk), .rst(core_rst),
@@ -1076,7 +1079,7 @@ module ps1_top #(
 		.spu_wr(spu_dma_wr), .spu_data(spu_dma_wdata), .spu_ready(spu_dma_ready),
 		.spu_rd(spu_dma_rd), .spu_rdata(spu_dma_rdata), .spu_rvalid(spu_dma_rvalid),
 		.mdec_wr(mdec_wr), .mdec_in_ready(mdec_in_ready), .mdec_dreq0(mdec_dreq0),
-		.mdec_pop(mdec_pop), .mdec_rdata(mdec_odata), .mdec_rvalid(mdec_rvalid), .mdec_dreq1(mdec_dreq1),
+		.mdec_pop(mdec_pop), .mdec_rdata(mdec_odata), .mdec_rvalid(mdec_rvalid), .mdec_dreq1(mdec_dreq1), .mdec_depth(mdec_depth),
 		.hog(dma_hog), .in_flight(dma_in_flight),
 		.gpu_active(dma_gpu_active),
 		.dbg_node_v(dbg_node_v), .dbg_node_addr(dbg_node_addr), .dbg_node_hdr(dbg_node_hdr),
@@ -1121,6 +1124,9 @@ module ps1_top #(
 	wire [31:0] stub_rdata =
 	      mem_ctl ? memctl[c_addr[6:2]]
 	    : spu_hit ? spu_rdata
+	    // Expansion 2 (1F802000h on): an 8-bit bus with nothing on it reads all ones
+	    // (ps1-tests cpu/io-access-bitwidth)
+	    : (c_addr[28:13] == 16'hFC01) ? 32'hFFFF_FFFF
 	    :           32'd0;              // the rest: zero
 
 	// ================================================================================
@@ -1430,6 +1436,10 @@ module ps1_top #(
 		end
 	end
 
+	// (debug) a live look, for sampling: {credit full, waits: DMA owns the bus, DMA RAM, processor
+	// not ready, GP0 full, GPUREAD, VRAM flush; cpu_ce; 12'd0; GPU}
+	assign dbg_live = {credit == CREDIT_MAX, dma_block, dma_ram_wait, !cpu_ready, gp0_wait, gpuread_wait, vz_active_w, cpu_ce,
+	                   12'd0, gpu_live};
 endmodule
 
 `default_nettype wire

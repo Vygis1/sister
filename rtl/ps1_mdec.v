@@ -12,8 +12,10 @@
 // two IDCT passes (vertical first) with (sum + 4000h) >> 15 and the scale table cut to 13
 // bits, a 9-bit wrap and clamp; YCbCr -> RGB with 359 / -88 / -183 / 454.
 //
-// A colour macroblock is kept whole and handed out row by row (what the chip's DMA1 re-ordering
-// makes of its 8x8 order), so DMA1 is a plain linear copy. One multiply-accumulate a clock:
+// A colour macroblock is kept whole and handed out as the chip does: four 8x8 blocks (Y1 Y2 Y3 Y4),
+// each row by row. DMA1 puts them in 16-pixel rows as it writes RAM (ps1_dma.v, psx-spx); a CPU
+// reading the port gets the blocks (ps1-tests mdec/frame re-orders them itself, and came out in
+// stripes when they were already in rows). One multiply-accumulate a clock:
 // about 1100 clocks a block, 7000 a macroblock -- ~7500 macroblocks a second at 52.6 MHz,
 // near the chip's 9000.
 //
@@ -44,7 +46,8 @@ module ps1_mdec (
 	// a CPU read of the data port finds nothing yet while a decode is under way: the CPU waits
 	// for the word rather than taking a stale one (ps1-tests mdec/frame reads a whole frame
 	// word by word without looking, and came out as blocks of noise)
-	output wire        rd_stall
+	output wire        rd_stall,
+	output wire [1:0]  out_depth     // the depth being put out (DMA1 re-orders 15- and 24-bit)
 );
 	// --- the FIFOs: 32 words each -------------------------------------------------------------
 	reg [31:0] ififo [0:31]; reg [4:0] iw, ir; reg [5:0] icnt;
@@ -140,9 +143,11 @@ module ps1_mdec (
 		wclamp = (v[8] && v[7:0] < 8'h80) ? 8'h80 : (!v[8] && v[7]) ? 8'h7F : v[7:0];
 	endfunction
 
-	// colour conversion of the pixel cp (row-major 16x16)
-	wire [7:0] c_y  = mb[9'd128 + {1'b0, cp[7:0]}];
-	wire [5:0] c_ci = {cp[7:5], cp[3:1]};                 // (y >> 1) * 8 + (x >> 1)
+	// colour conversion of the pixel cp -- in block order: Y1..Y4, 8 x 8 each -- from the
+	// row-major 16x16: row {block[1], r}, column {block[0], x}
+	wire [7:0] cpr  = {cp[7], cp[5:3], cp[6], cp[2:0]};
+	wire [7:0] c_y  = mb[9'd128 + {1'b0, cpr}];
+	wire [5:0] c_ci = {cpr[7:5], cpr[3:1]};               // (y >> 1) * 8 + (x >> 1)
 	wire signed [7:0] c_cr = mb[{3'd0, c_ci}];
 	wire signed [7:0] c_cb = mb[9'd64 + {3'd0, c_ci}];
 	wire signed [17:0] m_r  = 18'sd359 * c_cr + 18'sd128;
@@ -158,7 +163,19 @@ module ps1_mdec (
 	function [7:0] ub; input [7:0] v; input s; ub = s ? v : v ^ 8'h80; endfunction
 	function [4:0] c5; input [7:0] u; reg [8:0] t; begin t = {1'b0, u} + 9'd4; c5 = (t[8:3] > 6'd31) ? 5'd31 : t[7:3]; end endfunction
 	wire [7:0] u_r = px_r ^ 8'h80, u_g = px_g ^ 8'h80, u_b = px_b ^ 8'h80;
-	wire [15:0] px15 = {b15, c5(u_b), c5(u_g), c5(u_r)} ^ (sgn ? 16'h4210 : 16'h0000);
+	// 15-bit: from the sum with the colour term's fraction still in it, rounded once to five
+	// bits. Rounded to a byte first and then to five, a byte ending in 100b went up every time;
+	// the console's goes either way by what was below it. Measured offline against ps1-tests
+	// mdec/frame's own picture: 15,777 pixels off by a step -> 8,358 (the rest is the IDCT).
+	wire signed [18:0] f_y  = {{3{c_y[7]}}, c_y, 8'd0};
+	wire signed [18:0] f_r  = f_y + (19'sd359 * c_cr);
+	wire signed [18:0] f_g  = f_y + ((-19'sd88 * c_cb) & ~19'sh1F) + ((-19'sd183 * c_cr) & ~19'sh07);
+	wire signed [18:0] f_b  = f_y + (19'sd454 * c_cb);
+	function [4:0] f5; input signed [18:0] v; reg signed [19:0] u; begin
+		u  = {v[18], v} + 20'sh08400;                  // + 128 (unsigned) and half a step, in 1/256ths
+		f5 = u[19] ? 5'd0 : (u[18:11] > 8'd31) ? 5'd31 : u[15:11];
+	end endfunction
+	wire [15:0] px15 = {b15, f5(f_b), f5(f_g), f5(f_r)} ^ (sgn ? 16'h4210 : 16'h0000);
 	reg [15:0] px15_lo;
 
 	// mono: the pixel cp of the block in mb[0..63]
@@ -170,6 +187,7 @@ module ps1_mdec (
 	// the status
 	reg busy;
 	assign rd_stall = (ocnt == 6'd0) && busy;
+	assign out_depth = depth;
 	wire       want_more = (kind != 2'd0) && (to_come != 16'd0);
 	assign dreq0 = en_in && want_more && icnt == 6'd0;
 	assign dreq1 = en_out && (ocnt >= 6'd32 || (ocnt != 6'd0 && !busy));

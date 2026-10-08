@@ -142,6 +142,12 @@ module tb_ps1_gpu;
 
 	wire [31:0] rdata_stat = gpu.gpustat;
 
+	integer cyc = 0;
+	function [31:0] xy; input integer x, y; xy = {5'd0, y[10:0], 5'd0, x[10:0]}; endfunction
+	reg trace_ds = 0; reg [5:0] ds_last = 0; integer ds_n = 0;
+	always @(posedge clk) if (trace_ds && gpu.ds != ds_last && ds_n < 40) begin
+		$display("      t=%0d ds %0d -> %0d (cmd %h argc %0d)", cyc, ds_last, gpu.ds, gpu.cmd, gpu.argc); ds_last = gpu.ds; ds_n = ds_n + 1; end
+	always @(posedge clk) cyc = cyc + 1;
 	task gp0; input [31:0] w; begin
 		@(negedge clk); while (gpu.f_full) @(negedge clk);
 		sel = 1; we = 1; a4 = 0; wdata = w;
@@ -463,6 +469,34 @@ module tb_ps1_gpu;
 		for (k = 0; k < 320 * 240; k = k + 1) $fwrite(fd, "%c", frame[k]);
 		$fclose(fd);
 		$display("  frame written to build/sim/gpu_frame.bin (cache hits %0d misses %0d)", hits, misses);
+
+		// --- what a small primitive costs, against the console's time for it ------------
+		// (fed as fast as this bench feeds, a word every two clocks -- a DMA's pace)
+		begin : small_prims
+			integer t0, i, n;
+			gp0(32'hE300_0000); gp0(32'hE400_0000 | 1023 | (511 << 10)); gp0(32'hE500_0000);   // all of VRAM
+			gp0(32'hE100_0008);                         // texture page 8, 4-bit
+			idle(); t0 = cyc;
+			for (i = 0; i < 64; i = i + 1)               // 8x8 textured sprites
+				begin gp0(32'h7480_8080); gp0(xy(20 + (i % 32) * 9, 300 + (i / 32) * 9)); gp0({16'h7800, 8'd0, 8'd0}); end
+			idle(); n = cyc - t0;
+			$display("    64 sprites 8x8 textured: %0d clocks, %0d each (console ~53)", n, n / 64);
+			idle(); t0 = cyc;
+			for (i = 0; i < 64; i = i + 1)               // flat triangles, 18 pixels
+				begin gp0(32'h2000_FF00); gp0(xy(300 + (i % 32) * 8, 100 + (i / 32) * 8)); gp0(xy(300 + (i % 32) * 8, 106 + (i / 32) * 8)); gp0(xy(306 + (i % 32) * 8, 100 + (i / 32) * 8)); end
+			idle(); n = cyc - t0;
+			$display("    64 flat triangles (18 px): %0d clocks, %0d each (console ~24)", n, n / 64);
+			idle(); t0 = cyc;
+			for (i = 0; i < 64; i = i + 1) begin         // Gouraud textured quads, 10x10
+				gp0(32'h3C80_8080); gp0(xy(400 + (i % 32) * 11, 320 + (i / 32) * 11)); gp0({16'h7800, 8'd0, 8'd0});
+				gp0(32'h0040_4040); gp0(xy(410 + (i % 32) * 11, 320 + (i / 32) * 11)); gp0({16'h0008, 8'd0, 8'd9});
+				gp0(32'h0080_8080); gp0(xy(400 + (i % 32) * 11, 330 + (i / 32) * 11)); gp0({16'd0, 8'd9, 8'd0});
+				gp0(32'h00FF_FFFF); gp0(xy(410 + (i % 32) * 11, 330 + (i / 32) * 11)); gp0({16'd0, 8'd9, 8'd9});
+			end
+			idle(); n = cyc - t0;
+			$display("    64 Gouraud textured quads 10x10: %0d clocks, %0d each (console ~270)", n, n / 64);
+			$display("    drawn? sprite %h  triangle %h  quad %h", vram_px(10'd23, 9'd303), vram_px(10'd301, 9'd101), vram_px(10'd405, 9'd325));
+		end
 
 		$display("");
 		$display("    ENGINE BUSY CLOCKS: %0d", busy_clks);

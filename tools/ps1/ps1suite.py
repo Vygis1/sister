@@ -29,7 +29,13 @@ FB = 0x100000
 PACE = int(os.environ.get('PS1_PACE', '0x1000'), 0)      # ctrl 0xEC: bit 12 = CPU at the console's pace
 # interactive (a pad, a disc swap) or open-ended: not run unattended
 SKIP = {'input_pad', 'cdrom_disc-swap', 'cdrom_terminal', 'spu_toolbox', 'spu_ram-sandbox', 'gpu_benchmark',
-        'mdec_step-by-step-log', 'gte-fuzz'}
+        'mdec_step-by-step-log', 'gte-fuzz',
+        # a movie playing: its reference is one moment of it, ours is another (checked by eye:
+        # the frames decode clean)
+        'mdec_movie_movie-15bit', 'mdec_movie_movie-24bit',
+        # the CPU-read 24-bit frame: the test does not put the MDEC's 8x8 blocks in rows
+        # ("swizzling for 24bit not implemented"), so no console's picture matches its reference
+        'mdec_frame_frame-24bit'}
 
 
 def tests():
@@ -157,19 +163,20 @@ def halt_at_vsync(j, name, tries=400):
     return False
 
 
-def halt_late_in_frame(j):
-    """halt near the END of a frame: a vertical blank goes by (ctrl 0x4C counts them), then
-    13 ms -- by then a test has drawn its frame and waits in VSync() for the next one"""
+def halt_late_in_frame(j, ms=13):
+    """halt `ms` after a vertical blank (ctrl 0x4C counts them). Where a test's frame is whole
+    differs: gpu/lines is whole 1-8 ms after the blank and redrawing by 12 -- so the looks
+    are taken at several points and the closest kept"""
     v0 = j.read(CTRL + 0x4C) & 0xFFFF
     t0 = time.time()
     while (j.read(CTRL + 0x4C) & 0xFFFF) == v0 and time.time() - t0 < 1:
         pass
-    time.sleep(0.013)
+    time.sleep(ms / 1000.0)
     j.write(CTRL + 0x04, 1 | 4)
 
 
-def vram_dump(j, name=None):
-    halt_late_in_frame(j); time.sleep(0.3)
+def vram_dump(j, name=None, ms=13):
+    halt_late_in_frame(j, ms); time.sleep(0.3)
     j.write(CTRL + 0xE0, 1)
     for _ in range(200):
         if not j.read(CTRL + 0xE0) >> 31:
@@ -317,8 +324,8 @@ def main():
             # is caught part way through its frame now and then (the CPU runs at the console's
             # pace, and a long frame can outlast the halt's guess); a real fault shows in all three
             best = None
-            for look in range(3):
-                bad, first = vram_compare(vram_dump(j, name), rv, os.path.join(OUT, name + '_vram%d.png' % look), VRAM_BOX.get(name))
+            for look, ms in enumerate((13, 3, 8)):
+                bad, first = vram_compare(vram_dump(j, name, ms), rv, os.path.join(OUT, name + '_vram%d.png' % look), VRAM_BOX.get(name))
                 if best is None or bad < best[0]:
                     best = (bad, first, look)
                 j.write(CTRL + 0x04, 1)                       # let it run on to another frame
