@@ -8,8 +8,8 @@ module tb_ps1_fill;
 	wire v_lwe; wire [127:0] v_wdata128;
 	wire [127:0] v_line;
 	wire px_valid; wire [8:0] px_x,px_y; wire [7:0] px_rgb; wire vblank,hblank,dot_ce,irq;
-	wire v_lin_w, g_lin_w;
-	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w),.clk(clk),.rst(rst),.sel(sel),.we(we),.a4(a4),.dma_active(1'b0),.cap_every_vsync(1'b0), .gpu_fast(1'b1),.wdata(wdata),.rdata(rdata),
+	wire v_lin_w, v_one_w, g_lin_w;
+	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),.clk(clk),.rst(rst),.sel(sel),.we(we),.a4(a4),.dma_active(1'b0),.cap_every_vsync(1'b0), .gpu_fast(1'b1),.wdata(wdata),.rdata(rdata),
 		.dma_wr(1'b0),.dma_data(32'd0),.dma_ready(),.dma_rd(1'b0),.dma_rdata(),.dma_rvalid(),
 		.v_addr(v_addr),.v_req(v_req),.v_we(v_we),.v_be(v_be),.v_wdata(v_wdata),.v_rdata(v_rdata),.v_line(v_line),.v_ack(v_ack),
 		.v_lwe(v_lwe),.v_wdata128(v_wdata128),
@@ -23,7 +23,7 @@ module tb_ps1_fill;
 	wire [28:0]  gp_addr; wire gp_req, gp_around, gp_ack; wire [31:0] gp_rdata; wire [127:0] gp_line;
 	wire [23:0]  bk_addr, vc_addr; wire bk_req, bk_we, bk_ready, vc_req, vc_we, vc_ready, vc_valid; wire [127:0] bk_wdata, vc_wdata, vc_rdata; wire [15:0] bk_wmask, vc_wmask;
 	wire         inv_v; wire [24:0] inv_line; wire bk_busy;
-	ps1_vram_port vp ( .v_lin(v_lin_w), .g_lin(g_lin_w),
+	ps1_vram_port vp ( .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
 		.clk(clk), .rst(rst),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata), .v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(1'b0),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack), .eng_idle(!gpu.busy), .host_flush(1'b0), .busy(bk_busy),
@@ -64,6 +64,7 @@ module tb_ps1_fill;
 	end endtask
 	task idle; begin @(negedge clk); while(!(gpu.f_empty&&!gpu.busy&&!bk_busy))@(negedge clk); repeat(3)@(negedge clk); end endtask
 	integer k,errors=0;
+	reg [15:0] nb_l, nb_r;
 	task chk; input c; input [255:0] m; begin if(c)$display("  ok   %0s",m); else begin $display("  FAIL %0s",m);errors=errors+1;end end endtask
 	// how much of the fill went out a whole line at a time
 	integer oct_writes = 0, pair_writes = 0, one_writes = 0;
@@ -144,6 +145,27 @@ module tb_ps1_fill;
 		gp0(32'h50000000); gp0((310<<16)|16); gp0(32'h000000FF); gp0((330<<16)|56); idle();
 		$display("    shaded: %04h %04h %04h", vpx(16,310), vpx(36,320), vpx(56,330));
 		chk(vpx(56,330)[4:0] > 5'd25 && vpx(16,310)[4:0] < 5'd3, "shaded line ends");
+				// --- CPU -> VRAM: eight pixels a write where the row is aligned, one at a time elsewhere
+		// (a start at x=3 and a width of 21: three single pixels, two lines, two singles a row)
+		oct_writes = 0;
+		nb_l = vpx(2,400); nb_r = vpx(24,400);
+		gp0(32'hA0000000); gp0((400<<16)|3); gp0((3<<16)|21);
+		for (k = 0; k < 32; k = k + 1) gp0(((k*2+1) << 16) | (k*2));
+		idle();
+		begin : upchk
+			integer xx, yy, n, bad; n = 0; bad = 0;
+			for (yy = 0; yy < 3; yy = yy + 1) for (xx = 0; xx < 21; xx = xx + 1) begin
+				if (vpx(3+xx, 400+yy) !== n[15:0]) begin
+					if (bad < 4) $display("    upload (%0d,%0d) = %h, want %h", 3+xx, 400+yy, vpx(3+xx,400+yy), n[15:0]);
+					bad = bad + 1;
+				end
+				n = n + 1;
+			end
+			chk(bad == 0, "upload: every pixel in place");
+			chk(vpx(2,400) == nb_l && vpx(24,400) == nb_r, "upload: nothing either side");
+			$display("    upload: %0d whole-line writes", oct_writes);
+			chk(oct_writes >= 2, "upload: aligned runs a line at a time");
+		end
 		if(errors==0)$display("tb_ps1_fill: all passed"); else $display("tb_ps1_fill: %0d FAIL",errors);
 		$finish;
 	end

@@ -50,8 +50,8 @@ module tb_ps1_gpu;
 	wire [7:0]  px_rgb;
 	wire        vblank, hblank, dot_ce, irq;
 
-	wire v_lin_w, g_lin_w;
-	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w),
+	wire v_lin_w, v_one_w, g_lin_w;
+	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .a4(a4), .dma_active(1'b0), .cap_every_vsync(1'b0), .gpu_fast(1'b1),
 		.no_tcache(1'b0), .no_ccache(1'b0), .no_trun(1'b0), .wdata(wdata), .rdata(rdata),
@@ -79,7 +79,7 @@ module tb_ps1_gpu;
 	wire [28:0]  gp_addr; wire gp_req, gp_around, gp_ack; wire [31:0] gp_rdata; wire [127:0] gp_line;
 	wire [23:0]  bk_addr, vc_addr; wire bk_req, bk_we, bk_ready, vc_req, vc_we, vc_ready, vc_valid; wire [127:0] bk_wdata, vc_wdata, vc_rdata; wire [15:0] bk_wmask, vc_wmask;
 	wire         inv_v; wire [24:0] inv_line; wire bk_busy;
-	ps1_vram_port vp ( .v_lin(v_lin_w), .g_lin(g_lin_w),
+	ps1_vram_port vp ( .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
 		.clk(clk), .rst(rst),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata), .v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack), .eng_idle(!gpu.busy), .host_flush(1'b0), .busy(bk_busy),
@@ -390,7 +390,9 @@ module tb_ps1_gpu;
 		gp0({16'd344, 16'd240}); gp0(32'h0080_2F9F);
 		idle();
 		$display("    menu text quad: rows v<24 (glyph) at (100,325)=%04h (200,330)=%04h ; rows v>=24 (bg) at (100,340)=%04h", vram_px(10'd100, 9'd325), vram_px(10'd200, 9'd330), vram_px(10'd100, 9'd340));
-		check(vram_px(10'd100, 9'd325) == 16'h7FFF && vram_px(10'd200, 9'd330) == 16'h7FFF, "menu text quad: glyph texels (index 0) are white");
+		// (the menu's E1 dithers, and a modulated texel is dithered: white at (100,325) takes
+		// the matrix's +2 and stays 31; at (200,330) it takes -3, 248-3 -> 30 a channel)
+		check(vram_px(10'd100, 9'd325) == 16'h7FFF && vram_px(10'd200, 9'd330) == 16'h7BDE, "menu text quad: glyph texels (index 0) are white");
 		check(vram_px(10'd100, 9'd340) == 16'h3C00, "menu text quad: background texels (index 2) are transparent");
 
 		// single lines, flat and Gouraud, each followed by a fill that must still

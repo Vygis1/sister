@@ -37,7 +37,10 @@ module ps1_dma #(
 	// the SPU takes its DMA slowly -- a word every ~32 console cycles here (ps1-tests
 	// spu/memory-transfer: a 1 kB write must take 1.6k-18k cycles, with the CPU running
 	// between); in board clocks
-	parameter SPU_GAP = 47
+	parameter SPU_GAP = 47,
+	// sync mode 1: the console waits ~10 cycles for the device's next request between blocks
+	// (ps1-tests dma/chopping: 2048 one-word blocks take 22819 cycles, 2048 words in one 2196)
+	parameter BLK_GAP = 15
 ) (
 	input  wire        clk,
 	input  wire        rst,
@@ -55,6 +58,12 @@ module ps1_dma #(
 	output reg         r_we,
 	output reg  [31:0] r_wdata,
 	input  wire [31:0] r_rdata,
+	input  wire [127:0] r_line,        // the whole line the word came from (a read)
+	// a CPU store to RAM: the line in hand is dropped if it is the one stored to (a CPU that
+	// rewrites a list while the DMA walks it -- ps1-tests dma/chain-looping breaks a looping
+	// chain that way -- was never seen, and the DMA went round the loop for ever)
+	input  wire        snoop_v,
+	input  wire [23:0] snoop_a,
 	input  wire        r_ack,
 
 	// the GPU's command port: one word at a time when it is ready
@@ -142,8 +151,12 @@ module ps1_dma #(
 	reg [6:0] want;
 	// the device behind the block paths: the GPU's, on channel 4 the SPU's, on 0 / 1 the MDEC's
 	reg  [7:0]  spu_gap;              // the SPU is not ready for the next word until this runs out
+	// the last RAM line read, so a run of words costs one read in four: the console moves a word
+	// a cycle, and a read a word took us ~3.5 (the same test: 7100 cycles where it takes 2200)
+	reg         lb_v; reg [19:0] lb_tag; reg [127:0] lb_data;
+	reg  [4:0]  blk_gap;
 	wire        dev_ready  = (cur == 3'd4) ? (spu_ready && spu_gap == 8'd0) : (cur == 3'd0) ? mdec_in_ready : gp0_ready;
-	wire        dev_rvalid = (cur == 3'd4) ? (spu_rvalid && spu_gap == 8'd0) : (cur == 3'd1) ? mdec_rvalid : gpu_rvalid;
+	wire        dev_rvalid = (cur == 3'd4) ? spu_rvalid : (cur == 3'd1) ? mdec_rvalid : gpu_rvalid;
 	always @(posedge clk)
 		if (rst) spu_gap <= 8'd0;
 		else if (spu_wr || (st == S_GWRW && r_ack && cur == 3'd4)) spu_gap <= SPU_GAP[7:0];
@@ -169,7 +182,11 @@ module ps1_dma #(
 			st <= S_IDLE; cur <= 3'd0;
 			r_req <= 1'b0; r_we <= 1'b0; gp0_wr <= 1'b0; gpu_rd <= 1'b0; dbg_node_v <= 1'b0; spu_wr <= 1'b0; spu_rd <= 1'b0;
 			cd_rd <= 1'b0; cd_go <= 1'b0; cd_go_info <= 32'd0; cd_words <= 16'd0; mdec_wr <= 1'b0;
+			lb_v <= 1'b0; blk_gap <= 5'd0;
 		end else begin
+			if (blk_gap != 5'd0) blk_gap <= blk_gap - 5'd1;
+			if (r_req && r_we) lb_v <= 1'b0;                 // (a DMA write: the line in hand may be stale)
+			if (snoop_v && snoop_a[20:4] == lb_tag[16:0]) lb_v <= 1'b0;   // (2 MB: the CPU may store through a mirror)
 			r_req  <= 1'b0;
 			gp0_wr <= 1'b0;
 			gpu_rd <= 1'b0;
@@ -208,6 +225,7 @@ module ps1_dma #(
 
 			S_PICK: begin
 					addr <= madr[cur];
+					lb_v <= 1'b0;
 					case (cur)
 					3'd2: begin                                     // GPU
 						if (chcr[2][10:9] == 2'd2) st <= S_LL;
@@ -252,12 +270,19 @@ module ps1_dma #(
 					else begin
 						blocks <= blocks - 16'd1;
 						words  <= bwords(bcr[cur][15:0]);
+						if (chcr[cur][10:9] == 2'd1) blk_gap <= BLK_GAP[4:0];
 					end
-				end else if (dev_ready) begin
-					r_addr <= {5'd0, addr};
-					r_we   <= 1'b0;
-					r_req  <= 1'b1;
-					st <= S_RDW;
+				end else if (!chcr[cur][24]) begin madr[cur] <= addr; st <= S_IDLE; end
+				else if (dev_ready && blk_gap == 5'd0) begin
+					if (lb_v && lb_tag == addr[23:4]) begin
+						gp0_data <= lb_data[addr[3:2]*32 +: 32];
+						st <= S_GP0;
+					end else begin
+						r_addr <= {5'd0, addr};
+						r_we   <= 1'b0;
+						r_req  <= 1'b1;
+						st <= S_RDW;
+					end
 				end
 			// The word is held here until the GPU's FIFO can take it. Pushing it
 			// straight from S_RDW lost words: S_RD had checked gp0_ready cycles
@@ -267,6 +292,7 @@ module ps1_dma #(
 			// after it misparsed, a triangle waiting forever for its last vertex.
 			S_RDW: if (r_ack) begin
 					gp0_data <= r_rdata;
+					lb_v <= 1'b1; lb_tag <= addr[23:4]; lb_data <= r_line;
 					st <= S_GP0;
 				end else r_req <= 1'b1;   // hold until the cache takes it
 			S_GP0: if (dev_ready) begin
@@ -329,13 +355,19 @@ module ps1_dma #(
 				end
 			// gpu_rd is held until the word arrives: a one-cycle pulse while the
 			// GPU had nothing ready yet was simply missed, and this waited forever
-			S_GWR: if (dev_rvalid) begin
+			// A channel the CPU stops (CHCR bit 24 cleared) while it waits on its device lets go:
+			// MADR as far as it got, and back to the arbiter. ps1-tests mdec/4bit stops channel 1
+			// in the middle of a block the MDEC will never finish, then runs the GPU's -- and
+			// this waited for the MDEC for ever with every other channel shut out.
+			S_GWR: if (!chcr[cur][24]) begin madr[cur] <= addr; st <= S_IDLE; end
+				else if (dev_rvalid) begin
 					r_addr  <= {5'd0, addr};
 					r_we    <= 1'b1;
 					r_wdata <= dev_rdata;
 					r_req   <= 1'b1;
 					st <= S_GWRW;
-				end else if (cur == 3'd4) spu_rd <= 1'b1; else if (cur != 3'd1) gpu_rd <= 1'b1;
+				end else if (cur == 3'd4) begin if (spu_gap == 8'd0) spu_rd <= 1'b1; end   // (the SPU's pace: ask when the gap is out)
+				else if (cur != 3'd1) gpu_rd <= 1'b1;
 			S_GWRW: if (r_ack) begin
 					addr  <= addr + 24'd4;
 					words <= words - 32'd1;
@@ -440,7 +472,8 @@ module ps1_dma #(
 	// the chip gives the CPU the bus until the device asks again. Held, the CPU stood still on
 	// its next access for good when the device never had the rest -- ps1-tests mdec/4bit asks
 	// for more words than one block decodes, and its timeout loop never got to run.
-	wire dev_paused = ((st == S_GWR) && !dev_rvalid && ((cur == 3'd1) || (cur == 3'd4)))
+	wire dev_paused = ((st == S_GWR) && !dev_rvalid && ((cur == 3'd1) || ((cur == 3'd4) && spu_gap != 8'd0)))
+	                || ((st == S_RD) && blk_gap != 5'd0)
 	                || ((cur == 3'd4) && ((st == S_RD) || (st == S_GP0)) && !dev_ready);
 	assign hog = (hog_want || (st != S_IDLE)) && !gpu_paused && !dev_paused;
 	assign in_flight = (hog_want || (st != S_IDLE)) && !dev_paused;

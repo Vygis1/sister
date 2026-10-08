@@ -561,7 +561,7 @@ module console_top #(
 	wire [31:0] gte_snap_data; wire [24:0] gte_snap_word; wire [1:0] gte_snap_state;
 	// ...and the TTY (ps1_top DBG): 0x1A8 the characters printed so far, 0x8000-0xBFFF the 16 kB ring
 	// a word (four characters) at a time
-	wire [31:0] ps1_tty_word, ps1_tty_count;
+	wire [31:0] ps1_tty_word, ps1_tty_count, ps1_lost_cpu, ps1_lost_gpu;
 	// ...and the GP0 trace (ps1_top DBG): 0x1B0 status (write: arm), 0xC000-0xDFFF its 2048 words,
 	// 0xE000-0xFFFF bit 0 = that word was a command's first
 	wire [31:0] ps1_gtr_word, ps1_gtr_stat; wire [1:0] ps1_gtr_head;
@@ -748,6 +748,8 @@ module console_top #(
 		16'h01A8: ctrl_rdata = ps1_tty_count;
 		16'h01AC: ctrl_rdata = {fb_hr_raw, 7'd0, fb_hr_base};
 		16'h01B0: ctrl_rdata = ps1_gtr_stat;
+		16'h01B4: ctrl_rdata = PS1_DBG ? ps1_lost_cpu : 32'd0;   // console time the processor lost (system clocks)
+		16'h01B8: ctrl_rdata = PS1_DBG ? ps1_lost_gpu : 32'd0;   // our clocks the GPU ran behind the console
 		16'h0184: ctrl_rdata = {31'd0, snes_dirty};
 		16'h0188: ctrl_rdata = snes_hword;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
@@ -1245,7 +1247,7 @@ module console_top #(
  .gte_snap_go(gte_snap_go), .gte_snap_skip(gte_snap_skip), .gte_snap_idx(gte_snap_idx),
 			.gte_snap_data(gte_snap_data), .gte_snap_word(gte_snap_word), .gte_snap_state(gte_snap_state),
 			.gte_wt_idx(gte_wt_idx), .gte_wt_pc(gte_wt_pc), .gte_wt_data(gte_wt_data), .gte_wt_reg(gte_wt_reg),
-			.tty_idx(off[13:2]), .tty_word(ps1_tty_word), .tty_count(ps1_tty_count),
+			.tty_idx(off[13:2]), .tty_word(ps1_tty_word), .tty_count(ps1_tty_count), .lost_cpu(ps1_lost_cpu), .lost_gpu(ps1_lost_gpu),
 			.gtr_idx(off[12:2]), .gtr_word(ps1_gtr_word), .gtr_head(ps1_gtr_head), .gtr_stat(ps1_gtr_stat), .gtr_arm(ps1_gtr_arm), .fb_hr_raw(fb_hr_raw), .fb_hr_base(fb_hr_base), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
 			.cd_fill_lba_o(cd_fill_lba), .cd_fill_room_o(cd_fill_room), .cd_fill_run_o(cd_fill_run), .cd_dbg_o(cd_dbg), .cd_dbg_cmds_o(cd_dbg_cmds), .cd_dbg_setloc_o(cd_dbg_setloc), .cd_dbg_seek_o(cd_dbg_seek), .cd_dbg_hdr_o(cd_dbg_hdr), .cd_trace_idx(cd_trace_idx), .cc_flush(cc_flush), .cc_flush_busy(cc_flush_busy), .cd_trace_data(cd_trace_data), .cd_trace_wp(cd_trace_wp), .cd_dma_words_o(cd_dma_words),
 			.dbg_icv_pc(ps1_icv_pc), .dbg_icv_got(ps1_icv_got), .dbg_icv_want(ps1_icv_want), .dbg_icv_n(ps1_icv_n),
@@ -1279,7 +1281,7 @@ module console_top #(
 		assign ps1_vid_rgb = 24'd0;
 		assign gte_snap_data = 32'd0; assign gte_snap_word = 25'd0; assign gte_snap_state = 2'd0;
 		assign gte_wt_pc = 32'd0; assign gte_wt_data = 32'd0; assign gte_wt_reg = 6'd0;
-		assign ps1_tty_word = 32'd0; assign ps1_tty_count = 32'd0;
+		assign ps1_tty_word = 32'd0; assign ps1_tty_count = 32'd0; assign ps1_lost_cpu = 32'd0; assign ps1_lost_gpu = 32'd0;
 		assign ps1_gtr_word = 32'd0; assign ps1_gtr_head = 2'd0; assign ps1_gtr_stat = 32'd0;
 		if (!CORE_N64 && (CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS) begin : g_md_lr
 			// the Mega Drive's (or the SNES's) two channels, for HDMI's stereo: 48000 times a

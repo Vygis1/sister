@@ -78,14 +78,17 @@ module ps1_raster #(
 	// field on screen, and the capture saw the half that was drawn so far.
 	input  wire        il_skip,
 	input  wire        il_field,          // the field on screen: its parity of line is skipped
-	// The chip's pace or ours. The console's GPU runs at 53.2 MHz and lands two
-	// flat pixels a clock, one textured or shaded: 106 and 53 million a second.
-	// This pipeline lands two a clock at 50 MHz whatever the pixel, so a textured
-	// primitive would go twice as fast as on the console. With `pace` set the
-	// scanner is let go on 53.2 of every 100 clocks for textured, shaded and
-	// blended primitives; flat ones run free (100 against 106 a second: the 6%
-	// the clock is short, and not worth a stall pattern).
+	// The console's pace or ours. With `pace` set a primitive takes no less time than the
+	// console's GPU would give it: two ticks a 33.8688 MHz system clock, a pixel one tick
+	// flat, two textured, half as much again blended or mask-checked, and the command's
+	// setup on top -- DuckStation's model, and the console's own ps1-tests gpu/bandwidth
+	// log bears it out (a flat 320x240 rectangle at 64 Mpx/s against 68 modelled; blended
+	// 1.5x; a quad half off the screen half the time). The old pace took the console for
+	// 106 Mpx/s flat and let flat primitives run free: ours drew them 1.55x too fast.
 	input  wire        pace,
+	input  wire        pace_clr,          // a command taken: its time starts now...
+	input  wire [9:0]  pace_setup,        // ...after this many ticks of setup
+	output wire        pace_behind,       // more console time in hand than spent: slower than the console
 
 	// --- VRAM: the engine's port, ours while busy ------------------------------------
 	output reg  [28:0] v_addr,
@@ -99,6 +102,7 @@ module ps1_raster #(
 	// down as well as across. A palette is 32 consecutive lines of ONE row, so
 	// half of every tile is the row below and useless to it.
 	output reg         v_lin,
+	output reg         v_one,             // a read whose run's other lines the asker never uses
 	input  wire [31:0] v_rdata,
 	input  wire [127:0] v_line,
 	input  wire        v_ack,
@@ -196,17 +200,25 @@ module ps1_raster #(
 	// ------------------------------------------------------------------------------------
 	wire hold;
 
-	// the pace: a pair may go on the clocks a 53.2 MHz chip would have landed one
-	// textured/shaded pixel-pair on -- 26.6 of every 50 -- by a phase accumulator
-	reg  [19:0] pace_acc;
-	reg         pace_go;
-	always @(posedge clk) begin
-		if (rst) begin pace_acc <= 20'd0; pace_go <= 1'b0; end
-		else if (pace_acc + 20'd266000 >= CLK_HZ / 100) begin pace_acc <= pace_acc + 20'd266000 - CLK_HZ / 100; pace_go <= 1'b1; end
-		else begin pace_acc <= pace_acc + 20'd266000; pace_go <= 1'b0; end   // (CLK_HZ / 100 < 2^20: under 104 MHz)
-	end
-	wire slow_prim = is_tex || is_gour || is_semi;
-	wire pace_ok   = !pace || !slow_prim || pace_go;
+	// the pace: console time in half-ticks, four a system clock, earned by a phase
+	// accumulator (CLK_HZ / 100 < 2^21: under 209 MHz) and spent as pixels go
+	localparam [20:0] PG   = 21'd1354752;            // 4 x 338688: half-ticks x 10^4 a clock, over CLK_HZ/100
+	localparam [20:0] PD   = CLK_HZ / 100;
+	reg  [20:0] pace_acc;
+	reg  signed [19:0] pace_cr;                       // half-ticks in hand (negative: owed)
+	wire [21:0] pa_sum = {1'b0, pace_acc} + {1'b0, PG};
+	wire [1:0]  pa_n   = (pa_sum >= 3 * PD) ? 2'd3 : (pa_sum >= 2 * PD) ? 2'd2 : (pa_sum >= PD) ? 2'd1 : 2'd0;
+	// a pixel's cost in half-ticks. A rectangle's texture cost is its mode's: the console
+	// reloads its texture cache every few pixels of an 8- or 15-bit one wider than 128
+	wire [10:0] rw_px  = bx1 - bx0 + 12'sd1;
+	wire [4:0]  c_base = !is_tex ? 5'd2
+	                   : !always_in ? 5'd4
+	                   : (tp_depth == 2'd1 && rw_px > 11'd128) ? 5'd6
+	                   : (tp_depth[1]      && rw_px > 11'd128) ? 5'd10 : 5'd4;
+	wire        c_blnd = is_semi || mask_chk;
+	wire [4:0]  c_px   = !c_blnd ? c_base : always_in ? c_base + 5'd1 : c_base + {1'b0, c_base[4:1]};
+	wire        pace_ok = !pace || (pace_cr > 0);
+	assign      pace_behind = (pace_cr > 20'sd32);
 
 
 
@@ -241,6 +253,18 @@ module ps1_raster #(
 	wire xb_ok  = (px1 >= $signed({2'b0, da_x0})) && (px1 <= $signed({2'b0, da_x1})) && px1 >= 0 && px1 < 1024 && px1 >= bx0 && px1 <= bx1;
 	wire a_ok = scanning && row_ok && xa_ok && in_a;
 	wire b_ok = scanning && row_ok && xb_ok && in_b;
+	wire        pace_take = scanning && !hold && pace_ok;   // a pair leaves the scanner this clock
+	wire [5:0]  pace_cost = (a_ok ? {1'b0, c_px} : 6'd0) + (b_ok ? {1'b0, c_px} : 6'd0);
+	always @(posedge clk) begin
+		if (rst) begin pace_acc <= 21'd0; pace_cr <= 20'sd0; end
+		else begin
+			pace_acc <= pa_sum - pa_n * PD;
+			if (pace_clr)
+				pace_cr <= -$signed({8'd0, pace_setup, 1'b0});
+			else if (pace_cr < 20'sd262000)               // (well clear of the top: behind is behind)
+				pace_cr <= pace_cr + $signed({18'd0, pa_n}) - (pace_take ? $signed({14'd0, pace_cost}) : 20'sd0);
+		end
+	end
 	wire signed [31:0] cr1 = cr + dr_dx, cg1 = cg + dg_dx, cb1 = cb + db_dx, cu1 = cu + du_dx, cv1 = cv + dv_dx;
 	// 12'sd: an unsigned literal would make the compare unsigned. A row the
 	// field rule skips is over before it starts: one clock, not one a pair.
@@ -336,7 +360,9 @@ module ps1_raster #(
 	// its own instead of going into the cache, and nothing is evicted.
 	wire         collide    = (tidx(taC0) == tidx(taC1)) && (ttag(taC0) != ttag(taC1));
 	wire         fill_hold  = own_fill && collide && (faddr[28:4] == taC1[28:4]);
-	wire         tfill_go   = (own_fill && !fill_hold) || (tx_valid && !no_trun);
+	// (the spare lines of a destination run are framebuffer, not texture: kept out)
+	reg          dst_run;
+	wire         tfill_go   = (own_fill && !fill_hold) || (tx_valid && !no_trun && !dst_run);
 	wire [28:0]  tfill_addr = own_fill ? faddr  : {tx_addr, 4'd0};
 	wire [127:0] tfill_line = own_fill ? v_line : tx_line;
 	always @(posedge clk)
@@ -558,11 +584,15 @@ module ps1_raster #(
 	// the port: a pending write owns it; otherwise a fetch
 	always @(*) begin
 		if (wreq) begin
-			v_req = 1'b1; v_we = 1'b1; v_addr = waddr; v_be = wbe; v_wdata = wdata; v_around = 1'b0; v_lin = 1'b0;
+			v_req = 1'b1; v_we = 1'b1; v_addr = waddr; v_be = wbe; v_wdata = wdata; v_around = 1'b0; v_lin = 1'b0; v_one = 1'b0;
 		end else begin
 			v_req = (fs != F_IDLE); v_we = 1'b0; v_addr = faddr; v_be = 4'hF; v_wdata = 32'd0;
-			v_around = (fwho != 2'd1);              // texel and palette lines come as runs
-			v_lin    = (fwho == 2'd2);              // a palette's run is along one row
+			// every fetch comes as a run. The destination's too, along its row: a semi-
+			// transparent span reads each line before it writes it, and a line at a time from
+			// memory it ran at a quarter of the console's speed (ps1-tests gpu/bandwidth)
+			v_around = 1'b1;
+			v_lin    = (fwho != 2'd0);              // palette and destination runs are along one row
+			v_one    = (fwho == 2'd1);              // ...and the destination uses only the line it asked for
 		end
 	end
 	assign f_ack = (fs != F_IDLE) && !wreq && v_ack;
@@ -625,7 +655,7 @@ module ps1_raster #(
 		if (rst) begin
 			busy <= 1'b0; scanning <= 1'b0;
 			vB <= 1'b0; vC <= 1'b0; vD <= 1'b0; vE <= 1'b0; wreq <= 1'b0; lastF <= 1'b0;
-			fs <= F_IDLE; fwho <= 2'd0; faddr <= 29'd0; cl_have <= 32'd0; cl_req <= 5'd0; cl_loading <= 1'b0;
+			fs <= F_IDLE; fwho <= 2'd0; faddr <= 29'd0; dst_run <= 1'b0; cl_have <= 32'd0; cl_req <= 5'd0; cl_loading <= 1'b0;
 			cl_wait <= 4'd0;
 			cl_v <= 1'b0; cl_tag <= 16'd0; cl_depth <= 2'd0; dl_v <= 1'b0; dl_a <= 25'd0; dl_d <= 128'd0;
 			px <= 0; py <= 0; ea0 <= 0; ea1 <= 0; ea2 <= 0; er0 <= 0; er1 <= 0; er2 <= 0;
@@ -731,8 +761,8 @@ module ps1_raster #(
 			// not when a write is pending, nor when F is taking one this clock
 			F_IDLE: if (want_fetch && !wreq && !(mvE && (landE0 || landE1))) begin
 					if (cl_loading && (cl_wait == 4'd0)) begin fwho <= 2'd2; faddr <= {cl_base + {20'd0, cl_next}, 4'd0}; cl_req <= cl_next; end
-					else if (want_dst)   begin fwho <= 2'd1; faddr <= waE; end
-					else                 begin fwho <= 2'd0; faddr <= (needC0 && !hitC0) ? taC0 : taC1; end
+					else if (want_dst)   begin fwho <= 2'd1; faddr <= waE; dst_run <= 1'b1; end
+					else                 begin fwho <= 2'd0; faddr <= (needC0 && !hitC0) ? taC0 : taC1; dst_run <= 1'b0; end
 					fs <= F_REQ;
 				end
 			F_REQ: if (f_ack) begin

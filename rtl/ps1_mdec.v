@@ -40,7 +40,11 @@ module ps1_mdec (
 	input  wire        out_rd,       // pop (when out_valid)
 	output wire [31:0] out_data,
 	output wire        out_valid,
-	output wire        dreq1
+	output wire        dreq1,
+	// a CPU read of the data port finds nothing yet while a decode is under way: the CPU waits
+	// for the word rather than taking a stale one (ps1-tests mdec/frame reads a whole frame
+	// word by word without looking, and came out as blocks of noise)
+	output wire        rd_stall
 );
 	// --- the FIFOs: 32 words each -------------------------------------------------------------
 	reg [31:0] ififo [0:31]; reg [4:0] iw, ir; reg [5:0] icnt;
@@ -165,6 +169,7 @@ module ps1_mdec (
 
 	// the status
 	reg busy;
+	assign rd_stall = (ocnt == 6'd0) && busy;
 	wire       want_more = (kind != 2'd0) && (to_come != 16'd0);
 	assign dreq0 = en_in && want_more && icnt == 6'd0;
 	assign dreq1 = en_out && (ocnt >= 6'd32 || (ocnt != 6'd0 && !busy));

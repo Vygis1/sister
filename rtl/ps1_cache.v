@@ -279,6 +279,13 @@ module ps1_cache #(
 	reg [127:0] pf_data [0:PFL-1];
 	reg [24:0]  pf_base;                    // the line the run in hand starts at
 	reg         pf_valid;
+	// which lines of the run are still good. One bit for the whole run threw all four away
+	// when any one was written -- and a semi-transparent span writes the line it has just
+	// read, so the three after it went back to memory one by one (ps1-tests gpu/bandwidth:
+	// semi-transparent drawing at a quarter of the console's speed). And a write landing
+	// while the run was still in flight was forgotten when the run completed and set the
+	// one bit again: a stale line served. A bit a line, cleared even in flight, is both.
+	reg [PFL-1:0] pf_lv;
 	// Issued and received are counted separately because they overlap: the
 	// arbiter in front of the memory takes a request every few cycles, so the
 	// first line of a run comes back while the last is still going out. Counting
@@ -338,7 +345,7 @@ module ps1_cache #(
 	reg         pf_lin;                            // the run in hand is along one row
 	wire        pf_lo  = pf_lin ? (pf_off < PFLW) : (pf_off < 25'd2);
 	wire        pf_hi  = !pf_lin && (pf_off >= ROWL) && (pf_off < ROWL + 25'd2);
-	wire        pf_hit = pf_valid && (pf_lo || pf_hi);
+	wire        pf_hit0 = pf_valid && (pf_lo || pf_hi);
 	wire [24:0] pf_first = rq_line;                // the run starts where it was asked
 	wire [PFLB-1:0] pf_sel = pf_lin ? pf_off[PFLB-1:0]
 	                               : (pf_lo ? {1'b0, pf_off[0]} : {1'b1, pf_off[0]});
@@ -351,6 +358,11 @@ module ps1_cache #(
 		in_run = pf_lin ? (d < PFLW)
 		                : ((d < 25'd2) || ((d >= ROWL) && (d < ROWL + 25'd2)));
 	endfunction
+	function [PFLB-1:0] run_ix; input [24:0] d;     // which of the run's lines (when in_run)
+		run_ix = pf_lin ? d[PFLB-1:0] : ((d < 25'd2) ? {1'b0, d[0]} : {1'b1, d[0]});
+	endfunction
+	wire        pf_hit = pf_hit0 && pf_lv[pf_sel];
+	wire [24:0] inv_d  = inv_line - pf_base;
 	// The walk steps from the address just issued, NOT from pf_base: pf_base is
 	// written in the same clock the first request goes out, so a walk computed
 	// from it got the SECOND line of every tile wrong (line 1 of VRAM instead of
@@ -399,15 +411,14 @@ module ps1_cache #(
 		va_we = 1'b0; vb_we = 1'b0;
 		if (!rst && inv_v) begin
 			if (BRAM == 0 && !clr && `CV(inv_idx) && tag[(BRAM != 0) ? {IDXBITS{1'b0}} : inv_idx] == inv_tg) vb_we = 1'b1;
-			if (pf_valid && (((inv_line - pf_base) < 25'd2)
-			    || in_run(inv_line - pf_base))) pf_valid <= 1'b0;
+			if (in_run(inv_d)) pf_lv[run_ix(inv_d)] <= 1'b0;
 		end
 		if (rst) begin
 			st <= S_IDLE; flushing <= 1'b0; fl_serve <= 1'b0; fidx <= {IDXBITS{1'b0}}; ar_q <= 1'b0;
 			a_ack_r <= 1'b0; b_ack <= 1'b0; a_line_r <= 128'd0; b_line <= 128'd0;
 			m_req <= 1'b0; m_we <= 1'b0; m_wmask <= 16'hFFFF;
 			serving_b <= 1'b0; refilled <= 1'b0;
-			pf_valid <= 1'b0; pf_i <= 0; pf_n <= 0; pf_busy <= 1'b0;
+			pf_valid <= 1'b0; pf_lv <= {PFL{1'b0}}; pf_i <= 0; pf_n <= 0; pf_busy <= 1'b0;
 			xs_on <= 1'b0; xs_i <= 0; x_valid <= 1'b0; x_addr <= 25'd0; x_line <= 128'd0; pf_lin <= 1'b0;
 			pf_want <= 0; pf_base <= 25'd0; pf_early <= 1'b0;
 			dbg_hits <= 32'd0; dbg_misses <= 32'd0;
@@ -432,7 +443,7 @@ module ps1_cache #(
 				if (pf_busy || !pf_valid) xs_on <= 1'b0;
 				else if (xs_i == PFL) xs_on <= 1'b0;
 				else begin
-					if (xs_i[PFLB-1:0] != pf_want) begin
+					if (xs_i[PFLB-1:0] != pf_want && pf_lv[xs_i[PFLB-1:0]]) begin
 						x_valid <= 1'b1;
 						x_addr  <= runaddr(xs_i);
 						x_line  <= pf_data[xs_i[PFLB-1:0]];
@@ -485,8 +496,8 @@ module ps1_cache #(
 					if (we) begin
 						if (BRAM == 0) data[didx] <= line_mode ? merge16(line_q, a_be16, a_wdata128) : merge(line_q, wsel, be, wdata);
 						dirty[idx] <= 1'b1;
-						// this write makes any copy of the same run stale
-						if (pf_hit) pf_valid <= 1'b0;
+						// this write makes any copy of the same line stale
+						if (pf_hit) pf_lv[pf_sel] <= 1'b0;
 					end
 					if (serving_b) begin b_rdata <= pick(line_q, wsel); b_line <= line_q; b_ack <= 1'b1; end
 					else           begin a_rdata_r <= pick(line_q, wsel); a_line_r <= line_q; a_ack_r <= !fast_a; end
@@ -507,6 +518,7 @@ module ps1_cache #(
 						st <= S_IDLE;
 					end else begin
 						pf_valid <= 1'b0;
+						pf_lv    <= {PFL{1'b1}};      // (a write from here on clears its line)
 						// Port B is the scanout, and the scanout is the most
 						// perfectly sequential reader in the machine: it walks
 						// straight along a row, eight pixels at a time. Its run
@@ -549,7 +561,7 @@ module ps1_cache #(
 					// clocks each, 37% of the frame. Order is kept by the arbiter and the
 					// memory, so a later read of this line from any port sees it.
 					dbg_misses <= dbg_misses + 32'd1;
-					if (pf_hit) pf_valid <= 1'b0;   // the read-around copy is stale now
+					if (pf_hit) pf_lv[pf_sel] <= 1'b0;   // the read-around copy is stale now
 					m_addr  <= {tg, idx};
 					m_wdata <= a_wdata128;
 					m_we    <= 1'b1;
@@ -561,7 +573,7 @@ module ps1_cache #(
 					// The line here is somebody else's. Write it back if it is
 					// dirty, then fetch the one wanted.
 					if (valid_q && dirty_q) begin
-						if (pf_valid && in_run(evicted - pf_base)) pf_valid <= 1'b0;
+						if (in_run(evicted - pf_base)) pf_lv[run_ix(evicted - pf_base)] <= 1'b0;
 						m_addr  <= {tag_q, idx};
 						m_wdata <= line_q;
 						m_we    <= 1'b1;
@@ -588,7 +600,7 @@ module ps1_cache #(
 				end
 
 			S_ALLOC: begin
-					if (pf_hit) pf_valid <= 1'b0;
+					if (pf_hit) pf_lv[pf_sel] <= 1'b0;
 					if (BRAM == 0) begin data[didx] <= a_wdata128; tag[didx] <= tg; end
 					va_we = 1'b1;
 					dirty[idx] <= 1'b1;
@@ -681,8 +693,7 @@ module ps1_cache #(
 					st <= S_FANS;
 				end
 			S_FANS: if (valid_q && dirty_q) begin
-					if (pf_valid && (((evicted - pf_base) < 25'd2)
-					    || (((evicted - pf_base) >= ROWL) && ((evicted - pf_base) < ROWL + 25'd2)))) pf_valid <= 1'b0;
+					if (in_run(evicted - pf_base)) pf_lv[run_ix(evicted - pf_base)] <= 1'b0;
 					m_addr <= {tag_q, idx}; m_wdata <= line_q; m_we <= 1'b1; m_req <= 1'b1;
 					dirty[idx] <= 1'b0;
 					st <= S_FWB;

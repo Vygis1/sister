@@ -736,6 +736,7 @@ module r3000 (
 	reg  [3:0]  icv [0:255];             // ...and a valid bit for each of the line's words
 	reg  [15:0] ctime;                   // console cycles spent so far (differences only)
 	reg  [15:0] mdu_ready, gte_ready;    // when the multiplier / the GTE has its answer
+	reg  [15:0] wq_free;                 // when the write buffer has put its last store into RAM
 	integer     ii;
 	initial for (ii = 0; ii < 256; ii = ii + 1) begin ict[ii] = 17'd0; icv[ii] = 4'd0; end
 
@@ -752,7 +753,7 @@ module r3000 (
 				// (calibrated on the board against cpu/access-time: our own access already costs
 				// a little here, and the CD byte and the SPU word were that much over)
 				if (p[11:4] == 8'h80)                load_wait = (sz == 2'd0) ? 7'd6  : (sz == 2'd1) ? 7'd13 : 7'd25;   // CD-ROM
-				else if (p[11:10] == 2'b11)          load_wait = (sz == 2'd2) ? 7'd0  : 7'd17;    // SPU (a word is two halves here)
+				else if (p[11:10] == 2'b11)          load_wait = (sz == 2'd2) ? 7'd38 : 7'd17;    // SPU
 				else if (p[11:4] == 8'h81)           load_wait = (sz == 2'd2) ? 7'd3  : 7'd2;     // GPU
 				else if (p[11:4] == 8'h07 || p[11:7] == 5'b00001 || p[11:4] == 8'h82)
 				                                     load_wait = (sz == 2'd2) ? 7'd2  : 7'd3;     // IRQ, DMA, MDEC
@@ -820,6 +821,15 @@ module r3000 (
 					icv[ln] <= ((ict[ln] == tg) ? icv[ln] : 4'd0) | (4'b1111 << k_pc[3:2]);
 				end
 			end
+			// a load that goes out on the bus waits for the write buffer to empty first: a store
+			// to RAM keeps the bus ~7 cycles (ps1-tests dma/chain-looping: a load/add/store
+			// loop is 16 cycles an iteration on the console, 11 without this)
+			if ((o == 6'h20 || o == 6'h21 || o == 6'h22 || o == 6'h23 || o == 6'h24 || o == 6'h25 || o == 6'h26 || o == 6'h32)
+			    && !(ea[31:29] != 3'b111 && ea[28:10] == 19'h7E000))
+				c = c + until(wq_free, ctime);
+			if ((o == 6'h28 || o == 6'h29 || o == 6'h2A || o == 6'h2B || o == 6'h2E || o == 6'h3A)
+			    && ea[31:29] != 3'b111 && ea[28:23] == 6'd0)
+				wq_free <= ((until(wq_free, ctime) != 6'd0) ? wq_free : ctime) + 16'd7;
 			// its data
 			case (o)
 			6'h20, 6'h24:                       c = c + load_wait(ea, 2'd0);

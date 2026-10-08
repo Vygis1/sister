@@ -203,6 +203,10 @@ module ps1_cdrom #(
 	// ==================================================================================
 	reg [1:0]  index;
 	reg [7:0]  stat;                  // 0 error, 1 motor, 2 seek err, 3 id err, 4 shell, 5 read, 6 seek, 7 play
+	// GetlocL has something to report only once a header has been read since Init: a sector's
+	// own, or after a seek the target's (the drive read it getting there). ps1-tests cdrom/getloc.
+	reg         hdr_valid, hdr_seek;
+	reg [23:0]  sl_bcd;               // the last Setloc, BCD mm ss ff
 	reg [2:0]  int_flag;              // HINTSTS bits 2:0 (INT number, 0 = none)
 	reg [4:0]  int_mask;              // HINTMSK bits 4:0
 	reg        busy;                  // BUSYSTS: a command is being processed
@@ -400,6 +404,7 @@ module ps1_cdrom #(
 	always @(posedge clk) begin
 		if (rst) begin
 			index <= 2'd0; stat <= 8'h02; int_flag <= 3'd0; int_mask <= 5'd0; busy <= 1'b0; mode <= 8'h00;
+			hdr_valid <= 1'b0; hdr_seek <= 1'b0; sl_bcd <= 24'd0;
 			prm_wr <= 5'd0; prm_rd <= 5'd0; rsp_wr <= 5'd0; rsp_rd <= 5'd0;
 			cmd <= 8'd0; cmd_pend <= 1'b0; eod_pend <= 1'b0; timer <= 22'd0; dbg_cmds <= 32'd0; dbg_setloc <= 32'd0; trace_w <= 6'd0;
 			tr_v <= 1'b0; tr_d <= 32'd0;
@@ -569,6 +574,7 @@ module ps1_cdrom #(
 							loc <= (bcd2bin(prm[0]) * 24'd60 + bcd2bin(prm[1])) * 24'd75 + bcd2bin(prm[2]) - 24'd150;
 							loc_mm <= bcd2bin(prm[0]); loc_ss <= bcd2bin(prm[1]); loc_ff <= bcd2bin(prm[2]);
 							dbg_setloc <= {prm[0], prm[1], prm[2], mode};
+							sl_bcd <= {prm[0], prm[1], prm[2]};
 							loc_v <= 1'b1;
 							rsp[0] <= stat; rsp_wr <= 5'd1; int_flag <= 3'd3;
 						end
@@ -581,8 +587,16 @@ module ps1_cdrom #(
 							rsp_wr <= 5'd5; int_flag <= 3'd3;
 						end
 					8'h10: begin                                             // GetlocL: the last sector's header
-							for (k = 0; k < 8; k = k + 1) rsp[k] <= cur_hdr[k];
-							rsp_wr <= 5'd8; int_flag <= 3'd3;
+							if (!hdr_valid) begin                      // nothing read since Init: INT5(stat, 80h)
+								rsp[0] <= stat; rsp[1] <= 8'h80; rsp_wr <= 5'd2; int_flag <= 3'd5;
+							end else if (hdr_seek) begin               // after a seek: where it landed
+								rsp[0] <= sl_bcd[23:16]; rsp[1] <= sl_bcd[15:8]; rsp[2] <= sl_bcd[7:0]; rsp[3] <= 8'd2;
+								rsp[4] <= 8'd0; rsp[5] <= 8'd0; rsp[6] <= 8'h08; rsp[7] <= 8'd0;
+								rsp_wr <= 5'd8; int_flag <= 3'd3;
+							end else begin
+								for (k = 0; k < 8; k = k + 1) rsp[k] <= cur_hdr[k];
+								rsp_wr <= 5'd8; int_flag <= 3'd3;
+							end
 						end
 					8'h11: begin                                             // GetlocP: track, index, mm, ss, ff (relative), amm, ass, aff
 							rsp[0] <= bin2bcd({1'b0, cur_trk}); rsp[1] <= 8'h01;
@@ -660,6 +674,7 @@ module ps1_cdrom #(
 						end
 					8'h0A: begin                                             // Init: INT3(stat), INT2(stat)
 							stat <= disc_in ? 8'h02 : 8'h10; mode <= 8'h00;
+							hdr_valid <= 1'b0; hdr_seek <= 1'b0;
 							reading <= 1'b0; seeking <= 1'b0; seek_then_read <= 1'b0; loc_v <= 1'b0;
 							playing <= 1'b0; seek_then_play <= 1'b0; pl_v <= 1'b0;
 							xa_play <= 1'b0; xa_rp <= xa_wp; xa_gen <= xa_gen + 8'd1;
@@ -762,7 +777,8 @@ module ps1_cdrom #(
 						seek_then_play <= 1'b0; playing <= 1'b1; pl_v <= 1'b0;
 						stat <= (stat & 8'h1F) | 8'h82;
 					end else begin
-						// a plain seek finishes with INT2(stat)
+						// a plain seek finishes with INT2(stat), the target's header read on the way
+						hdr_valid <= 1'b1; hdr_seek <= 1'b1;
 						stat <= (stat & 8'h1F) | 8'h02;
 						rsp_rd <= 5'd0; rsp[0] <= (stat & 8'h1F) | 8'h02; rsp_wr <= 5'd1; int_flag <= 3'd2;
 					end
@@ -773,7 +789,7 @@ module ps1_cdrom #(
 					// the sector is due and here: it becomes the current one, INT1(stat)
 					sec_timer <= 22'd0;
 					if (slot_audio[r_rp]) slot_skip[r_rp] <= 1'b1;            // audio: passed over, never data
-					else begin cur_slot <= r_rp; cur_v <= 1'b1; int1_fire <= 1'b1; end
+					else begin cur_slot <= r_rp; cur_v <= 1'b1; int1_fire <= 1'b1; hdr_valid <= 1'b1; hdr_seek <= 1'b0; end
 					r_rp <= r_rp + 3'd1;
 					r_base <= r_base + 24'd1;
 					pos <= r_base + 24'd1;

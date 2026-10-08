@@ -37,6 +37,13 @@ module ps1_vram_port (
 	input  wire [127:0] v_wdata128,
 	input  wire         v_around,
 	input  wire         v_lin,
+	// The asker uses only the line it asked for (the drawing engine's destination). The
+	// video cache still fetches a run, but here it is one line: held only for its own block,
+	// and the block in hand's bytes forwarded over it. A semi-transparent span reads the line
+	// after the one it has just written, and as a run that read waited for the block in hand
+	// to be flushed every eight pixels. The run's other lines are kept right by the cache:
+	// the write that makes one stale clears it there when it lands.
+	input  wire         v_one,
 	output wire [31:0]  v_rdata,
 	output wire [127:0] v_line,
 	output wire         v_ack,
@@ -77,7 +84,7 @@ module ps1_vram_port (
 		.flush(eng_idle || host_flush || (rd && r_hold)), .idle(idle),
 		.m_addr(m_addr), .m_req(m_req), .m_we(m_we), .m_wdata(m_wdata), .m_wmask(m_wmask), .m_ready(m_ready),
 		.inv_v(inv_v), .inv_line(inv_line),
-		.r_line(v_addr[28:4]), .r_run(v_around), .r_hold(r_hold), .r_fwd_m(r_fwd_m), .r_fwd_d(r_fwd_d)
+		.r_line(v_addr[28:4]), .r_run(v_around && !v_one), .r_hold(r_hold), .r_fwd_m(r_fwd_m), .r_fwd_d(r_fwd_d)
 	);
 	assign busy = !idle;
 

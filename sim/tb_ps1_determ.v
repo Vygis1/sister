@@ -38,10 +38,10 @@ module tb_ps1_determ;
 	wire [24:0] x_addr;
 	wire        px_valid; wire [8:0] px_x, px_y; wire [7:0] px_rgb;
 	wire        vblank, hblank, dot_ce, irq;
-	wire        v_lin_w, g_lin_w;
+	wire        v_lin_w, v_one_w, g_lin_w;
 	wire        dma_ready; wire [31:0] dma_rdata; wire dma_rvalid;
 
-	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w),
+	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .a4(a4), .dma_active(1'b0), .cap_every_vsync(1'b0), .gpu_fast(1'b1),
 		.no_tcache(1'b0), .no_ccache(1'b0), .no_trun(1'b0), .wdata(wdata), .rdata(rdata),
@@ -66,7 +66,7 @@ module tb_ps1_determ;
 	wire [127:0] bk_wdata, vc_wdata, vc_rdata; wire [15:0] bk_wmask, vc_wmask;
 	wire         inv_v; wire [24:0] inv_line; wire bk_busy;
 
-	ps1_vram_port vp ( .v_lin(v_lin_w), .g_lin(g_lin_w),
+	ps1_vram_port vp ( .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
 		.clk(clk), .rst(rst),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata),
 		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around),

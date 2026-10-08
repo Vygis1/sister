@@ -28,7 +28,7 @@ module tb_ps1_raster;
 	wire       busy;
 
 	// --- the VRAM path, as in ps1_top ------------------------------------------------
-	wire [28:0] v_addr; wire v_req, v_we, v_around, v_lin_w, g_lin_w; wire [3:0] v_be; wire [31:0] v_wdata, v_rdata; wire [127:0] v_line; wire v_ack;
+	wire [28:0] v_addr; wire v_req, v_we, v_around, v_lin_w, v_one_w, g_lin_w; wire [3:0] v_be; wire [31:0] v_wdata, v_rdata; wire [127:0] v_line; wire v_ack;
 	wire        x_valid; wire [24:0] x_addr; wire [127:0] x_line;
 	wire        st_tex, st_dst, st_full, st_clut;
 	ps1_raster dut (
@@ -43,8 +43,8 @@ module tb_ps1_raster;
 		.tw_mx(tw_mx), .tw_my(tw_my), .tw_ox(tw_ox), .tw_oy(tw_oy),
 		.no_tcache(1'b0), .no_ccache(1'b0), .no_trun(1'b0),
 		.da_x0(da_x0), .da_x1(da_x1), .da_y0(da_y0), .da_y1(da_y1), .mask_set(mask_set), .mask_chk(mask_chk),
-		.il_skip(il_skip), .il_field(il_field), .pace(pace),
-		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata), .v_around(v_around), .v_lin(v_lin_w),
+		.il_skip(il_skip), .il_field(il_field), .pace(pace), .pace_clr(start), .pace_setup(10'd0),
+		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata), .v_around(v_around), .v_lin(v_lin_w), .v_one(v_one_w),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack),
 		.tx_valid(x_valid), .tx_addr(x_addr), .tx_line(x_line),
 		.inv_en(1'b0), .inv_line(25'd0),
@@ -53,7 +53,7 @@ module tb_ps1_raster;
 	wire [28:0]  gp_addr; wire gp_req, gp_around, gp_ack; wire [31:0] gp_rdata; wire [127:0] gp_line;
 	wire [23:0]  bk_addr, vc_addr; wire bk_req, bk_we, bk_ready, vc_req, vc_we, vc_ready, vc_valid; wire [127:0] bk_wdata, vc_wdata, vc_rdata; wire [15:0] bk_wmask, vc_wmask;
 	wire         inv_v; wire [24:0] inv_line; wire bk_busy;
-	ps1_vram_port vp ( .v_lin(v_lin_w), .g_lin(g_lin_w),
+	ps1_vram_port vp ( .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
 		.clk(clk), .rst(rst),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata), .v_lwe(1'b0), .v_wdata128(128'd0), .v_around(v_around),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack), .eng_idle(!busy), .host_flush(1'b0), .busy(bk_busy),
@@ -99,6 +99,13 @@ module tb_ps1_raster;
 		end
 	end
 
+	// destination fetch latency (request up to answer), and how often
+	integer dfn = 0, dfc = 0, dfr = 0; reg dfo = 0;
+	always @(posedge clk) begin
+		if (dut.fs == 2'd1 && dut.fwho == 2'd1) begin dfc = dfc + 1; if (!dfo) dfn = dfn + 1; dfo = 1; end
+		if (dut.fs == 2'd1 && dut.fwho == 2'd1 && v_ack) dfo = 0;
+		if (vc_req && !vc_we && vc_ready) dfr = dfr + 1;
+	end
 	// --- the reference ----------------------------------------------------------------
 	reg [15:0] ref_px [0:1024*512-1];
 	function [15:0] mem_px; input [9:0] x; input [8:0] y;
@@ -130,6 +137,12 @@ module tb_ps1_raster;
 	reg signed [23:0] e0, e1, e2;
 	reg signed [31:0] cr, cg, cb, cu, cv;
 	reg [7:0] tu, tv, ix; reg [9:0] tx; reg [15:0] hw, texel, pix, dst; reg inside, semi;
+	function rin; input signed [23:0] e, sxx, syy; reg tl;
+		begin
+			tl  = apos ? (sxx > 0 || (sxx == 0 && syy > 0)) : (sxx < 0 || (sxx == 0 && syy < 0));
+			rin = apos ? (e > 0 || (e == 0 && tl)) : (e < 0 || (e == 0 && tl));
+		end
+	endfunction
 	task ref_draw;
 		begin
 			for (y = by0; y <= by1; y = y + 1)
@@ -137,7 +150,9 @@ module tb_ps1_raster;
 					e0 = e0_0 + sx0 * (x - bx0) + sy0 * (y - by0);
 					e1 = e1_0 + sx1 * (x - bx0) + sy1 * (y - by0);
 					e2 = e2_0 + sx2 * (x - bx0) + sy2 * (y - by0);
-					inside = always_in || (apos ? (e0 >= 0 && e1 >= 0 && e2 >= 0) : (e0 <= 0 && e1 <= 0 && e2 <= 0));
+					// the console's fill rule: a pixel exactly on an edge is drawn only for a top or
+					// left edge (ps1-tests gpu/quad, gpu/triangle)
+					inside = always_in || (rin(e0, sx0, sy0) && rin(e1, sx1, sy1) && rin(e2, sx2, sy2));
 					if (inside && x >= 0 && x < 1024 && y >= 0 && y < 512
 					    && x >= da_x0 && x <= da_x1 && y >= da_y0 && y <= da_y1
 					    && !(il_skip && (y[0] == il_field))) begin
@@ -314,7 +329,9 @@ module tb_ps1_raster;
 		is_tex = 0;
 		rect(0, 0, 1024, 32, 0, 0);              run("flat rectangle, full width");
 		is_semi = 1; tp_abr = 2;
+		dfn = 0; dfc = 0; dfr = 0;
 		rect(700, 400, 100, 60, 0, 0);           run("flat rectangle, blended");
+		$display("    dest fetches %0d, %0d clocks in F (%0d each), memory reads %0d", dfn, dfc, dfc / (dfn ? dfn : 1), dfr);
 		is_semi = 0;
 		$display("--- 480i field rule ---");
 		il_skip = 1; il_field = 1;

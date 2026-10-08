@@ -148,6 +148,11 @@ module ps1_top #(
 	// the last four GP0 opcodes the GPU dispatched
 	output wire [31:0] dbg_gpu2,
 	output wire [31:0] dbg_disp,
+	// console time lost: system clocks the processor's credit was full and went unspent (it
+	// was held -- by memory, a DMA, the GPU -- longer than the console would have been), and
+	// our clocks the GPU worked behind the console's time for its command
+	output reg  [31:0] lost_cpu,
+	output reg  [31:0] lost_gpu,
 	output wire [31:0] dbg_draw,
 	output wire [31:0] dbg_v2c,     // VRAM->CPU word accounting (see ps1_gpu)
 	output wire [31:0] dbg_c0,      // and the size that transfer asked for
@@ -322,6 +327,13 @@ module ps1_top #(
 	reg  signed [10:0] credit;
 	wire        t_take; wire [6:0] t_cost;
 	wire        cpu_go = cpu_fast || (credit > 0);
+	wire        gpu_behind;
+	always @(posedge clk)
+		if (rst) begin lost_cpu <= 32'd0; lost_gpu <= 32'd0; end
+		else begin
+			if (sys_ce && !cpu_fast && credit == CREDIT_MAX && !(t_take && t_cost != 7'd0)) lost_cpu <= lost_cpu + 32'd1;
+			if (gpu_behind) lost_gpu <= lost_gpu + 32'd1;
+		end
 	always @(posedge clk) begin : pace_credit
 		reg signed [11:0] n;
 		if (rst) credit <= 11'sd0;
@@ -402,6 +414,7 @@ module ps1_top #(
 	wire mem_ctl  = io_hit && (c_addr[15:7] == 9'b0001_0000_0);   // 0x1000..0x107F
 	wire cd_hit   = io_hit && (c_addr[15:4] == 12'h180);
 	wire mdec_hit = io_hit && (c_addr[15:4] == 12'h182);
+	wire mdec_rd_stall;
 	wire pad_hit  = io_hit && (c_addr[15:4] == 12'h104);
 	wire spu_hit  = io_hit && (c_addr[15:10] == 6'b0001_11);       // 0x1C00..0x1FFF: the SPU (1E00+ are its current volumes)
 	wire cached   = ram_hit || bios_hit;
@@ -422,6 +435,7 @@ module ps1_top #(
 	wire        isc_inv; wire [31:0] isc_addr;   // a store made with the cache isolated
 	wire        dm_req, dm_we;
 	wire [31:0] dm_wdata, dm_rdata;
+	wire [127:0] dm_line;
 	wire        dm_ack;
 
 	wire [31:0] cc_rdata;
@@ -600,7 +614,8 @@ module ps1_top #(
 	// read-back stayed one word short for ever -- the BIOS froze on its next
 	// poll. It only showed when the GPU was slowed by something else sharing
 	// video memory, which is exactly what capturing frames for the web UI does.
-	wire gpuread_wait = gpu_hit && c_req && !c_we && !c_addr[2] && gpu_rd_stall;
+	wire gpuread_wait = (gpu_hit && c_req && !c_we && !c_addr[2] && gpu_rd_stall)
+	                 || (mdec_hit && c_req && !c_we && !c_addr[2] && mdec_rd_stall);   // (the MDEC's data port: the same wait)
 	// A read the data cache already holds does not have to wait for `served`,
 	// which is a clock later: the word is registered into din_r at the end of
 	// this cycle, which is the cycle the processor collects it in anyway. That
@@ -651,7 +666,7 @@ module ps1_top #(
 		// slot, size 1 for an environment primitive, so one word of a nine-word
 		// triangle went out and the engine waited for the rest for ever.
 		.b_req(dm_req && !sb_v), .b_we(dm_we), .b_be(4'hF),
-		.b_wdata(dm_wdata), .b_rdata(dm_rdata), .b_ack(dm_ack), .b_line(),
+		.b_wdata(dm_wdata), .b_rdata(dm_rdata), .b_ack(dm_ack), .b_line(dm_line),
 		.m_addr(cc_m_addr), .m_req(cc_m_req), .m_we(cc_m_we), .m_wdata(cc_m_wdata), .m_wmask(cc_m_wmask),
 		.m_ready(cc_m_ready), .m_rdata(cc_m_rdata), .m_valid(cc_m_valid),
 		.dbg_hits(), .dbg_misses()
@@ -720,14 +735,14 @@ module ps1_top #(
 		.dma_wr(gp0_wr), .dma_data(gp0_data), .dma_ready(gp0_ready),
 		.dma_rd(gpu_dma_rd), .dma_rdata(gpu_dma_rdata), .dma_rvalid(gpu_dma_rvalid), .gp0_full(gpu_gp0_full),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata),
-		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around), .v_lin(v_lin),
+		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around), .v_lin(v_lin), .v_one(v_one),
 		.tx_valid(vx_valid), .tx_addr(vx_addr), .tx_line(vx_line),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack),
 		.s_addr(s_addr), .s_req(s_req), .s_rdata(s_rdata), .s_ack(s_ack), .s_line(s_vline),
 		.px_valid(px_valid), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb),
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
 		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_pophead(dbg_gpu_pophead), .dbg_popword(dbg_gpu_popword),
-		.dbg_in_v(gin_v), .dbg_in_type(gin_type), .dbg_in_word(gin_word), .dbg_disp(dbg_disp), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
+		.dbg_in_v(gin_v), .dbg_in_type(gin_type), .dbg_in_word(gin_word), .dbg_disp(dbg_disp), .dbg_behind(gpu_behind), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
 		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w), .disp_v480(gpu_v480), .cap_weave(gpu_weave), .cap_field(gpu_wfield),
 		.scan_lines(fb_want && !fs_en),
@@ -780,7 +795,7 @@ module ps1_top #(
 	// the draw port goes through a write combiner (see vram_wc.v): a line of
 	// pixels per cache access instead of one, and no DDR3 fetch for a full line
 	wire [28:0]  wc_addr; wire wc_req, wc_we, wc_lwe, wc_around; wire [3:0] wc_be; wire [31:0] wc_wdata, wc_rdata;
-	wire         v_around; wire v_lin; wire gp_lin; wire wc_lin;
+	wire         v_around; wire v_lin; wire v_one; wire gp_lin; wire wc_lin;
 	wire         vx_valid; wire [24:0] vx_addr; wire [127:0] vx_line;   // the rest of a texel run
 	wire [127:0] wc_line, v_line;     // the whole line a draw read came from
 	wire [15:0]  wc_be16; wire [127:0] wc_wdata128; wire wc_ack;
@@ -794,7 +809,7 @@ module ps1_top #(
 	ps1_vram_port u_vp (
 		.clk(clk), .rst(core_rst),
 		.v_addr(v_addr), .v_req(v_req & d_calibrated), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata),
-		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around), .v_lin(v_lin),
+		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around), .v_lin(v_lin), .v_one(v_one),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack),
 		.eng_idle(!gpu.busy), .host_flush(vram_flush), .busy(bk_busy),
 		.g_addr(gp_addr), .g_req(gp_req), .g_around(gp_around), .g_lin(gp_lin),
@@ -1047,14 +1062,14 @@ module ps1_top #(
 		.clk(clk), .rst(core_rst),
 		.sel(mdec_hit & c_req & cpu_ce_io), .we(c_we), .a2(c_addr[2]), .wdata(c_dout), .rdata(mdec_rdata),
 		.in_wr(mdec_wr), .in_data(gp0_data), .in_ready(mdec_in_ready), .dreq0(mdec_dreq0),
-		.out_rd(mdec_pop), .out_data(mdec_odata), .out_valid(mdec_rvalid), .dreq1(mdec_dreq1)
+		.out_rd(mdec_pop), .out_data(mdec_odata), .out_valid(mdec_rvalid), .dreq1(mdec_dreq1), .rd_stall(mdec_rd_stall)
 	);
 	ps1_dma u_dma (
 		.clk(clk), .rst(core_rst),
 		.sel(dma_hit & c_req & cpu_ce), .we(c_we), .a(c_addr[7:0]),
 		.wdata(c_dout), .rdata(dma_rdata),
 		.r_addr(dm_addr), .r_req(dm_req), .r_we(dm_we), .r_wdata(dm_wdata),
-		.r_rdata(dm_rdata), .r_ack(dm_ack),
+		.r_rdata(dm_rdata), .r_line(dm_line), .r_ack(dm_ack), .snoop_v(sb_v), .snoop_a(sb_addr[23:0]),
 		.gp0_wr(gp0_wr), .gp0_data(gp0_data), .gp0_ready(gp0_ready),
 		.gpu_rd(gpu_dma_rd), .gpu_rdata(gpu_dma_rdata), .gpu_rvalid(gpu_dma_rvalid),
 		.cd_rd(cd_dma_rd), .cd_rdata(cd_dma_rdata), .cd_rvalid(cd_dma_rvalid), .cd_go(cd_dma_go), .cd_go_info(cd_dma_go_info), .cd_words(cd_dma_words),
