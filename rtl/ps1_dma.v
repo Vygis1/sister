@@ -33,7 +33,12 @@
 
 `default_nettype none
 
-module ps1_dma (
+module ps1_dma #(
+	// the SPU takes its DMA slowly -- a word every ~32 console cycles here (ps1-tests
+	// spu/memory-transfer: a 1 kB write must take 1.6k-18k cycles, with the CPU running
+	// between); in board clocks
+	parameter SPU_GAP = 47
+) (
 	input  wire        clk,
 	input  wire        rst,
 
@@ -136,8 +141,13 @@ module ps1_dma (
 	// triggered
 	reg [6:0] want;
 	// the device behind the block paths: the GPU's, on channel 4 the SPU's, on 0 / 1 the MDEC's
-	wire        dev_ready  = (cur == 3'd4) ? spu_ready  : (cur == 3'd0) ? mdec_in_ready : gp0_ready;
-	wire        dev_rvalid = (cur == 3'd4) ? spu_rvalid : (cur == 3'd1) ? mdec_rvalid : gpu_rvalid;
+	reg  [7:0]  spu_gap;              // the SPU is not ready for the next word until this runs out
+	wire        dev_ready  = (cur == 3'd4) ? (spu_ready && spu_gap == 8'd0) : (cur == 3'd0) ? mdec_in_ready : gp0_ready;
+	wire        dev_rvalid = (cur == 3'd4) ? (spu_rvalid && spu_gap == 8'd0) : (cur == 3'd1) ? mdec_rvalid : gpu_rvalid;
+	always @(posedge clk)
+		if (rst) spu_gap <= 8'd0;
+		else if (spu_wr || (st == S_GWRW && r_ack && cur == 3'd4)) spu_gap <= SPU_GAP[7:0];
+		else if (spu_gap != 8'd0) spu_gap <= spu_gap - 8'd1;
 	wire [31:0] dev_rdata  = (cur == 3'd4) ? spu_rdata  : (cur == 3'd1) ? mdec_rdata : gpu_rdata;
 	assign      spu_data   = gp0_data;
 	integer k;
@@ -179,7 +189,10 @@ module ps1_dma (
 				end else if (ch <= 3'd6) case (rg)
 					2'd0: madr[ch] <= wdata[23:0];
 					2'd1: bcr[ch]  <= wdata;
-					2'd2: chcr[ch] <= wdata;
+					// only the bits the chip keeps (psx-spx, ps1-tests dma/otc-test): channel 6, the
+					// ordering-table clear, has only 30, 28 and 24, and always runs backwards (bit 1)
+					2'd2: chcr[ch] <= (ch == 3'd6) ? ((wdata & 32'h5100_0000) | 32'h0000_0002)
+					                               : (wdata & 32'h7177_0703);
 					default: ;
 				endcase
 			end
@@ -199,15 +212,15 @@ module ps1_dma (
 					3'd2: begin                                     // GPU
 						if (chcr[2][10:9] == 2'd2) st <= S_LL;
 						else begin
-							words  <= (chcr[2][10:9] == 2'd0) ? {16'd0, bcr[2][15:0]}
-							                                  : {16'd0, bcr[2][15:0]};
+							words  <= (chcr[2][10:9] == 2'd0) ? bwords(bcr[2][15:0])
+							                                  : bwords(bcr[2][15:0]);
 							blocks <= (chcr[2][10:9] == 2'd0) ? 16'd1 : bcr[2][31:16];
 							st <= chcr[2][0] ? S_RD : S_GRD;
 						end
 					end
 					3'd3: begin                                     // CD-ROM -> RAM: BCR words (mode 0) or blocks (mode 1)
 						cd_go <= 1'b1; cd_go_info <= {8'hD3, chcr[3][27:24], bcr[3][19:0]};
-						words  <= {16'd0, bcr[3][15:0]};
+						words  <= bwords(bcr[3][15:0]);
 						blocks <= (chcr[3][10:9] == 2'd0) ? 16'd1 : bcr[3][31:16];
 						st <= S_CRD;
 					end
@@ -216,17 +229,17 @@ module ps1_dma (
 					// used to finish the moment it started, and every sample bank
 					// a game uploaded went nowhere.
 					3'd4: begin
-						words  <= {16'd0, bcr[4][15:0]};
+						words  <= bwords(bcr[4][15:0]);
 						blocks <= (chcr[4][10:9] == 2'd0) ? 16'd1 : bcr[4][31:16];
 						st <= chcr[4][0] ? S_RD : S_GRD;
 					end
 					// The MDEC: one block per request (its words in BCR's low half), then back to
 					// the arbiter with MADR and the block count saved, as the chip does in sync
 					// mode 1 -- so channel 1 can drain what channel 0 fed in between.
-					3'd0: begin words <= {16'd0, bcr[0][15:0]}; blocks <= 16'd1; st <= S_RD; end
-					3'd1: begin words <= {16'd0, bcr[1][15:0]}; blocks <= 16'd1; st <= S_GRD; end
+					3'd0: begin words <= bwords(bcr[0][15:0]); blocks <= 16'd1; st <= S_RD; end
+					3'd1: begin words <= bwords(bcr[1][15:0]); blocks <= 16'd1; st <= S_GRD; end
 					3'd6: begin                                     // OTC
-						words <= {16'd0, bcr[6][15:0]};
+						words <= bwords(bcr[6][15:0]);
 						st <= S_OTC;
 					end
 					default: st <= S_DONE;                          // the rest: instant
@@ -238,7 +251,7 @@ module ps1_dma (
 					if (blocks <= 16'd1) st <= S_DONE;
 					else begin
 						blocks <= blocks - 16'd1;
-						words  <= {16'd0, bcr[cur][15:0]};
+						words  <= bwords(bcr[cur][15:0]);
 					end
 				end else if (dev_ready) begin
 					r_addr <= {5'd0, addr};
@@ -309,7 +322,7 @@ module ps1_dma (
 			// --- GPU -> RAM (VRAM read-back) ---------------------------------------------------
 			S_GRD: if (words == 32'd0) begin
 					if (blocks <= 16'd1) st <= S_DONE;
-					else begin blocks <= blocks - 16'd1; words <= {16'd0, bcr[cur][15:0]}; end
+					else begin blocks <= blocks - 16'd1; words <= bwords(bcr[cur][15:0]); end
 				end else begin
 					if (cur == 3'd4) spu_rd <= 1'b1; else if (cur != 3'd1) gpu_rd <= 1'b1;
 					st <= S_GWR;
@@ -331,7 +344,7 @@ module ps1_dma (
 
 			S_CRD: if (words == 32'd0) begin
 					if (blocks <= 16'd1) st <= S_DONE;
-					else begin blocks <= blocks - 16'd1; words <= {16'd0, bcr[3][15:0]}; end
+					else begin blocks <= blocks - 16'd1; words <= bwords(bcr[3][15:0]); end
 				end else begin
 					cd_rd <= 1'b1;
 					st <= S_CWR;
@@ -353,9 +366,10 @@ module ps1_dma (
 			S_DONE: begin
 					if (cur == 3'd3) begin cd_go <= 1'b1; cd_go_info <= {8'hD4, 8'd0, cd_words}; end   // for the drive's trace
 					// a linked list goes on to its next node
-					if (cur == 3'd2 && chcr[2][10:9] == 2'd2 && next != 24'hFF_FFFF
+					// (the chip ends a list on bit 23 alone, and masks the pointer into RAM)
+					if (cur == 3'd2 && chcr[2][10:9] == 2'd2 && !next[23]
 					    && st == S_DONE) begin
-						addr <= next;
+						addr <= {3'd0, next[20:2], 2'b00};
 						next <= 24'hFF_FFFF;
 						st <= S_LL;
 					end else if (cur <= 3'd1 && chcr[cur][10:9] == 2'd1 && bcr[cur][31:16] > 16'd1) begin
@@ -395,6 +409,11 @@ module ps1_dma (
 			default: rdata = 32'd0;
 			endcase
 	end
+	// a word count of 0 is 65,536 words (psx-spx)
+	function [31:0] bwords;
+		input [15:0] n;
+		bwords = (n == 16'd0) ? 32'h0001_0000 : {16'd0, n};
+	endfunction
 	assign dbg_dma = {st, cur, chcr[2][24], next};
 	// channel 1 takes the MDEC's word the clock it writes it to RAM
 	assign mdec_pop = (st == S_GWR) && (cur == 3'd1) && mdec_rvalid;
@@ -417,8 +436,14 @@ module ps1_dma (
 			if (want[hk]) hog_want = 1'b1;
 	end
 	wire gpu_paused = ((st == S_GP0) || (st == S_RD)) && !gp0_ready;   // S_RD and S_GP0 are where a GPU transfer waits on the GPU
-	assign hog = (hog_want || (st != S_IDLE)) && !gpu_paused;
-	assign in_flight = hog_want || (st != S_IDLE);
+	// ...and a transfer FROM the MDEC or the SPU waiting for the device's next word: in sync mode 1
+	// the chip gives the CPU the bus until the device asks again. Held, the CPU stood still on
+	// its next access for good when the device never had the rest -- ps1-tests mdec/4bit asks
+	// for more words than one block decodes, and its timeout loop never got to run.
+	wire dev_paused = ((st == S_GWR) && !dev_rvalid && ((cur == 3'd1) || (cur == 3'd4)))
+	                || ((cur == 3'd4) && ((st == S_RD) || (st == S_GP0)) && !dev_ready);
+	assign hog = (hog_want || (st != S_IDLE)) && !gpu_paused && !dev_paused;
+	assign in_flight = (hog_want || (st != S_IDLE)) && !dev_paused;
 	assign gpu_active = want[2] || ((st != S_IDLE) && (cur == 3'd2));
 
 endmodule

@@ -699,7 +699,7 @@ class Gen:
         a = self.a
         a.li(S0, EXCN)
         # SR: IEc=1, IM all set (bits 8-15), BEV kept
-        a.li(T0, 0x0040FF01); a.mtc0(T0, C0_SR)
+        a.li(T0, 0x4040FF01); a.mtc0(T0, C0_SR)
         a.li(T0, 0xDEAD0001)              # the testbench watches for this store
         a.li(T1, SCRATCH + 0x40); a.sw(T0, 0, T1)
         a.li(T2, 0)
@@ -710,7 +710,7 @@ class Gen:
         a.addiu(T2, T2, 1)
         a.lw(T3, EXCAUSE - EXCN, S0); a.nop()
         a.andi(T3, T3, 0x7C); self.check(T3, 0)      # ExcCode 0 = Int
-        a.li(T0, 0x00400000); a.mtc0(T0, C0_SR)      # interrupts off again
+        a.li(T0, 0x40400000); a.mtc0(T0, C0_SR)      # interrupts off again
 
     def handler(self):
         """At ROM+$180: count it, record Cause and EPC, step past, return."""
@@ -755,7 +755,7 @@ class Gen:
         a.li(T0, 0); a.li(T1, RESULT)
         for off in range(0, 0x1C, 4):
             a.sw(ZERO, off, T1)
-        a.li(T0, 0x00400000); a.mtc0(T0, C0_SR)      # BEV=1, interrupts off
+        a.li(T0, 0x40400000); a.mtc0(T0, C0_SR)      # BEV=1, COP2 (the GTE) usable, interrupts off
         self.alu_reg()
         self.alu_imm()
         self.shifts()

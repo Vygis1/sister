@@ -67,6 +67,7 @@ module fb_ddr #(
 	// showing, not the other one (alternate captures into alternate frames would leave each
 	// frame with one field fresh and the other never written).
 	input  wire        weave,
+	input  wire        weave_field,      // (weave) the field this capture is: rows 2k + weave_field
 	input  wire [8:0]  lf_want,
 	input  wire [6:0]  lf_words,
 	output reg         lf_we,
@@ -75,6 +76,10 @@ module fb_ddr #(
 
 	// host read-back: a word of the frame
 	input  wire [17:0] hr_addr,
+	// (debug: the host window on any DDR3 region -- hr_base's lines -- instead of the frame on
+	// screen: the PlayStation's VRAM is lines 0-FFFFh. Held 0 in a shipping image.)
+	input  wire        hr_raw,
+	input  wire [23:0] hr_base,
 	input  wire        hr_req,
 	output reg  [31:0] hr_rdata,
 	output reg         hr_ack,
@@ -90,6 +95,7 @@ module fb_ddr #(
 );
 	// --- capture state ---------------------------------------------------------------
 	reg armed, capturing, finishing;     // asked / the frame is streaming / its last lines are draining
+	localparam QD = 16, QB = 4;          // the write queue (below)
 
 	// --- line assembly ---------------------------------------------------------------
 	reg [23:0]  cur_line;
@@ -102,7 +108,15 @@ module fb_ddr #(
 	// while HDMI read it, showed pixels of two frames: a blink's eye pixels one frame
 	// wrong.) Without HDMI it is the one frame, as it always was.
 	reg         disp_b, pend;
-	wire        cap_b     = hdmi_on ? (weave ? disp_b : ~disp_b) : 1'b0;
+	// 480i (weave): each FIELD has a front and a back copy -- even rows of frame 0/1 and odd
+	// rows of frame 0/1 -- with its own selector (disp_f[0] even, disp_f[1] odd). A capture is
+	// one field; it fills that field's back copy, which goes on screen at the top of the next
+	// HDMI frame. HDMI takes each row from its field's front copy. Written straight into the
+	// frame on screen (as before), a change tore down the screen while it was written.
+	reg  [1:0]  disp_f, pend_f;
+	reg         cap_par;                  // the field the capture in hand is writing
+	reg  [QB:0] end_wp [0:1];             // where in the queue that field's capture ended
+	wire        cap_b     = hdmi_on ? (weave ? ~disp_f[cap_par] : ~disp_b) : 1'b0;
 	wire [23:0] cap_base  = FB_LINE + (cap_b ? 24'h00_A000 : 24'd0);
 	wire [23:0] disp_base = FB_LINE + ((hdmi_on && disp_b) ? 24'h00_A000 : 24'd0);
 	wire [23:0] px_line = cap_base + px_y * STRIDE + {17'd0, px_x[9:3]};
@@ -122,7 +136,6 @@ module fb_ddr #(
 	// line, lets the scanout run at its own speed and the writes drain behind
 	// it. This is block RAM and registers on a path nothing waits on, so it
 	// costs nothing the processor can feel.
-	localparam QD = 16, QB = 4;
 	reg [23:0]  q_addr [0:QD-1];
 	reg [127:0] q_data [0:QD-1];
 	reg [QB:0]  q_wp, q_rp;
@@ -134,6 +147,10 @@ module fb_ddr #(
 	// what needs pushing this cycle: the current line when a pixel starts another
 	// line, or when the capture ends
 	wire flush_end = capturing && frame_start;
+	// a field's capture is all written once the queue's read side has reached where it ended
+	wire [QB:0] fd0 = end_wp[0] - q_rp, fd1 = end_wp[1] - q_rp;
+	wire        f_written0 = (fd0 == 0) || (fd0 > q_cnt);
+	wire        f_written1 = (fd1 == 0) || (fd1 > q_cnt);
 	wire new_line  = px_valid && capturing && cur_v && (px_line != cur_line);
 	wire push      = cur_v && (new_line || flush_end);
 
@@ -146,7 +163,9 @@ module fb_ddr #(
 	wire [15:0] hr_line = hr_addr[17:2];
 	wire        hr_hit  = rc_v && (rc_line == {8'd0, hr_line});
 	reg         wr_busy;            // a write is presented to the arbiter
+	reg         hr_raw_d; reg [23:0] hr_base_d;
 	reg  [8:0]  lf_have, lf_line;   // the line in the buffer / being fetched
+	wire [23:0] lf_fbase  = FB_LINE + (disp_f[lf_line[0]] ? 24'h00_A000 : 24'd0);   // (weave) the row's field's front copy
 	reg  [6:0]  lf_w;
 	reg         lf_on, lf_wait;     // fetching / a read of it is out
 
@@ -159,10 +178,13 @@ module fb_ddr #(
 			rs <= R_IDLE; rc_v <= 1'b0; rc_line <= 24'd0; rc_data <= 128'd0;
 			hr_ack <= 1'b0; hr_rdata <= 32'd0; wr_busy <= 1'b0;
 			lf_have <= 9'h1FF; lf_line <= 9'd0; lf_w <= 7'd0; lf_on <= 1'b0; lf_wait <= 1'b0; lf_we <= 1'b0;
-			disp_b <= 1'b0; pend <= 1'b0;
+			disp_b <= 1'b0; pend <= 1'b0; disp_f <= 2'b00; pend_f <= 2'b00; cap_par <= 1'b0;
+			end_wp[0] <= 0; end_wp[1] <= 0;
 		end else begin
 			hr_ack <= 1'b0;
 			lf_we  <= 1'b0;
+			hr_raw_d <= hr_raw; hr_base_d <= hr_base;
+			if (hr_raw != hr_raw_d || hr_base != hr_base_d) rc_v <= 1'b0;   // (the line in hand is from elsewhere)
 
 			// --- capture control ------------------------------------------------
 			// (HDMI: the next frame is armed as soon as this one is in)
@@ -172,11 +194,22 @@ module fb_ddr #(
 				lf_on <= 1'b1; lf_line <= lf_want; lf_w <= 7'd0;
 				// the top of HDMI's frame: a finished capture goes on screen
 				if (lf_want == 9'd0 && pend) begin disp_b <= ~disp_b; pend <= 1'b0; end
+				// ...and a field whose capture is all written goes on screen there too
+				if (lf_want == 9'd0) begin
+					if (pend_f[0] && f_written0) begin disp_f[0] <= ~disp_f[0]; pend_f[0] <= 1'b0; end
+					if (pend_f[1] && f_written1) begin disp_f[1] <= ~disp_f[1]; pend_f[1] <= 1'b0; end
+				end
 			end
 			if (frame_abort && capturing) begin
 				capturing <= 1'b0; armed <= 1'b1; cur_v <= 1'b0;   // dropped; the next one is taken
+			end else if (frame_start && weave && hdmi_on && capturing) begin
+				// one field ends where the next begins: mark where its last line sits in the
+				// queue (the line in hand goes in this clock), and go straight on to the next
+				end_wp[cap_par] <= q_wp + (push ? 1'b1 : 1'b0);
+				pend_f[cap_par] <= 1'b1;
+				cap_par <= weave_field;
 			end else if (frame_start) begin
-				if (armed) begin capturing <= 1'b1; armed <= 1'b0; rc_v <= 1'b0; end
+				if (armed) begin capturing <= 1'b1; armed <= 1'b0; rc_v <= 1'b0; cap_par <= weave_field; end
 				else if (capturing) begin capturing <= 1'b0; finishing <= 1'b1; end   // the frame is complete
 			end
 			// ready once the frame's last line has been written
@@ -222,10 +255,10 @@ module fb_ddr #(
 					m_we <= 1'b1; m_req <= 1'b1; wr_busy <= 1'b1;
 				end else if (lf_on && !lf_wait && rs == R_IDLE) begin
 					// (before the host's reads: the picture cannot wait)
-					m_addr <= disp_base + lf_line * STRIDE + {17'd0, lf_w}; m_we <= 1'b0; m_req <= 1'b1;
+					m_addr <= (weave ? lf_fbase : disp_base) + lf_line * STRIDE + {17'd0, lf_w}; m_we <= 1'b0; m_req <= 1'b1;
 					lf_wait <= 1'b1;
 				end else if (rs == R_IDLE && hr_req && !hr_hit && q_empty && !lf_wait) begin
-					m_addr <= disp_base + {8'd0, hr_line}; m_we <= 1'b0; m_req <= 1'b1;
+					m_addr <= (hr_raw ? hr_base : disp_base) + {8'd0, hr_line}; m_we <= 1'b0; m_req <= 1'b1;
 					rs <= R_WAIT;
 				end
 			end

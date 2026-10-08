@@ -99,6 +99,9 @@ module r3000 (
 	input  wire [5:0]  dbg_rsel,     // register peek: 0-31 = R, 32 = SR, 33 = CAUSE, 34 = EPC
 	output wire [31:0] dbg_rval,
 	output wire [31:0] dbg_a0, dbg_a1, dbg_ra, dbg_sp,   // for a snapshot at a watchpoint hit
+	output wire [31:0] dbg_t1,                           // ...and t1: the BIOS function number (ps1_top's TTY)
+	output reg         t_take,                           // an instruction committed last clock...
+	output reg  [6:0]  t_cost,                           // ...and what it cost the console, in its cycles
 	// every write into the register file, for a trace of one register:
 	// port A is the queued writeback landing, port B an exception entry's load commit
 	output wire        dbg_wa_en,
@@ -138,6 +141,7 @@ module r3000 (
 	reg [31:0] rf_live;             // written since reset
 	reg        rf_w0, rf_w1, rf_w2; // this enable's writes (blocking, decided below)
 	reg [31:0] s_a0, s_a1, s_ra, s_sp;   // copies of four registers for the debugger
+	reg [31:0] s_t1;
 	integer k;
 	initial for (k = 0; k < 32; k = k + 1) begin rf0[k] = 32'd0; rf1[k] = 32'd0; rf2[k] = 32'd0; end
 
@@ -294,8 +298,9 @@ module r3000 (
 
 	// --- exceptions ----------------------------------------------------------------------------
 	localparam EXC_INT = 5'd0, EXC_ADEL = 5'd4, EXC_ADES = 5'd5, EXC_SYS = 5'd8,
-	           EXC_BP  = 5'd9, EXC_RI   = 5'd10, EXC_OV  = 5'd12;
+	           EXC_BP  = 5'd9, EXC_RI   = 5'd10, EXC_OV  = 5'd12, EXC_IBE = 5'd6, EXC_CPU = 5'd11;
 	reg [4:0]  exc_code;
+	reg [1:0]  exc_ce;                // a coprocessor-unusable exception's coprocessor (Cause 29:28)
 	reg        exc_take;
 	reg [31:0] exc_bad;
 	reg        exc_bd;              // the fault was in a delay slot
@@ -311,6 +316,13 @@ module r3000 (
 	wire [31:0] ea   = a + simm;
 	wire [31:0] phys = ea[31] ? {3'b000, ea[28:0]} : ea;
 	wire [31:0] pc_phys = PC[31] ? {3'b000, PC[28:0]} : PC;
+	// code runs from RAM, the BIOS ROM and expansion 1 only: a fetch anywhere else -- the
+	// scratchpad, an I/O port -- is an instruction bus error on the chip (ps1-tests
+	// cpu/code-in-io), where ours fetched whatever was there and ran it
+	// ...and from most I/O ports, which hand back what they hold (SPU, DMA: ps1-tests runs code
+	// there), but not from the interrupt controller or the MDEC
+	wire        pc_io        = (PC[28:12] == 17'h1F801) && (PC[11:4] != 8'h07) && (PC[11:4] != 8'h82);
+	wire        pc_fetchable = (PC[31:29] != 3'b111) && ((PC[28:23] == 6'd0) || (PC[28:19] == 10'h3F8) || (PC[28:23] == 6'h3E) || pc_io);
 	// Where the next instruction lives. Execute assigns exactly this to PC on
 	// every ordinary instruction, and it is made of registers only, so it is
 	// known before the instruction has run -- which is what lets the same cycle
@@ -358,7 +370,7 @@ module r3000 (
 	end
 
 	// --- the register file write --------------------------------------------------------------
-	assign dbg_a0 = s_a0; assign dbg_a1 = s_a1; assign dbg_ra = s_ra; assign dbg_sp = s_sp;
+	assign dbg_a0 = s_a0; assign dbg_a1 = s_a1; assign dbg_ra = s_ra; assign dbg_sp = s_sp; assign dbg_t1 = s_t1;
 	// (the write-trace ports, after everything they look at is declared)
 	assign dbg_wa_en  = ce && wb_en && (wb_reg != 5'd0);
 	assign dbg_wa_reg = wb_reg;
@@ -388,7 +400,7 @@ module r3000 (
 		rf_w0 = 1'b0; rf_w1 = 1'b0; rf_w2 = 1'b0;
 		if (rst) begin
 			rf_live <= 32'd0; rf_lo <= 32'd0; rf_hi <= 32'd0;
-			s_a0 <= 32'd0; s_a1 <= 32'd0; s_ra <= 32'd0; s_sp <= 32'd0;
+			s_a0 <= 32'd0; s_a1 <= 32'd0; s_ra <= 32'd0; s_sp <= 32'd0; s_t1 <= 32'd0;
 			PC       <= 32'hBFC0_0000;
 			HI <= 32'd0; LO <= 32'd0;
 			SR       <= 32'h0040_0000;     // BEV set, interrupts off, kernel
@@ -502,6 +514,10 @@ module r3000 (
 					end else if (PC[1:0] != 2'b00) begin
 						exc_code <= EXC_ADEL;
 						exc_bad  <= PC;
+						exc_bd   <= 1'b0;
+						st       <= S_EXC;
+					end else if (!pc_fetchable) begin
+						exc_code <= EXC_IBE;
 						exc_bd   <= 1'b0;
 						st       <= S_EXC;
 					end else if (fetch_hit) begin
@@ -649,7 +665,7 @@ module r3000 (
 					// EPC is the faulting instruction, or the branch it was the
 					// slot of; BD says which. SR's mode/enable pairs shift up.
 					EPC   <= exc_bd ? PC - 32'd4 : PC;
-					CAUSE <= {exc_bd, CAUSE[30:7], exc_code, 2'b00};
+					CAUSE <= {exc_bd, CAUSE[30], (exc_code == EXC_CPU) ? exc_ce : CAUSE[29:28], CAUSE[27:7], exc_code, 2'b00};
 					if (exc_code == EXC_ADEL || exc_code == EXC_ADES)
 						BADVADDR <= exc_bad;
 					SR    <= {SR[31:6], SR[3:0], 2'b00};
@@ -687,6 +703,7 @@ module r3000 (
 		input [31:0] v;
 		begin
 			if (n == 5'd4)  s_a0 <= v;
+			if (n == 5'd9)  s_t1 <= v;
 			if (n == 5'd5)  s_a1 <= v;
 			if (n == 5'd29) s_sp <= v;
 			if (n == 5'd31) s_ra <= v;
@@ -697,6 +714,136 @@ module r3000 (
 	// A task, so that the decode reads the word on the bus rather than a
 	// register that is one enable stale. Everything it assigns is a register of
 	// this module, assigned non-blocking, exactly as if it were inline.
+
+	// =====================================================================================
+	// The console's clock. This processor runs on the board's clock and spends its own
+	// cycles (a load is four states here); what the PlayStation's R3000A would have spent
+	// on each instruction is worked out alongside and handed to ps1_top, which lets the
+	// processor go on only as fast as the console's 33.8688 MHz pays for it.
+	//
+	// The costs are the console's own, measured on hardware (ps1-tests cpu/access-time:
+	// a load from RAM 5.2 cycles, BIOS ROM 7.6 / 12.9 / 24.9 for 8 / 16 / 32 bits, the
+	// scratchpad 1, I/O 3-4, the CD-ROM 8 / 14 / 26, the SPU 18 / 18 / 39) and the
+	// documented latencies (psx-spx: MULT 6 / 9 / 13 by the size of rs, DIV 36, each GTE
+	// command its own count). Code runs from the 4 kB instruction cache (16-byte lines, a
+	// valid bit a word, filled from the missed word to the end of its line, a cycle a word)
+	// or, uncached (KSEG1), pays the region's word time for every instruction -- which is
+	// why the BIOS crawls until it has copied itself to RAM.
+	//
+	// t_take pulses the clock after an instruction commits; t_cost is what it cost.
+	// =====================================================================================
+	reg  [16:0] ict [0:255];             // the instruction cache's tags (physical [28:12])
+	reg  [3:0]  icv [0:255];             // ...and a valid bit for each of the line's words
+	reg  [15:0] ctime;                   // console cycles spent so far (differences only)
+	reg  [15:0] mdu_ready, gte_ready;    // when the multiplier / the GTE has its answer
+	integer     ii;
+	initial for (ii = 0; ii < 256; ii = ii + 1) begin ict[ii] = 17'd0; icv[ii] = 4'd0; end
+
+	function [6:0] load_wait;            // a load's cycles beyond the instruction's own
+		input [31:0] ea; input [1:0] sz;     // sz: 0 byte, 1 half, 2 word
+		reg [28:0] p;
+		begin
+			p = ea[28:0];
+			if (ea[31:29] == 3'b111)                 load_wait = (sz == 2'd0) ? 7'd0 : 7'd1;     // cache control
+			else if (p[28:23] == 6'd0)               load_wait = 7'd4;                            // RAM (8 MB of mirrors)
+			else if (p[28:23] == 6'h3E)              load_wait = (sz == 2'd0) ? 7'd6  : (sz == 2'd1) ? 7'd13 : 7'd25;   // expansion 1
+			else if (p[28:10] == 19'h7E000)          load_wait = 7'd0;                            // scratchpad
+			else if (p[28:12] == 17'h1F801) begin                                                   // I/O
+				// (calibrated on the board against cpu/access-time: our own access already costs
+				// a little here, and the CD byte and the SPU word were that much over)
+				if (p[11:4] == 8'h80)                load_wait = (sz == 2'd0) ? 7'd6  : (sz == 2'd1) ? 7'd13 : 7'd25;   // CD-ROM
+				else if (p[11:10] == 2'b11)          load_wait = (sz == 2'd2) ? 7'd0  : 7'd17;    // SPU (a word is two halves here)
+				else if (p[11:4] == 8'h81)           load_wait = (sz == 2'd2) ? 7'd3  : 7'd2;     // GPU
+				else if (p[11:4] == 8'h07 || p[11:7] == 5'b00001 || p[11:4] == 8'h82)
+				                                     load_wait = (sz == 2'd2) ? 7'd2  : 7'd3;     // IRQ, DMA, MDEC
+				else                                 load_wait = 7'd2;
+			end
+			else if (p[28:13] == 16'hFC01)           load_wait = (sz == 2'd0) ? 7'd10 : (sz == 2'd1) ? 7'd25 : 7'd55;  // expansion 2
+			else if (p[28:21] == 8'hFD)              load_wait = (sz == 2'd0) ? 7'd6  : (sz == 2'd1) ? 7'd5  : 7'd9;   // expansion 3
+			else if (p[28:19] == 10'h3F8)            load_wait = (sz == 2'd0) ? 7'd6  : (sz == 2'd1) ? 7'd12 : 7'd24;  // BIOS ROM
+			else                                     load_wait = 7'd0;
+		end
+	endfunction
+	function [5:0] gte_cycles;
+		input [5:0] f;
+		case (f)
+		6'h01: gte_cycles = 15; 6'h06: gte_cycles = 8;  6'h0C: gte_cycles = 6;  6'h10: gte_cycles = 8;
+		6'h11: gte_cycles = 8;  6'h12: gte_cycles = 8;  6'h13: gte_cycles = 19; 6'h14: gte_cycles = 13;
+		6'h16: gte_cycles = 44; 6'h1B: gte_cycles = 17; 6'h1C: gte_cycles = 11; 6'h1E: gte_cycles = 14;
+		6'h20: gte_cycles = 30; 6'h28: gte_cycles = 5;  6'h29: gte_cycles = 8;  6'h2A: gte_cycles = 17;
+		6'h2D: gte_cycles = 5;  6'h2E: gte_cycles = 6;  6'h30: gte_cycles = 23; 6'h3D: gte_cycles = 5;
+		6'h3E: gte_cycles = 5;  6'h3F: gte_cycles = 39; default: gte_cycles = 8;
+		endcase
+	endfunction
+	function [5:0] until;                // cycles from `now` to `ready`, 0 if it has passed
+		input [15:0] ready, now;
+		reg [15:0] d;
+		begin d = ready - now; until = (d[15] || d == 16'd0) ? 6'd0 : (d > 16'd63 ? 6'd63 : d[5:0]); end
+	endfunction
+
+	// (in two steps: the instruction, its PC and its load address are taken as it commits,
+	// and its cost is worked out from those a clock later -- in one, the decode, the address
+	// add and the region decode ran on from the instruction register and set the clock)
+	reg        k_v;
+	reg [31:0] k_w, k_pc, k_ea, k_rsv;
+	always @(posedge clk) begin
+		k_v <= ce && (st == S_EXEC);
+		k_w <= insn; k_pc <= PC;
+		k_rsv <= operand(insn[25:21]);
+		k_ea  <= operand(insn[25:21]) + {{16{insn[15]}}, insn[15:0]};
+	end
+	always @(posedge clk) begin : console_clock
+		reg [31:0] w, va, ea, rsv;
+		reg [5:0]  o, f;
+		reg [4:0]  rs_n;
+		reg [8:0]  c;
+		reg [7:0]  ln;
+		reg [16:0] tg;
+		reg        hit;
+		t_take <= 1'b0;
+		if (isc_inv) icv[isc_addr[11:4]] <= 4'd0;          // the BIOS's cache flush
+		if (k_v) begin
+			w = k_w; o = w[31:26]; f = w[5:0]; rs_n = w[25:21];
+			rsv = k_rsv;
+			ea  = k_ea;
+			c = 9'd1;
+			// the instruction's fetch
+			ln = k_pc[11:4]; tg = k_pc[28:12];
+			if (k_pc[31:29] == 3'b101) begin
+				if (k_pc[28:23] == 6'd0)          c = c + 9'd4;
+				else if (k_pc[28:19] == 10'h3F8)  c = c + 9'd24;
+			end else begin
+				hit = (ict[ln] == tg) && icv[ln][k_pc[3:2]];
+				if (!hit) begin
+					c = c + {7'd0, 2'd3 - k_pc[3:2]} + 9'd1;     // the words from here to the line's end
+					ict[ln] <= tg;
+					icv[ln] <= ((ict[ln] == tg) ? icv[ln] : 4'd0) | (4'b1111 << k_pc[3:2]);
+				end
+			end
+			// its data
+			case (o)
+			6'h20, 6'h24:                       c = c + load_wait(ea, 2'd0);
+			6'h21, 6'h25:                       c = c + load_wait(ea, 2'd1);
+			6'h22, 6'h23, 6'h26, 6'h32:         c = c + load_wait(ea, 2'd2);
+			default: ;
+			endcase
+			// the multiplier and the GTE answer when they are done
+			if (o == 6'h00 && (f == 6'h10 || f == 6'h12))   c = c + until(mdu_ready, ctime);
+			if (o == 6'h12 && (w[25] || w[25:21] == 5'd0 || w[25:21] == 5'd2)) c = c + until(gte_ready, ctime);
+			if (o == 6'h3A)                                  c = c + until(gte_ready, ctime);
+			if (o == 6'h00 && f == 6'h18)
+				mdu_ready <= ctime + ((rsv[31:11] == 21'd0 || rsv[31:11] == 21'h1FFFFF) ? 16'd6
+				                    : (rsv[31:20] == 12'd0 || rsv[31:20] == 12'hFFF) ? 16'd9 : 16'd13);
+			if (o == 6'h00 && f == 6'h19)
+				mdu_ready <= ctime + ((rsv[31:11] == 21'd0) ? 16'd6 : (rsv[31:20] == 12'd0) ? 16'd9 : 16'd13);
+			if (o == 6'h00 && (f == 6'h1A || f == 6'h1B)) mdu_ready <= ctime + 16'd36;
+			if (o == 6'h12 && w[25])                        gte_ready <= ctime + c[5:0] + {10'd0, gte_cycles(f)};
+			ctime  <= ctime + {7'd0, c};
+			t_cost <= (c > 9'd127) ? 7'd127 : c[6:0];
+			t_take <= 1'b1;
+		end
+	end
+
 	task exec;
 		input [31:0] w;
 		reg [5:0]  o; reg [4:0] s, t, d, h; reg [5:0] f;
@@ -828,7 +975,15 @@ module r3000 (
 			// slot, re-executing it later without the branch would fall straight
 			// through -- which is how a wait in a delay slot became a jump to
 			// address 1. Reassigning them here keeps their pre-enable values.
-			6'h12: begin
+			// --- the coprocessors' usable bits (SR 28-31): an instruction for one that is
+			// switched off is a coprocessor-unusable exception, with its number in Cause;
+			// COP1 and COP3 do not exist, so switched on their instructions do nothing
+			// (ps1-tests cpu/cop -- it was a reserved-instruction exception either way)
+			6'h11, 6'h31, 6'h39: if (!SR[29]) raise_cu(2'd1);
+			6'h13, 6'h33, 6'h3B: if (!SR[31]) raise_cu(2'd3);
+			6'h30, 6'h38:        if (!SR[28]) raise_cu(2'd0);
+
+			6'h12: if (!SR[30]) raise_cu(2'd2); else begin
 					if (c2_busy) begin PC <= PC; br_pend <= br_pend; in_slot <= in_slot; nst = S_C2W; end
 					else if (w[25]) begin                          // a GTE command
 						c2_cmd  <= 1'b1;
@@ -844,9 +999,9 @@ module r3000 (
 					default: ;
 					endcase
 				end
-			6'h32: if (c2_busy) begin PC <= PC; br_pend <= br_pend; in_slot <= in_slot; nst = S_C2W; end
+			6'h32: if (!SR[30]) raise_cu(2'd2); else if (c2_busy) begin PC <= PC; br_pend <= br_pend; in_slot <= in_slot; nst = S_C2W; end
 			       else load(ph, 4'b1111, ea_t);                   // LWC2: the value lands in the GTE
-			6'h3A: if (c2_busy) begin PC <= PC; br_pend <= br_pend; in_slot <= in_slot; nst = S_C2W; end
+			6'h3A: if (!SR[30]) raise_cu(2'd2); else if (c2_busy) begin PC <= PC; br_pend <= br_pend; in_slot <= in_slot; nst = S_C2W; end
 			       else store({ph[31:2], 2'b00}, 4'b1111, c2_rdata);   // SWC2: store a GTE data register
 
 			// --- loads: issue now, collect in S_MEMR ------------------------------------
@@ -862,9 +1017,14 @@ module r3000 (
 			6'h22, 6'h26: load(ph, 4'b1111, ea_t);                                       // LWL/LWR
 
 			// --- stores: one enable, data and enables on the bus --------------------------
-			6'h28: store({ph[31:2], 2'b00}, 4'b0001 << ea_t[1:0], {4{vb[7:0]}});          // SB
+			// The bus carries the whole register, shifted to the byte's lane -- not the byte
+			// copied into every lane: a 32-bit I/O register that ignores the byte enables
+			// takes all of it, as on the chip (ps1-tests cpu/io-access-bitwidth: SB of
+			// 12345678h to DMA0's address leaves 345678h). Memory and the byte-wide devices
+			// see the same byte in the same lane either way.
+			6'h28: store({ph[31:2], 2'b00}, 4'b0001 << ea_t[1:0], vb << {ea_t[1:0], 3'b000});    // SB
 			6'h29: if (ea_t[0]) raise(EXC_ADES, ea_t);
-			       else store({ph[31:2], 2'b00}, ea_t[1] ? 4'b1100 : 4'b0011, {2{vb[15:0]}});  // SH
+			       else store({ph[31:2], 2'b00}, ea_t[1] ? 4'b1100 : 4'b0011, vb << {ea_t[1], 4'b0000});  // SH
 			6'h2B: if (ea_t[1:0] != 2'b00) raise(EXC_ADES, ea_t);
 			       else store({ph[31:2], 2'b00}, 4'b1111, vb);                              // SW
 			6'h2A: store({ph[31:2], 2'b00}, swl_be(ea_t[1:0]), swl_data(vb, ea_t[1:0]));   // SWL
@@ -888,6 +1048,10 @@ module r3000 (
 		end
 	endtask
 
+	task raise_cu;
+		input [1:0] n;
+		begin exc_ce <= n; raise(EXC_CPU, 32'd0); end
+	endtask
 	task raise;
 		input [4:0]  code;
 		input [31:0] bad;

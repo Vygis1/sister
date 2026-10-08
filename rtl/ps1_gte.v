@@ -523,8 +523,9 @@ module ps1_gte (
 				if (mbase == 5'd31) begin
 					case (rr)
 					2'd0: begin e0r <= -sx16({8'd0, d[6][7:0]} << 4); e1r <= sx16({8'd0, d[6][7:0]} << 4); e2r <= sx16(d[8][15:0]); end
-					2'd1: begin e0r <= sx16(c[2][15:0]); e1r <= sx16(c[2][15:0]); e2r <= sx16(c[2][15:0]); end
-					default: begin e0r <= sx16(c[4][15:0]); e1r <= sx16(c[4][15:0]); e2r <= sx16(c[4][15:0]); end
+					// (rows two and three are RT13 and RT22 three times -- psx-spx; ps1-tests gte/test-all)
+					2'd1: begin e0r <= sx16(c[1][15:0]); e1r <= sx16(c[1][15:0]); e2r <= sx16(c[1][15:0]); end
+					default: begin e0r <= sx16(c[2][15:0]); e1r <= sx16(c[2][15:0]); e2r <= sx16(c[2][15:0]); end
 					endcase
 				end else begin
 					e0r <= mel(mbase, rr, 2'd0); e1r <= mel(mbase, rr, 2'd1); e2r <= mel(mbase, rr, 2'd2);
@@ -540,14 +541,21 @@ module ps1_gte (
 			6'd1: begin p0 <= e0r * x0r; p1 <= e1r * x1r; p2 <= e2r * x2r; end
 			// --- add, check, shift, saturate, write ---
 			default: begin
+				// The sum is built one product at a time, and the chip checks it for 44-bit
+				// overflow -- and wraps it to 44 bits -- after EACH addition, not just at the end
+				// (ps1-tests gte/test-all: RTPT set MAC overflow flags the final sum alone did not)
 				if (ts == 2'd2) begin
 					fst = (trr <<< 12) + p0;
 					if (fst >= P43) c[31][30 - rr] <= 1'b1; if (fst < N43) c[31][27 - rr] <= 1'b1;
 					if (ir_of(fst >>> shamt, 1'b0)) c[31][24 - rr] <= 1'b1;
-					acc = p1 + p2;
+					acc = p1;
 				end else begin
-					acc = (trr <<< 12) + p0 + p1 + p2;
+					acc = (trr <<< 12) + p0;
+					if (acc >= P43) c[31][30 - rr] <= 1'b1; if (acc < N43) c[31][27 - rr] <= 1'b1;
+					acc = {{20{acc[43]}}, acc[43:0]} + p1;
 				end
+				if (acc >= P43) c[31][30 - rr] <= 1'b1; if (acc < N43) c[31][27 - rr] <= 1'b1;
+				acc = {{20{acc[43]}}, acc[43:0]} + p2;
 				if (acc >= P43) c[31][30 - rr] <= 1'b1; if (acc < N43) c[31][27 - rr] <= 1'b1;
 				// The chip's accumulator is 44 BITS and wraps; ours kept the whole
 				// 64-bit sum. Past 44 bits the two part company completely: the
@@ -590,7 +598,10 @@ module ps1_gte (
 			if (a0 >= P43) c[31][30] <= 1'b1; if (a0 < N43) c[31][27] <= 1'b1;
 			if (a1 >= P43) c[31][29] <= 1'b1; if (a1 < N43) c[31][26] <= 1'b1;
 			if (a2 >= P43) c[31][28] <= 1'b1; if (a2 < N43) c[31][25] <= 1'b1;
+			// ...and IR is saturated from the 32 bits a MAC register holds, not from the wide
+			// difference (ps1-tests gte/test-all: all 50 DPCS cases off the console agree)
 			s0 = a0 >>> shamt; s1 = a1 >>> shamt; s2 = a2 >>> shamt;
+			s0 = sx32(s0[31:0]); s1 = sx32(s1[31:0]); s2 = sx32(s2[31:0]);
 			if (ir_of(s0, 1'b0)) c[31][24] <= 1'b1;
 			if (ir_of(s1, 1'b0)) c[31][23] <= 1'b1;
 			if (ir_of(s2, 1'b0)) c[31][22] <= 1'b1;
@@ -706,7 +717,10 @@ module ps1_gte (
 			dq = sx32(c[28]) + p0;
 			if (dq > 64'sh7FFFFFFF) c[31][16] <= 1'b1; if (dq < -64'sh80000000) c[31][15] <= 1'b1;
 			d[24] <= dq[31:0];
-			s0 = sx32(dq[31:0]) >>> 12;
+			// IR0 from the full sum, not from MAC0's 32 bits: a depth cue that overflows
+			// negative wraps MAC0 positive, and the chip still clips IR0 to 0 (ps1-tests
+			// gte/test-all #51: IR0 0, where the wrapped value gave 1000h)
+			s0 = dq >>> 12;
 			i0 = clip(s0, 0, 4096);
 			if (i0 != s0) c[31][12] <= 1'b1;
 			d[8] <= {16'd0, i0[15:0]};

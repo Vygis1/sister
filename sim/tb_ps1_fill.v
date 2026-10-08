@@ -125,6 +125,25 @@ module tb_ps1_fill;
 		$display("    writes: %0d whole lines (%0d px), %0d pairs, %0d singles",
 		  oct_writes, oct_writes*8, pair_writes, one_writes);
 		$display("    video cache: write-around %0d, allocate %0d, write-back %0d, fill %0d", wa_n, alloc_n, wb_n, fill_n);
+		// ps1-tests gpu/triangle clears VRAM with four 512x256 fills; on the board the
+		// bottom-right one (512,256) never landed
+		gp0(32'h02ffffff); gp0(32'h00000000); gp0(32'h01000200);
+		gp0(32'h02ffffff); gp0(32'h00000200); gp0(32'h01000200);
+		gp0(32'h02ffffff); gp0(32'h01000000); gp0(32'h01000200);
+		gp0(32'h02ffffff); gp0(32'h01000200); gp0(32'h010003f1); idle();   // (the test's own width: 1009 -> 1024)
+		chk(vpx(5,5)     == 16'h7fff, "quarter fill top-left");
+		chk(vpx(1000,10) == 16'h7fff, "quarter fill top-right");
+		chk(vpx(5,300)   == 16'h7fff, "quarter fill bottom-left");
+		chk(vpx(600,300) == 16'h7fff, "quarter fill bottom-right");
+		chk(vpx(1023,511)== 16'h7fff, "quarter fill last pixel");
+		// lines (ps1-tests gpu/lines): a flat horizontal and a shaded diagonal
+		gp0(32'hE3000000); gp0(32'hE4000000|1023|(511<<10)); gp0(32'hE5000000);
+		gp0(32'h40000000); gp0((300<<16)|16); gp0((300<<16)|60); idle();
+		$display("    line: lst=%0d ds=%0d px=%0d py=%0d lk=%0d", gpu.lst, gpu.ds, gpu.px, gpu.py, gpu.lk);
+		chk(vpx(30,300) == 16'h0000, "flat line pixel");
+		gp0(32'h50000000); gp0((310<<16)|16); gp0(32'h000000FF); gp0((330<<16)|56); idle();
+		$display("    shaded: %04h %04h %04h", vpx(16,310), vpx(36,320), vpx(56,330));
+		chk(vpx(56,330)[4:0] > 5'd25 && vpx(16,310)[4:0] < 5'd3, "shaded line ends");
 		if(errors==0)$display("tb_ps1_fill: all passed"); else $display("tb_ps1_fill: %0d FAIL",errors);
 		$finish;
 	end

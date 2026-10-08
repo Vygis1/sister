@@ -40,6 +40,7 @@ module eth_top #(
 	parameter WEBVID   = 0,
 	parameter N64_DBG  = 1,      // the N64's debug window: 0 for a shipping image (n64_top DBG)
 	parameter PS1_DBG  = 1,      // the PlayStation's debug hardware: 0 for a shipping image (ps1_top DBG)
+	parameter JTAG_DBG = 0,      // the register bus over JTAG (jtag_axi + jtag_bus, tools/jtag.py): debug builds
 	// The console's clock: the MMCM's 1000 MHz VCO divided by this. 20 is 50 MHz,
 	// what every core was written for; a core that runs faster says so in its build.
 	parameter CLK_DIV  = 20
@@ -193,8 +194,30 @@ module eth_top #(
 	wire   mdio_out = pr_done ? rf_mdio_o  : pr_mdio_o;
 	assign eth_mdio = mdio_oe ? mdio_out : 1'bz;
 	end else begin : g_nonet
-	// no network: the bus's first master asks nothing, the pins are still
-	assign b_addr = 32'd0; assign b_wdata = 32'd0; assign b_we = 1'b0; assign b_re = 1'b0;
+	// no network: the bus's first master is the JTAG cable in a debug build (registers, frames and
+	// memory windows read from the PC: tools/jtag.py), else it asks nothing; the pins are still
+	if (JTAG_DBG) begin : g_jtag
+		wire [31:0] awaddr, wdata_j, araddr, rdata_j; wire [7:0] awlen, arlen;
+		wire awvalid, awready, wlast, wvalid, wready, bvalid, bready, arvalid, arready, rlast, rvalid, rready;
+		wire [1:0] bresp, rresp;
+		jtag_axi_0 u_jtag (.aclk(cclk), .aresetn(!rst),
+			.m_axi_awid(), .m_axi_awaddr(awaddr), .m_axi_awlen(awlen), .m_axi_awsize(), .m_axi_awburst(),
+			.m_axi_awlock(), .m_axi_awcache(), .m_axi_awprot(), .m_axi_awqos(), .m_axi_awvalid(awvalid), .m_axi_awready(awready),
+			.m_axi_wdata(wdata_j), .m_axi_wstrb(), .m_axi_wlast(wlast), .m_axi_wvalid(wvalid), .m_axi_wready(wready),
+			.m_axi_bid(1'b0), .m_axi_bresp(bresp), .m_axi_bvalid(bvalid), .m_axi_bready(bready),
+			.m_axi_arid(), .m_axi_araddr(araddr), .m_axi_arlen(arlen), .m_axi_arsize(), .m_axi_arburst(),
+			.m_axi_arlock(), .m_axi_arcache(), .m_axi_arprot(), .m_axi_arqos(), .m_axi_arvalid(arvalid), .m_axi_arready(arready),
+			.m_axi_rid(1'b0), .m_axi_rdata(rdata_j), .m_axi_rresp(rresp), .m_axi_rlast(rlast), .m_axi_rvalid(rvalid), .m_axi_rready(rready));
+		jtag_bus u_jbus (.clk(cclk), .rst(rst),
+			.awaddr(awaddr), .awlen(awlen), .awvalid(awvalid), .awready(awready),
+			.wdata(wdata_j), .wlast(wlast), .wvalid(wvalid), .wready(wready),
+			.bresp(bresp), .bvalid(bvalid), .bready(bready),
+			.araddr(araddr), .arlen(arlen), .arvalid(arvalid), .arready(arready),
+			.rdata(rdata_j), .rresp(rresp), .rlast(rlast), .rvalid(rvalid), .rready(rready),
+			.bus_addr(b_addr), .bus_wdata(b_wdata), .bus_we(b_we), .bus_re(b_re), .bus_ack(b_ack), .bus_rdata(bus_rdata));
+	end else begin : g_nojtag
+		assign b_addr = 32'd0; assign b_wdata = 32'd0; assign b_we = 1'b0; assign b_re = 1'b0;
+	end
 	assign stream_frd = 1'b0; assign rx_frame = 1'b0; assign tx_frame = 1'b0;
 	assign eth_txd = 2'b00; assign eth_tx_en = 1'b0;
 	assign eth_mdc = 1'b0; assign eth_mdio = 1'bz;

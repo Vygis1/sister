@@ -45,7 +45,7 @@ module tb_gte;
 		.snap_arm(1'b0), .snap_go(1'b0), .snap_skip(16'd0), .snap_idx(7'd0), .snap_data(), .snap_word(), .snap_state()
 	);
 
-	localparam NCASES = 2000;
+	localparam NCASES = 1150;
 	localparam CW = 129;
 	reg [31:0] vec [0:NCASES*CW-1];
 	integer dmiss [0:31];
@@ -54,7 +54,7 @@ module tb_gte;
 	integer sxy_by_op [0:63];
 	integer cmiss [0:31];
 
-	integer n, i, base, errors, ops_by_kind [0:63], t;
+	integer n, i, base, errors, ops_by_kind [0:63], t, fout;
 	reg [31:0] got, want;
 
 	task load_reg; input c; input [4:0] r; input [31:0] v; begin
@@ -67,6 +67,7 @@ module tb_gte;
 		for (i = 0; i < 32; i = i + 1) begin dmiss[i] = 0; cmiss[i] = 0; end
 		for (i = 0; i < 64; i = i + 1) begin ir1_by_op[i] = 0; sxy_by_op[i] = 0; end
 		$readmemh("../../sim/roms/gte_vectors.hex", vec);
+		fout = $fopen("../../build/gte_rtl_out.txt", "w");
 		errors = 0;
 
 		for (n = 0; n < NCASES; n = n + 1) begin
@@ -87,8 +88,11 @@ module tb_gte;
 				load_reg(1'b1, i[4:0], vec[base + 32 + i]);
 
 			// the command: one-cycle strobe, then wait for the engine to finish
-			@(negedge clk); cmd = 1; word = vec[base + 64][24:0];
-			@(negedge clk); cmd = 0;
+			// (a word of FFFFFFFF is a register test: nothing is run -- ps1-tests gte/test-all)
+			if (vec[base + 64] != 32'hFFFF_FFFF) begin
+				@(negedge clk); cmd = 1; word = vec[base + 64][24:0];
+				@(negedge clk); cmd = 0;
+			end
 			t = 0;
 			while (busy && t < 200) begin @(negedge clk); t = t + 1; end
 			if (busy) begin
@@ -98,6 +102,11 @@ module tb_gte;
 			@(negedge clk);
 			ops_by_kind[vec[base + 64][5:0]] = ops_by_kind[vec[base + 64][5:0]] + 1;
 
+			// (every register as the RTL reads it, for tools that diff against the vectors)
+			for (i = 0; i < 64; i = i + 1) begin
+				ctl = i[5]; reg_i = i[4:0]; #1;
+				$fwrite(fout, "%08h ", rdata); if (i == 63) $fwrite(fout, "%c", 8'd10);
+			end
 			// compare every register the model reads back
 			for (i = 0; i < 32; i = i + 1) begin
 				ctl = 0; reg_i = i[4:0]; #1;
@@ -147,6 +156,7 @@ module tb_gte;
 		if (errors == 0) $display("tb_gte: all %0d cases match the model -- %0d registers checked",
 		                          NCASES, NCASES * 64);
 		else             $display("tb_gte: %0d MISMATCH(es)", errors);
+		$fclose(fout);
 		$finish;
 	end
 endmodule

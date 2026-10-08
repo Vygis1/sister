@@ -43,7 +43,11 @@ module ps1_top #(
 	// and the console still keeps the console's time (only the CPU and the drawing are quicker)
 	parameter CLK_HZ = 50_000_000,
 	// the debug hardware (performance counters, event ring, GTE write trace): 0 for a shipping image
-	parameter DBG    = 1
+	parameter DBG    = 1,
+	// the older debug hardware -- 64 performance counters, the event ring, the GTE write
+	// trace -- off unless asked for: the JTAG traces replaced them, and the debug image
+	// no longer fits with them
+	parameter DBG_OLD = 0
 ) (
 	input  wire        clk,
 	input  wire        rst,        // resets the memory infrastructure
@@ -150,6 +154,24 @@ module ps1_top #(
 	// Where the machine's time goes, so "it feels slow" can be measured instead
 	// of guessed at. One counter at a time, chosen by dbg_perf_sel.
 	input  wire [5:0]  dbg_perf_sel,
+	// the TTY (DBG): every character the program prints through the BIOS, in a 16 kB ring --
+	// tty_count characters so far, the ring read a word (four characters, the first in [7:0])
+	// at tty_idx, a clock after the index
+	input  wire [11:0] tty_idx,
+	// the GPU input trace (DBG): the last 2048 things that went INTO the GPU -- GP0 words from
+	// the processor (type 0) or the DMA (1), GP1 writes (2) -- and the DMA's linked-list node
+	// headers (3); it stops when the engine starts a command the BIOS never sends (an opcode
+	// 03-1E) -- the place the stream it was given stopped making sense.
+	// gtr_stat {frozen, armed, 18'd0, next index [11:0]}; gtr_arm (a pulse) clears and starts it.
+	input  wire [10:0] gtr_idx,
+	output reg  [31:0] gtr_word,
+	output reg  [1:0]  gtr_head,
+	output wire [31:0] gtr_stat,
+	input  wire        gtr_arm,
+	input  wire        fb_hr_raw,      // (DBG) the frame window reads DDR3 at fb_hr_base instead (VRAM: 0)
+	input  wire [23:0] fb_hr_base,
+	output reg  [31:0] tty_word,
+	output reg  [31:0] tty_count,
 	// Switches for the two paths that answer a read without asking memory, so
 	// either can be taken out of the picture on a running board instead of
 	// costing a ten-minute build to bisect.
@@ -288,9 +310,29 @@ module ps1_top #(
 	// I/O accesses (a GPUSTAT poll) still go through.
 	wire        dma_ram_wait = dma_in_flight && c_req && (c_addr[28:21] == 8'h00 || c_addr[28:19] == 10'b11_1111_1000);   // RAM or BIOS (= `cached`, declared below)
 	wire        dma_block;              // a DMA holds the processor (see below, after the decode)
+	// The console's pace: the processor runs on this clock, and each instruction it finishes
+	// is charged what the console's R3000A would have spent on it (r3000 t_cost); credit
+	// comes in at the console's 33.8688 MHz and the processor waits while it is spent. It
+	// was paced a cycle of ours to a cycle of the console's, so every load took two of its
+	// own states' worth and cost ~2.4 cycles wherever it went: RAM twice as fast as the
+	// console's, the BIOS ROM ten times, the SPU eight -- and the libraries' VSync() gave up
+	// before every vertical blank. A short lead (CREDIT_MAX) is kept, so a wait on DDR3
+	// can be made up, but never more than that.
+	localparam signed [10:0] CREDIT_MAX = 11'sd48;
+	reg  signed [10:0] credit;
+	wire        t_take; wire [6:0] t_cost;
+	wire        cpu_go = cpu_fast || (credit > 0);
+	always @(posedge clk) begin : pace_credit
+		reg signed [11:0] n;
+		if (rst) credit <= 11'sd0;
+		else begin
+			n = credit + (sys_ce ? 12'sd1 : 12'sd0) - (t_take ? $signed({5'd0, t_cost}) : 12'sd0);
+			credit <= (n > CREDIT_MAX) ? CREDIT_MAX : (n < -12'sd1000) ? -11'sd1000 : n[10:0];
+		end
+	end
 	wire        cpu_ce = d_calibrated && cpu_ready && !vz_active_w && !dma_block && !dma_ram_wait   // a DMA owns the bus
 	                     && !cpu_halt
-	                     && (cpu_fast || sys_ce);
+	                     && cpu_go;
 	wire        core_rst = rst || !cpu_run;
 
 	// COP2 (the GTE) hangs off the CPU's coprocessor-2 port
@@ -299,6 +341,7 @@ module ps1_top #(
 	wire [31:0] c2_wdata, c2_rdata;
 	wire [24:0] c2_word;
 
+	wire [31:0] dbg_t1;                    // (the processor's t1, for the TTY below)
 	r3000 cpu (
 		.isc_inv(isc_inv), .isc_addr(isc_addr),
 		.clk(clk), .rst(core_rst), .ce(cpu_ce),
@@ -308,7 +351,7 @@ module ps1_top #(
 		.irq({5'd0, cpu_irq}),
 		.c2_we(c2_we), .c2_ctl(c2_ctl), .c2_reg(c2_reg), .c2_wreg(c2_wreg), .c2_wctl(c2_wctl), .c2_wdata(c2_wdata),
 		.c2_rdata(c2_rdata), .c2_cmd(c2_cmd), .c2_word(c2_word), .c2_busy(c2_busy),
-		.dbg_pc(dbg_pc), .dbg_ir(), .dbg_exec(dbg_exec), .dbg_rsel(dbg_rsel), .dbg_rval(dbg_rval), .dbg_a0(dbg_a0), .dbg_a1(dbg_a1), .dbg_ra(dbg_ra), .dbg_sp(dbg_sp),
+		.dbg_pc(dbg_pc), .dbg_ir(), .dbg_exec(dbg_exec), .dbg_rsel(dbg_rsel), .dbg_rval(dbg_rval), .dbg_a0(dbg_a0), .dbg_a1(dbg_a1), .dbg_ra(dbg_ra), .dbg_sp(dbg_sp), .dbg_t1(dbg_t1), .t_take(t_take), .t_cost(t_cost),
 		.dbg_wa_en(dbg_wa_en), .dbg_wa_reg(dbg_wa_reg), .dbg_wa_val(dbg_wa_val), .dbg_wb_en(dbg_wb_en), .dbg_wb_reg(dbg_wb_reg), .dbg_wb_val(dbg_wb_val), .dbg_halted(),
 		.dbg_cause(dbg_cause), .dbg_epc(dbg_epc)
 	);
@@ -332,7 +375,7 @@ module ps1_top #(
 	(* ram_style = "distributed" *) reg [31:0] gw_pc [0:63];
 	(* ram_style = "distributed" *) reg [31:0] gw_d  [0:63];
 	(* ram_style = "distributed" *) reg [5:0]  gw_r  [0:63];
-	always @(posedge clk) if (DBG && gte_wr_ok && !gte_snap_busy) begin
+	always @(posedge clk) if (DBG && DBG_OLD && gte_wr_ok && !gte_snap_busy) begin
 		gw_pc[gw_wp] <= dbg_pc; gw_d[gw_wp] <= c2_wdata; gw_r[gw_wp] <= {c2_wctl, c2_wreg}; gw_wp <= gw_wp + 6'd1;
 	end
 	wire [5:0] gw_ra = gw_wp + gte_wt_idx;
@@ -496,7 +539,7 @@ module ps1_top #(
 		.hit(d_hit), .word(d_word), .fa2(29'd0), .fa2_ok(1'b0), .hit2(), .line2(),
 		.fill_en(cc_take && !c_we && !cpu_fetching),
 		.fill_addr(cpu_pa), .fill_line(cc_line),
-		.inv_a_en((c_req && c_we && cpu_ce && cached) || isc_inv), .inv_a_addr(isc_inv ? {3'd0, isc_addr[28:0]} : cpu_pa),
+		.inv_a_en((c_req && c_we && cpu_ce && ram_hit) || isc_inv), .inv_a_addr(isc_inv ? {3'd0, isc_addr[28:0]} : cpu_pa),
 		// A store made with the cache ISOLATED must DROP the line, never patch it:
 		// the data never reached memory, and this cache patches a line in place
 		// when a whole word lands in it. Leaving the byte enables as the store's
@@ -517,7 +560,7 @@ module ps1_top #(
 		.fill_en(cc_take && !c_we && cpu_fetching),
 		.fill_addr(cpu_pa), .fill_line(cc_line),
 		// anything that writes memory drops the line it maps to
-		.inv_a_en((c_req && c_we && cpu_ce && cached) || isc_inv), .inv_a_addr(isc_inv ? {3'd0, isc_addr[28:0]} : cpu_pa),
+		.inv_a_en((c_req && c_we && cpu_ce && ram_hit) || isc_inv), .inv_a_addr(isc_inv ? {3'd0, isc_addr[28:0]} : cpu_pa),
 		.inv_a_be(4'd0), .inv_a_data(32'd0),
 		.inv_b_en(dm_req && dm_we && dm_ack),         .inv_b_addr({8'd0, dm_addr[20:0]})
 	);
@@ -527,7 +570,9 @@ module ps1_top #(
 	// the buffer's, which is what keeps a later access from overtaking it.
 	always @(posedge clk) begin
 		if (rst || !d_calibrated) sb_v <= 1'b0;
-		else if (!sb_v && cached && c_req && c_we && cpu_ce) begin
+		// (the BIOS is a ROM: a store to it is taken and goes nowhere -- ps1-tests
+		// cpu/io-access-bitwidth read back what it had written)
+		else if (!sb_v && ram_hit && c_req && c_we && cpu_ce) begin
 			sb_v    <= 1'b1;
 			sb_addr <= cpu_ca;
 			sb_data <= c_dout;
@@ -664,7 +709,7 @@ module ps1_top #(
 	wire [127:0] gfl_data;
 	wire [9:0]   gfl_x;
 	wire [8:0]   gfl_y;
-	wire [9:0]  fpx_x, gpu_disp_w; wire gpu_v480, gpu_weave;
+	wire [9:0]  fpx_x, gpu_disp_w; wire gpu_v480, gpu_weave, gpu_wfield;
 	wire [8:0]  fpx_y;
 	wire [15:0] fpx_rgb;
 
@@ -681,9 +726,10 @@ module ps1_top #(
 		.s_addr(s_addr), .s_req(s_req), .s_rdata(s_rdata), .s_ack(s_ack), .s_line(s_vline),
 		.px_valid(px_valid), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb),
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
-		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_popword(dbg_gpu_popword), .dbg_disp(dbg_disp), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
+		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_pophead(dbg_gpu_pophead), .dbg_popword(dbg_gpu_popword),
+		.dbg_in_v(gin_v), .dbg_in_type(gin_type), .dbg_in_word(gin_word), .dbg_disp(dbg_disp), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
-		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w), .disp_v480(gpu_v480), .cap_weave(gpu_weave),
+		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w), .disp_v480(gpu_v480), .cap_weave(gpu_weave), .cap_field(gpu_wfield),
 		.scan_lines(fb_want && !fs_en),
 		.fl_valid(gfl_valid), .fl_data(gfl_data), .fl_x(gfl_x), .fl_y(gfl_y)
 	);
@@ -717,10 +763,10 @@ module ps1_top #(
 		.fl_valid(gfl_valid), .fl_data(gfl_data), .fl_x(gfl_x), .fl_y(gfl_y),
 		.hold(fb_hold), .want(fb_want),
 		.cap_go(fb_cap_go), .cap_ready(fb_cap_ready),
-		.hr_addr(fbr_addr), .hr_req(fbr_req), .hr_rdata(fbr_rdata), .hr_ack(fbr_ack),
+		.hr_addr(fbr_addr), .hr_req(fbr_req), .hr_raw(DBG ? fb_hr_raw : 1'b0), .hr_base(fb_hr_base), .hr_rdata(fbr_rdata), .hr_ack(fbr_ack),
 		.m_addr(fb_m_addr), .m_req(fb_m_req), .m_we(fb_m_we), .m_wdata(fb_m_wdata),
 		.m_ready(fb_m_ready), .m_rdata(fb_m_rdata), .m_valid(fb_m_valid),
-		.hdmi_on(hdmi_on), .weave(gpu_weave), .lf_want(lf_want), .lf_words(fb_width[9:3] + {6'd0, fb_width[2:0] != 3'd0}),
+		.hdmi_on(hdmi_on), .weave(gpu_weave), .weave_field(gpu_wfield), .lf_want(lf_want), .lf_words(fb_width[9:3] + {6'd0, fb_width[2:0] != 3'd0}),
 		.lf_we(lf_we), .lf_addr(lf_addr), .lf_data(lf_data)
 	);
 	// Wide modes are captured at half width: the scanout emits every other
@@ -950,8 +996,11 @@ module ps1_top #(
 	// The same value for every access these devices see -- and the caches' hit logic is no
 	// longer in front of their registers' write enables (52.6 MHz missed by 0.57 ns there).
 	wire        cpu_ce_io = d_calibrated && !gp0_wait && !gpuread_wait && !vz_active_w && !dma_block && !dma_ram_wait
-	                        && !cpu_halt && (cpu_fast || sys_ce);
-	ps1_cdrom #(.ACK_CYCLES((CLK_HZ / 1000) * 2 / 5), .SECOND_CYCLES((CLK_HZ / 1000) * 12 / 5),
+	                        && !cpu_halt && cpu_go;
+	// (the acknowledge: 50,401 console cycles, Init's 81,102 -- psx-spx; 1.488 / 2.395 ms)
+	ps1_cdrom #(.ACK_CYCLES((CLK_HZ / 1000) * 1488 / 1000), .SECOND_CYCLES((CLK_HZ / 1000) * 12 / 5),
+	            .INIT_ACK_CYCLES((CLK_HZ / 1000) * 2395 / 1000), .INIT_DONE_CYCLES((CLK_HZ / 1000) * 14),
+	            .PAUSE_DONE_CYCLES((CLK_HZ / 1000) * 30),
 	            .SEEK_CYCLES(CLK_HZ / 25), .SECTOR_1X(CLK_HZ / 75), .SECTOR_2X(CLK_HZ / 150)) u_cd (
 		.clk(clk), .rst(core_rst),
 		.sel(cd_hit & c_req & cpu_ce_io), .we(c_we), .addr(c_addr[3:0]), .be(c_be), .wdata(c_dout), .rdata(cd_rdata),
@@ -1157,13 +1206,57 @@ module ps1_top #(
 	always @(posedge clk) begin
 		ev_clk <= ev_clk + 29'd1;
 		ev_disp_d <= dbg_disp; ev_dma_d <= dma_gpu_active; ev_draw_d <= ev_draw;
-		if (rst || !DBG) ev_p <= 6'd0;
+		if (rst || !(DBG && DBG_OLD)) ev_p <= 6'd0;
 		else if (dbg_disp[18:0] != ev_disp_d[18:0]) begin ev_ring[ev_p] <= {3'd0, ev_clk}; ev_p <= ev_p + 6'd1; end
 		else if (ev_draw_d && !ev_draw)             begin ev_ring[ev_p] <= {3'd3, ev_clk}; ev_p <= ev_p + 6'd1; end
 		else if (dma_gpu_active && !ev_dma_d)       begin ev_ring[ev_p] <= {3'd1, ev_clk}; ev_p <= ev_p + 6'd1; end
 		else if (!dma_gpu_active && ev_dma_d)       begin ev_ring[ev_p] <= {3'd2, ev_clk}; ev_p <= ev_p + 6'd1; end
 		else if (gpu_vblank_edge)                   begin ev_ring[ev_p] <= {3'd4, ev_clk}; ev_p <= ev_p + 6'd1; end
 	end
+
+	// --- the TTY: B(3Dh) std_out_putchar and A(3Ch) putchar, caught as the processor enters the
+	// BIOS's call vector with the function number in t1 and the character in a0 -- what the
+	// reference logs of the test suites (ps1-tests' psx.log) are made of, by emulators that hook
+	// the same two calls. A byte lane an array, each written once: block RAM.
+	wire        tty_hit = DBG && dbg_exec && ((dbg_pc[28:0] == 29'h000000B4 && dbg_t1 == 32'h3D)
+	                                        || (dbg_pc[28:0] == 29'h000000A4 && dbg_t1 == 32'h3C));
+	(* ram_style = "block" *) reg [7:0] tty0 [0:4095];
+	(* ram_style = "block" *) reg [7:0] tty1 [0:4095];
+	(* ram_style = "block" *) reg [7:0] tty2 [0:4095];
+	(* ram_style = "block" *) reg [7:0] tty3 [0:4095];
+	reg [7:0] tq0, tq1, tq2, tq3;
+	always @(posedge clk) begin
+		if (rst) tty_count <= 32'd0;
+		else if (tty_hit) tty_count <= tty_count + 32'd1;
+	end
+	always @(posedge clk) if (tty_hit && tty_count[1:0] == 2'd0) tty0[tty_count[13:2]] <= dbg_a0[7:0];
+	always @(posedge clk) if (tty_hit && tty_count[1:0] == 2'd1) tty1[tty_count[13:2]] <= dbg_a0[7:0];
+	always @(posedge clk) if (tty_hit && tty_count[1:0] == 2'd2) tty2[tty_count[13:2]] <= dbg_a0[7:0];
+	always @(posedge clk) if (tty_hit && tty_count[1:0] == 2'd3) tty3[tty_count[13:2]] <= dbg_a0[7:0];
+	always @(posedge clk) begin tq0 <= tty0[tty_idx]; tq1 <= tty1[tty_idx]; tq2 <= tty2[tty_idx]; tq3 <= tty3[tty_idx]; end
+	always @(*) tty_word = {tq3, tq2, tq1, tq0};
+
+	wire       dbg_gpu_pophead;
+	wire       gin_v; wire [1:0] gin_type; wire [31:0] gin_word;
+	(* ram_style = "block" *) reg [31:0] gtr_w [0:2047];
+	(* ram_style = "block" *) reg [1:0]  gtr_h [0:2047];
+	wire       gtr_ev   = gin_v || dbg_node_v;
+	wire [1:0] gtr_ty   = gin_v ? gin_type : 2'd3;
+	wire [31:0] gtr_in  = gin_v ? gin_word : dbg_node_hdr;
+	reg [11:0] gtr_n; reg gtr_frozen, gtr_on;
+	wire       gtr_take = DBG && gtr_on && !gtr_frozen && gtr_ev;
+	wire       gtr_odd  = dbg_gpu_pophead && (dbg_gpu_popword[31:24] >= 8'h03) && (dbg_gpu_popword[31:24] <= 8'h1E);
+	always @(posedge clk) begin
+		if (rst) begin gtr_n <= 12'd0; gtr_frozen <= 1'b0; gtr_on <= 1'b0; end
+		else if (gtr_arm) begin gtr_n <= 12'd0; gtr_frozen <= 1'b0; gtr_on <= 1'b1; end
+		else begin
+			if (gtr_take) gtr_n <= gtr_n + 12'd1;
+			if (DBG && gtr_on && gtr_odd) gtr_frozen <= 1'b1;
+		end
+	end
+	always @(posedge clk) if (gtr_take) begin gtr_w[gtr_n[10:0]] <= gtr_in; gtr_h[gtr_n[10:0]] <= gtr_ty; end
+	always @(posedge clk) begin gtr_word <= gtr_w[gtr_idx]; gtr_head <= gtr_h[gtr_idx]; end
+	assign gtr_stat = {gtr_frozen, gtr_on, 18'd0, gtr_n};
 
 	reg [31:0] perf [0:63];
 	integer pk;
@@ -1173,7 +1266,7 @@ module ps1_top #(
 		// and the reset was 2,048 flip-flops on the global reset net: the worst
 		// path of the build at 0.002 ns of slack, 18.7 ns of pure routing from
 		// the reset register to their reset pins (2026-09-27).
-		if (DBG) begin
+		if (DBG && DBG_OLD) begin
 			perf[0] <= perf[0] + 32'd1;
 			if (d_req && d_ready)            perf[1] <= perf[1] + 32'd1;
 			if (c_req && !cpu_ce)            perf[2] <= perf[2] + 32'd1;

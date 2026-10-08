@@ -54,6 +54,7 @@ module ps1_raster #(
 	input  wire signed [31:0] dr_dx, dg_dx, db_dx, du_dx, dv_dx,
 	input  wire signed [31:0] dr_dy, dg_dy, db_dy, du_dy, dv_dy,
 	input  wire        is_gour, is_tex, is_semi, is_raw,
+	input  wire        dither,           // E1 bit 9: the chip's 4x4 dither on shaded and modulated pixels
 	input  wire [7:0]  fr, fg, fb,       // the flat colour
 	input  wire [3:0]  tp_x,
 	input  wire        tp_y,
@@ -220,8 +221,20 @@ module ps1_raster #(
 	reg               scanning;
 	wire signed [11:0] px1 = px + 12'sd1;
 	wire signed [23:0] eb0 = ea0 + sx0, eb1 = ea1 + sx1, eb2 = ea2 + sx2;
-	wire in_a = always_in || inside3(ea0, ea1, ea2, apos);
-	wire in_b = always_in || inside3(eb0, eb1, eb2, apos);
+	// The chip's fill rule: a pixel exactly ON an edge belongs to the triangle only when that
+	// edge is a top or left one -- "the lower-right edges are excluded" (psx-spx). Counting
+	// every edge pixel, two triangles sharing an edge both drew it: a semi-transparent quad
+	// showed its diagonal as a darker seam, and a box ending at x = 320 drew column 320
+	// (ps1-tests gpu/quad). sx = -dy and sy = dx of each edge say which way it faces.
+	wire etl0 = apos ? (sx0 > 0 || (sx0 == 0 && sy0 > 0)) : (sx0 < 0 || (sx0 == 0 && sy0 < 0));
+	wire etl1 = apos ? (sx1 > 0 || (sx1 == 0 && sy1 > 0)) : (sx1 < 0 || (sx1 == 0 && sy1 < 0));
+	wire etl2 = apos ? (sx2 > 0 || (sx2 == 0 && sy2 > 0)) : (sx2 < 0 || (sx2 == 0 && sy2 < 0));
+	function edge_in;
+		input signed [23:0] e; input pos, tl;
+		edge_in = pos ? (e > 0 || (e == 0 && tl)) : (e < 0 || (e == 0 && tl));
+	endfunction
+	wire in_a = always_in || (edge_in(ea0, apos, etl0) && edge_in(ea1, apos, etl1) && edge_in(ea2, apos, etl2));
+	wire in_b = always_in || (edge_in(eb0, apos, etl0) && edge_in(eb1, apos, etl1) && edge_in(eb2, apos, etl2));
 	wire row_ok = (py >= $signed({3'b0, da_y0})) && (py <= $signed({3'b0, da_y1})) && py >= 0 && py < 512
 	           && !(il_skip && (py[0] == il_field));
 	wire xa_ok  = (px  >= $signed({2'b0, da_x0})) && (px  <= $signed({2'b0, da_x1})) && px  >= 0 && px  < 1024 && px  >= bx0 && px  <= bx1;
@@ -438,7 +451,12 @@ module ps1_raster #(
 	wire [24:0] cl_hbase  = vaddr({cl_tag[5:0], 4'd0}, cl_tag[14:6]) >> 4;
 	wire [5:0]  cl_hlines = (cl_depth == 2'd0) ? 6'd2 : 6'd32;
 	wire        cl_need  = is_tex && (tp_depth != 2'd2);
-	wire        cl_ok    = !cl_need || (cl_v && cl_tag == clut && cl_depth == tp_depth && !no_ccache);
+	// The chip's palette cache (ps1-tests gpu/clut-cache): loaded again only when the palette's
+	// address changes, or when an 8-bit texture wants the 256 entries a 4-bit load (16) did not
+	// bring. A 256-entry load serves a 4-bit texture too, and drawing over the palette in VRAM,
+	// or GP0(01), leaves the cached copy as it was -- games that rewrite a palette change its
+	// address, and the console shows the old colours until they do.
+	wire        cl_ok    = !cl_need || (cl_v && cl_tag == clut && (cl_depth == 2'd1 || tp_depth == 2'd0) && !no_ccache);
 
 	// ------------------------------------------------------------------------------------
 	// D: shading
@@ -448,8 +466,40 @@ module ps1_raster #(
 	reg [8:0]  yD;
 	reg [15:0] tD0, tD1;                            // the texel (or nothing)
 	reg [7:0]  rD0, gD0, bD0, rD1, gD1, bD1;
-	wire [15:0] pixD0 = !is_tex ? to555(rD0, gD0, bD0) : is_raw ? tD0 : modulate(tD0, rD0, gD0, bD0);
-	wire [15:0] pixD1 = !is_tex ? to555(rD1, gD1, bD1) : is_raw ? tD1 : modulate(tD1, rD1, gD1, bD1);
+	// The chip dithers a Gouraud-shaded or a texture-modulated pixel when E1 asks (psx-spx): its
+	// 8-bit colour -- for a modulated texel (texel x colour) / 16 -- plus the 4x4 offset for
+	// (x, y), clamped, then cut to five bits. A flat or raw-textured pixel is never dithered.
+	// Without it every shaded surface came out in bands the console doesn't have.
+	function [4:0] dch;                              // one channel: 8-bit-scale value + offset -> 5 bits
+		input [8:0] v; input [1:0] x, y;
+		reg signed [3:0] o; reg signed [10:0] s;
+		begin
+			case ({y, x})
+			4'h0: o = -4; 4'h1: o =  0; 4'h2: o = -3; 4'h3: o =  1;
+			4'h4: o =  2; 4'h5: o = -2; 4'h6: o =  3; 4'h7: o = -1;
+			4'h8: o = -3; 4'h9: o =  1; 4'hA: o = -4; 4'hB: o =  0;
+			4'hC: o =  3; 4'hD: o = -1; 4'hE: o =  2; default: o = -2;
+			endcase
+			s = $signed({2'b0, v}) + o;
+			dch = s[10] ? 5'd0 : (s > 11'sd255) ? 5'd31 : s[7:3];
+		end
+	endfunction
+	function [15:0] shade;                           // a pixel as the chip shades it, dithered
+		input [15:0] t; input [7:0] r, g, b; input tex; input [1:0] x, y;
+		reg [12:0] pr, pg, pb;
+		begin
+			if (tex) begin
+				pr = t[4:0] * r; pg = t[9:5] * g; pb = t[14:10] * b;
+				shade = {t[15], dch(pb[12:4], x, y), dch(pg[12:4], x, y), dch(pr[12:4], x, y)};
+			end else
+				shade = {1'b0, dch({1'b0, b}, x, y), dch({1'b0, g}, x, y), dch({1'b0, r}, x, y)};
+		end
+	endfunction
+	wire        dithD = dither && !always_in && (is_gour || (is_tex && !is_raw));   // (never a rectangle)
+	wire [15:0] pixD0 = (dithD && !(is_tex && is_raw)) ? shade(tD0, rD0, gD0, bD0, is_tex, xD[1:0], yD[1:0])
+	                  : !is_tex ? to555(rD0, gD0, bD0) : is_raw ? tD0 : modulate(tD0, rD0, gD0, bD0);
+	wire [15:0] pixD1 = (dithD && !(is_tex && is_raw)) ? shade(tD1, rD1, gD1, bD1, is_tex, {xD[1], 1'b1}, yD[1:0])
+	                  : !is_tex ? to555(rD1, gD1, bD1) : is_raw ? tD1 : modulate(tD1, rD1, gD1, bD1);
 	wire drawD0 = okD0 && !(is_tex && tD0 == 16'd0);  // a zero texel is transparent
 	wire drawD1 = okD1 && !(is_tex && tD1 == 16'd0);
 	wire semiD0 = is_semi && (!is_tex || tD0[15]);
@@ -710,7 +760,7 @@ module ps1_raster #(
 			else if (cl_wr_dem || cl_off_in) cl_wait <= 4'd12;
 			else if (cl_wait != 4'd0)        cl_wait <= cl_wait - 4'd1;
 			// --- writes drop what they cover (the texture cache does its own above) ------
-			if (inv_go && cl_v && (inv_a[28:4] >= cl_hbase) && (inv_a[28:4] < cl_hbase + {19'd0, cl_hlines})) begin
+			if (1'b0) begin                                   // (the cached palette is not dropped by a write)
 				cl_v <= 1'b0; cl_have <= 32'd0;
 			end
 			if (inv_en && dl_v && dl_a == inv_line) dl_v <= 1'b0;

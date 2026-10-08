@@ -158,6 +158,7 @@ module ps1_gpu #(
 	output wire [9:0]  disp_w,      // how many VRAM columns the display shows
 	output wire        disp_v480,   // ...and that it is 480 lines (interlaced): the capture has 480 rows
 	output wire        cap_weave,   // this capture is one field of a 480i picture (fb_ddr weave)
+	output wire        cap_field,   // ...and which: its rows are 2k + cap_field
 
 	output reg         vblank,
 	output reg         hblank,
@@ -167,6 +168,11 @@ module ps1_gpu #(
 	output wire [31:0] dbg_gpu,
 	output wire [31:0] dbg_gpu2,    // the last four command opcodes dispatched
 	output wire        dbg_pop,       // the engine takes a word from the FIFO this cycle
+	output wire        dbg_pophead,   // ...and it is the first word of a command
+	// what goes IN: a GP0 word from the processor (type 0) or the DMA (1), or a GP1 write (2)
+	output wire        dbg_in_v,
+	output wire [1:0]  dbg_in_type,
+	output wire [31:0] dbg_in_word,
 	output wire [31:0] dbg_popword,
 	output wire [31:0] dbg_disp,    // where the display points, and its mode
 	output wire [31:0] dbg_draw,    // the drawing area and offset
@@ -265,6 +271,10 @@ module ps1_gpu #(
 	reg [1:0]  tp_abr;        // semi-transparency mode
 	reg [1:0]  tp_depth;      // 0 = 4-bit, 1 = 8-bit, 2 = 15-bit
 	reg        dither, draw_display;
+	reg        tflip_x, tflip_y;      // E1 bits 12/13: a textured rectangle's texture runs backwards
+	// texture disable (ps1-tests gpu/gp0-e1): E1 bit 11, or a polygon's texture page bit 11, sets it
+	// only while GP1(09) allows; GPUSTAT 15 shows it, and textured primitives then draw without
+	reg        tex_allow, tex_off;
 	reg [4:0]  tw_mx, tw_my, tw_ox, tw_oy;   // texture window mask/offset (in 8s)
 	reg [9:0]  da_x0, da_x1;  // drawing area
 	reg [8:0]  da_y0, da_y1;
@@ -322,6 +332,13 @@ module ps1_gpu #(
 	// longer than the game's frame. So that capture is abandoned and started
 	// again at the flip; the frame is dropped, never spliced.
 	reg        sc_abort;
+	// 480i (il_skip): a capture reads the field on screen while the engine draws the other, so
+	// it must start as the field turns -- it then has a whole field's time before its rows are
+	// drawn over -- and the two fields must take turns. Started whenever the HDMI side asked,
+	// a capture ran across a field turn (a tear down the boot logo), and only every other scan
+	// was ever kept, so one field's rows were never refreshed: the last game's picture showed
+	// through every other line of the BIOS's screens.
+	reg        il_field_d, il_fresh, il_last;
 	reg [19:0] frame_len;        // how long the last frame was, in clocks
 	// three quarters through, and almost at the end
 	wire [19:0] capture_at = frame_len - (frame_len >> 2);
@@ -366,6 +383,7 @@ module ps1_gpu #(
 	// A read-back is running and the next word is not there yet: the CPU must
 	// wait, as it does on the chip.
 	assign rd_stall = rd_pending && !rd_have;
+	wire        c2v_phase;          // a CPU->VRAM transfer is taking its data (assigned below)
 	wire [31:0] gpustat = {
 		// 31: the line being drawn is odd (0 in vblank); in 480i it is the FIELD,
 		// which toggles every frame -- the BIOS's VSync in that mode waits for it
@@ -376,7 +394,10 @@ module ps1_gpu #(
 		// direction off and then waits for THIS bit before collecting the words,
 		// so a C0 that held it low stalled the BIOS until its 4 s GPU timeout
 		// (the board seemed to pass; it was timing out; the sim never got that far).
-		!busy || rd_pending,
+		// ...and SET while a CPU->VRAM transfer waits for its data: that is exactly when the
+		// chip wants a DMA block. psxsdk's DrawSync after an A0 header waits for this bit,
+		// and held low it waited for ever (ps1-tests dma/chopping)
+		!busy || rd_pending || c2v_phase,
 		rd_have,                    // 27 ready to send VRAM to CPU: a word is actually waiting
 		                            // (the BIOS polls this before every GPUREAD; a 0 read as data
 		                            // leaves the last word in the GPU and it never goes idle)
@@ -400,7 +421,7 @@ module ps1_gpu #(
 		vres480,                    // 19
 		hres,                       // 18:17
 		hres368,                    // 16
-		1'b0,                       // 15 texture disable
+		tex_off,                    // 15 texture disable
 		1'b0,                       // 14 reverse
 		1'b0,                       // 13 interlace field
 		mask_chk,                   // 12
@@ -431,12 +452,15 @@ module ps1_gpu #(
 		D_V2C    = 6'd25, D_V2CR   = 6'd26,
 		D_QUAD2  = 6'd27, D_TEXUSE = 6'd28,
 		D_RAST   = 6'd29,   // ps1_raster is drawing the polygon or rectangle
-		D_GDONE  = 6'd30;   // the last gradient has landed: now the row start
+		D_GDONE  = 6'd30,   // the last gradient has landed: now the row start
+		D_COPYB  = 6'd31, D_COPYBW = 6'd32,   // VRAM -> VRAM: writing the buffered run
+		D_C2VM   = 6'd33, D_COPYM  = 6'd34;   // ...a transfer's write waiting on the mask check
 	reg [5:0]  ds;
 	// consume the FIFO head this cycle in the states that read a word. D_C2V
 	// (CPU->VRAM) also consumes, and adds its own term through c2v_pop below.
 	wire c2v_pop;
 	assign f_pop = !f_empty && f_head_ok && ((ds == D_IDLE) || (ds == D_ARG) || (ds == D_PLNEXT) || c2v_pop);
+	assign c2v_phase = (ds == D_C2V) || (ds == D_C2VW) || (ds == D_C2VM);
 
 	reg [7:0]  cmd;
 	reg [31:0] args [0:15];
@@ -491,12 +515,31 @@ module ps1_gpu #(
 	reg        pix_semi;
 
 	// rectangles and lines
-	reg [9:0]  rw;  reg [8:0] rh;
+	reg [10:0] rw;  reg [8:0] rh;      // (11 bits: a fill rounds 1009..1023 up to 1024)
 	reg signed [11:0] rx, ry, rxe, rye;
 	reg [7:0]  ru0, rv0;
 	reg signed [11:0] lx0, ly0, lx1, ly1;
-	reg signed [12:0] lerr, ldx, ldy;
-	reg        lsx, lsy;
+	// --- a line, as the chip draws it (Mednafen/DuckStation's DDA, which matches the
+	// hardware): k = the longer side; the end with the smaller x first; x and y step by
+	// d/k in 32-bit fixed point from the pixel's centre, nudged (-1024) so a tie rounds
+	// the chip's way; colours step by (c1 - c0) * 4096 / k. Lines 1024 wide or 512 tall
+	// are not drawn. Every pixel dithers when E1 dithering is on -- flat lines too, on the
+	// console (ps1-tests gpu/lines). Bresenham, which this replaced, put the steps of a
+	// shallow line in other places, and drew a Gouraud line in its first colour.
+	reg [2:0]  lst;                     // 0 set up, 1 divide, 2 start, 3 position, 4 plot, 5 done
+	reg [10:0] lk, lcnt;
+	reg signed [11:0] lpx0, lpy0, lddx, lddy;
+	reg signed [44:0] lcx, lcy, lsdx, lsdy;
+	reg signed [20:0] lcr, lcg, lcb, lsr, lsg, lsb;
+	reg [7:0]  lc0r, lc0g, lc0b;
+	reg signed [8:0] ldcr, ldcg, ldcb;
+	reg [1:0]  ldiv;                    // which quotient: 0 the short side, 1-3 r g b
+	reg [43:0] dv_n, dv_q; reg [10:0] dv_r; reg [5:0] dv_i; reg dv_neg;
+	wire [11:0] dv_r2 = {dv_r, dv_n[43]};
+	wire        dv_ge = dv_r2 >= {1'b0, lk};
+	wire [11:0] l_adx = lddx < 0 ? -lddx : lddx;
+	wire [11:0] l_ady = lddy < 0 ? -lddy : lddy;
+	wire        l_xmaj = l_adx >= l_ady;    // x is the long side (or they tie)
 
 	// copies
 	// cx/cw count to 1024 and cy/ch to 512 -- a full-width transfer. Ten bits
@@ -505,6 +548,9 @@ module ps1_gpu #(
 	reg [10:0] cx, cw;
 	reg [9:0]  cy, ch, cxs, cys, cxd, cyd, cxi, cyi;
 	reg [15:0] chold;
+	reg [15:0] cbuf [0:15];          // VRAM -> VRAM: up to 16 pixels read before any is written
+	reg [4:0]  ck, cn;
+	reg        t_skip;                // a transfer's pixel the mask check keeps: no write
 	reg        cphase;              // CPU<->VRAM: which half of the word
 	reg [31:0] cword;
 
@@ -544,6 +590,21 @@ module ps1_gpu #(
 	function [15:0] to555;
 		input [7:0] r, g, b;
 		to555 = {1'b0, b[7:3], g[7:3], r[7:3]};
+	endfunction
+	// the chip's 4x4 dither, added before the colour drops to five bits
+	function [4:0] dith5;
+		input [7:0] c; input [1:0] x, y;
+		reg signed [3:0] o; reg signed [9:0] v;
+		begin
+			case ({y, x})
+			4'h0: o = -4; 4'h1: o =  0; 4'h2: o = -3; 4'h3: o =  1;
+			4'h4: o =  2; 4'h5: o = -2; 4'h6: o =  3; 4'h7: o = -1;
+			4'h8: o = -3; 4'h9: o =  1; 4'hA: o = -4; 4'hB: o =  0;
+			4'hC: o =  3; 4'hD: o = -1; 4'hE: o =  2; default: o = -2;
+			endcase
+			v = $signed({2'b0, c}) + o;
+			dith5 = v[9] ? 5'd0 : v[8] ? 5'd31 : v[7:3];
+		end
 	endfunction
 	function [7:0] sat8;
 		input [8:0] v;
@@ -592,8 +653,10 @@ module ps1_gpu #(
 			8'b0100_????,
 			8'b0101_????: argcount = c[4] ? 5'd3 : 5'd2;        // one segment; polylines below
 			8'b011?_????: argcount = (c[4:3] == 2'd0 ? 1 : 0) + (t ? 1 : 0) + 1;
-			8'h80:      argcount = 5'd3;
-			8'hA0, 8'hC0: argcount = 5'd2;
+			// the transfers decode on their top three bits: 80-9F are all VRAM->VRAM, A0-BF
+			// all CPU->VRAM, C0-DF all VRAM->CPU (psx-spx)
+			8'b100?_????: argcount = 5'd3;
+			8'b101?_????, 8'b110?_????: argcount = 5'd2;
 			default:    argcount = 5'd0;
 			endcase
 		end
@@ -674,7 +737,7 @@ module ps1_gpu #(
 			r_start <= 1'b0; r_rect <= 1'b0; r_bx0 <= 0; r_bx1 <= 0; r_by0 <= 0; r_by1 <= 0; r_e0 <= 0; r_e1 <= 0; r_e2 <= 0;
 			ex0 <= 0; ex1 <= 0; ex2 <= 0; er0 <= 0; er1 <= 0; er2 <= 0;
 			sx0 <= 0; sx1 <= 0; sx2 <= 0; sy0 <= 0; sy1 <= 0; sy2 <= 0;
-			tp_x <= 0; tp_y <= 0; tp_abr <= 0; tp_depth <= 0; dither <= 0; draw_display <= 0;
+			tp_x <= 0; tp_y <= 0; tp_abr <= 0; tp_depth <= 0; dither <= 0; draw_display <= 0; tflip_x <= 1'b0; tflip_y <= 1'b0; t_skip <= 1'b0; tex_allow <= 1'b0; tex_off <= 1'b0;
 			tw_mx <= 0; tw_my <= 0; tw_ox <= 0; tw_oy <= 0;
 			da_x0 <= 0; da_y0 <= 0; da_x1 <= 10'd1023; da_y1 <= 9'd511;
 			dofs_x <= 0; dofs_y <= 0; mask_set <= 0; mask_chk <= 0;
@@ -732,6 +795,7 @@ module ps1_gpu #(
 				6'h05: begin disp_x <= wdata_r[9:0]; disp_y <= wdata_r[18:10]; end
 				6'h06: begin hrange0 <= wdata_r[11:0]; hrange1 <= wdata_r[23:12]; end
 				6'h07: begin vrange0 <= wdata_r[9:0]; vrange1 <= wdata_r[19:10]; end
+				6'h09: tex_allow <= wdata_r[0];
 				6'h08: begin hres <= wdata_r[1:0]; vres480 <= wdata_r[2]; pal <= wdata_r[3];
 				             bpp24 <= wdata_r[4]; interlace <= wdata_r[5]; hres368 <= wdata_r[6]; end
 				// GP1(10h) Get GPU Info (psx-spx): the answer appears on GPUREAD. The
@@ -767,8 +831,9 @@ module ps1_gpu #(
 					case (f_head[31:24])
 					8'h00, 8'h01: begin busy <= 1'b0; end
 					8'h1F: begin irq <= 1'b1; busy <= 1'b0; end
-					8'hE1: begin tp_x <= f_head[3:0]; tp_y <= f_head[4]; tp_abr <= f_head[6:5];
+					8'hE1: begin tp_x <= f_head[3:0]; tp_y <= f_head[4]; tp_abr <= f_head[6:5]; tflip_x <= f_head[12]; tflip_y <= f_head[13];
 					             tp_depth <= f_head[8:7]; dither <= f_head[9]; draw_display <= f_head[10];
+					             tex_off <= tex_allow && f_head[11];
 					             busy <= 1'b0; end
 					8'hE2: begin e2_raw <= f_head[19:0]; tw_mx <= f_head[4:0]; tw_my <= f_head[9:5]; tw_ox <= f_head[14:10];
 					             tw_oy <= f_head[19:15]; busy <= 1'b0; end
@@ -776,7 +841,11 @@ module ps1_gpu #(
 					8'hE4: begin e4_raw <= f_head[18:0]; da_x1 <= f_head[9:0]; da_y1 <= f_head[18:10]; busy <= 1'b0; end
 					8'hE5: begin e5_raw <= f_head[21:0]; dofs_x <= f_head[10:0]; dofs_y <= f_head[21:11]; busy <= 1'b0; end
 					8'hE6: begin mask_set <= f_head[0]; mask_chk <= f_head[1]; busy <= 1'b0; end
-					default: ds <= (argcount(f_head[31:24]) == 0) ? D_IDLE : D_ARG;
+					// anything else with no arguments is a one-word no-op on the chip (03-1E, E0,
+					// E7-EF): the engine must say it is ready again. It used to stay busy for good,
+					// and the BIOS's libgpu then waited out its 'GPU timeout' -- seconds a frame.
+					default: if (argcount(f_head[31:24]) == 0) begin busy <= 1'b0; ds <= D_IDLE; end
+					         else ds <= D_ARG;
 					endcase
 				end
 
@@ -791,22 +860,26 @@ module ps1_gpu #(
 			D_HEAD: begin
 					casez (cmd)
 					8'h02: begin                                  // fill
-						rx  <= {2'b0, w1[9:0]};  ry <= {3'b0, w1[24:16]};
-						rw  <= (w2[9:0] + 10'h0F) & 10'h3F0;      // width rounds up to 16, as the chip does
+						// psx-spx: X start AND 3F0h, width ((n AND 3FFh) + 0Fh) AND NOT 0Fh -- which
+						// reaches 1024 for 1009..1023, and the fill then wraps round the whole row.
+						// Done in 10 bits that width came out 0 and the fill drew nothing
+						// (ps1-tests gpu/triangle clears its last quarter with width 1009).
+						rx  <= {2'b0, w1[9:4], 4'b0};  ry <= {3'b0, w1[24:16]};
+						rw  <= ({1'b0, w2[9:0]} + 11'h0F) & 11'h7F0;
 						rh  <= w2[24:16];
-						rxe <= {2'b0, w1[9:0]};
+						rxe <= {2'b0, w1[9:4], 4'b0};
 						wpix <= to555(w0[7:0], w0[15:8], w0[23:16]);
 						ds <= D_FILL;
 					end
 					8'b001?_????: begin                           // polygon
 						rxe <= 0; in_line <= 1'b0;
-						is_gour <= cmd[4]; is_quad <= cmd[3]; is_tex <= cmd[2];
+						is_gour <= cmd[4]; is_quad <= cmd[3]; is_tex <= cmd[2] && !tex_off;
 						is_semi <= cmd[1]; is_raw <= cmd[0];
 						unpack_poly();
 						ds <= D_TRI;
 					end
 					8'b011?_????: begin                           // rectangle
-						is_tex <= cmd[2]; is_semi <= cmd[1]; is_raw <= cmd[0];
+						is_tex <= cmd[2] && !tex_off; is_semi <= cmd[1]; is_raw <= cmd[0];
 						vr[0] <= w0[7:0]; vg[0] <= w0[15:8]; vb[0] <= w0[23:16];
 						rx <= $signed(w1[10:0]) + dofs_x; ry <= $signed(w1[26:16]) + dofs_y;
 						case (cmd[4:3])
@@ -829,23 +902,23 @@ module ps1_gpu #(
 						end else begin
 							lx1 <= $signed(w2[10:0]) + dofs_x; ly1 <= $signed(w2[26:16]) + dofs_y;
 						end
-						ds <= D_LINE; rxe <= 0; in_line <= 1'b1;
+						ds <= D_LINE; rxe <= 0; in_line <= 1'b1; lst <= 3'd0;
 					end
-					8'h80: begin                                  // VRAM -> VRAM
+					8'b100?_????: begin                           // VRAM -> VRAM
 						cxs <= w1[9:0]; cys <= w1[24:16]; cxd <= w2[9:0]; cyd <= w2[24:16];
 						cw <= (w3[9:0] == 0) ? 11'd1024 : {1'b0, w3[9:0]};   // 0 means max
 						ch <= (w3[24:16] == 0) ? 10'd512 : {1'b0, w3[24:16]};
 						cx <= 0; cy <= 0;
 						ds <= D_COPY;
 					end
-					8'hA0: begin                                  // CPU -> VRAM
+					8'b101?_????: begin                           // CPU -> VRAM
 						cxd <= w1[9:0]; cyd <= w1[24:16];
 						cw <= (w2[9:0] == 0) ? 11'd1024 : {1'b0, w2[9:0]};
 						ch <= (w2[24:16] == 0) ? 10'd512 : {1'b0, w2[24:16]};
 						cx <= 0; cy <= 0; cphase <= 1'b0;
 						ds <= D_C2V;
 					end
-					8'hC0: begin                                  // VRAM -> CPU
+					8'b110?_????: begin                           // VRAM -> CPU
 						cxs <= w1[9:0]; cys <= w1[24:16];
 						cw <= (w2[9:0] == 0) ? 11'd1024 : {1'b0, w2[9:0]};
 						ch <= (w2[24:16] == 0) ? 10'd512 : {1'b0, w2[24:16]};
@@ -869,13 +942,18 @@ module ps1_gpu #(
 				else if (rxe >= $signed({2'b0, rx}) + $signed({2'b0, rw})) begin
 					rxe <= rx; ry <= ry + 12'd1; rh <= rh - 9'd1;
 				end else begin
-					e_addr <= vaddr(rxe[9:0], ry[8:0]);
+					// a fill starts on a 16-pixel boundary and is a multiple of 16 wide, so it
+					// goes out a whole VRAM line -- eight pixels -- at a time (it went two at a
+					// time, and a 1024 x 512 clear took longer than a frame: ps1-tests' frames
+					// were never finished when they were looked at)
+					e_addr <= vaddr({rxe[9:3], 3'd0}, ry[8:0]);
 					e_be   <= 4'b1111;
 					e_wdata <= {wpix, wpix};
+					v_lwe  <= 1'b1; v_wdata128 <= {8{wpix}};
 					e_we   <= 1'b1; e_req <= 1'b1;
 					ds <= D_FILLW;
 				end
-			D_FILLW: if (v_ack) begin rxe <= rxe + 12'd2; ds <= D_FILL; end
+			D_FILLW: if (v_ack) begin rxe <= rxe + 12'd8; ds <= D_FILL; end
 
 			// -------------------------------------------------------------------------------
 			// polygon: set up the triangle, compute gradients, scan
@@ -1067,8 +1145,12 @@ module ps1_gpu #(
 					r_bx0 <= rx; r_bx1 <= rx + $signed({2'b0, rw}) - 12'sd1;
 					r_by0 <= ry; r_by1 <= ry + $signed({3'b0, rh}) - 12'sd1;
 					r_e0 <= 24'd0; r_e1 <= 24'd0; r_e2 <= 24'd0;
-					cu <= {8'd0, ru0, 16'd0}; cv <= {8'd0, rv0, 16'd0};
-					du_dx <= 32'h10000; dv_dx <= 32'd0; du_dy <= 32'd0; dv_dy <= 32'h10000;
+					// (an X-flipped rectangle starts a texel on: u0+1, u0, u0-1 ... on the console --
+					// ps1-tests gpu/texture-flip; the Y flip has no such offset)
+					cu <= {8'd0, ru0 + (tflip_x ? 8'd1 : 8'd0), 16'd0}; cv <= {8'd0, rv0, 16'd0};
+					// (E1's flips run the texture backwards: ps1-tests gpu/texture-flip)
+					du_dx <= tflip_x ? -32'sh10000 : 32'h10000; dv_dx <= 32'd0; du_dy <= 32'd0;
+					dv_dy <= tflip_y ? -32'sh10000 : 32'h10000;
 					r_start <= 1'b1;
 					ds <= D_RAST;
 				end
@@ -1083,38 +1165,107 @@ module ps1_gpu #(
 				end
 
 
-			D_LINE: begin
-					if (rxe == 0) begin
-						// set up
-						ldx <= (lx1 > lx0) ? lx1 - lx0 : lx0 - lx1;
-						ldy <= (ly1 > ly0) ? -(ly1 - ly0) : -(ly0 - ly1);
-						lsx <= (lx1 > lx0); lsy <= (ly1 > ly0);
-						lerr <= ((lx1 > lx0) ? lx1 - lx0 : lx0 - lx1)
-						      + ((ly1 > ly0) ? -(ly1 - ly0) : -(ly0 - ly1));
-						px <= lx0; py <= ly0;
-						rxe <= 2;                             // "in a line"
-					end else if (rxe == 3) begin
-						// finished; a polyline continues from this end point
-						rxe <= 0; ldx <= 0; ldy <= 0;
-						if (is_poly) begin lx0 <= lx1; ly0 <= ly1; ds <= D_PLNEXT; end
-						else begin busy <= 1'b0; in_line <= 1'b0; ds <= D_IDLE; end
-					end else begin
-						// plot, then step
-						if (in_area) begin
-							wx <= px[9:0]; wy <= py[8:0]; pix_semi <= is_semi;
-							wpix <= to555(vr[0], vg[0], vb[0]);
-							is_tex <= 1'b0;
-							ds <= (is_semi || mask_chk) ? D_BLEND : D_WRITE;
+			D_LINE: case (lst)
+				3'd0: begin : l_setup
+					// the ends, offset and cut to 11 bits as every vertex is
+					reg signed [11:0] ax, ay, bx, by, adx, ady, kk;
+					reg sw;
+					ax = {lx0[10], lx0[10:0]}; ay = {ly0[10], ly0[10:0]};
+					bx = {lx1[10], lx1[10:0]}; by = {ly1[10], ly1[10:0]};
+					adx = (bx > ax) ? bx - ax : ax - bx;
+					ady = (by > ay) ? by - ay : ay - by;
+					kk  = (adx > ady) ? adx : ady;
+					sw  = (ax >= bx) && (kk != 0);
+					lk  <= kk[10:0];
+					lpx0 <= sw ? bx : ax; lpy0 <= sw ? by : ay;
+					lddx <= sw ? ax - bx : bx - ax; lddy <= sw ? ay - by : by - ay;
+					lc0r <= (is_gour && sw) ? vr[1] : vr[0];
+					lc0g <= (is_gour && sw) ? vg[1] : vg[0];
+					lc0b <= (is_gour && sw) ? vb[1] : vb[0];
+					ldcr <= !is_gour ? 9'sd0 : sw ? $signed({1'b0, vr[0]}) - $signed({1'b0, vr[1]}) : $signed({1'b0, vr[1]}) - $signed({1'b0, vr[0]});
+					ldcg <= !is_gour ? 9'sd0 : sw ? $signed({1'b0, vg[0]}) - $signed({1'b0, vg[1]}) : $signed({1'b0, vg[1]}) - $signed({1'b0, vg[0]});
+					ldcb <= !is_gour ? 9'sd0 : sw ? $signed({1'b0, vb[0]}) - $signed({1'b0, vb[1]}) : $signed({1'b0, vb[1]}) - $signed({1'b0, vb[0]});
+					lsdx <= 45'sd0; lsdy <= 45'sd0; lsr <= 21'sd0; lsg <= 21'sd0; lsb <= 21'sd0;
+					ldiv <= 2'd0; dv_i <= 6'd0;
+					if (adx >= 12'sd1024 || ady >= 12'sd512) lst <= 3'd5;        // too big: not drawn
+					else if (kk == 0) lst <= 3'd2;
+					else lst <= 3'd1;
+				end
+				// one quotient at a time, a bit a clock: the short side's step, then the colours'
+				3'd1: if (dv_i == 6'd0) begin : l_load
+					reg [11:0] m; reg [8:0] c;
+					case (ldiv)
+					2'd0: begin
+						m = l_xmaj ? l_ady : l_adx;
+						dv_neg <= l_xmaj ? (lddy < 0) : (lddx < 0);
+						dv_n <= (m == 0) ? 44'd0 : ({1'b0, m[10:0], 32'd0} + {33'd0, lk} - 44'd1);
+					end
+					2'd1: begin c = ldcr[8] ? -ldcr : ldcr; dv_neg <= ldcr[8]; dv_n <= {24'd0, c[7:0], 12'd0}; end
+					2'd2: begin c = ldcg[8] ? -ldcg : ldcg; dv_neg <= ldcg[8]; dv_n <= {24'd0, c[7:0], 12'd0}; end
+					default: begin c = ldcb[8] ? -ldcb : ldcb; dv_neg <= ldcb[8]; dv_n <= {24'd0, c[7:0], 12'd0}; end
+					endcase
+					dv_r <= 11'd0; dv_q <= 44'd0; dv_i <= 6'd44;
+				end else begin
+					dv_r <= dv_ge ? dv_r2[10:0] - lk : dv_r2[10:0];
+					dv_q <= {dv_q[42:0], dv_ge};
+					dv_n <= {dv_n[42:0], 1'b0};
+					dv_i <= dv_i - 6'd1;
+					if (dv_i == 6'd1) begin : l_store
+						reg [43:0] q;
+						q = {dv_q[42:0], dv_ge};
+						case (ldiv)
+						2'd0: begin
+							// the long side steps a whole pixel; the short one by the quotient
+							if (l_xmaj) begin
+								lsdx <= lddx < 0 ? -45'sh1_0000_0000 : 45'sh1_0000_0000;
+								lsdy <= dv_neg ? -$signed({1'b0, q}) : $signed({1'b0, q});
+							end else begin
+								lsdy <= lddy < 0 ? -45'sh1_0000_0000 : 45'sh1_0000_0000;
+								lsdx <= dv_neg ? -$signed({1'b0, q}) : $signed({1'b0, q});
+							end
 						end
-						if (px == lx1 && py == ly1) begin rxe <= 3; ldx <= 1; end
-						else begin
-							if ((lerr << 1) >= ldy) begin lerr <= lerr + ldy + ((lerr << 1) <= ldx ? ldx : 0);
-							                              px <= lsx ? px + 1 : px - 1;
-							                              if ((lerr << 1) <= ldx) py <= lsy ? py + 1 : py - 1; end
-							else begin lerr <= lerr + ldx; py <= lsy ? py + 1 : py - 1; end
-						end
+						2'd1: lsr <= dv_neg ? -$signed({1'b0, q[19:0]}) : $signed({1'b0, q[19:0]});
+						2'd2: lsg <= dv_neg ? -$signed({1'b0, q[19:0]}) : $signed({1'b0, q[19:0]});
+						default: lsb <= dv_neg ? -$signed({1'b0, q[19:0]}) : $signed({1'b0, q[19:0]});
+						endcase
+						if (ldiv == 2'd3 || (ldiv == 2'd0 && !is_gour)) lst <= 3'd2;
+						else ldiv <= ldiv + 2'd1;
 					end
 				end
+				3'd2: begin
+					lcx <= ($signed({lpx0[11], lpx0, 32'd0}) | 45'sh0_8000_0000) - 45'sd1024;
+					lcy <= ($signed({lpy0[11], lpy0, 32'd0}) | 45'sh0_8000_0000) - (lsdy < 0 ? 45'sd1024 : 45'sd0);
+					lcr <= $signed({1'b0, lc0r, 12'h800}); lcg <= $signed({1'b0, lc0g, 12'h800}); lcb <= $signed({1'b0, lc0b, 12'h800});
+					lcnt <= 11'd0;
+					lst <= 3'd3;
+				end
+				3'd3: begin
+					px <= {lcx[42], lcx[42:32]}; py <= {lcy[42], lcy[42:32]};
+					lst <= 3'd4;
+				end
+				3'd4: begin
+					if (in_area) begin
+						wx <= px[9:0]; wy <= py[8:0]; pix_semi <= is_semi;
+						wpix <= dither ? {1'b0, dith5(lcb[19:12], px[1:0], py[1:0]), dith5(lcg[19:12], px[1:0], py[1:0]), dith5(lcr[19:12], px[1:0], py[1:0])}
+						               : to555(lcr[19:12], lcg[19:12], lcb[19:12]);
+						is_tex <= 1'b0;
+						ds <= (is_semi || mask_chk) ? D_BLEND : D_WRITE;
+					end
+					lcx <= lcx + lsdx; lcy <= lcy + lsdy;
+					lcr <= lcr + lsr; lcg <= lcg + lsg; lcb <= lcb + lsb;
+					lcnt <= lcnt + 11'd1;
+					lst <= (lcnt == lk) ? 3'd5 : 3'd3;
+				end
+				default: begin
+					// finished; a polyline goes on from this end, in this end's colour
+					rxe <= 0; lst <= 3'd0;
+					if (is_poly) begin
+						lx0 <= lx1; ly0 <= ly1;
+						if (is_gour) begin vr[0] <= vr[1]; vg[0] <= vg[1]; vb[0] <= vb[1]; end
+						ds <= D_PLNEXT;
+					end else begin busy <= 1'b0; in_line <= 1'b0; ds <= D_IDLE; end
+				end
+				endcase
 
 			// A polyline's remaining words: a vertex per segment (with a colour first
 			// when Gouraud), until a word whose bits 31:28 and 15:12 are both 5.
@@ -1124,43 +1275,75 @@ module ps1_gpu #(
 					if ((f_head & 32'hF000_F000) == 32'h5000_5000) begin
 						busy <= 1'b0; in_line <= 1'b0; ds <= D_IDLE;
 					end else if (pl_col) begin
-						vr[0] <= f_head[7:0]; vg[0] <= f_head[15:8]; vb[0] <= f_head[23:16];
+						vr[1] <= f_head[7:0]; vg[1] <= f_head[15:8]; vb[1] <= f_head[23:16];   // the next end's colour
 						pl_col <= 1'b0;
 					end else begin
 						lx1 <= $signed(f_head[10:0]) + dofs_x; ly1 <= $signed(f_head[26:16]) + dofs_y;
 						pl_col <= is_gour;
-						ds <= D_LINE;
+						ds <= D_LINE; lst <= 3'd0;
 					end
 				end
 
 			// -------------------------------------------------------------------------------
 			// VRAM -> VRAM, halfword at a time (wraps at 1024/512 as the chip does)
+			// a row goes in runs of up to 16 pixels, each read in full before any of it is
+			// written: a copy one to three pixels to the right of itself then comes out as a
+			// clean shifted copy, as on the chip (ps1-tests gpu/vram-to-vram-overlap), where a
+			// pixel at a time read back what it had just written and smeared it along the row
 			D_COPY: if (cy == ch) begin busy <= 1'b0; ds <= D_IDLE; end
 				else if (cx == cw) begin cx <= 0; cy <= cy + 10'd1; end
 				else begin
+					cn <= ((cw - cx) > 11'd16) ? 5'd16 : (cw - cx);
+					ck <= 5'd0;
 					e_addr <= vaddr(cxs + cx, cys + cy[8:0]); e_be <= 4'b1111; e_we <= 1'b0; e_req <= 1'b1;
 					ds <= D_COPYR;
 				end
 			D_COPYR: if (v_ack) begin
-					chold <= half(v_rdata, (cxs + cx) & 1);
-					e_addr <= vaddr(cxd + cx, cyd + cy[8:0]); e_be <= vbe(cxd + cx);
-					e_wdata <= {2{half(v_rdata, (cxs + cx) & 1)}};
-					e_we <= 1'b1; e_req <= 1'b1;
-					ds <= D_COPYW;
+					cbuf[ck[3:0]] <= half(v_rdata, (cxs + cx + ck) & 1);
+					if (ck + 5'd1 < cn) begin
+						ck <= ck + 5'd1;
+						e_addr <= vaddr(cxs + cx + ck + 5'd1, cys + cy[8:0]); e_req <= 1'b1;
+					end else begin
+						ck <= 5'd0; ds <= D_COPYB;
+					end
 				end
-			D_COPYW: if (v_ack) begin e_we <= 1'b0; cx <= cx + 10'd1; ds <= D_COPY; end
+			D_COPYB: begin
+					e_addr <= vaddr(cxd + cx + ck, cyd + cy[8:0]); e_be <= vbe(cxd + cx + ck);
+					e_wdata <= {2{cbuf[ck[3:0]] | {mask_set, 15'd0}}};
+					chold <= cbuf[ck[3:0]] | {mask_set, 15'd0};
+					if (mask_chk) begin e_we <= 1'b0; e_req <= 1'b1; ds <= D_COPYM; end
+					else begin e_we <= 1'b1; e_req <= 1'b1; ds <= D_COPYBW; end
+				end
+			D_COPYM: if (v_ack) begin
+					if (half(v_rdata, (cxd + cx + ck) & 1) & 16'h8000) begin t_skip <= 1'b1; ds <= D_COPYBW; end
+					else begin e_wdata <= {2{chold}}; e_we <= 1'b1; e_req <= 1'b1; ds <= D_COPYBW; end
+				end
+			D_COPYBW: if (t_skip || v_ack) begin
+					t_skip <= 1'b0;
+					e_we <= 1'b0;
+					if (ck + 5'd1 < cn) begin ck <= ck + 5'd1; ds <= D_COPYB; end
+					else begin cx <= cx + cn; ds <= D_COPY; end
+				end
 
 			// CPU -> VRAM: words arrive through the FIFO, two pixels each
 			D_C2V: if (cy == ch) begin busy <= 1'b0; ds <= D_IDLE; end
 				else if (cx == cw) begin cx <= 0; cy <= cy + 10'd1; end
 				else if (cphase || (!f_empty && f_head_ok)) begin
+					// GP0(E6) applies to a transfer as to drawing (ps1-tests gpu/mask-bit): bit 15
+					// set on the way in, and a pixel whose destination has it kept
 					if (!cphase) cword <= f_head;
+					chold <= (cphase ? cword[31:16] : f_head[15:0]) | {mask_set, 15'd0};
 					e_addr <= vaddr(cxd + cx, cyd + cy[8:0]); e_be <= vbe(cxd + cx);
-					e_wdata <= cphase ? {cword[31:16], cword[31:16]} : {f_head[15:0], f_head[15:0]};
-					e_we <= 1'b1; e_req <= 1'b1;
-					ds <= D_C2VW;
+					e_wdata <= {2{(cphase ? cword[31:16] : f_head[15:0]) | {mask_set, 15'd0}}};
+					if (mask_chk) begin e_we <= 1'b0; e_req <= 1'b1; ds <= D_C2VM; end
+					else begin e_we <= 1'b1; e_req <= 1'b1; ds <= D_C2VW; end
 				end
-			D_C2VW: if (v_ack) begin
+			D_C2VM: if (v_ack) begin
+					if (half(v_rdata, (cxd + cx) & 1) & 16'h8000) begin t_skip <= 1'b1; ds <= D_C2VW; end
+					else begin e_wdata <= {2{chold}}; e_we <= 1'b1; e_req <= 1'b1; ds <= D_C2VW; end
+				end
+			D_C2VW: if (t_skip || v_ack) begin
+					t_skip <= 1'b0;
 					e_we <= 1'b0; cx <= cx + 10'd1;
 					// an odd-width row ends mid-word; the chip still consumes the word
 					cphase <= !cphase;
@@ -1173,6 +1356,12 @@ module ps1_gpu #(
 			// rd_word is a single register, and running ahead overwrote it --
 			// a CPU polling GPUREAD saw one word in a thousand and the rest 0.
 			D_V2C: if (rd_have) ;   // wait for GPUREAD / the DMA to take the word -- the last one too
+				// an odd number of pixels ends half way through a word: that word goes out too
+				// (ps1-tests gpu/mask-bit reads ONE pixel back, and waited for ever for its word)
+				else if (cy == ch && cphase) begin
+					rd_word <= {16'd0, cword[15:0]}; rd_have <= 1'b1; cphase <= 1'b0;
+					n_made  <= n_made + 8'd1;
+				end
 				else if (cy == ch) begin busy <= 1'b0; rd_pending <= 1'b0; ds <= D_IDLE; end
 				else if (cx == cw) begin cx <= 0; cy <= cy + 10'd1; end
 				else begin
@@ -1207,7 +1396,7 @@ module ps1_gpu #(
 				argc   <= 0;
 				need   <= 0;
 				second <= 1'b0;
-				skip   <= 1'b0;
+				skip   <= 1'b0; t_skip <= 1'b0;
 				in_line<= 1'b0;
 				rxe    <= 0;
 				rd_have    <= 1'b0;
@@ -1252,6 +1441,7 @@ module ps1_gpu #(
 							// the texture page rides on the second vertex
 							tp_x <= args[idx][19:16]; tp_y <= args[idx][20];
 							tp_abr <= args[idx][22:21]; tp_depth <= args[idx][24:23];
+							tex_off <= tex_allow && args[idx][27];
 						end
 						idx = idx + 1;
 					end
@@ -1314,11 +1504,14 @@ module ps1_gpu #(
 			b0 = {8'd0, vi(2, 0), 8'd0} << 8;
 			u0 = {8'd0, vi(3, 0), 8'd0} << 8;
 			v0 = {8'd0, vi(4, 0), 8'd0} << 8;
-			r0 = r0 + dr_dx * ddx + dr_dy * ddy;
-			g0 = g0 + dg_dx * ddx + dg_dy * ddy;
-			b0 = b0 + db_dx * ddx + db_dy * ddy;
-			u0 = u0 + du_dx * ddx + du_dy * ddy;
-			v0 = v0 + dv_dx * ddx + dv_dy * ddy;
+			// ...plus half a step: the chip rounds an interpolated colour or texture
+			// coordinate to the nearest, not down (ps1-tests gpu/uv-interpolation: a strip
+			// from texel 0 to texel 1 turns to texel 1 half way across, and ours never did)
+			r0 = r0 + dr_dx * ddx + dr_dy * ddy + 32'sh8000;
+			g0 = g0 + dg_dx * ddx + dg_dy * ddy + 32'sh8000;
+			b0 = b0 + db_dx * ddx + db_dy * ddy + 32'sh8000;
+			u0 = u0 + du_dx * ddx + du_dy * ddy + 32'sh8000;
+			v0 = v0 + dv_dx * ddx + dv_dy * ddy + 32'sh8000;
 			rr <= r0; rg_ <= g0; rb <= b0; ru <= u0; rv <= v0;
 			cr <= r0; cg <= g0; cb <= b0; cu <= u0; cv <= v0;
 		end
@@ -1336,7 +1529,7 @@ module ps1_gpu #(
 		.cr_0(cr), .cg_0(cg), .cb_0(cb), .cu_0(cu), .cv_0(cv),
 		.dr_dx(dr_dx), .dg_dx(dg_dx), .db_dx(db_dx), .du_dx(du_dx), .dv_dx(dv_dx),
 		.dr_dy(dr_dy), .dg_dy(dg_dy), .db_dy(db_dy), .du_dy(du_dy), .dv_dy(dv_dy),
-		.is_gour(is_gour), .is_tex(is_tex), .is_semi(is_semi), .is_raw(is_raw),
+		.is_gour(is_gour), .is_tex(is_tex), .is_semi(is_semi), .is_raw(is_raw), .dither(dither),
 		.fr(vr[0]), .fg(vg[0]), .fb(vb[0]),
 		.tp_x(tp_x), .tp_y(tp_y), .tp_abr(tp_abr), .tp_depth(tp_depth), .clut(clut),
 		.tw_mx(tw_mx), .tw_my(tw_my), .tw_ox(tw_ox), .tw_oy(tw_oy),
@@ -1444,6 +1637,7 @@ module ps1_gpu #(
 	reg         sc_il;
 	wire [8:0]  out_y   = sc_il ? {sy[7:0], sc_field} : sy;
 	assign cap_weave = sc_il;
+	assign cap_field = sc_field;
 	wire [8:0]  sc_last = (sc_v480 && !sc_il) ? 9'd479 : 9'd239;
 	wire [28:0] s_next = vaddr(sc_x + sx, sc_y + out_y);
 	wire [8:0]  src_y   = sc_y + out_y;
@@ -1520,6 +1714,9 @@ module ps1_gpu #(
 			fpx_valid  <= 1'b0;
 			fl_valid   <= 1'b0;
 			scan_start <= 1'b0;
+			il_field_d <= field;
+			if (field != il_field_d) il_fresh <= 1'b1;            // the field has just turned
+			else if (rc_y == 9'd40) il_fresh <= 1'b0;             // ...too long ago to start now
 			scan_done  <= 1'b0;
 			scan_abort <= 1'b0;
 			// s_req is held, not pulsed, for the same reason v_req is: the cache
@@ -1547,12 +1744,13 @@ module ps1_gpu #(
 			SC_IDLE: if (scan_enable && want_scan
 			          && (flip_pend                // a double-buffered game: at its flip, and only then
 			              || flips_recent == 2'd0 && (
-			                 il_skip                 // 480i: every field, the one on screen (see out_y)
+			                 il_skip && il_fresh && (field != il_last)   // 480i: as each field turns, the fields in turn
 			              || !il_skip && (!busy && f_empty && !dma_active)
 			              && (frame_len == 20'd0 || post_vsync >= capture_at)
 			              || !il_skip && (frame_len != 20'd0 && post_vsync >= late_at
 			                  && (arm_ticks == 2'd3 || cap_every_vsync))))) begin
 					sc_field <= field; sc_il <= il_skip; sc_abort <= 1'b0;
+					il_fresh <= 1'b0; il_last <= field;
 					sc_crop  <= flip_pend && !vres480 && (sc_ylo <= sc_yhi);   // (the bounds are rows under 240)   // a flipping game, and it drew something
 					sx <= 0; sy <= 0; ox <= 0; substep <= 0;
 					step <= (hres == 2'd0) ? 2'd1 : (hres == 2'd1) ? 2'd1 : 2'd2;   // 256/320 -> 1:1, 512/640 -> 2:1
@@ -1716,7 +1914,10 @@ module ps1_gpu #(
 	// one that is merely slow shows them sweeping.
 	assign dbg_gpu  = {disp_on, busy, ds[5:0], cmd[7:0], argc[3:0], f_count[11:0]};   // fits 32 bits: the count is capped for display
 	assign dbg_gpu2 = cmd_hist;
-	assign dbg_pop = f_pop; assign dbg_popword = f_head;
+	assign dbg_pop = f_pop; assign dbg_popword = f_head; assign dbg_pophead = f_pop && (ds == D_IDLE);
+	assign dbg_in_v    = f_push || (wr_r && a4_r);
+	assign dbg_in_type = f_push ? {1'b0, dma_wr} : 2'd2;
+	assign dbg_in_word = f_push ? f_in : wdata_r;
 
 	// what is shown versus what is drawn: if these never meet, the screen is static
 	assign dbg_disp = {disp_on, hres, vres480, interlace, 1'b0, disp_y, 7'd0, disp_x};

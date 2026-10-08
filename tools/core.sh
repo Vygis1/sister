@@ -46,7 +46,7 @@ case "${1:-nes}" in
          # unroutable. It cost a build to find out.
          EXTRA="-ip $MIG_XCI" ;;
   ps1|playstation)
-         NAME=ps1;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:1 -gen CLK_DIV:${PS1_DIV:-20} -gen PS1_DBG:${PS1_DBG:-1}"
+         NAME=ps1;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:1 -gen CLK_DIV:${PS1_DIV:-20} -gen PS1_DBG:${PS1_DBG:-1} -gen JTAG_DBG:${JTAG:-0}"
          # The PlayStation keeps 1 MB of VRAM in DDR3, so like the Mega Drive it
          # needs the memory controller. Its boot program is baked into the core.
          EXTRA="-ip $MIG_XCI" ;;
@@ -65,6 +65,13 @@ case "${1:-nes}" in
   shell) NAME=shell; TOP=shell_top; XDC=boards/qmtech_a100t/shell_top.xdc ;;
   *) echo "usage: tools/core.sh [nes|sms|md|ps1|n64|snes|dev|shell]" >&2; exit 1 ;;
 esac
+# JTAG=1: the register bus over the JTAG cable (eth_top JTAG_DBG, tools/jtag.py) -- the
+# jtag_axi core generated once by tools/jtagaxi.tcl
+if [ "${JTAG:-0}" = 1 ]; then
+  JTAG_XCI=build/jtagaxi_gen/jtagaxi_gen.srcs/sources_1/ip/jtag_axi_0/jtag_axi_0.xci
+  [ -f "$JTAG_XCI" ] || { echo "no $JTAG_XCI: run tools/jtagaxi.tcl first" >&2; exit 1; }
+  EXTRA="$EXTRA -ip $JTAG_XCI"
+fi
 
 LOG="build/core_$NAME.log"
 # each core in a folder of its own, so two can build at once

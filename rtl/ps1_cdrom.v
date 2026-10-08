@@ -62,6 +62,11 @@
 module ps1_cdrom #(
 	parameter ACK_CYCLES    = 20000,     // command -> INT3 first response
 	parameter SECOND_CYCLES = 120000,    // INT3 acknowledged -> INT2/INT5 second response
+	// the console's own delays where they differ (psx-spx, ps1-tests cdrom/timing): Init is
+	// acknowledged later than other commands and completes in ~14 ms, Pause in ~30 ms
+	parameter INIT_ACK_CYCLES  = ACK_CYCLES,
+	parameter INIT_DONE_CYCLES = SECOND_CYCLES,
+	parameter PAUSE_DONE_CYCLES = SECOND_CYCLES,
 	parameter SEEK_CYCLES   = 2000000,   // a seek: 40 ms (the real drive: 40-800 ms)
 	parameter SECTOR_1X     = 666667,    // 1/75 s at 50 MHz
 	parameter SECTOR_2X     = 333333,    // 1/150 s
@@ -209,7 +214,7 @@ module ps1_cdrom #(
 	reg [4:0]  rsp_wr, rsp_rd;
 	wire       prm_empty = (prm_wr == prm_rd);
 	wire       prm_full  = (prm_wr[3:0] == prm_rd[3:0]) && (prm_wr[4] != prm_rd[4]);
-	wire       rsp_empty = (rsp_wr == rsp_rd);
+	wire       rsp_empty = !(rsp_rd < rsp_wr);
 	// the command in flight and its scheduling
 	reg [7:0]  cmd;
 	reg        cmd_pend;
@@ -366,6 +371,10 @@ module ps1_cdrom #(
 	reg         pl_v;                 // the player has a sector
 	wire        play_pop = playing && !seeking && !pl_v && ring_has;
 	wire        any_pop  = pop || play_pop;
+	// A sector nobody collects is overwritten, as on the drive: when a fifth would be held
+	// delivered-but-unread, the oldest goes. Kept, a program that only counts INT1s
+	// (ps1-tests cdrom/timing) filled the ring in seven sectors and the drive stopped.
+	wire        ld_drop   = any_pop && (ld_cnt >= 4'd4) && !lp_skip && !fifo_load;
 	wire [7:0]  ff_bcd   = bin2bcd(pos_ff);
 
 	// XA: the queue of sectors for the PC, and the FIFO of samples it sends back
@@ -419,8 +428,8 @@ module ps1_cdrom #(
 				fill_lba <= fill_lba + 24'd1;
 			end
 			r_cnt  <= r_cnt + {3'd0, sb_take} - {3'd0, any_pop};
-			ld_cnt <= ld_cnt + {3'd0, any_pop} - {3'd0, fifo_load} - {3'd0, lp_skip};
-			if (lp_skip) begin r_lp <= r_lp + 3'd1; slot_skip[r_lp] <= 1'b0; end
+			ld_cnt <= ld_cnt + {3'd0, any_pop} - {3'd0, fifo_load} - {3'd0, lp_skip} - {3'd0, ld_drop};
+			if (lp_skip || ld_drop) begin r_lp <= r_lp + 3'd1; slot_skip[r_lp] <= 1'b0; end
 			xa_rd <= 1'b0;
 			if (xa_pop && xa_count != 5'd0) xaq_rp <= xaq_rp + 5'd1;
 
@@ -497,7 +506,10 @@ module ps1_cdrom #(
 					2'd1: begin                                                    // HCLRCTL
 						if (wdata[26:24] != 3'd0) begin
 							int_flag <= 3'd0;                                      // acknowledge
-							rsp_rd <= rsp_wr;                                      // the response is consumed with it
+							// ...and the reply stays readable: the drive's controller only drains it
+							// when it posts the next one. PSn00bSDK acknowledges FIRST and reads the
+							// reply a few microseconds later (psxcd common.c); drained here, every
+							// status and position it read came back 00.
 							if (second_pend) begin second_wait <= 1'b1; timer <= 22'd0; end
 						end
 						if (wdata[30]) begin prm_wr <= 5'd0; prm_rd <= 5'd0; end   // clear parameter FIFO
@@ -509,8 +521,10 @@ module ps1_cdrom #(
 					default: ;
 					endcase
 				end
-			end else if (sel && !we && (be == 4'b0010) && !rsp_empty) begin
-				rsp_rd <= rsp_rd + 5'd1;                                          // RESULT pop
+			end else if (sel && !we && (be == 4'b0010)) begin
+				// RESULT: past the reply it reads 00 to the 16th byte, then starts again at the
+				// first (psx-spx) -- it never stops on an empty FIFO
+				rsp_rd <= (rsp_rd[3:0] == 4'd15) ? 5'd0 : rsp_rd + 5'd1;
 			end
 
 			// ---- the data FIFO: loading, CPU bytes, DMA words ----
@@ -536,7 +550,7 @@ module ps1_cdrom #(
 
 			// ---- first response, after the acknowledge delay ----
 			if (cmd_pend) begin
-				if (timer != ACK_CYCLES[21:0]) timer <= timer + 22'd1;
+				if (timer != ((cmd == 8'h0A) ? INIT_ACK_CYCLES[21:0] : ACK_CYCLES[21:0])) timer <= timer + 22'd1;
 				else if (int_flag == 3'd0) begin
 					cmd_pend <= 1'b0; busy <= 1'b0;
 					rsp_wr <= 5'd0; rsp_rd <= 5'd0;
@@ -718,7 +732,7 @@ module ps1_cdrom #(
 
 			// ---- second response, once the first was acknowledged and time has passed ----
 			if (second_wait) begin
-				if (timer != SECOND_CYCLES[21:0]) timer <= timer + 22'd1;
+				if (timer != ((cmd == 8'h0A) ? INIT_DONE_CYCLES[21:0] : (cmd == 8'h09) ? PAUSE_DONE_CYCLES[21:0] : SECOND_CYCLES[21:0])) timer <= timer + 22'd1;
 				else if (int_flag == 3'd0) begin
 					second_wait <= 1'b0; second_pend <= 1'b0;
 					rsp_rd <= 5'd0;

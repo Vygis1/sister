@@ -272,7 +272,7 @@ module console_top #(
 	// 35 ms of work a frame against a 33.3 ms frame). Inverted so that the many
 	// tools that write this register with only a counter number in it leave
 	// the pace alone. Bit 13 lets the drawing engine past the chip's fill rate.
-	reg          cpu_pace = 1'b0, gpu_fast = 1'b0;
+	reg          cpu_pace = 1'b1, gpu_fast = 1'b0;   // the CPU at the console's own pace (r3000 t_cost): the default
 	wire         cpu_fast = !cpu_pace;
 	reg          dma_relax = 1'b0;                              // ctrl 0xEC bit 14: see ps1_top
 	reg  [5:0]   ev_idx = 6'd0;
@@ -559,6 +559,17 @@ module console_top #(
 	// [24:0] the command word); 0x194 the register, [5] control (read: its value)
 	reg         gte_snap_arm = 1'b0, gte_snap_go = 1'b0; reg [15:0] gte_snap_skip = 16'd0; reg [6:0] gte_snap_idx = 7'd0;
 	wire [31:0] gte_snap_data; wire [24:0] gte_snap_word; wire [1:0] gte_snap_state;
+	// ...and the TTY (ps1_top DBG): 0x1A8 the characters printed so far, 0x8000-0xBFFF the 16 kB ring
+	// a word (four characters) at a time
+	wire [31:0] ps1_tty_word, ps1_tty_count;
+	// ...and the GP0 trace (ps1_top DBG): 0x1B0 status (write: arm), 0xC000-0xDFFF its 2048 words,
+	// 0xE000-0xFFFF bit 0 = that word was a command's first
+	wire [31:0] ps1_gtr_word, ps1_gtr_stat; wire [1:0] ps1_gtr_head;
+	wire        ps1_gtr_arm = ctrl_we && (off == 16'h01B0);
+	// ...and 0x1AC {raw [31], DDR3 line [23:0]}: the frame window (pages 0x10-0x19) on any DDR3
+	// region instead of the frame -- the VRAM dump (tools/jtag.py)
+	reg         fb_hr_raw = 1'b0; reg [23:0] fb_hr_base = 24'd0;
+	always @(posedge clk) if (ctrl_we && off == 16'h01AC) begin fb_hr_raw <= PS1_DBG && wdata[31]; fb_hr_base <= wdata[23:0]; end
 	// ...and its write trace: 0x198 the entry (0 oldest .. 63 newest); 0x19C its PC, 0x1A0 its
 	// value, 0x1A4 {control, register}
 	reg  [5:0]  gte_wt_idx = 6'd0;
@@ -734,6 +745,9 @@ module console_top #(
 		16'h019C: ctrl_rdata = gte_wt_pc;
 		16'h01A0: ctrl_rdata = gte_wt_data;
 		16'h01A4: ctrl_rdata = {26'd0, gte_wt_reg};
+		16'h01A8: ctrl_rdata = ps1_tty_count;
+		16'h01AC: ctrl_rdata = {fb_hr_raw, 7'd0, fb_hr_base};
+		16'h01B0: ctrl_rdata = ps1_gtr_stat;
 		16'h0184: ctrl_rdata = {31'd0, snes_dirty};
 		16'h0188: ctrl_rdata = snes_hword;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
@@ -767,6 +781,9 @@ module console_top #(
 		16'h00DC: ctrl_rdata = gpw[gpw_idx];
 		default:  ctrl_rdata = 32'd0;
 		endcase
+		if (off[15:14] == 2'b10) ctrl_rdata = ps1_tty_word;
+		if (off[15:13] == 3'b110) ctrl_rdata = ps1_gtr_word;
+		if (off[15:13] == 3'b111) ctrl_rdata = {30'd0, ps1_gtr_head};
 	end
 
 	// --- the cartridge ---------------------------------------------------------
@@ -1224,9 +1241,12 @@ module console_top #(
 			.dbg_gpu_wr(ps1_dbg_gpu_wr), .dbg_mem(ps1_dbg_mem), .dbg_daddr(ps1_dbg_daddr),
 			.dbg_irq(ps1_dbg_irq), .dbg_gpu_st(ps1_dbg_gpu_st),
 			.dbg_cause(ps1_dbg_cause), .dbg_epc(ps1_dbg_epc),
-			.gte_snap_arm(PS1_DBG ? gte_snap_arm : 1'b0), .gte_snap_go(gte_snap_go), .gte_snap_skip(gte_snap_skip), .gte_snap_idx(gte_snap_idx),
+			.gte_snap_arm(1'b0),   // (the GTE snapshot: ps1_top DBG_OLD, off)
+ .gte_snap_go(gte_snap_go), .gte_snap_skip(gte_snap_skip), .gte_snap_idx(gte_snap_idx),
 			.gte_snap_data(gte_snap_data), .gte_snap_word(gte_snap_word), .gte_snap_state(gte_snap_state),
-			.gte_wt_idx(gte_wt_idx), .gte_wt_pc(gte_wt_pc), .gte_wt_data(gte_wt_data), .gte_wt_reg(gte_wt_reg), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
+			.gte_wt_idx(gte_wt_idx), .gte_wt_pc(gte_wt_pc), .gte_wt_data(gte_wt_data), .gte_wt_reg(gte_wt_reg),
+			.tty_idx(off[13:2]), .tty_word(ps1_tty_word), .tty_count(ps1_tty_count),
+			.gtr_idx(off[12:2]), .gtr_word(ps1_gtr_word), .gtr_head(ps1_gtr_head), .gtr_stat(ps1_gtr_stat), .gtr_arm(ps1_gtr_arm), .fb_hr_raw(fb_hr_raw), .fb_hr_base(fb_hr_base), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
 			.cd_fill_lba_o(cd_fill_lba), .cd_fill_room_o(cd_fill_room), .cd_fill_run_o(cd_fill_run), .cd_dbg_o(cd_dbg), .cd_dbg_cmds_o(cd_dbg_cmds), .cd_dbg_setloc_o(cd_dbg_setloc), .cd_dbg_seek_o(cd_dbg_seek), .cd_dbg_hdr_o(cd_dbg_hdr), .cd_trace_idx(cd_trace_idx), .cc_flush(cc_flush), .cc_flush_busy(cc_flush_busy), .cd_trace_data(cd_trace_data), .cd_trace_wp(cd_trace_wp), .cd_dma_words_o(cd_dma_words),
 			.dbg_icv_pc(ps1_icv_pc), .dbg_icv_got(ps1_icv_got), .dbg_icv_want(ps1_icv_want), .dbg_icv_n(ps1_icv_n),
 			.dbg_exec(ps1_dbg_exec), .dbg_rsel(ps1_rsel), .dbg_rval(ps1_rval),
@@ -1259,6 +1279,8 @@ module console_top #(
 		assign ps1_vid_rgb = 24'd0;
 		assign gte_snap_data = 32'd0; assign gte_snap_word = 25'd0; assign gte_snap_state = 2'd0;
 		assign gte_wt_pc = 32'd0; assign gte_wt_data = 32'd0; assign gte_wt_reg = 6'd0;
+		assign ps1_tty_word = 32'd0; assign ps1_tty_count = 32'd0;
+		assign ps1_gtr_word = 32'd0; assign ps1_gtr_head = 2'd0; assign ps1_gtr_stat = 32'd0;
 		if (!CORE_N64 && (CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS) begin : g_md_lr
 			// the Mega Drive's (or the SNES's) two channels, for HDMI's stereo: 48000 times a
 			// second (the SNES's 32 kHz held)

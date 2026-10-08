@@ -38,7 +38,7 @@ module tb_ps1_raster;
 		.cr_0(cr_0), .cg_0(cg_0), .cb_0(cb_0), .cu_0(cu_0), .cv_0(cv_0),
 		.dr_dx(dr_dx), .dg_dx(dg_dx), .db_dx(db_dx), .du_dx(du_dx), .dv_dx(dv_dx),
 		.dr_dy(dr_dy), .dg_dy(dg_dy), .db_dy(db_dy), .du_dy(du_dy), .dv_dy(dv_dy),
-		.is_gour(is_gour), .is_tex(is_tex), .is_semi(is_semi), .is_raw(is_raw), .fr(fr), .fg(fg), .fb(fb),
+		.is_gour(is_gour), .is_tex(is_tex), .is_semi(is_semi), .is_raw(is_raw), .dither(1'b0), .fr(fr), .fg(fg), .fb(fb),
 		.tp_x(tp_x), .tp_y(tp_y), .tp_abr(tp_abr), .tp_depth(tp_depth), .clut(clut),
 		.tw_mx(tw_mx), .tw_my(tw_my), .tw_ox(tw_ox), .tw_oy(tw_oy),
 		.no_tcache(1'b0), .no_ccache(1'b0), .no_trun(1'b0),
