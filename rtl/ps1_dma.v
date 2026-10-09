@@ -59,6 +59,9 @@ module ps1_dma #(
 	output reg         r_req,
 	output reg         r_we,
 	output reg  [31:0] r_wdata,
+	output reg         r_lwe,          // a whole line: r_wdata128 under r_be16 (the ordering-table clear)
+	output reg  [15:0] r_be16,
+	output reg  [127:0] r_wdata128,
 	input  wire [31:0] r_rdata,
 	input  wire [127:0] r_line,        // the whole line the word came from (a read)
 	// a CPU store to RAM: the line in hand is dropped if it is the one stored to (a CPU that
@@ -192,8 +195,36 @@ module ps1_dma #(
 	integer i;
 	reg [23:0] addr_n;
 	reg [31:0] wd;                    // the word in hand, before it is pushed
+	reg [31:0] otc_n;                 // slots in the ordering-table line being written
+	integer    ok;
 	reg [23:0] ll_cur, ll_prev1, ll_prev2;   // the list's node now and the two before
 	reg        ll_loop;                      // it has come back to one of them
+	// a linked-list node's header: its payload next, or -- an empty node, most of an ordering
+	// table -- straight on to the node it points to (by way of S_DONE that was a clock more a node)
+	task ll_node; input [31:0] h; reg [23:0] na;
+		begin
+			// only nodes that carry something are recorded: an ordering table is mostly empty
+			// slots, and recording those flushed the trace of the primitives it was there to catch
+			dbg_node_v <= (h[31:24] != 8'd0); dbg_node_addr <= addr; dbg_node_hdr <= h;
+			next   <= h[23:0];
+			words  <= {24'd0, h[31:24]};
+			addr   <= addr + 24'd4;
+			blocks <= 16'd1;
+			// (an empty node never reads the word after its header as the next node: that walked
+			// off the table into whatever RAM followed and fed the GPU garbage for ever)
+			if (h[31:24] != 8'd0) st <= S_RD;          // the payload; S_DONE follows the pointer after
+			else if (h[23]) st <= S_DONE;              // the end ($FFFFFF: the chip looks at bit 23 alone)
+			else begin
+				na = {3'd0, h[20:2], 2'b00};
+				addr <= na; next <= 24'hFF_FFFF;
+				ll_prev2 <= ll_prev1; ll_prev1 <= ll_cur; ll_cur <= na;
+				if (na == ll_cur || na == ll_prev1) ll_loop <= 1'b1;
+				if (ll_loop) blk_gap <= LL_GAP[4:0];
+				st <= S_LL;
+			end
+		end
+	endtask
+
 	reg [1:0]  m_park;                // channel 0 / 1 stepped aside part way through a block...
 	reg [31:0] m_left0, m_left1;      // ...with this many words of it to go
 	always @(posedge clk) begin
@@ -203,7 +234,7 @@ module ps1_dma #(
 			end
 			dpcr <= 32'h0765_4321; dicr <= 32'd0;
 			st <= S_IDLE; cur <= 3'd0;
-			r_req <= 1'b0; r_we <= 1'b0; gp0_wr <= 1'b0; gpu_rd <= 1'b0; dbg_node_v <= 1'b0; spu_wr <= 1'b0; spu_rd <= 1'b0;
+			r_req <= 1'b0; r_we <= 1'b0; r_lwe <= 1'b0; r_be16 <= 16'd0; r_wdata128 <= 128'd0; otc_n <= 32'd0; gp0_wr <= 1'b0; gpu_rd <= 1'b0; dbg_node_v <= 1'b0; spu_wr <= 1'b0; spu_rd <= 1'b0;
 			cd_rd <= 1'b0; cd_go <= 1'b0; cd_go_info <= 32'd0; cd_words <= 16'd0; mdec_wr <= 1'b0;
 			lb_v <= 1'b0; blk_gap <= 5'd0; ll_loop <= 1'b0; ll_cur <= 24'd0; ll_prev1 <= 24'hFF_FFFF; ll_prev2 <= 24'hFF_FFFF; m_park <= 2'b00; m1b <= 2'd0; m1r <= 3'd0; m1w <= 3'd0;
 		end else begin
@@ -357,6 +388,10 @@ module ps1_dma #(
 			// console's, which keeps ahead) and the list walked into the exception vector.
 			S_LL: if (!chcr[2][24]) begin madr[2] <= addr; st <= S_IDLE; end   // stopped by the CPU
 				else if (blk_gap != 5'd0) ;
+				// the header out of the line in hand: an ordering table's next slot is the word
+				// below this one, in the same line three times in four -- each a cache round trip
+				// before (ps1-tests in GT2: 4.5% of the race's time waiting on headers)
+				else if (lb_v && lb_tag == addr[23:4]) ll_node(lb_data[addr[3:2]*32 +: 32]);
 				else begin
 					// read the node header
 					r_addr <= {5'd0, addr};
@@ -365,37 +400,39 @@ module ps1_dma #(
 					st <= S_LLW;
 				end
 			S_LLW: if (r_ack) begin
-					// only nodes that carry something: an ordering table is mostly
-					// empty slots, and recording those flushed the trace of the
-					// primitives it was there to catch
-					dbg_node_v <= (r_rdata[31:24] != 8'd0); dbg_node_addr <= addr; dbg_node_hdr <= r_rdata;
-					next  <= r_rdata[23:0];
-					words <= {24'd0, r_rdata[31:24]};
-					addr  <= addr + 24'd4;
-					blocks <= 16'd1;
-					// An empty node -- an ordering-table slot with nothing in it, which
-					// is most of them on most frames -- has no payload to send: go to
-					// S_DONE, which follows the node's next-pointer or stops at the
-					// $FFFFFF end. Going to S_LL instead read the word AFTER the header
-					// as the next node, walking forward off the table into whatever RAM
-					// followed and feeding the GPU garbage forever.
-					st <= (r_rdata[31:24] == 8'd0) ? S_DONE : S_RD;
-					// after the payload S_RD sees words==0, blocks==1 -> S_DONE;
-					// a list continues there, so S_DONE checks for a next node
+					lb_v <= 1'b1; lb_tag <= addr[23:4]; lb_data <= r_line;
+					ll_node(r_rdata);
 				end else r_req <= 1'b1;   // hold until the cache takes it
 
 			// --- the ordering table clear ---------------------------------------------------
+			// A line at a time: the slots from this one down to the line's first (or the table's
+			// last), each pointing at the one below, the very last at $FFFFFF. Written a word at a
+			// time, every line missed and was read from memory only to be overwritten: 3.5% of
+			// GT2's race time, where the console clears a slot a cycle.
 			S_OTC: if (words == 32'd0) st <= S_DONE;
 				else begin
-					r_addr  <= {5'd0, addr};
+					r_addr  <= {5'd0, addr[23:4], 4'd0};
 					r_we    <= 1'b1;
-					r_wdata <= (words == 32'd1) ? 32'h00FF_FFFF : {8'd0, addr - 24'd4};
+					r_lwe   <= 1'b1;
+					for (ok = 0; ok < 4; ok = ok + 1) begin
+						// slot ok of the line is (addr[3:2] - ok) slots below the one at addr
+						if (ok <= addr[3:2] && ({30'd0, addr[3:2]} - ok) < words) begin
+							r_be16[ok*4 +: 4] <= 4'hF;
+							r_wdata128[ok*32 +: 32] <= (({30'd0, addr[3:2]} - ok) == words - 32'd1) ? 32'h00FF_FFFF
+							                         : {8'd0, addr[23:4], ok[1:0], 2'b00} - 32'd4;
+						end else begin
+							r_be16[ok*4 +: 4] <= 4'h0;
+							r_wdata128[ok*32 +: 32] <= 32'd0;
+						end
+					end
+					otc_n   <= ({29'd0, addr[3:2]} + 32'd1 < words) ? {29'd0, addr[3:2]} + 32'd1 : words;
 					r_req   <= 1'b1;
 					st <= S_OTCW;
 				end
 			S_OTCW: if (r_ack) begin
-					addr  <= addr - 24'd4;
-					words <= words - 32'd1;
+					addr  <= addr - {otc_n[21:0], 2'b00};
+					words <= words - otc_n;
+					r_lwe <= 1'b0;
 					st <= S_OTC;
 				end else r_req <= 1'b1;   // hold until the cache takes it
 

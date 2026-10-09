@@ -97,6 +97,8 @@ module ps1_cdrom #(
 	input  wire [11:0] sb_addr,       // 0..2351 within it
 	input  wire [7:0]  sb_data,
 	input  wire        sb_done,       // the whole sector is in
+	input  wire        edc_on,        // check each data sector's EDC and have a bad one sent again
+	output reg  [15:0] dbg_edc_bad,   // (debug) data sectors refused for a bad EDC
 	input  wire [23:0] sb_lba,        // ...and it is this one: accepted only if it is fill_lba
 	input  wire        sb_abort,      // (the transport gave up on it: forget the bytes so far)
 
@@ -360,9 +362,46 @@ module ps1_cdrom #(
 	// Setloc(112019)+ReadN restarts the ring, and slot 0 -- still the header -- went to the
 	// game as its first 2048 bytes of code. One boot in three to five on the board. The
 	// transport sends the sector the drive wants next, so a refused frame comes again.
+	// The sector's own check. A data sector carries an EDC -- a CRC-32 over its subheader and data
+	// (Mode 2 Form 1: bytes 16..817h, kept at 818h; Form 2: 16..92Bh at 92Ch, 0 meaning none) --
+	// and a drive reads a sector again when it does not match. The link from the ESP32 flips or
+	// drops a bit now and then (one page in ten thousand, measured); GT2's attract mode, loading
+	// cars and tracks without end, took one in its data every half hour or so and divided by the
+	// zero it put there (libgcc's __udivdi3 BREAK, then A(40h)). A refused frame is simply sent
+	// again, as a mislabelled one is; three in a row for the same sector and it is taken anyway
+	// (a disc image whose own EDC is wrong must still play).
+	function [31:0] edc8; input [31:0] c; input [7:0] b; integer k; reg [31:0] x;
+		begin
+			x = c ^ {24'd0, b};
+			for (k = 0; k < 8; k = k + 1) x = x[0] ? ((x >> 1) ^ 32'hD801_8001) : (x >> 1);
+			edc8 = x;
+		end
+	endfunction
+	reg  [31:0] edc_run, edc_f1, edc_st1, edc_st2;
+	reg  [7:0]  edc_mode, edc_sub;
+	always @(posedge clk) if (sb_we) begin
+		if (sb_addr == 12'd16) edc_run <= edc8(32'd0, sb_data);
+		else if (sb_addr > 12'd16 && sb_addr <= 12'h92B) edc_run <= edc8(edc_run, sb_data);
+		if (sb_addr == 12'h818) edc_f1 <= edc_run;            // (the CRC through 817h)
+		if (sb_addr == 12'd15) edc_mode <= sb_data;
+		if (sb_addr == 12'd18) edc_sub  <= sb_data;
+		if (sb_addr >= 12'h818 && sb_addr <= 12'h81B) edc_st1[(sb_addr[1:0]) * 8 +: 8] <= sb_data;
+		if (sb_addr >= 12'h92C && sb_addr <= 12'h92F) edc_st2[(sb_addr[1:0]) * 8 +: 8] <= sb_data;
+	end
+	wire        edc_ok = sb_audio || (edc_mode != 8'd2)
+	                     || (edc_sub[5] ? ((edc_st2 == 32'd0) || (edc_st2 == edc_run)) : (edc_st1 == edc_f1));
+	reg  [23:0] edc_lba; reg [1:0] edc_tries;
+	wire        edc_pass = !edc_on || edc_ok || ((edc_lba == fill_lba) && (edc_tries == 2'd3));
 	reg         sb_stale;
 	wire        sb_take = sb_done && !sb_stale && (sb_lba == fill_lba) && (held < 4'd7)
-	                      && ((hdr_lba == fill_lba) || playing || seek_then_play || sb_audio);
+	                      && ((hdr_lba == fill_lba) || playing || seek_then_play || sb_audio) && edc_pass;
+	always @(posedge clk)
+		if (rst) begin dbg_edc_bad <= 16'd0; edc_lba <= 24'hFFFFFF; edc_tries <= 2'd0; end
+		else if (sb_done && !sb_stale && (sb_lba == fill_lba) && !edc_pass) begin
+			dbg_edc_bad <= dbg_edc_bad + 16'd1;
+			if (edc_lba != fill_lba) begin edc_lba <= fill_lba; edc_tries <= 2'd1; end
+			else edc_tries <= edc_tries + 2'd1;
+		end
 	reg  [15:0] sb_mislabelled;      // frames whose header did not match their label (a debug count)
 	always @(posedge clk) if (rst) sb_mislabelled <= 16'd0; else if (sb_done && (sb_lba == fill_lba) && (hdr_lba != fill_lba)) sb_mislabelled <= sb_mislabelled + 16'd1;
 	wire        want_wr   = sel && we && be[3] && (index == 2'd0) && wdata[31];

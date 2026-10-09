@@ -36,6 +36,8 @@ module tb_gte;
 	reg  [24:0] word = 0;
 	wire [31:0] rdata;
 	wire        busy;
+	integer cyc_sum [0:63]; integer cyc_n [0:63]; integer ci;
+	initial for (ci = 0; ci < 64; ci = ci + 1) begin cyc_sum[ci] = 0; cyc_n[ci] = 0; end
 
 	ps1_gte dut (
 		.gte_old(4'd0),
@@ -95,6 +97,7 @@ module tb_gte;
 			end
 			t = 0;
 			while (busy && t < 200) begin @(negedge clk); t = t + 1; end
+			cyc_sum[vec[base+64][5:0]] = cyc_sum[vec[base+64][5:0]] + t; cyc_n[vec[base+64][5:0]] = cyc_n[vec[base+64][5:0]] + 1;
 			if (busy) begin
 				$display("  case %0d: command %02h never finished", n, vec[base+64][5:0]);
 				errors = errors + 1;
@@ -146,6 +149,8 @@ module tb_gte;
 
 		for (i = 0; i < 32; i = i + 1) if (dmiss[i] != 0) $display("   data r%0d differed in %0d of %0d cases", i, dmiss[i], NCASES);
 		for (i = 0; i < 32; i = i + 1) if (cmiss[i] != 0) $display("   ctrl r%0d differed in %0d of %0d cases", i, cmiss[i], NCASES);
+		$display("   clocks a command (busy), by op:");
+		for (i = 0; i < 64; i = i + 1) if (cyc_n[i]) $display("      op %02h: %0d clocks", i, cyc_sum[i] / cyc_n[i]);
 		$display("   IR1 differences by op:");
 		for (i = 0; i < 64; i = i + 1) if (ir1_by_op[i]) $display("      op %02h: %0d of %0d run", i, ir1_by_op[i], ops_by_kind[i]);
 		$display("   screen coordinate differences by op:");

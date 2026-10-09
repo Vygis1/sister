@@ -66,7 +66,9 @@ module ps1_gte (
 	output reg  [24:0] snap_word,
 	output wire [1:0]  snap_state,   // {stopped after, stopped before}
 	output wire        wr_ok,        // a register write taken this clock (for the write trace in ps1_top)
-	output wire        snap_busy     // the snapshot has taken a command (the trace stops)
+	output wire        snap_busy,    // the snapshot has taken a command (the trace stops)
+	output reg  [31:0] dbg_drops,    // (debug) {commands, register writes} that arrived while one ran and were lost
+	output wire [31:0] dbg_rgbc      // (debug) RGBC as it stands
 );
 	reg [31:0] d [0:31];
 	reg [31:0] c [0:31];
@@ -445,6 +447,15 @@ module ps1_gte (
 		if (rst) cmd_d <= 1'b0; else cmd_d <= cmd;
 	end
 	wire cmd_go = cmd && !cmd_d;
+	assign dbg_rgbc = d[6];
+	// (debug) neither should ever happen -- the processor waits on `busy` first -- but a lost RGBC
+	// write or a lost colour command is exactly a GT2 packet whose command word is the last one's
+	always @(posedge clk)
+		if (rst) dbg_drops <= 32'd0;
+		else begin
+			if (cmd_go && (run || snap_hold))            dbg_drops[31:16] <= dbg_drops[31:16] + 16'd1;
+			if (we && (run || snap_hold) && !cmd_go)     dbg_drops[15:0]  <= dbg_drops[15:0]  + 16'd1;
+		end
 	wire [24:0] cw = (sst == 2'd1) ? snap_word : word;     // (the snapshot's command, when it lets it run)
 	wire [4:0] shamt = sf ? 5'd12 : 5'd0;
 
@@ -496,16 +507,22 @@ module ps1_gte (
 	reg signed [63:0] chk, sxv, syv, dq, nc, av, c0v, c1v, c2v;
 	reg [8:0]  ridx;
 	reg [1:0]  rr;
+	reg [1:0]  r_l, r_m;                       // the rows in the select and multiply stages
+	reg        rt3; reg [1:0] mv_v; reg [5:0] mv_k, dv_s, pj_s;   // RTPS/RTPT schedule (scratch)
+	reg signed [63:0] trr_m;                   // the translation, carried with its row
+	reg signed [63:0] pp0, pp1;                // the projection's own products (an RTPT overlaps it)
+	reg [15:0] irl1 [0:2], irl2 [0:2];         // each vertex's IR1/IR2, kept for its projection
 
 	// ---- matrix*vector, one row = three steps: select, multiply, finish ------------
 	// mstep 0..8: row = mstep/3, phase = mstep%3
 	task mvt_step;
 		input [4:0] mbase; input [2:0] vs; input [1:0] ts; input lmf; input [5:0] ms;
+		// ms 0..4: row ms is selected, row ms-1 multiplied and row ms-2 finished, all in the one
+		// clock -- three rows overlapped, five clocks where they took nine one after another
+		// (an RTPT was 62 clocks against the console's 34; GT2 waits on it in every frame)
 		begin
-			rr = (ms < 3) ? 2'd0 : (ms < 6) ? 2'd1 : 2'd2;
-			case (ms % 3)
-			// --- select the operands into registers ---
-			6'd0: begin
+			if (ms < 3) begin
+				rr = ms[1:0];
 				if (rr == 2'd0) begin
 					case (vs)
 					3'd0: begin x0r <= sx16(d[0][15:0]); x1r <= sx16(d[0][31:16]); x2r <= sx16(d[1][15:0]);
@@ -536,21 +553,24 @@ module ps1_gte (
 				2'd2: trr <= (rr == 0) ? sx32(c[21]) : (rr == 1) ? sx32(c[22]) : sx32(c[23]);
 				default: trr <= 0;
 				endcase
+				r_l <= ms[1:0];
 			end
-			// --- the three products ---
-			6'd1: begin p0 <= e0r * x0r; p1 <= e1r * x1r; p2 <= e2r * x2r; end
-			// --- add, check, shift, saturate, write ---
-			default: begin
+			if (ms >= 1 && ms <= 3) begin
+				p0 <= e0r * x0r; p1 <= e1r * x1r; p2 <= e2r * x2r;
+				trr_m <= trr; r_m <= r_l;
+			end
+			if (ms >= 2) begin
+				rr = r_m;
 				// The sum is built one product at a time, and the chip checks it for 44-bit
 				// overflow -- and wraps it to 44 bits -- after EACH addition, not just at the end
 				// (ps1-tests gte/test-all: RTPT set MAC overflow flags the final sum alone did not)
 				if (ts == 2'd2) begin
-					fst = (trr <<< 12) + p0;
+					fst = (trr_m <<< 12) + p0;
 					if (fst >= P43) c[31][30 - rr] <= 1'b1; if (fst < N43) c[31][27 - rr] <= 1'b1;
 					if (ir_of(fst >>> shamt, 1'b0)) c[31][24 - rr] <= 1'b1;
 					acc = p1;
 				end else begin
-					acc = (trr <<< 12) + p0;
+					acc = (trr_m <<< 12) + p0;
 					if (acc >= P43) c[31][30 - rr] <= 1'b1; if (acc < N43) c[31][27 - rr] <= 1'b1;
 					acc = {{20{acc[43]}}, acc[43:0]} + p1;
 				end
@@ -579,7 +599,6 @@ module ps1_gte (
 				default: begin macw2 <= sh; d[27] <= sh[31:0]; d[11] <= {16'd0, iv[15:0]}; end
 				endcase
 			end
-			endcase
 		end
 	endtask
 
@@ -651,7 +670,7 @@ module ps1_gte (
 	end endtask
 
 	// RTPS: SZ push with the IR3 quirk (no multiply)
-	task rtp_sz; begin
+	task rtp_sz; input [1:0] v; begin
 		chk = macw2 >>> (5'd12 - shamt);
 		ir3q <= ir3q | ir_of(chk, 1'b0);
 		c[31][22] <= ir3q | ir_of(chk, 1'b0);
@@ -659,6 +678,7 @@ module ps1_gte (
 		if (s2 != chk) c[31][18] <= 1'b1;
 		d[16] <= d[17]; d[17] <= d[18]; d[18] <= d[19];
 		d[19] <= {16'd0, s2[15:0]};
+		irl1[v] <= d[9][15:0]; irl2[v] <= d[10][15:0];   // this vertex's IR1/IR2, for its projection
 	end endtask
 
 	// the divide: eight steps, one multiply OR one add a step
@@ -686,12 +706,12 @@ module ps1_gte (
 	end endtask
 
 	// RTPS: project -- products, then add/clip/push
-	task rtp_proj; input sub; begin
+	task rtp_proj; input sub; input [1:0] v; begin
 		if (sub == 1'b0) begin
-			p0 <= m16u17(d[9][15:0], q);
-			p1 <= m16u17(d[10][15:0], q);
+			pp0 <= m16u17(irl1[v], q);
+			pp1 <= m16u17(irl2[v], q);
 		end else begin
-			sxv = sx32(c[24]) + p0; syv = sx32(c[25]) + p1;
+			sxv = sx32(c[24]) + pp0; syv = sx32(c[25]) + pp1;
 			if (sxv > 64'sh7FFFFFFF) c[31][16] <= 1'b1; if (sxv < -64'sh80000000) c[31][15] <= 1'b1;
 			if (syv > 64'sh7FFFFFFF) c[31][16] <= 1'b1; if (syv < -64'sh80000000) c[31][15] <= 1'b1;
 			d[24] <= syv[31:0];
@@ -813,18 +833,24 @@ module ps1_gte (
 		end else if (run) begin
 			step <= step + 6'd1;
 			case (op)
-			// --- RTPS / RTPT: MVT 0-8, SZ 9, DIV 10-17, PROJ 18-19, DQ 20-21 -----
+			// --- RTPS / RTPT, the vertices overlapped: vertex v's MVT at 6v..6v+4 and its SZ at
+			// 6v+5; its divide at 6+8v..13+8v (one divider, so after the last), its projection
+			// at 14+8v..15+8v; then DQ. An RTPT is 34 clocks -- the console's 23 cycles -- where
+			// one vertex after another took 62; an RTPS 18 against its 15 cycles (22 clocks).
 			6'h01, 6'h30: begin
-				if (step < 9) mvt_step(5'd0, {1'b0, vi}, 2'd0, lm, step);
-				else if (step == 9) rtp_sz;
-				else if (step < 18) div_step(step - 6'd10);
-				else if (step == 18) rtp_proj(1'b0);
-				else if (step == 19) begin
-					rtp_proj(1'b1);
-					if (!(op == 6'h01 || vi == 2'd2)) begin vi <= vi + 2'd1; step <= 0; end
-				end
-				else if (step == 20) rtp_dq(1'b0);
-				else begin rtp_dq(1'b1); run <= 1'b0; end
+				// (each piece called from ONE place, its vertex and sub-step worked out from the
+				// step: called once per vertex it was built three times over, 2,000 LUTs more)
+				rt3   = (op == 6'h30);
+				mv_v  = (step < 6) ? 2'd0 : (step < 12) ? 2'd1 : 2'd2;
+				mv_k  = step - {mv_v, 2'b00} - {mv_v, 1'b0};          // step - 6v
+				if ((mv_v == 2'd0 || rt3) && mv_k < 6'd5 && step < 6'd17) mvt_step(5'd0, {1'b0, mv_v}, 2'd0, lm, mv_k);
+				if ((mv_v == 2'd0 || rt3) && mv_k == 6'd5 && step < 6'd18) rtp_sz(mv_v);
+				dv_s  = step - 6'd6;                                    // the divides run back to back
+				if (step >= 6'd6 && dv_s < (rt3 ? 6'd24 : 6'd8)) div_step(dv_s[2:0]);
+				pj_s  = step - 6'd14;
+				if (step >= 6'd14 && pj_s[2:1] == 2'd0 && pj_s[5:3] < (rt3 ? 3'd3 : 3'd1)) rtp_proj(pj_s[0], pj_s[4:3]);
+				if (step == (rt3 ? 6'd32 : 6'd16)) rtp_dq(1'b0);
+				if (step == (rt3 ? 6'd33 : 6'd17)) begin rtp_dq(1'b1); run <= 1'b0; end
 			end
 			// --- NCLIP ------------------------------------------------------------------
 			6'h06: begin
@@ -864,49 +890,49 @@ module ps1_gte (
 			end
 			// --- MVMVA ---------------------------------------------------------------------
 			6'h12: begin
-				if (step < 8) mvt_step(mvbase, {1'b0, vx}, cv, lm, step);
-				else begin mvt_step(mvbase, {1'b0, vx}, cv, lm, 6'd8); run <= 1'b0; end
+				mvt_step(mvbase, {1'b0, vx}, cv, lm, step);
+				if (step == 6'd4) run <= 1'b0;
 			end
-			// --- NCDS / NCDT: light 0-8, colour 9-17, rgb 18, cue 19-21, out 22 -------
+			// --- NCDS / NCDT: light 0-4, colour 5-9, rgb 10, cue 11-13, out 14 -------
 			6'h13, 6'h16: begin
-				if (step < 9) mvt_step(5'd8, {1'b0, vi}, 2'd3, lm, step);
-				else if (step < 18) mvt_step(5'd16, 3'd3, 2'd1, lm, step - 6'd9);
-				else if (step == 18) rgb_ir;
-				else if (step < 22) dcue_step(step - 6'd19);
+				if (step < 5) mvt_step(5'd8, {1'b0, vi}, 2'd3, lm, step);
+				else if (step < 10) mvt_step(5'd16, 3'd3, 2'd1, lm, step - 6'd5);
+				else if (step == 10) rgb_ir;
+				else if (step < 14) dcue_step(step - 6'd11);
 				else begin
 					mac_color(lm);
 					if (op == 6'h16 && vi != 2'd2) begin vi <= vi + 2'd1; step <= 0; end
 					else run <= 1'b0;
 				end
 			end
-			// --- CDP: colour 0-8, rgb 9, cue 10-12, out 13 --------------------------------
+			// --- CDP: colour 0-4, rgb 5, cue 6-8, out 9 --------------------------------
 			6'h14: begin
-				if (step < 9) mvt_step(5'd16, 3'd3, 2'd1, lm, step);
-				else if (step == 9) rgb_ir;
-				else if (step < 13) dcue_step(step - 6'd10);
+				if (step < 5) mvt_step(5'd16, 3'd3, 2'd1, lm, step);
+				else if (step == 5) rgb_ir;
+				else if (step < 9) dcue_step(step - 6'd6);
 				else begin mac_color(lm); run <= 1'b0; end
 			end
-			// --- NCCS / NCCT: light 0-8, colour 9-17, rgb 18, out 19 -----------------------
+			// --- NCCS / NCCT: light 0-4, colour 5-9, rgb 10, out 11 -----------------------
 			6'h1B, 6'h3F: begin
-				if (step < 9) mvt_step(5'd8, {1'b0, vi}, 2'd3, lm, step);
-				else if (step < 18) mvt_step(5'd16, 3'd3, 2'd1, lm, step - 6'd9);
-				else if (step == 18) rgb_ir;
+				if (step < 5) mvt_step(5'd8, {1'b0, vi}, 2'd3, lm, step);
+				else if (step < 10) mvt_step(5'd16, 3'd3, 2'd1, lm, step - 6'd5);
+				else if (step == 10) rgb_ir;
 				else begin
 					mac_color(lm);
 					if (op == 6'h3F && vi != 2'd2) begin vi <= vi + 2'd1; step <= 0; end
 					else run <= 1'b0;
 				end
 			end
-			// --- CC: colour 0-8, rgb 9, out 10 ----------------------------------------------
+			// --- CC: colour 0-4, rgb 5, out 6 ----------------------------------------------
 			6'h1C: begin
-				if (step < 9) mvt_step(5'd16, 3'd3, 2'd1, lm, step);
-				else if (step == 9) rgb_ir;
+				if (step < 5) mvt_step(5'd16, 3'd3, 2'd1, lm, step);
+				else if (step == 5) rgb_ir;
 				else begin mac_color(lm); run <= 1'b0; end
 			end
-			// --- NCS / NCT: light 0-8, colour 9-17, push 18 ----------------------------------
+			// --- NCS / NCT: light 0-4, colour 5-9, push 10 ----------------------------------
 			6'h1E, 6'h20: begin
-				if (step < 9) mvt_step(5'd8, {1'b0, vi}, 2'd3, lm, step);
-				else if (step < 18) mvt_step(5'd16, 3'd3, 2'd1, lm, step - 6'd9);
+				if (step < 5) mvt_step(5'd8, {1'b0, vi}, 2'd3, lm, step);
+				else if (step < 10) mvt_step(5'd16, 3'd3, 2'd1, lm, step - 6'd5);
 				else begin
 					push_color(sx32(d[25]) >>> 4, sx32(d[26]) >>> 4, sx32(d[27]) >>> 4);
 					if (op == 6'h20 && vi != 2'd2) begin vi <= vi + 2'd1; step <= 0; end

@@ -40,6 +40,9 @@ module ps1_cache #(
 	// why that is both correct and worth doing.
 	parameter B_NOALLOC = 0,
 	parameter A_AROUND  = 0,   // port A reads marked a_around go round the cache like port B's
+	// port B may write a whole line (b_lwe, byte mask b_be16): the DMA clearing an ordering table.
+	// A full line that misses is allocated without reading memory first. Off, b_lwe is ignored.
+	parameter B_LINE    = 0,
 
 	// --- answering a hit in the cycle it is decided --------------------------
 	// S_ANS works entirely out of registers: the line, the tag and the valid bit
@@ -106,6 +109,9 @@ module ps1_cache #(
 	input  wire         b_we,
 	input  wire [3:0]   b_be,
 	input  wire [31:0]  b_wdata,
+	input  wire         b_lwe,
+	input  wire [15:0]  b_be16,
+	input  wire [127:0] b_wdata128,
 	output reg  [31:0]  b_rdata,
 	output reg          b_ack,
 	output reg  [127:0] b_line,      // and port B's, for the same reason
@@ -389,7 +395,9 @@ module ps1_cache #(
 				if (b[k]) merge16[k*8 +: 8] = v[k*8 +: 8];
 		end
 	endfunction
-	wire line_mode = !serving_b && a_lwe;
+	wire line_mode = serving_b ? ((B_LINE != 0) && b_lwe) : a_lwe;
+	wire [15:0]  l_be16 = serving_b ? b_be16 : a_be16;           // the line write's mask and data
+	wire [127:0] l_wd   = serving_b ? b_wdata128 : a_wdata128;
 
 	function [127:0] merge;
 		input [127:0] l;
@@ -494,7 +502,7 @@ module ps1_cache #(
 					if (!refilled) dbg_hits <= dbg_hits + 32'd1;
 					refilled <= 1'b0;
 					if (we) begin
-						if (BRAM == 0) data[didx] <= line_mode ? merge16(line_q, a_be16, a_wdata128) : merge(line_q, wsel, be, wdata);
+						if (BRAM == 0) data[didx] <= line_mode ? merge16(line_q, l_be16, l_wd) : merge(line_q, wsel, be, wdata);
 						dirty[idx] <= 1'b1;
 						// this write makes any copy of the same line stale
 						if (pf_hit) pf_lv[pf_sel] <= 1'b0;
@@ -582,13 +590,13 @@ module ps1_cache #(
 						st <= S_WB;
 					end else
 						// a whole line arriving needs nothing from memory: allocate it
-						st <= (line_mode && we && (&a_be16)) ? S_ALLOC : S_FILL;
+						st <= (line_mode && we && (&l_be16)) ? S_ALLOC : S_FILL;
 				end
 
 			S_WB: if (m_ready) begin
 					m_req <= 1'b0;
 					m_we  <= 1'b0;
-					st <= (line_mode && we && (&a_be16)) ? S_ALLOC : S_FILL;
+					st <= (line_mode && we && (&l_be16)) ? S_ALLOC : S_FILL;
 				end
 
 			// the write-around is taken by memory: that is the whole of it
@@ -601,10 +609,10 @@ module ps1_cache #(
 
 			S_ALLOC: begin
 					if (pf_hit) pf_lv[pf_sel] <= 1'b0;
-					if (BRAM == 0) begin data[didx] <= a_wdata128; tag[didx] <= tg; end
+					if (BRAM == 0) begin data[didx] <= l_wd; tag[didx] <= tg; end
 					va_we = 1'b1;
 					dirty[idx] <= 1'b1;
-					a_ack_r <= 1'b1;
+					if (serving_b) b_ack <= 1'b1; else a_ack_r <= 1'b1;
 					st <= S_IDLE;
 				end
 
@@ -626,8 +634,18 @@ module ps1_cache #(
 						valid_q <= 1'b1;
 						dirty_q <= 1'b0;
 						refilled <= 1'b1;
-						// now it hits; out of block RAM, once it has been read back
-						st <= (BRAM != 0) ? S_LOOK : S_ANS;
+						// A read is answered from the line as it arrives: going back through the
+						// block RAM (S_LOOK, S_ANS) cost two clocks a miss, and the processor waits
+						// on every one (GT2: half a million misses a second). A store goes round to
+						// be merged in. (The line is written into the RAM this same clock.)
+						if (!we && !line_mode) begin
+							if (serving_b) begin b_rdata <= pick(m_rdata, wsel); b_line <= m_rdata; b_ack <= 1'b1; end
+							else           begin a_rdata_r <= pick(m_rdata, wsel); a_line_r <= m_rdata; a_ack_r <= 1'b1; end
+							refilled <= 1'b0;
+							st <= S_IDLE;
+						end else
+							// now it hits; out of block RAM, once it has been read back
+							st <= (BRAM != 0) ? S_LOOK : S_ANS;
 					end
 				end
 
@@ -739,9 +757,9 @@ module ps1_cache #(
 		                    || (st == S_LOOK) || (st == S_FLOOK));
 		wire bwn = !rst && ((st == S_ALLOC) || ((st == S_FILLWAIT) && m_valid));  // a new line: data and tag
 		wire bw  = bwn || (!rst && (st == S_ANS) && hit && we);                  // or a store into one
-		wire [127:0] bwd = (st == S_ALLOC)    ? a_wdata128
+		wire [127:0] bwd = (st == S_ALLOC)    ? l_wd
 		                 : (st == S_FILLWAIT) ? m_rdata
-		                 : line_mode ? merge16(line_q, a_be16, a_wdata128) : merge(line_q, wsel, be, wdata);
+		                 : line_mode ? merge16(line_q, l_be16, l_wd) : merge(line_q, wsel, be, wdata);
 		integer bi;
 		initial for (bi = 0; bi < LINES; bi = bi + 1) begin bdata[bi] = 128'd0; btag[bi] = {TAGW{1'b0}}; end
 		always @(posedge clk) begin

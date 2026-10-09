@@ -235,6 +235,7 @@ module console_top #(
 	wire [31:0]  ps1_dbg_pc;
 	wire [31:0]  ps1_dbg_io_addr, ps1_dbg_io_data, ps1_dbg_gpu_wr;
 	wire [31:0]  ps1_dbg_mem, ps1_dbg_daddr, ps1_dbg_irq, ps1_dbg_gpu_st;
+	wire         ps1_rgb_odd;
 	wire [31:0]  ps1_dbg_cause, ps1_dbg_epc, ps1_dbg_dma, ps1_dbg_gpu2, ps1_dbg_disp, ps1_dbg_draw;
 	wire [31:0]  ps1_dbg_v2c, ps1_dbg_c0, ps1_dbg_perf;
 	wire [15:0]  ps1_d_wmask;
@@ -275,6 +276,7 @@ module console_top #(
 	reg          cpu_pace = 1'b1, gpu_fast = 1'b0;   // the CPU at the console's own pace (r3000 t_cost): the default
 	wire         cpu_fast = !cpu_pace;
 	reg          dma_relax = 1'b0;                              // ctrl 0xEC bit 14: see ps1_top
+	reg          pace_long = 1'b0, dma_charge = 1'b0;           // ctrl 0xEC bits 15, 16: see ps1_top
 	reg  [5:0]   ev_idx = 6'd0;
 	// the PlayStation's memory card: ctrl 0x134 {fill aimed at the card, card in},
 	// 0x138 the queue of sectors it has stored (see ps1_sio.v / pc/server.py)
@@ -492,12 +494,12 @@ module console_top #(
 	wire         hr_done;
 	wire [127:0] hr_data;
 	wire [31:0]  ps1_dbg_word;
-	reg  [31:0]  pitrace [0:15];    // the instruction words beside pctrace
+	reg  [31:0]  pitrace [0:63];    // the instruction words beside pctrace
 	// a PC trace for the PlayStation: the last sixteen distinct PCs before an
 	// exception that was not an interrupt or a syscall, frozen there (logic at
 	// the end of the module; declared here so the register mux may read it)
-	reg [31:0] pctrace [0:15];
-	reg [3:0]  pct_wr, pct_idx;
+	reg [31:0] pctrace [0:63];
+	reg [5:0]  pct_wr, pct_idx;
 	reg        pct_frozen;
 	reg [31:0] pct_last;
 	wire [7:0]   md_px_rgb;
@@ -561,7 +563,7 @@ module console_top #(
 	wire [31:0] gte_snap_data; wire [24:0] gte_snap_word; wire [1:0] gte_snap_state;
 	// ...and the TTY (ps1_top DBG): 0x1A8 the characters printed so far, 0x8000-0xBFFF the 16 kB ring
 	// a word (four characters) at a time
-	wire [31:0] ps1_tty_word, ps1_tty_count, ps1_lost_cpu, ps1_lost_gpu, ps1_live;
+	wire [31:0] ps1_tty_word, ps1_tty_count, ps1_lost_cpu, ps1_lost_gpu, ps1_live, ps1_cc_miss, ps1_cpu_wait;
 	// ...and the GP0 trace (ps1_top DBG): 0x1B0 status (write: arm), 0xC000-0xDFFF its 2048 words,
 	// 0xE000-0xFFFF bit 0 = that word was a command's first
 	wire [31:0] ps1_gtr_word, ps1_gtr_stat; wire [1:0] ps1_gtr_head;
@@ -611,13 +613,14 @@ module console_top #(
 		end else if (ctrl_we) begin
 			case (off)
 			16'h0004: begin run <= wdata[0]; mirror_v <= wdata[1]; cpu_halt <= wdata[2]; end
-		16'h0064: pct_idx <= wdata[3:0];        // which PC-trace entry 0x64 reads back
+		16'h0064: pct_idx <= wdata[5:0];        // which PC-trace entry 0x64 reads back
 			16'h007C: hr_line <= wdata[23:0];       // read one DDR3 line (hr_go fires with the write)
 			16'h0090: nt_idx <= wdata[3:0];         // which DMA node-trace entry 0x90/0x94 read back
 			16'h009C: ps1_rsel <= wdata[5:0];
 			16'h0110: cd_trace_idx <= wdata[5:0];
 			16'h00EC: begin perf_sel <= wdata[5:0];
-			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14]; end
+			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14];
+			                pace_long <= wdata[15]; dma_charge <= wdata[16]; end
 			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
 			16'h0134: begin card_in <= wdata[0]; card_fill <= wdata[1]; card2_in <= wdata[2]; card2_fill <= wdata[3]; end
 			16'h00F0: if (WEBVID) stream_ctl <= wdata;
@@ -694,7 +697,7 @@ module console_top #(
 		16'h005C: ctrl_rdata = ps1_dbg_dma;
 		16'h0060: ctrl_rdata = ps1_dbg_gpu2;
 		16'h0064: ctrl_rdata = pctrace[pct_idx];
-		16'h0068: ctrl_rdata = {27'd0, pct_frozen, pct_wr};
+		16'h0068: ctrl_rdata = {25'd0, pct_frozen, pct_wr};
 		16'h006C: ctrl_rdata = ps1_dbg_disp;
 		16'h0070: ctrl_rdata = ps1_dbg_draw;
 		16'h0074: ctrl_rdata = pitrace[pct_idx];
@@ -751,6 +754,8 @@ module console_top #(
 		16'h01B4: ctrl_rdata = PS1_DBG ? ps1_lost_cpu : 32'd0;   // console time the processor lost (system clocks)
 		16'h01B8: ctrl_rdata = PS1_DBG ? ps1_lost_gpu : 32'd0;   // our clocks the GPU ran behind the console
 		16'h01BC: ctrl_rdata = PS1_DBG ? ps1_live : 32'd0;       // why the processor waits, what the GPU does (ps1_top dbg_live)
+		16'h01C0: ctrl_rdata = PS1_DBG ? ps1_cc_miss : 32'd0;    // the processor's RAM cache: misses
+		16'h01C4: ctrl_rdata = PS1_DBG ? ps1_cpu_wait : 32'd0;   // clocks the processor waited on memory
 		16'h0184: ctrl_rdata = {31'd0, snes_dirty};
 		16'h0188: ctrl_rdata = snes_hword;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
@@ -1248,8 +1253,8 @@ module console_top #(
  .gte_snap_go(gte_snap_go), .gte_snap_skip(gte_snap_skip), .gte_snap_idx(gte_snap_idx),
 			.gte_snap_data(gte_snap_data), .gte_snap_word(gte_snap_word), .gte_snap_state(gte_snap_state),
 			.gte_wt_idx(gte_wt_idx), .gte_wt_pc(gte_wt_pc), .gte_wt_data(gte_wt_data), .gte_wt_reg(gte_wt_reg),
-			.tty_idx(off[13:2]), .tty_word(ps1_tty_word), .tty_count(ps1_tty_count), .lost_cpu(ps1_lost_cpu), .lost_gpu(ps1_lost_gpu), .dbg_live(ps1_live),
-			.gtr_idx(off[12:2]), .gtr_word(ps1_gtr_word), .gtr_head(ps1_gtr_head), .gtr_stat(ps1_gtr_stat), .gtr_arm(ps1_gtr_arm), .fb_hr_raw(fb_hr_raw), .fb_hr_base(fb_hr_base), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
+			.tty_idx(off[13:2]), .tty_word(ps1_tty_word), .tty_count(ps1_tty_count), .lost_cpu(ps1_lost_cpu), .lost_gpu(ps1_lost_gpu), .dbg_live(ps1_live), .dbg_cc_miss(ps1_cc_miss), .dbg_cpu_wait(ps1_cpu_wait),
+			.gtr_idx(off[12:2]), .gtr_word(ps1_gtr_word), .gtr_head(ps1_gtr_head), .gtr_stat(ps1_gtr_stat), .gtr_arm(ps1_gtr_arm), .dbg_rgb_odd(ps1_rgb_odd), .gtr_pops(wdata[1]), .gtr_halt(wdata[2]), .fb_hr_raw(fb_hr_raw), .fb_hr_base(fb_hr_base), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
 			.cd_fill_lba_o(cd_fill_lba), .cd_fill_room_o(cd_fill_room), .cd_fill_run_o(cd_fill_run), .cd_dbg_o(cd_dbg), .cd_dbg_cmds_o(cd_dbg_cmds), .cd_dbg_setloc_o(cd_dbg_setloc), .cd_dbg_seek_o(cd_dbg_seek), .cd_dbg_hdr_o(cd_dbg_hdr), .cd_trace_idx(cd_trace_idx), .cc_flush(cc_flush), .cc_flush_busy(cc_flush_busy), .cd_trace_data(cd_trace_data), .cd_trace_wp(cd_trace_wp), .cd_dma_words_o(cd_dma_words),
 			.dbg_icv_pc(ps1_icv_pc), .dbg_icv_got(ps1_icv_got), .dbg_icv_want(ps1_icv_want), .dbg_icv_n(ps1_icv_n),
 			.dbg_exec(ps1_dbg_exec), .dbg_rsel(ps1_rsel), .dbg_rval(ps1_rval),
@@ -1265,7 +1270,7 @@ module console_top #(
 			.fbr_addr(from_ddr ? sfa[17:0] : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
 			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
 			.spu_out(audio_lr), .spu_out_we(audio_lr_we),
-			.dma_relax(dma_relax), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
+			.dma_relax(dma_relax), .cd_edc_on(1'b1), .pace_long(pace_long), .dma_charge(dma_charge), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
 			.card_in(card_in), .card_fill(card_fill), .card2_in(card2_in), .card2_fill(card2_fill),
 			.card_wq_sector(card_wq_sector), .card_wq_count(card_wq_count),
 			.card_wq_ovf(card_wq_ovf), .card_wq_pop(card_wq_pop), .card_wq_clr(card_wq_clr),
@@ -1282,7 +1287,7 @@ module console_top #(
 		assign ps1_vid_rgb = 24'd0;
 		assign gte_snap_data = 32'd0; assign gte_snap_word = 25'd0; assign gte_snap_state = 2'd0;
 		assign gte_wt_pc = 32'd0; assign gte_wt_data = 32'd0; assign gte_wt_reg = 6'd0;
-		assign ps1_tty_word = 32'd0; assign ps1_tty_count = 32'd0; assign ps1_lost_cpu = 32'd0; assign ps1_lost_gpu = 32'd0; assign ps1_live = 32'd0;
+		assign ps1_tty_word = 32'd0; assign ps1_tty_count = 32'd0; assign ps1_lost_cpu = 32'd0; assign ps1_lost_gpu = 32'd0; assign ps1_live = 32'd0; assign ps1_cc_miss = 32'd0; assign ps1_cpu_wait = 32'd0;
 		assign ps1_gtr_word = 32'd0; assign ps1_gtr_head = 2'd0; assign ps1_gtr_stat = 32'd0;
 		if (!CORE_N64 && (CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS) begin : g_md_lr
 			// the Mega Drive's (or the SNES's) two channels, for HDMI's stereo: 48000 times a
@@ -1305,6 +1310,7 @@ module console_top #(
 		assign ps1_dbg_gpu_wr = 32'd0; assign ps1_gpu_pop = 1'b0; assign ps1_gpu_popword = 32'd0;
 		assign ps1_dbg_mem = 32'd0; assign ps1_dbg_daddr = 32'd0; assign ps1_dbg_irq = 32'd0;
 		assign ps1_dbg_gpu_st = 32'd0;
+		assign ps1_rgb_odd = 1'b0;
 		assign ps1_dbg_cause = 32'd0; assign ps1_dbg_epc = 32'd0; assign ps1_dbg_dma = 32'd0; assign ps1_dbg_gpu2 = 32'd0; assign ps1_dbg_disp = 32'd0; assign ps1_dbg_draw = 32'd0;
 		assign ps1_dbg_exec = 1'b0; assign ps1_dbg_word = 32'd0; assign ps1_rval = 32'd0;
 		assign ps1_watch_hit = 32'd0;
@@ -1421,14 +1427,14 @@ module console_top #(
 	// 0x64; 0x68 is {frozen, write pointer} -- the pointer is the oldest entry.
 	wire [4:0] pct_code = ps1_dbg_cause[6:2];
 	always @(posedge clk) begin
-		if (rst || !run) begin pct_wr <= 4'd0; pct_frozen <= 1'b0; pct_last <= 32'd0; end
+		if (rst || !run) begin pct_wr <= 6'd0; pct_frozen <= 1'b0; pct_last <= 32'd0; end
 		else if (!pct_frozen) begin
 			// one entry per COMMITTED instruction: its address and its word.
 			// Recording every PC value instead left out delay slots and put in
 			// fetches that were never run, and the trace read like a CPU bug.
 			if (PS1_DBG && ps1_dbg_exec) begin
 				pctrace[pct_wr] <= ps1_dbg_pc; pitrace[pct_wr] <= ps1_dbg_word;
-				pct_wr <= pct_wr + 4'd1; pct_last <= ps1_dbg_pc;
+				pct_wr <= pct_wr + 6'd1; pct_last <= ps1_dbg_pc;
 			end
 			if (pct_code != 5'd0 && pct_code != 5'd8) pct_frozen <= 1'b1;
 			// ...and at a jump to address zero: the kernel keeps a copy of the
@@ -1436,6 +1442,7 @@ module console_top #(
 			// a stale EPC and the BIOS "returns" into the wrong context
 			if (ps1_dbg_exec && ps1_dbg_pc == 32'd0) pct_frozen <= 1'b1;
 			if (pc_freeze_now) pct_frozen <= 1'b1;
+			if (ps1_rgb_odd) pct_frozen <= 1'b1;
 		end
 	end
 

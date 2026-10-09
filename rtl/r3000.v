@@ -100,6 +100,8 @@ module r3000 (
 	output wire [31:0] dbg_rval,
 	output wire [31:0] dbg_a0, dbg_a1, dbg_ra, dbg_sp,   // for a snapshot at a watchpoint hit
 	output wire [31:0] dbg_t1,                           // ...and t1: the BIOS function number (ps1_top's TTY)
+	output wire        dbg_c2w,                          // waiting for the GTE to finish (S_C2W)
+	output wire        dbg_swc2_rgb2,                    // (debug) an SWC2 of RGB2 is going out this clock
 	output reg         t_take,                           // an instruction committed last clock...
 	output reg  [6:0]  t_cost,                           // ...and what it cost the console, in its cycles
 	// every write into the register file, for a trace of one register:
@@ -193,6 +195,7 @@ module r3000 (
 	           S_DIV   = 3'd4, S_EXC  = 3'd5, S_FETCHW = 3'd6, S_MEMW = 3'd7;
 	localparam S_C2W = 4'd8;
 	reg [3:0]  st;
+	assign dbg_c2w   = (st == S_C2W);
 	// Where the instruction just executed wants the processor to go. A
 	// blocking variable, so the cycle that runs the instruction can read it
 	// back and, when nothing is diverting, fetch the next instruction itself
@@ -216,6 +219,7 @@ module r3000 (
 	// the instruction being executed: the one taken from the held line, or the
 	// one the bus brought back
 	wire [31:0] insn = if_fast ? if_word : din;
+	assign dbg_swc2_rgb2 = ce && (st == S_EXEC) && (insn[31:26] == 6'h3A) && (insn[20:16] == 5'd22) && !c2_busy && SR[30];
 
 	// --- decode ----------------------------------------------------------------------------
 	wire [5:0]  op    = ir[31:26];
@@ -335,7 +339,21 @@ module r3000 (
 	assign fetching   = (st == S_FETCHW);
 	// this fetch will go straight to execute: the instruction is in hand and
 	// nothing is diverting the processor first
-	wire fast_go = fetch_hit && !(irq_now && !in_slot) && (PC[1:0] == 2'b00);
+	// An interrupt that lands on a GTE command: the R3000 has already sent the command to the GTE
+	// when it takes the interrupt, with EPC on the command -- and the BIOS's handler knows it: it
+	// looks at the word at EPC and, a GTE command, returns past it (psx-spx "Interrupts vs GTE
+	// commands"; DuckStation executes the command at the interrupt). Taking the interrupt BEFORE
+	// the command, as this did, the BIOS then skipped a command that never ran: GT2's DPCS at
+	// 80024524, and the polygon's packet went out with the last polygon's command word -- a
+	// display list the GPU misread, and the game hung (caught with an RGB2-vs-RGBC check on the
+	// board, 2026-10-09: EPC 80024524, the handler returned to 80024528).
+	// So the word at PC decides: in hand (fetch_hit), a GTE command goes out with the interrupt
+	// (or, the GTE still busy, the interrupt waits for the stall like any other); not in hand, the
+	// interrupt is decided in S_EXEC once it is (irq_x).
+	wire fw_gte   = (fetch_word[31:25] == 7'b0100101) && SR[30];
+	wire irq_take = irq_now && !in_slot && fetch_hit && !(fw_gte && c2_busy);
+	reg  irq_x;                           // an interrupt waiting for the word at PC (see S_EXEC)
+	wire fast_go = fetch_hit && !irq_take && (PC[1:0] == 2'b00);
 	// The same question asked from the states that follow a load or a store,
 	// where the program counter already points at the next instruction: can it
 	// be taken straight from the cache instead of spending a fetch cycle on it?
@@ -414,7 +432,7 @@ module r3000 (
 			ld_pend <= 1'b0; ld_reg <= 5'd0; ld_val <= 32'd0;
 			ld_commit <= 1'b0; ld_creg <= 5'd0; ld_cval <= 32'd0;
 			halted <= 1'b0;
-			exc_take <= 1'b0; exc_code <= 5'd0; exc_bad <= 32'd0; exc_bd <= 1'b0;
+			exc_take <= 1'b0; exc_code <= 5'd0; exc_bad <= 32'd0; exc_bd <= 1'b0; irq_x <= 1'b0;
 			isc_inv <= 1'b0; isc_addr <= 32'd0;
 			div_busy <= 1'b0; div_cnt <= 6'd0; mul_busy <= 1'b0; mul_cnt <= 2'd0; hl_wait <= 3'd0;
 			wb_en <= 1'b0; wb_reg <= 5'd0; wb_val <= 32'd0;
@@ -505,9 +523,12 @@ module r3000 (
 						ld_pend   <= 1'b0;
 					end
 
-					if (irq_now && !in_slot) begin
+					irq_x <= 1'b0;
+					if (irq_take) begin
 						// Interrupts are taken between instructions, and never in
-						// a delay slot: the branch would be lost.
+						// a delay slot: the branch would be lost. (A GTE command at
+						// PC goes out with it: see irq_take.)
+						if (fw_gte) begin c2_cmd <= 1'b1; c2_word <= fetch_word[24:0]; end
 						exc_code <= EXC_INT;
 						exc_bd   <= 1'b0;
 						st       <= S_EXC;
@@ -530,6 +551,7 @@ module r3000 (
 						be   <= 4'b1111;
 						req  <= 1'b1;
 						st   <= S_FETCHW;
+						irq_x <= irq_now && !in_slot;   // decided when the word is here
 					end
 				end
 
@@ -538,7 +560,18 @@ module r3000 (
 			S_C2W:    if (!c2_busy) st <= S_FETCH;   // MFC2 re-executes once the GTE is done
 
 			// ---------------------------------------------------------------------------------
-			S_EXEC: begin
+			S_EXEC: if (irq_x && irq_now && !in_slot && !((insn[31:25] == 7'b0100101) && SR[30] && c2_busy)) begin
+					// the interrupt the fetch could not decide (irq_x): a GTE command here goes out
+					// with it, anything else waits for the return, exactly as if taken in S_FETCH
+					irq_x <= 1'b0;
+					if_fast <= 1'b0;
+					ir <= insn;
+					if ((insn[31:25] == 7'b0100101) && SR[30]) begin c2_cmd <= 1'b1; c2_word <= insn[24:0]; end
+					exc_code <= EXC_INT;
+					exc_bd   <= 1'b0;
+					st       <= S_EXC;
+				end else begin
+					irq_x <= 1'b0;
 					// from the held line if it was there, off the bus if not
 					if_fast <= 1'b0;
 					ir <= insn;
@@ -739,6 +772,9 @@ module r3000 (
 	reg  [15:0] wq_free;                 // when the write buffer has put its last store into RAM
 	integer     ii;
 	initial for (ii = 0; ii < 256; ii = ii + 1) begin ict[ii] = 17'd0; icv[ii] = 4'd0; end
+	// (the FPGA starts these at 0; a simulation starts them at X, and the X reached the pace credit
+	// with the first instruction -- the processor stopped for good in any bench that paces it)
+	initial begin ctime = 16'd0; mdu_ready = 16'd0; gte_ready = 16'd0; wq_free = 16'd0; end
 
 	function [6:0] load_wait;            // a load's cycles beyond the instruction's own
 		input [31:0] ea; input [1:0] sz;     // sz: 0 byte, 1 half, 2 word

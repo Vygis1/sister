@@ -269,7 +269,13 @@ module ps1_raster #(
 	wire signed [31:0] cr1 = cr + dr_dx, cg1 = cg + dg_dx, cb1 = cb + db_dx, cu1 = cu + du_dx, cv1 = cv + dv_dx;
 	// 12'sd: an unsigned literal would make the compare unsigned. A row the
 	// field rule skips is over before it starts: one clock, not one a pair.
-	wire row_end = (px + 12'sd2 > bx1) || (il_skip && (py[0] == il_field));
+	// ...and a triangle's row is over once it has been inside and come out again: a triangle is
+	// convex, so nothing further right on the row is in it. The walk went on to the box's right
+	// edge (two pixels a clock, or eight past the shape), and on GT2's polygons that was time the
+	// console never spends -- it walks spans, not boxes.
+	reg  row_in;                                    // this row has had a pixel inside
+	wire span_done = !always_in && row_in && !in_a && !in_b;
+	wire row_end = (px + 12'sd2 > bx1) || (il_skip && (py[0] == il_field)) || span_done;
 	wire last    = row_end && (py >= by1);
 
 	// eight ahead: when neither of the next four pairs is inside, jump
@@ -659,7 +665,7 @@ module ps1_raster #(
 	integer k;
 	always @(posedge clk) begin
 		if (rst) begin
-			busy <= 1'b0; scanning <= 1'b0;
+			busy <= 1'b0; scanning <= 1'b0; row_in <= 1'b0;
 			vB <= 1'b0; vC <= 1'b0; vD <= 1'b0; vE <= 1'b0; wreq <= 1'b0; lastF <= 1'b0;
 			fs <= F_IDLE; fwho <= 2'd0; faddr <= 29'd0; dst_run <= 1'b0; cl_have <= 32'd0; cl_req <= 5'd0; cl_loading <= 1'b0;
 			cl_wait <= 4'd0;
@@ -671,6 +677,7 @@ module ps1_raster #(
 			// --- start: the scanner at the box's top-left, the palette if needed ------
 			if (start && !busy) begin
 				busy <= 1'b1; scanning <= (by0 <= by1);   // an empty box draws nothing
+				row_in <= 1'b0;
 				px <= {bx0[11:1], 1'b0}; py <= by0;
 				// the pair starts one left of the box when bx0 is odd: the edge
 				// functions and interpolants are asked for at px, so step back
@@ -688,6 +695,7 @@ module ps1_raster #(
 			// --- A: the scanner ------------------------------------------------------------
 			if (scanning && !hold && pace_ok) begin
 				if (last) scanning <= 1'b0;
+				row_in <= row_end ? 1'b0 : (row_in || in_a || in_b);
 				if (row_end) begin
 					px <= {bx0[11:1], 1'b0}; py <= py + 12'd1;
 					er0 <= er0 + sy0; er1 <= er1 + sy1; er2 <= er2 + sy2;

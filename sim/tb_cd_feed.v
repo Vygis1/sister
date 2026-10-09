@@ -19,6 +19,7 @@ module tb_cd_feed;
 	reg  sclk = 0, mosi = 0, cs_n = 1; wire miso;
 
 	ps1_cdrom #(.ACK_CYCLES(200), .SECOND_CYCLES(400), .SEEK_CYCLES(3000), .SECTOR_1X(40000), .SECTOR_2X(20000)) drive (
+		.edc_on(1'b0), .dbg_edc_bad(),
 		.clk(clk), .rst(rst), .sel(sel), .we(we), .addr(addr), .be(be), .wdata(wdata), .rdata(rdata), .irq(irq),
 		.dma_rd(1'b0), .dma_rdata(), .dma_rvalid(),
 		.disc_in(disc_in), .fill_lba(fill_lba), .fill_room(fill_room), .fill_run(fill_run),
