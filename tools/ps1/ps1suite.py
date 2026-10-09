@@ -35,7 +35,10 @@ SKIP = {'input_pad', 'cdrom_disc-swap', 'cdrom_terminal', 'spu_toolbox', 'spu_ra
         'mdec_movie_movie-15bit', 'mdec_movie_movie-24bit',
         # the CPU-read 24-bit frame: the test does not put the MDEC's 8x8 blocks in rows
         # ("swizzling for 24bit not implemented"), so no console's picture matches its reference
-        'mdec_frame_frame-24bit'}
+        'mdec_frame_frame-24bit',
+        # needs a MODIFIED console: CPU pin 160 (TCLK0) cut from the GPU and wired to the serial
+        # port's RTS, so the program can clock Timer0 by hand; the reference log is from one
+        'timer-dump'}
 
 
 def tests():
