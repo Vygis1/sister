@@ -67,7 +67,8 @@ module ps1_cdrom #(
 	parameter INIT_ACK_CYCLES  = ACK_CYCLES,
 	parameter INIT_DONE_CYCLES = SECOND_CYCLES,
 	parameter PAUSE_DONE_CYCLES = SECOND_CYCLES,
-	parameter SEEK_CYCLES   = 2000000,   // a seek: 40 ms (the real drive: 40-800 ms)
+	parameter CLK_HZ        = 50000000,  // (for the seek's length, which grows with the distance)
+	parameter SEEK_CYCLES   = 2000000,   // (unused: see seek_len)
 	parameter SECTOR_1X     = 666667,    // 1/75 s at 50 MHz
 	parameter SECTOR_2X     = 333333,    // 1/150 s
 	parameter [23:0] LAST_LBA = 24'd268742   // Crash Bandicoot (USA): 632083536 / 2352 sectors
@@ -234,6 +235,198 @@ module ps1_cdrom #(
 	// the drive
 	reg [23:0] loc;                   // Setloc target (LBA)
 	reg        loc_v;                 // set since the last seek
+	// --- the seek's length (DuckStation's model of the mech: GetTicksForSeek) ---------------
+	// A seek was a fixed 40 ms; a real drive's grows with the distance -- ps1-tests cdrom/getloc reads
+	// 40 minutes in and expects the drive still SEEKING 90 ms later. Forward within a track of the
+	// spiral: read up to it; one track back: jump and read up; under 7,200 sectors: 50 or 100 ms;
+	// further, the sled: 50 ms + 0.85 s, 40% logarithmic and 60% linear in the distance over 72
+	// minutes. Plus 0.5-1 ms of jitter, as the mech has.
+	function [4:0] spt_of; input [6:0] mm; begin
+		case (mm)
+			7'd0: spt_of = 5'd8;
+			7'd1: spt_of = 5'd9;
+			7'd2: spt_of = 5'd9;
+			7'd3: spt_of = 5'd9;
+			7'd4: spt_of = 5'd9;
+			7'd5: spt_of = 5'd10;
+			7'd6: spt_of = 5'd10;
+			7'd7: spt_of = 5'd10;
+			7'd8: spt_of = 5'd11;
+			7'd9: spt_of = 5'd11;
+			7'd10: spt_of = 5'd11;
+			7'd11: spt_of = 5'd11;
+			7'd12: spt_of = 5'd12;
+			7'd13: spt_of = 5'd12;
+			7'd14: spt_of = 5'd12;
+			7'd15: spt_of = 5'd12;
+			7'd16: spt_of = 5'd12;
+			7'd17: spt_of = 5'd13;
+			7'd18: spt_of = 5'd13;
+			7'd19: spt_of = 5'd13;
+			7'd20: spt_of = 5'd13;
+			7'd21: spt_of = 5'd13;
+			7'd22: spt_of = 5'd13;
+			7'd23: spt_of = 5'd13;
+			7'd24: spt_of = 5'd14;
+			7'd25: spt_of = 5'd14;
+			7'd26: spt_of = 5'd14;
+			7'd27: spt_of = 5'd14;
+			7'd28: spt_of = 5'd15;
+			7'd29: spt_of = 5'd15;
+			7'd30: spt_of = 5'd15;
+			7'd31: spt_of = 5'd15;
+			7'd32: spt_of = 5'd15;
+			7'd33: spt_of = 5'd16;
+			7'd34: spt_of = 5'd16;
+			7'd35: spt_of = 5'd16;
+			7'd36: spt_of = 5'd16;
+			7'd37: spt_of = 5'd16;
+			7'd38: spt_of = 5'd16;
+			7'd39: spt_of = 5'd16;
+			7'd40: spt_of = 5'd17;
+			7'd41: spt_of = 5'd17;
+			7'd42: spt_of = 5'd17;
+			7'd43: spt_of = 5'd17;
+			7'd44: spt_of = 5'd17;
+			7'd45: spt_of = 5'd18;
+			7'd46: spt_of = 5'd18;
+			7'd47: spt_of = 5'd18;
+			7'd48: spt_of = 5'd18;
+			7'd49: spt_of = 5'd18;
+			7'd50: spt_of = 5'd18;
+			7'd51: spt_of = 5'd18;
+			7'd52: spt_of = 5'd18;
+			7'd53: spt_of = 5'd19;
+			7'd54: spt_of = 5'd19;
+			7'd55: spt_of = 5'd19;
+			7'd56: spt_of = 5'd19;
+			7'd57: spt_of = 5'd19;
+			7'd58: spt_of = 5'd19;
+			7'd59: spt_of = 5'd19;
+			7'd60: spt_of = 5'd19;
+			7'd61: spt_of = 5'd20;
+			7'd62: spt_of = 5'd20;
+			7'd63: spt_of = 5'd20;
+			7'd64: spt_of = 5'd20;
+			7'd65: spt_of = 5'd20;
+			7'd66: spt_of = 5'd20;
+			7'd67: spt_of = 5'd20;
+			7'd68: spt_of = 5'd21;
+			7'd69: spt_of = 5'd21;
+			7'd70: spt_of = 5'd21;
+			7'd71: spt_of = 5'd21;
+			7'd72: spt_of = 5'd21;
+			7'd73: spt_of = 5'd21;
+			7'd74: spt_of = 5'd21;
+			7'd75: spt_of = 5'd22;
+			7'd76: spt_of = 5'd22;
+			7'd77: spt_of = 5'd22;
+			7'd78: spt_of = 5'd22;
+			7'd79: spt_of = 5'd22;
+			default: spt_of = 5'd22;
+		endcase
+	end endfunction
+	function [8:0] sw_of; input [6:0] mm; begin
+		case (mm)
+			7'd0: sw_of = 9'd330;
+			7'd1: sw_of = 9'd330;
+			7'd2: sw_of = 9'd286;
+			7'd3: sw_of = 9'd260;
+			7'd4: sw_of = 9'd242;
+			7'd5: sw_of = 9'd228;
+			7'd6: sw_of = 9'd216;
+			7'd7: sw_of = 9'd207;
+			7'd8: sw_of = 9'd198;
+			7'd9: sw_of = 9'd191;
+			7'd10: sw_of = 9'd184;
+			7'd11: sw_of = 9'd178;
+			7'd12: sw_of = 9'd173;
+			7'd13: sw_of = 9'd168;
+			7'd14: sw_of = 9'd163;
+			7'd15: sw_of = 9'd159;
+			7'd16: sw_of = 9'd154;
+			7'd17: sw_of = 9'd151;
+			7'd18: sw_of = 9'd147;
+			7'd19: sw_of = 9'd144;
+			7'd20: sw_of = 9'd140;
+			7'd21: sw_of = 9'd137;
+			7'd22: sw_of = 9'd134;
+			7'd23: sw_of = 9'd132;
+			7'd24: sw_of = 9'd129;
+			7'd25: sw_of = 9'd126;
+			7'd26: sw_of = 9'd124;
+			7'd27: sw_of = 9'd121;
+			7'd28: sw_of = 9'd119;
+			7'd29: sw_of = 9'd117;
+			7'd30: sw_of = 9'd115;
+			7'd31: sw_of = 9'd113;
+			7'd32: sw_of = 9'd111;
+			7'd33: sw_of = 9'd109;
+			7'd34: sw_of = 9'd107;
+			7'd35: sw_of = 9'd105;
+			7'd36: sw_of = 9'd103;
+			7'd37: sw_of = 9'd102;
+			7'd38: sw_of = 9'd100;
+			7'd39: sw_of = 9'd98;
+			7'd40: sw_of = 9'd97;
+			7'd41: sw_of = 9'd95;
+			7'd42: sw_of = 9'd94;
+			7'd43: sw_of = 9'd92;
+			7'd44: sw_of = 9'd91;
+			7'd45: sw_of = 9'd89;
+			7'd46: sw_of = 9'd88;
+			7'd47: sw_of = 9'd86;
+			7'd48: sw_of = 9'd85;
+			7'd49: sw_of = 9'd84;
+			7'd50: sw_of = 9'd83;
+			7'd51: sw_of = 9'd81;
+			7'd52: sw_of = 9'd80;
+			7'd53: sw_of = 9'd79;
+			7'd54: sw_of = 9'd78;
+			7'd55: sw_of = 9'd77;
+			7'd56: sw_of = 9'd75;
+			7'd57: sw_of = 9'd74;
+			7'd58: sw_of = 9'd73;
+			7'd59: sw_of = 9'd72;
+			7'd60: sw_of = 9'd71;
+			7'd61: sw_of = 9'd70;
+			7'd62: sw_of = 9'd69;
+			7'd63: sw_of = 9'd68;
+			7'd64: sw_of = 9'd67;
+			7'd65: sw_of = 9'd66;
+			7'd66: sw_of = 9'd65;
+			7'd67: sw_of = 9'd64;
+			7'd68: sw_of = 9'd63;
+			7'd69: sw_of = 9'd62;
+			7'd70: sw_of = 9'd61;
+			7'd71: sw_of = 9'd60;
+			7'd72: sw_of = 9'd59;
+			7'd73: sw_of = 9'd59;
+			7'd74: sw_of = 9'd59;
+			7'd75: sw_of = 9'd59;
+			7'd76: sw_of = 9'd59;
+			7'd77: sw_of = 9'd59;
+			7'd78: sw_of = 9'd59;
+			7'd79: sw_of = 9'd59;
+			default: sw_of = 9'd60;
+		endcase
+	end endfunction
+	function [8:0] log2x16; input [18:0] v; integer k; reg [4:0] m; reg [18:0] t; begin
+		m = 5'd0;
+		for (k = 0; k < 19; k = k + 1) if (v[k]) m = k[4:0];
+		t = v << (5'd18 - m);
+		log2x16 = {m, t[17:14]};
+	end endfunction
+	localparam [25:0] SK_T50  = (CLK_HZ / 1000) * 50;            // 50 ms
+	localparam [25:0] SK_T100 = (CLK_HZ / 1000) * 100;
+	localparam [25:0] SK_JIT  = (CLK_HZ / 1000) / 2;             // 0.5 ms
+	localparam [25:0] SK_K2   = (CLK_HZ / 1000) * 1000 / 862;    // per 1/16 of log2(distance)
+	localparam [25:0] SK_K3   = (CLK_HZ / 1000) * 1024 / 635;    // x distance, >> 10
+	reg  [23:0] sk_from, sk_to; reg [18:0] sk_diff; reg sk_fwd; reg [6:0] sk_mm;
+	reg  [4:0]  sk_spt; reg [23:0] sk_tj;
+	reg  [25:0] seek_len, seek_cnt; reg [15:0] sk_lfsr;
+	initial begin sk_lfsr = 16'hACE1; seek_len = 26'd0; seek_cnt = 26'd0; end
+	wire [25:0] sk_sector = mode[7] ? SECTOR_2X : SECTOR_1X;
 	reg [23:0] pos;                   // where the head is
 	reg        seeking, reading;
 	reg        read_s;                // ReadS: no retries (same here)
@@ -808,8 +1001,30 @@ module ps1_cdrom #(
 					loc_v <= 1'b0;
 					r_base <= loc_v ? loc : pos;
 					if (loc_v) begin r_cnt <= 4'd0; ld_cnt <= 4'd0; slot_skip <= 8'd0; end   // (the chain restarted in the command's clock)
-					sec_timer <= 22'd1;
-				end else if (sec_timer != SEEK_CYCLES[21:0]) sec_timer <= sec_timer + 22'd1;
+					sk_from <= pos; sk_to <= loc_v ? loc : pos;
+					sk_mm   <= (pos * 24'd233) >> 20;                   // the head's minute (1/4500)
+					sec_timer <= 22'd1; seek_cnt <= 26'd0;
+				end else if (sec_timer == 22'd1) begin
+					sk_fwd  <= (sk_to > sk_from);
+					sk_diff <= (sk_to > sk_from) ? (sk_to - sk_from) : (sk_from - sk_to);
+					sk_spt  <= spt_of(sk_mm);
+					sk_tj   <= (sk_from >= {19'd0, spt_of(sk_mm)}) ? (sk_from - {19'd0, spt_of(sk_mm)}) : 24'd0;
+					sk_lfsr <= {sk_lfsr[14:0], sk_lfsr[15] ^ sk_lfsr[13] ^ sk_lfsr[12] ^ sk_lfsr[10]} | 16'd1;
+					sec_timer <= 22'd2;
+				end else if (sec_timer == 22'd2) begin
+					if (sk_fwd && sk_diff <= {14'd0, sk_spt})                        // read up to it
+						seek_len <= sk_sector * ((sk_diff < 19'd2) ? 26'd2 : {7'd0, sk_diff});
+					else if (!sk_fwd && sk_tj <= sk_to)                               // one track back
+						seek_len <= sk_sector * (((sk_to - sk_tj) == 24'd0) ? 26'd1 : {2'd0, sk_to - sk_tj});
+					else if (sk_diff < 19'd7200)                                      // a short jump
+						seek_len <= (sk_diff < {10'd0, sw_of(sk_mm)}) ? SK_T50 : SK_T100;
+					else                                                              // the sled
+						seek_len <= SK_T50 + SK_K2 * log2x16(sk_diff) + ((({7'd0, sk_diff}) * SK_K3) >> 10);
+					sec_timer <= 22'd3;
+				end else if (sec_timer == 22'd3) begin
+					seek_len <= seek_len + SK_JIT + ((SK_JIT * {10'd0, sk_lfsr}) >> 16);   // + 0.5-1 ms
+					sec_timer <= 22'd4;
+				end else if (seek_cnt != seek_len) seek_cnt <= seek_cnt + 26'd1;
 				else if (!cmd_pend && !second_pend && int_flag == 3'd0) begin
 					seeking <= 1'b0; sec_timer <= 22'd0;
 					if (seek_then_read) begin

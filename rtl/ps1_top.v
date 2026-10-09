@@ -1065,7 +1065,7 @@ module ps1_top #(
 	ps1_cdrom #(.ACK_CYCLES((CLK_HZ / 1000) * 1488 / 1000), .SECOND_CYCLES((CLK_HZ / 1000) * 12 / 5),
 	            .INIT_ACK_CYCLES((CLK_HZ / 1000) * 2395 / 1000), .INIT_DONE_CYCLES((CLK_HZ / 1000) * 14),
 	            .PAUSE_DONE_CYCLES((CLK_HZ / 1000) * 30),
-	            .SEEK_CYCLES(CLK_HZ / 25), .SECTOR_1X(CLK_HZ / 75), .SECTOR_2X(CLK_HZ / 150)) u_cd (
+	            .CLK_HZ(CLK_HZ), .SEEK_CYCLES(CLK_HZ / 25), .SECTOR_1X(CLK_HZ / 75), .SECTOR_2X(CLK_HZ / 150)) u_cd (
 		.clk(clk), .rst(core_rst),
 		.sel(cd_hit & c_req & cpu_ce_io), .we(c_we), .addr(c_addr[3:0]), .be(c_be), .wdata(c_dout), .rdata(cd_rdata),
 		.irq(cd_irq),

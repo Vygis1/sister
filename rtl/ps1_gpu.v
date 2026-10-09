@@ -1022,7 +1022,17 @@ module ps1_gpu #(
 					e_we   <= 1'b1; e_req <= 1'b1;
 					ds <= D_FILLW;
 				end
-			D_FILLW: if (v_ack) begin rxe <= rxe + 12'd8; ds <= D_FILL; end
+			// A line a clock while the row goes on: the next one is asked for in the clock this one is
+			// taken (back through D_FILL each line was two clocks a line, 365 MB/s; the console fills
+			// at 779 -- ps1-tests gpu/bandwidth FillScreen)
+			D_FILLW: if (v_ack) begin
+					rxe <= rxe + 12'd8;
+					if (rxe + 12'sd16 <= $signed({2'b0, rx}) + $signed({2'b0, rw})) begin
+						e_addr <= vaddr({rxe[9:3] + 7'd1, 3'd0}, ry[8:0]);
+						v_lwe  <= 1'b1;
+						e_we   <= 1'b1; e_req <= 1'b1;
+					end else ds <= D_FILL;
+				end
 
 			// -------------------------------------------------------------------------------
 			// polygon: set up the triangle, compute gradients, scan
