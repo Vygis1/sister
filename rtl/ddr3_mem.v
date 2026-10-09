@@ -100,7 +100,7 @@ module ddr3_mem #(
 	wire               rq_we    = rq_dout[AW+128];
 	wire [AW-1:0]      rq_addr  = rq_dout[AW+127:128];
 	wire [127:0]       rq_wdata = rq_dout[127:0];
-	reg                rq_take;
+	wire               rq_take;
 
 	assign m_ready = !rq_full && calib_sync[1];
 
@@ -140,24 +140,28 @@ module ddr3_mem #(
 
 	// --- handing them to MIG -------------------------------------------------
 	// The command and the write data are accepted independently and may be taken
-	// on different cycles. Each is held up until it has been, and only then is
-	// the transaction done with and the next one started.
+	// on different cycles. Each is held up until it has been -- and the next one
+	// goes up in the very clock the last is taken (rq_take is the queue's pop, in
+	// that clock; the queue shows its head without one). Started a clock after,
+	// with the pop a clock after that, a transaction took two clocks at the least:
+	// the PlayStation's fill reached 365 MB/s where the console's is 779.
 	reg cmd_done, data_done;
+	wire cmd_free  = !app_en || app_rdy;               // the command register is free at this edge
+	wire data_free = !app_wdf_wren || app_wdf_rdy;     // ...and the write data's
+	assign rq_take = cmd_free && data_free && !rq_empty && !ui_rst;
 
 	always @(posedge ui_clk) begin
 		if (ui_rst) begin
 			app_en <= 1'b0; app_wdf_wren <= 1'b0; app_wdf_end <= 1'b0;
 			app_addr <= 28'd0; app_cmd <= CMD_READ; app_wdf_data <= 128'd0; app_wdf_mask <= 16'h0000;
-			cmd_done <= 1'b0; data_done <= 1'b0; rq_take <= 1'b0;
+			cmd_done <= 1'b0; data_done <= 1'b0;
 		end else begin
-			rq_take <= 1'b0;
-
 			if (app_en && app_rdy) begin app_en <= 1'b0; cmd_done <= 1'b1; end
 			if (app_wdf_wren && app_wdf_rdy) begin
 				app_wdf_wren <= 1'b0; app_wdf_end <= 1'b0; data_done <= 1'b1;
 			end
 
-			if (!app_en && !app_wdf_wren && !rq_empty && !rq_take) begin
+			if (rq_take) begin
 				// Eight 16-bit words per line; see the header.
 				app_addr     <= {rq_addr, 3'b000};
 				app_cmd      <= rq_we ? CMD_WRITE : CMD_READ;
@@ -168,7 +172,6 @@ module ddr3_mem #(
 				app_wdf_end  <= rq_we;
 				cmd_done     <= 1'b0;
 				data_done    <= !rq_we;
-				rq_take      <= 1'b1;
 			end
 		end
 	end

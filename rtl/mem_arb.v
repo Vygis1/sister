@@ -48,7 +48,10 @@
 module mem_arb #(
 	parameter PORTS  = 4,
 	parameter AW     = 24,          // line addresses: 24 bits of 16 bytes = 256 MB
-	parameter STARVE = 64           // cycles waiting before a port is promoted
+	parameter STARVE = 64,          // cycles waiting before a port is promoted
+	// ports whose request after `ready` is always a NEW one (they replace or drop it in the clock
+	// after being taken): those may be taken again at once. The rest sit out the clock after a turn.
+	parameter [PORTS-1:0] PIPE = {PORTS{1'b0}}
 )(
 	input  wire clk,
 	input  wire rst,
@@ -104,7 +107,11 @@ module mem_arb #(
 			urgent[i] = p_req_ok[i] && (waited[i] >= STARVE);
 	end
 
-	wire [PORTS-1:0] contenders = (|urgent) ? urgent : p_req_ok;
+	// The port taken in the last clock may still be holding that request (see the handshake,
+	// below): it sits this one out, unless it is a PIPE port. Everyone else may go now.
+	reg  [$clog2(PORTS+1)-1:0] last_win; reg last_v;
+	wire [PORTS-1:0] cool = (last_v && !PIPE[last_win]) ? ({{(PORTS-1){1'b0}}, 1'b1} << last_win) : {PORTS{1'b0}};
+	wire [PORTS-1:0] contenders = ((|urgent) ? urgent : p_req_ok) & ~cool;
 
 	reg [$clog2(PORTS+1)-1:0] win;
 	reg                       any;
@@ -156,7 +163,11 @@ module mem_arb #(
 	// ports are busy the duplicates fill the return queue with reads nobody is
 	// waiting for. So: issue only from idle, hold until the memory accepts, then
 	// drop for a cycle. The gap is what makes "accepted once" true.
-	wire             issue = !rst && !m_req && any;   // never acknowledge what reset will not issue
+	// The memory's register is free when nothing is in it OR it is being taken this clock: the next
+	// one goes up in the same clock. Issued only from idle, a transaction took two clocks at the
+	// least -- 25 M lines a second, and the PlayStation's fill stopped at 365 MB/s (the console
+	// 779). The gap is now per port (`cool`), which is all "accepted once" ever needed.
+	wire             issue = !rst && (!m_req || m_ready) && any;   // never acknowledge what reset will not issue
 	wire [PORTS-1:0] grant = issue
 	                         ? ({{(PORTS-1){1'b0}}, 1'b1} << win)
 	                         : {PORTS{1'b0}};
@@ -165,14 +176,17 @@ module mem_arb #(
 	always @(posedge clk) begin
 		if (rst) begin
 			m_req <= 1'b0; m_we <= 1'b0; m_addr <= {AW{1'b0}}; m_wdata <= 128'd0; m_wmask <= 16'hFFFF;
+			last_v <= 1'b0; last_win <= {$clog2(PORTS+1){1'b0}};
 			p_valid <= {PORTS{1'b0}};
 			q_head <= 0; q_tail <= 0;
 			for (i = 0; i < PORTS; i = i + 1) waited[i] <= 16'd0;
 		end else begin
 			p_valid <= {PORTS{1'b0}};
 
-			if (m_req && m_ready) begin
-				// accepted this cycle: drop req so the memory cannot take it again
+			last_v <= issue;
+			if (issue) last_win <= win;
+			if (m_req && m_ready && !issue) begin
+				// accepted this cycle, nothing behind it: drop req so the memory cannot take it again
 				m_req <= 1'b0;
 			end else if (issue) begin
 				// idle and someone wants in: present it and remember a read

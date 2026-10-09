@@ -1013,7 +1013,9 @@ module ps1_top #(
 	// The arbiter and the DDR3 path are memory infrastructure: they live on the
 	// GLOBAL reset. On the core's reset they sat dead while the host was filling
 	// the BIOS through them, acknowledging every line and issuing none.
-	mem_arb #(.PORTS(6), .AW(24)) arb (
+	// (PIPE: the CPU cache, the VRAM cache and the block writer replace or drop a request in the clock
+	// after it is taken, so they may go back to back)
+	mem_arb #(.PORTS(6), .AW(24), .PIPE(6'b000111)) arb (
 		.clk(clk), .rst(rst),
 		.p_addr(p_addr), .p_req(p_req), .p_we(p_we), .p_wdata(p_wdata), .p_wmask(p_wmask),
 		.p_ready(p_ready), .p_rdata(p_rdata), .p_valid(p_valid),
