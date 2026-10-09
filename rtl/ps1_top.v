@@ -343,7 +343,8 @@ module ps1_top #(
 	// however long ours took; without dma_charge the credit stands still while a DMA holds it.
 	wire signed [15:0] CREDIT_MAX = !pace_long ? 16'sd48 : lead_big ? 16'sd16000 : 16'sd4000;
 	reg  signed [15:0] credit;
-	wire [2:0]  dma_wc;                 // words a DMA moved this clock (declared with the DMA below)
+	wire [3:0]  dma_wc;                 // console cycles a DMA took this clock (declared with the DMA below)
+	wire        dma_ll_hdr;             // a list node's header was taken (any node)
 	wire        t_take; wire [6:0] t_cost;
 	// with run_ahead the processor may also get AHEAD of the console by up to 4,000 cycles in a
 	// stretch where it is faster, and spend that in one where DDR3 or a DMA slows it -- averaged
@@ -367,7 +368,7 @@ module ps1_top #(
 		else begin
 			n = credit + ((sys_ce && !(pace_long && !dma_charge && dma_block)) ? 17'sd1 : 17'sd0)
 			           - (t_take ? $signed({10'd0, t_cost}) : 17'sd0)
-			           - ((pace_long && dma_charge) ? $signed({14'd0, dma_wc}) : 17'sd0);
+			           - ((pace_long && dma_charge) ? $signed({13'd0, dma_wc}) : 17'sd0);
 			credit <= (n > CREDIT_MAX) ? CREDIT_MAX : (n < -17'sd5000) ? -16'sd5000 : n[15:0];
 		end
 	end
@@ -1127,14 +1128,17 @@ module ps1_top #(
 		.mdec_pop(mdec_pop), .mdec_rdata(mdec_odata), .mdec_rvalid(mdec_rvalid), .mdec_dreq1(mdec_dreq1), .mdec_depth(mdec_depth),
 		.hog(dma_hog), .in_flight(dma_in_flight),
 		.gpu_active(dma_gpu_active),
-		.dbg_node_v(dbg_node_v), .dbg_node_addr(dbg_node_addr), .dbg_node_hdr(dbg_node_hdr),
+		.ll_hdr(dma_ll_hdr), .dbg_node_v(dbg_node_v), .dbg_node_addr(dbg_node_addr), .dbg_node_hdr(dbg_node_hdr),
 		.irq(dma_irq), .dbg_dma(dbg_dma)
 	);
 	// the words a DMA moved this clock, for the processor's pace (the console's DMA moves a word a
 	// cycle): into a device, out of one into RAM, a line of the ordering-table clear, a list header
 	wire [2:0] dm_lw = {2'd0, |dm_be16[3:0]} + {2'd0, |dm_be16[7:4]} + {2'd0, |dm_be16[11:8]} + {2'd0, |dm_be16[15:12]};
-	assign dma_wc = (gp0_wr || spu_dma_wr || mdec_wr || dbg_node_v ? 3'd1 : 3'd0)
-	              + ((dm_req && dm_ack && dm_we) ? (dm_lwe ? dm_lw : 3'd1) : 3'd0);
+	// (a list node's header is 8: ps1-tests dma/chain-looping, a self-referencing list beside a
+	// 16,040-cycle loop, takes it to 25,632 on the console -- the processor gets ~13 cycles between
+	// headers of ~8. Charged 1, ours ran the loop at full speed: 15,016.)
+	assign dma_wc = (gp0_wr || spu_dma_wr || mdec_wr ? 4'd1 : 4'd0) + (dma_ll_hdr ? 4'd8 : 4'd0)
+	              + ((dm_req && dm_ack && dm_we) ? (dm_lwe ? {1'b0, dm_lw} : 4'd1) : 4'd0);
 
 	// ================================================================================
 	// the stubs the BIOS probes

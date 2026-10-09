@@ -42,7 +42,8 @@ module ps1_dma #(
 	// (ps1-tests dma/chopping: 2048 one-word blocks take 22819 cycles, 2048 words in one 2196)
 	parameter BLK_GAP = 15,
 	// ...and between the nodes of a linked list (dma/chain-looping): ~13 system clocks
-	parameter LL_GAP = 19
+	parameter LL_GAP = 19,
+	parameter HDR_HOLD = 9
 ) (
 	input  wire        clk,
 	input  wire        rst,
@@ -117,6 +118,7 @@ module ps1_dma #(
 	// linked list ever ends
 	output wire [31:0] dbg_dma,
 	// every linked-list node header as it is read: where it was and what it said
+	output reg         ll_hdr,        // a list node's header was taken this clock (any node, empty too)
 	output reg         dbg_node_v,
 	output reg  [23:0] dbg_node_addr,
 	output reg  [31:0] dbg_node_hdr
@@ -172,7 +174,8 @@ module ps1_dma #(
 	// the last RAM line read, so a run of words costs one read in four: the console moves a word
 	// a cycle, and a read a word took us ~3.5 (the same test: 7100 cycles where it takes 2200)
 	reg         lb_v; reg [19:0] lb_tag; reg [127:0] lb_data;
-	reg  [4:0]  blk_gap;
+	reg  [5:0]  blk_gap;
+	reg  [5:0]  hdr_hold;              // the first clocks of a list's gap: the header, the bus still held
 	wire        dev_ready  = (cur == 3'd4) ? (spu_ready && spu_gap == 8'd0) : (cur == 3'd0) ? mdec_in_ready : gp0_ready;
 	wire        dev_rvalid = (cur == 3'd4) ? spu_rvalid : (cur == 3'd1) ? mdec_rvalid : gpu_rvalid;
 	always @(posedge clk)
@@ -206,6 +209,7 @@ module ps1_dma #(
 			// only nodes that carry something are recorded: an ordering table is mostly empty
 			// slots, and recording those flushed the trace of the primitives it was there to catch
 			dbg_node_v <= (h[31:24] != 8'd0); dbg_node_addr <= addr; dbg_node_hdr <= h;
+			ll_hdr <= 1'b1;
 			next   <= h[23:0];
 			words  <= {24'd0, h[31:24]};
 			addr   <= addr + 24'd4;
@@ -219,7 +223,9 @@ module ps1_dma #(
 				addr <= na; next <= 24'hFF_FFFF;
 				ll_prev2 <= ll_prev1; ll_prev1 <= ll_cur; ll_cur <= na;
 				if (na == ll_cur || na == ll_prev1) ll_loop <= 1'b1;
-				if (ll_loop) blk_gap <= LL_GAP[4:0];
+				// a list seen going round: the bus held for the header as long as the console's (~8
+				// cycles, HDR_HOLD clocks), then the processor's window (LL_GAP)
+				if (ll_loop) begin blk_gap <= LL_GAP[5:0] + HDR_HOLD[5:0]; hdr_hold <= HDR_HOLD[5:0]; end
 				st <= S_LL;
 			end
 		end
@@ -236,9 +242,11 @@ module ps1_dma #(
 			st <= S_IDLE; cur <= 3'd0;
 			r_req <= 1'b0; r_we <= 1'b0; r_lwe <= 1'b0; r_be16 <= 16'd0; r_wdata128 <= 128'd0; otc_n <= 32'd0; gp0_wr <= 1'b0; gpu_rd <= 1'b0; dbg_node_v <= 1'b0; spu_wr <= 1'b0; spu_rd <= 1'b0;
 			cd_rd <= 1'b0; cd_go <= 1'b0; cd_go_info <= 32'd0; cd_words <= 16'd0; mdec_wr <= 1'b0;
-			lb_v <= 1'b0; blk_gap <= 5'd0; ll_loop <= 1'b0; ll_cur <= 24'd0; ll_prev1 <= 24'hFF_FFFF; ll_prev2 <= 24'hFF_FFFF; m_park <= 2'b00; m1b <= 2'd0; m1r <= 3'd0; m1w <= 3'd0;
+			lb_v <= 1'b0; blk_gap <= 6'd0; hdr_hold <= 6'd0; ll_hdr <= 1'b0; ll_loop <= 1'b0; ll_cur <= 24'd0; ll_prev1 <= 24'hFF_FFFF; ll_prev2 <= 24'hFF_FFFF; m_park <= 2'b00; m1b <= 2'd0; m1r <= 3'd0; m1w <= 3'd0;
 		end else begin
-			if (blk_gap != 5'd0) blk_gap <= blk_gap - 5'd1;
+			if (blk_gap != 6'd0) blk_gap <= blk_gap - 6'd1;
+			if (hdr_hold != 6'd0) hdr_hold <= hdr_hold - 6'd1;
+			ll_hdr <= 1'b0;
 			if (r_req && r_we) lb_v <= 1'b0;                 // (a DMA write: the line in hand may be stale)
 			if (snoop_v && snoop_a[20:4] == lb_tag[16:0]) lb_v <= 1'b0;   // (2 MB: the CPU may store through a mirror)
 			r_req  <= 1'b0;
@@ -512,7 +520,7 @@ module ps1_dma #(
 						// ever; the processor then gets its turn between nodes (below)
 						ll_prev2 <= ll_prev1; ll_prev1 <= ll_cur; ll_cur <= {3'd0, next[20:2], 2'b00};
 						if ({3'd0, next[20:2], 2'b00} == ll_cur || {3'd0, next[20:2], 2'b00} == ll_prev1) ll_loop <= 1'b1;
-						if (ll_loop) blk_gap <= LL_GAP[4:0];
+						if (ll_loop) begin blk_gap <= LL_GAP[5:0] + HDR_HOLD[5:0]; hdr_hold <= HDR_HOLD[5:0]; end
 						st <= S_LL;
 					end else if (cur <= 3'd1 && chcr[cur][10:9] == 2'd1 && bcr[cur][31:16] > 16'd1) begin
 						// an MDEC block done, more to come: back to the arbiter, not finished
@@ -583,7 +591,7 @@ module ps1_dma #(
 	// its next access for good when the device never had the rest -- ps1-tests mdec/4bit asks
 	// for more words than one block decodes, and its timeout loop never got to run.
 	wire dev_paused = ((st == S_GWR) && !dev_rvalid && ((cur == 3'd1) || ((cur == 3'd4) && spu_gap != 8'd0)))
-	                || ((st == S_RD || st == S_LL) && blk_gap != 5'd0)
+	                || ((st == S_RD || st == S_LL) && blk_gap != 6'd0 && hdr_hold == 6'd0)
 	                || ((cur == 3'd4) && ((st == S_RD) || (st == S_GP0)) && !dev_ready);
 	assign hog = (hog_want || (st != S_IDLE)) && !gpu_paused && !dev_paused;
 	assign in_flight = (hog_want || (st != S_IDLE)) && !dev_paused;
