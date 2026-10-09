@@ -448,14 +448,8 @@ module ps1_gte (
 	end
 	wire cmd_go = cmd && !cmd_d;
 	assign dbg_rgbc = d[6];
-	// (debug) neither should ever happen -- the processor waits on `busy` first -- but a lost RGBC
-	// write or a lost colour command is exactly a GT2 packet whose command word is the last one's
-	always @(posedge clk)
-		if (rst) dbg_drops <= 32'd0;
-		else begin
-			if (cmd_go && (run || snap_hold))            dbg_drops[31:16] <= dbg_drops[31:16] + 16'd1;
-			if (we && (run || snap_hold) && !cmd_go)     dbg_drops[15:0]  <= dbg_drops[15:0]  + 16'd1;
-		end
+	// (debug) the lost-command / lost-write counters (always 0 on GT2): taken out for room
+	always @(posedge clk) dbg_drops <= 32'd0;
 	wire [24:0] cw = (sst == 2'd1) ? snap_word : word;     // (the snapshot's command, when it lets it run)
 	wire [4:0] shamt = sf ? 5'd12 : 5'd0;
 

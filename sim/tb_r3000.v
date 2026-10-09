@@ -47,7 +47,7 @@ module tb_r3000;
 	);
 
 	r3000 dut (
-		.clk(clk), .rst(rst), .ce(ce),
+		.clk(clk), .rst(rst), .ce(ce), .wq_off(1'b0),
 		.addr(addr), .din(din), .dout(dout), .be(be), .we(we), .req(req),
 		.fetch_addr(fetch_addr), .fetch_hit(fetch_hit), .fetch_word(fetch_word),
 		.fetching(), .no_overlap(!overlap),

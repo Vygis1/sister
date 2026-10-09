@@ -102,6 +102,8 @@ module r3000 (
 	output wire [31:0] dbg_t1,                           // ...and t1: the BIOS function number (ps1_top's TTY)
 	output wire        dbg_c2w,                          // waiting for the GTE to finish (S_C2W)
 	output wire        dbg_swc2_rgb2,                    // (debug) an SWC2 of RGB2 is going out this clock
+	input  wire        wq_off,                           // (experiment) charge no write-queue wait to a load
+	output reg  [191:0] dbg_cost,                        // (debug) console cycles charged, by cause (see console_clock)
 	output reg         t_take,                           // an instruction committed last clock...
 	output reg  [6:0]  t_cost,                           // ...and what it cost the console, in its cycles
 	// every write into the register file, for a trace of one register:
@@ -770,11 +772,15 @@ module r3000 (
 	reg  [15:0] ctime;                   // console cycles spent so far (differences only)
 	reg  [15:0] mdu_ready, gte_ready;    // when the multiplier / the GTE has its answer
 	reg  [15:0] wq_free;                 // when the write buffer has put its last store into RAM
+	reg  [26:0] wqa [0:3];               // the queue: each store's word address...
+	reg  [15:0] wqr [0:3];               // ...and when it is in RAM
+	reg  [1:0]  wq_w;                    // the next slot (the oldest, when all four are taken)
 	integer     ii;
 	initial for (ii = 0; ii < 256; ii = ii + 1) begin ict[ii] = 17'd0; icv[ii] = 4'd0; end
 	// (the FPGA starts these at 0; a simulation starts them at X, and the X reached the pace credit
 	// with the first instruction -- the processor stopped for good in any bench that paces it)
-	initial begin ctime = 16'd0; mdu_ready = 16'd0; gte_ready = 16'd0; wq_free = 16'd0; end
+	initial begin ctime = 16'd0; mdu_ready = 16'd0; gte_ready = 16'd0; wq_free = 16'd0; dbg_cost = 192'd0; wq_w = 2'd0; end
+	initial for (ii = 0; ii < 4; ii = ii + 1) begin wqa[ii] = 27'd0; wqr[ii] = 16'd0; end
 
 	function [6:0] load_wait;            // a load's cycles beyond the instruction's own
 		input [31:0] ea; input [1:0] sz;     // sz: 0 byte, 1 half, 2 word
@@ -845,12 +851,24 @@ module r3000 (
 		reg [31:0] w, va, ea, rsv;
 		reg [5:0]  o, f;
 		reg [4:0]  rs_n;
-		reg [8:0]  c;
+		reg [8:0]  c, cf, cw, cl, cg;
+		reg        wq_hit; integer qi; reg [15:0] wq_t;
 		reg [7:0]  ln;
 		reg [16:0] tg;
 		reg        hit;
 		t_take <= 1'b0;
 		if (k_v) begin
+			cf = 9'd0; cw = 9'd0; cl = 9'd0; cg = 9'd0;
+			// The ready times are 16 bits against a 16-bit clock: one set long ago -- no RAM
+			// store, no GTE command, no multiply for 32,768 cycles -- wrapped round to look like
+			// one in the future, and every load or GTE read after it was charged a wait of up to
+			// 63 cycles that was never there. One that has passed is brought up to now each
+			// instruction (assigned first: a real update below wins).
+			if (until(wq_free, ctime) == 6'd0)   wq_free   <= ctime;
+			if (until(mdu_ready, ctime) == 6'd0) mdu_ready <= ctime;
+			if (until(gte_ready, ctime) == 6'd0) gte_ready <= ctime;
+			for (qi = 0; qi < 4; qi = qi + 1)
+				if (until(wqr[qi], ctime) == 6'd0) wqr[qi] <= ctime;
 			w = k_w; o = w[31:26]; f = w[5:0]; rs_n = w[25:21];
 			rsv = k_rsv;
 			ea  = k_ea;
@@ -865,26 +883,43 @@ module r3000 (
 				if (!hit)
 					c = c + {7'd0, 2'd3 - k_pc[3:2]} + 9'd1;     // the words from here to the line's end
 			end
-			// a load that goes out on the bus waits for the write buffer to empty first: a store
-			// to RAM keeps the bus ~7 cycles (ps1-tests dma/chain-looping: a load/add/store
-			// loop is 16 cycles an iteration on the console, 11 without this)
+			cf = c - 9'd1;
+			// The write queue (psx-spx "Write queue"): four words deep and PASS-THROUGH. A store
+			// costs nothing unless all four are still waiting, when the processor halts for room;
+			// a store to RAM keeps the bus ~7 cycles. A load passes the queue -- unless it reads a
+			// word still in it, or is a KSEG1 access, either of which flushes the whole queue
+			// first (ps1-tests dma/chain-looping: a volatile load/add/store loop, the load reading
+			// the word just stored, is 16 cycles an iteration on the console, 11 without). Every
+			// load waiting for the whole queue, as this did, charged GT2's packet building -- stores
+			// to the packet, loads from the model -- a tenth of all its time for a wait the
+			// console never has.
+			wq_hit = 1'b0;
+			for (qi = 0; qi < 4; qi = qi + 1)
+				if (wqa[qi] == ea[28:2] && until(wqr[qi], ctime) != 6'd0) wq_hit = 1'b1;
 			if ((o == 6'h20 || o == 6'h21 || o == 6'h22 || o == 6'h23 || o == 6'h24 || o == 6'h25 || o == 6'h26 || o == 6'h32)
-			    && !(ea[31:29] != 3'b111 && ea[28:10] == 19'h7E000))
-				c = c + until(wq_free, ctime);
+			    && !(ea[31:29] != 3'b111 && ea[28:10] == 19'h7E000)
+			    && (wq_hit || ea[31:29] == 3'b101))
+				begin cw = wq_off ? 9'd0 : {3'd0, until(wq_free, ctime)}; c = c + cw; end
 			if ((o == 6'h28 || o == 6'h29 || o == 6'h2A || o == 6'h2B || o == 6'h2E || o == 6'h3A)
-			    && ea[31:29] != 3'b111 && ea[28:23] == 6'd0)
-				wq_free <= ((until(wq_free, ctime) != 6'd0) ? wq_free : ctime) + 16'd7;
+			    && ea[31:29] != 3'b111 && ea[28:23] == 6'd0) begin
+				// the oldest of four still going out: wait for its room
+				if (!wq_off) begin cw = {3'd0, until(wqr[wq_w], ctime)}; c = c + cw; end
+				wq_t = ((until(wq_free, ctime) != 6'd0) ? wq_free : ctime) + 16'd7;
+				wqa[wq_w] <= ea[28:2]; wqr[wq_w] <= wq_t; wq_w <= wq_w + 2'd1;
+				wq_free <= wq_t;
+			end
 			// its data
 			case (o)
-			6'h20, 6'h24:                       c = c + load_wait(ea, 2'd0);
-			6'h21, 6'h25:                       c = c + load_wait(ea, 2'd1);
-			6'h22, 6'h23, 6'h26, 6'h32:         c = c + load_wait(ea, 2'd2);
+			6'h20, 6'h24:                       cl = {2'd0, load_wait(ea, 2'd0)};
+			6'h21, 6'h25:                       cl = {2'd0, load_wait(ea, 2'd1)};
+			6'h22, 6'h23, 6'h26, 6'h32:         cl = {2'd0, load_wait(ea, 2'd2)};
 			default: ;
 			endcase
+			c = c + cl;
 			// the multiplier and the GTE answer when they are done
-			if (o == 6'h00 && (f == 6'h10 || f == 6'h12))   c = c + until(mdu_ready, ctime);
-			if (o == 6'h12 && (w[25] || w[25:21] == 5'd0 || w[25:21] == 5'd2)) c = c + until(gte_ready, ctime);
-			if (o == 6'h3A)                                  c = c + until(gte_ready, ctime);
+			if (o == 6'h00 && (f == 6'h10 || f == 6'h12))   begin cg = {3'd0, until(mdu_ready, ctime)}; c = c + cg; end
+			if (o == 6'h12 && (w[25] || w[25:21] == 5'd0 || w[25:21] == 5'd2)) begin cg = cg + {3'd0, until(gte_ready, ctime)}; c = c + {3'd0, until(gte_ready, ctime)}; end
+			if (o == 6'h3A)                                  begin cg = cg + {3'd0, until(gte_ready, ctime)}; c = c + {3'd0, until(gte_ready, ctime)}; end
 			if (o == 6'h00 && f == 6'h18)
 				mdu_ready <= ctime + ((rsv[31:11] == 21'd0 || rsv[31:11] == 21'h1FFFFF) ? 16'd6
 				                    : (rsv[31:20] == 12'd0 || rsv[31:20] == 12'hFFF) ? 16'd9 : 16'd13);
@@ -895,6 +930,15 @@ module r3000 (
 			ctime  <= ctime + {7'd0, c};
 			t_cost <= (c > 9'd127) ? 7'd127 : c[6:0];
 			t_take <= 1'b1;
+			// (debug) {instructions, all cycles, fetch, write-queue waits, load waits, MDU+GTE waits}
+			dbg_cost[191:160] <= dbg_cost[191:160] + 32'd1;
+			dbg_cost[159:128] <= dbg_cost[159:128] + {23'd0, c};
+			dbg_cost[127:96]  <= dbg_cost[127:96]  + {23'd0, cf};
+			dbg_cost[95:64]   <= dbg_cost[95:64]   + {23'd0, cw};
+			dbg_cost[63:32]   <= dbg_cost[63:32]   + {23'd0, cl};
+			dbg_cost[31:0]    <= dbg_cost[31:0]    + {23'd0, cg};
+			// (debug) {instructions, all cycles, fetch, write-queue waits, load waits, MDU+GTE waits}
+
 		end
 	end
 

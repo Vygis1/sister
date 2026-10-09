@@ -283,6 +283,7 @@ module ps1_top #(
 	// moment any DMA starts, as it always has.
 	input  wire        dma_relax,
 	input  wire        cd_edc_on,      // the drive checks each data sector's EDC (see ps1_cdrom)
+	input  wire        wq_off,         // (experiment) the CPU pace model charges loads no write-queue wait
 	input  wire        pace_long,      // the processor may make up 4,000 console cycles, not 48 (see pace_credit)
 	input  wire        dma_charge,     // a DMA costs the processor the console's cycle a word, not our time
 	// the frame event log (see "where a frame goes" below)
@@ -386,7 +387,7 @@ module ps1_top #(
 		.irq({5'd0, cpu_irq}),
 		.c2_we(c2_we), .c2_ctl(c2_ctl), .c2_reg(c2_reg), .c2_wreg(c2_wreg), .c2_wctl(c2_wctl), .c2_wdata(c2_wdata),
 		.c2_rdata(c2_rdata), .c2_cmd(c2_cmd), .c2_word(c2_word), .c2_busy(c2_busy),
-		.dbg_pc(dbg_pc), .dbg_ir(), .dbg_exec(dbg_exec), .dbg_rsel(dbg_rsel), .dbg_rval(dbg_rval), .dbg_a0(dbg_a0), .dbg_a1(dbg_a1), .dbg_ra(dbg_ra), .dbg_sp(dbg_sp), .dbg_t1(dbg_t1), .dbg_c2w(cpu_c2w), .dbg_swc2_rgb2(cpu_swc2_rgb2), .t_take(t_take), .t_cost(t_cost),
+		.dbg_pc(dbg_pc), .dbg_ir(), .dbg_exec(dbg_exec), .dbg_rsel(dbg_rsel), .dbg_rval(dbg_rval), .dbg_a0(dbg_a0), .dbg_a1(dbg_a1), .dbg_ra(dbg_ra), .dbg_sp(dbg_sp), .dbg_t1(dbg_t1), .dbg_c2w(cpu_c2w), .dbg_swc2_rgb2(cpu_swc2_rgb2), .wq_off(wq_off), .dbg_cost(cpu_cost), .t_take(t_take), .t_cost(t_cost),
 		.dbg_wa_en(dbg_wa_en), .dbg_wa_reg(dbg_wa_reg), .dbg_wa_val(dbg_wa_val), .dbg_wb_en(dbg_wb_en), .dbg_wb_reg(dbg_wb_reg), .dbg_wb_val(dbg_wb_val), .dbg_halted(),
 		.dbg_cause(dbg_cause), .dbg_epc(dbg_epc)
 	);
@@ -636,19 +637,11 @@ module ps1_top #(
 	wire [31:0]  gte_drops, gte_rgbc;
 	wire [15:0]  cd_edc_bad;
 	wire         cpu_swc2_rgb2;
-	// (debug) Every GTE colour command copies RGBC's code byte into the colour FIFO, so an SWC2 of
-	// RGB2 storing a code byte RGBC does not have is a GT2 packet getting the last polygon's command
-	// word (or a game that loaded the next RGBC early -- the count tells). The first freezes the PC
-	// trace (rgb_odd_now, out to console_top) and keeps both words.
-	reg  [31:0]  rgb_odd_n, rgb_odd_rgb2, rgb_odd_rgbc;
-	wire         rgb_odd_now = cpu_swc2_rgb2 && (c2_rdata[31:24] != gte_rgbc[31:24]);
-	always @(posedge clk)
-		if (rst) begin rgb_odd_n <= 32'd0; end
-		else if (rgb_odd_now) begin
-			rgb_odd_n <= rgb_odd_n + 32'd1;
-			if (rgb_odd_n == 32'd0) begin rgb_odd_rgb2 <= c2_rdata; rgb_odd_rgbc <= gte_rgbc; end
-		end
-	assign dbg_rgb_odd = rgb_odd_now && (rgb_odd_n == 32'd0);
+	wire [191:0] cpu_cost;
+
+	// (the RGB2-vs-RGBC check that found the interrupt-on-a-GTE-command bug: taken out for room,
+	// commit 0ae39eb has it)
+	assign dbg_rgb_odd = 1'b0;
 	wire        gpu_rd_stall;           // GPUREAD asked for before the GPU has the word
 	// A GP0 write waits while the GPU's FIFO is full or the DMA is pushing a
 	// word this cycle: otherwise the word is lost and the command stream
@@ -1466,12 +1459,9 @@ module ps1_top #(
 		end
 	end
 	assign dbg_perf = DBG_OLD ? perf[dbg_perf_sel]
-	                : (dbg_perf_sel[3:0] == 4'd8)  ? rgb_odd_n
-	                : (dbg_perf_sel[3:0] == 4'd9)  ? rgb_odd_rgb2
-	                : (dbg_perf_sel[3:0] == 4'd10) ? rgb_odd_rgbc
-	                : (dbg_perf_sel[3:0] == 4'd11) ? {16'd0, cd_edc_bad}
-	                : (dbg_perf_sel[2:0] < 3'd5) ? gpu_xfer[(3'd4 - dbg_perf_sel[2:0]) * 32 +: 32]
-	                : gte_drops;
+	                : (dbg_perf_sel[4:0] == 5'd11) ? {16'd0, cd_edc_bad}
+	                : (dbg_perf_sel[4:0] >= 5'd12 && dbg_perf_sel[4:0] <= 5'd17) ? cpu_cost[(5'd17 - dbg_perf_sel[4:0]) * 32 +: 32]
+	                : 32'd0;
 
 	// --- introspection capture ---------------------------------------------------
 	// The value an I/O read returns is exactly din_r one clock after the address

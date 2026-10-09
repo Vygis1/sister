@@ -280,6 +280,7 @@ module console_top #(
 	// a console never has one, a DMA costs it the console's time. ps1-tests on the board pass as
 	// they did with both off (2026-10-09), and GT2 gains 2-5 fps
 	reg          pace_long = 1'b1, dma_charge = 1'b1;
+	reg          wq_off = 1'b0;                                 // ctrl 0xEC bit 17 (experiment): see r3000
 	reg  [5:0]   ev_idx = 6'd0;
 	// the PlayStation's memory card: ctrl 0x134 {fill aimed at the card, card in},
 	// 0x138 the queue of sectors it has stored (see ps1_sio.v / pc/server.py)
@@ -497,12 +498,12 @@ module console_top #(
 	wire         hr_done;
 	wire [127:0] hr_data;
 	wire [31:0]  ps1_dbg_word;
-	reg  [31:0]  pitrace [0:63];    // the instruction words beside pctrace
+	reg  [31:0]  pitrace [0:15];    // the instruction words beside pctrace
 	// a PC trace for the PlayStation: the last sixteen distinct PCs before an
 	// exception that was not an interrupt or a syscall, frozen there (logic at
 	// the end of the module; declared here so the register mux may read it)
-	reg [31:0] pctrace [0:63];
-	reg [5:0]  pct_wr, pct_idx;
+	reg [31:0] pctrace [0:15];
+	reg [3:0]  pct_wr, pct_idx;
 	reg        pct_frozen;
 	reg [31:0] pct_last;
 	wire [7:0]   md_px_rgb;
@@ -616,14 +617,14 @@ module console_top #(
 		end else if (ctrl_we) begin
 			case (off)
 			16'h0004: begin run <= wdata[0]; mirror_v <= wdata[1]; cpu_halt <= wdata[2]; end
-		16'h0064: pct_idx <= wdata[5:0];        // which PC-trace entry 0x64 reads back
+		16'h0064: pct_idx <= wdata[3:0];        // which PC-trace entry 0x64 reads back
 			16'h007C: hr_line <= wdata[23:0];       // read one DDR3 line (hr_go fires with the write)
 			16'h0090: nt_idx <= wdata[3:0];         // which DMA node-trace entry 0x90/0x94 read back
 			16'h009C: ps1_rsel <= wdata[5:0];
 			16'h0110: cd_trace_idx <= wdata[5:0];
 			16'h00EC: begin perf_sel <= wdata[5:0];
 			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14];
-			                pace_long <= wdata[15]; dma_charge <= wdata[16]; end
+			                pace_long <= wdata[15]; dma_charge <= wdata[16]; wq_off <= wdata[17]; end
 			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
 			16'h0134: begin card_in <= wdata[0]; card_fill <= wdata[1]; card2_in <= wdata[2]; card2_fill <= wdata[3]; end
 			16'h00F0: if (WEBVID) stream_ctl <= wdata;
@@ -700,7 +701,7 @@ module console_top #(
 		16'h005C: ctrl_rdata = ps1_dbg_dma;
 		16'h0060: ctrl_rdata = ps1_dbg_gpu2;
 		16'h0064: ctrl_rdata = pctrace[pct_idx];
-		16'h0068: ctrl_rdata = {25'd0, pct_frozen, pct_wr};
+		16'h0068: ctrl_rdata = {27'd0, pct_frozen, pct_wr};
 		16'h006C: ctrl_rdata = ps1_dbg_disp;
 		16'h0070: ctrl_rdata = ps1_dbg_draw;
 		16'h0074: ctrl_rdata = pitrace[pct_idx];
@@ -1273,7 +1274,7 @@ module console_top #(
 			.fbr_addr(from_ddr ? sfa[17:0] : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
 			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
 			.spu_out(audio_lr), .spu_out_we(audio_lr_we),
-			.dma_relax(dma_relax), .cd_edc_on(1'b1), .pace_long(pace_long), .dma_charge(dma_charge), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
+			.dma_relax(dma_relax), .cd_edc_on(1'b1), .pace_long(pace_long), .wq_off(wq_off), .dma_charge(dma_charge), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
 			.card_in(card_in), .card_fill(card_fill), .card2_in(card2_in), .card2_fill(card2_fill),
 			.card_wq_sector(card_wq_sector), .card_wq_count(card_wq_count),
 			.card_wq_ovf(card_wq_ovf), .card_wq_pop(card_wq_pop), .card_wq_clr(card_wq_clr),
@@ -1430,14 +1431,14 @@ module console_top #(
 	// 0x64; 0x68 is {frozen, write pointer} -- the pointer is the oldest entry.
 	wire [4:0] pct_code = ps1_dbg_cause[6:2];
 	always @(posedge clk) begin
-		if (rst || !run) begin pct_wr <= 6'd0; pct_frozen <= 1'b0; pct_last <= 32'd0; end
+		if (rst || !run) begin pct_wr <= 4'd0; pct_frozen <= 1'b0; pct_last <= 32'd0; end
 		else if (!pct_frozen) begin
 			// one entry per COMMITTED instruction: its address and its word.
 			// Recording every PC value instead left out delay slots and put in
 			// fetches that were never run, and the trace read like a CPU bug.
 			if (PS1_DBG && ps1_dbg_exec) begin
 				pctrace[pct_wr] <= ps1_dbg_pc; pitrace[pct_wr] <= ps1_dbg_word;
-				pct_wr <= pct_wr + 6'd1; pct_last <= ps1_dbg_pc;
+				pct_wr <= pct_wr + 4'd1; pct_last <= ps1_dbg_pc;
 			end
 			if (pct_code != 5'd0 && pct_code != 5'd8) pct_frozen <= 1'b1;
 			// ...and at a jump to address zero: the kernel keeps a copy of the

@@ -612,20 +612,8 @@ module ps1_gpu #(
 	reg [31:0] cword;
 
 	wire [31:0] w0 = args[0], w1 = args[1], w2 = args[2], w3 = args[3];
-	// (debug) The CPU->VRAM transfer in hand, for a hang where one took the display list after it
-	// as pixels: its three words, the words it has taken and the last one's total, the FIFO's
-	// count when it began and the words pushed since.
-	reg [31:0] x_hdr, x_xy, x_wh; reg [15:0] x_n, x_prev, x_in; reg [11:0] x_fc0; reg c2v_d;
-	always @(posedge clk) begin
-		c2v_d <= c2v_phase;
-		if (c2v_phase && !c2v_d) begin x_hdr <= w0; x_xy <= w1; x_wh <= w2; x_n <= 16'd0; x_in <= 16'd0; x_fc0 <= f_count; end
-		else begin
-			if (c2v_phase && f_pop)  x_n  <= x_n + 16'd1;
-			if (c2v_phase && f_push) x_in <= x_in + 16'd1;
-		end
-		if (!c2v_phase && c2v_d) x_prev <= x_n;
-	end
-	assign dbg_xfer = {x_hdr, x_xy, x_wh, x_prev, x_n, x_fc0, 4'd0, x_in};
+	// (debug) the CPU->VRAM transfer record that showed GT2 misparsing its list: taken out for room
+	assign dbg_xfer = 160'd0;
 	assign dbg_xfer_dry = c2v_phase && f_empty;
 	assign dbg_xfer_on  = c2v_phase;
 
