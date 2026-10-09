@@ -281,6 +281,8 @@ module console_top #(
 	// they did with both off (2026-10-09), and GT2 gains 2-5 fps
 	reg          pace_long = 1'b1, dma_charge = 1'b1;
 	reg          wq_off = 1'b0;                                 // ctrl 0xEC bit 17 (experiment): see r3000
+	reg          lead_big = 1'b0;                               // ctrl 0xEC bit 18 (experiment): see ps1_top
+	reg          run_ahead = 1'b0;                              // ctrl 0xEC bit 19 (experiment): see ps1_top
 	reg  [5:0]   ev_idx = 6'd0;
 	// the PlayStation's memory card: ctrl 0x134 {fill aimed at the card, card in},
 	// 0x138 the queue of sectors it has stored (see ps1_sio.v / pc/server.py)
@@ -624,7 +626,7 @@ module console_top #(
 			16'h0110: cd_trace_idx <= wdata[5:0];
 			16'h00EC: begin perf_sel <= wdata[5:0];
 			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14];
-			                pace_long <= wdata[15]; dma_charge <= wdata[16]; wq_off <= wdata[17]; end
+			                pace_long <= wdata[15]; dma_charge <= wdata[16]; wq_off <= wdata[17]; lead_big <= wdata[18]; run_ahead <= wdata[19]; end
 			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
 			16'h0134: begin card_in <= wdata[0]; card_fill <= wdata[1]; card2_in <= wdata[2]; card2_fill <= wdata[3]; end
 			16'h00F0: if (WEBVID) stream_ctl <= wdata;
@@ -1274,7 +1276,7 @@ module console_top #(
 			.fbr_addr(from_ddr ? sfa[17:0] : fbr_addr), .fbr_req(from_ddr ? sfr : fbr_req),
 			.fbr_rdata(fbr_rdata_w), .fbr_ack(fbr_ack_w),
 			.spu_out(audio_lr), .spu_out_we(audio_lr_we),
-			.dma_relax(dma_relax), .cd_edc_on(1'b1), .pace_long(pace_long), .wq_off(wq_off), .dma_charge(dma_charge), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
+			.dma_relax(dma_relax), .cd_edc_on(1'b1), .pace_long(pace_long), .wq_off(wq_off), .lead_big(lead_big), .run_ahead(run_ahead), .dma_charge(dma_charge), .ev_idx(ev_idx), .ev_data(ps1_ev_data), .ev_wp(ps1_ev_wp),
 			.card_in(card_in), .card_fill(card_fill), .card2_in(card2_in), .card2_fill(card2_fill),
 			.card_wq_sector(card_wq_sector), .card_wq_count(card_wq_count),
 			.card_wq_ovf(card_wq_ovf), .card_wq_pop(card_wq_pop), .card_wq_clr(card_wq_clr),

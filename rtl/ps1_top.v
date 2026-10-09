@@ -284,6 +284,8 @@ module ps1_top #(
 	input  wire        dma_relax,
 	input  wire        cd_edc_on,      // the drive checks each data sector's EDC (see ps1_cdrom)
 	input  wire        wq_off,         // (experiment) the CPU pace model charges loads no write-queue wait
+	input  wire        lead_big,       // (experiment) with pace_long, a lead of 16,000 console cycles
+	input  wire        run_ahead,      // (experiment) the processor may run up to 4,000 cycles ahead (see cpu_go)
 	input  wire        pace_long,      // the processor may make up 4,000 console cycles, not 48 (see pace_credit)
 	input  wire        dma_charge,     // a DMA costs the processor the console's cycle a word, not our time
 	// the frame event log (see "where a frame goes" below)
@@ -339,11 +341,14 @@ module ps1_top #(
 	// The processor still never gets AHEAD of the console: credit is console time not yet spent.
 	// A DMA then costs it what the console's would, a cycle a word (dma_charge), rather than
 	// however long ours took; without dma_charge the credit stands still while a DMA holds it.
-	wire signed [12:0] CREDIT_MAX = pace_long ? 13'sd4000 : 13'sd48;
-	reg  signed [12:0] credit;
+	wire signed [15:0] CREDIT_MAX = !pace_long ? 16'sd48 : lead_big ? 16'sd16000 : 16'sd4000;
+	reg  signed [15:0] credit;
 	wire [2:0]  dma_wc;                 // words a DMA moved this clock (declared with the DMA below)
 	wire        t_take; wire [6:0] t_cost;
-	wire        cpu_go = cpu_fast || (credit > 0);
+	// with run_ahead the processor may also get AHEAD of the console by up to 4,000 cycles in a
+	// stretch where it is faster, and spend that in one where DDR3 or a DMA slows it -- averaged
+	// over more than that it still runs at the console's pace, never faster
+	wire        cpu_go = cpu_fast || (credit > (run_ahead ? -16'sd4000 : 16'sd0));
 	wire        gpu_behind;
 	wire        cpu_c2w;
 	wire        gtr_stop;               // (debug) the GPU trace froze, armed to stop the processor
@@ -357,13 +362,13 @@ module ps1_top #(
 			if (gpu_behind) lost_gpu <= lost_gpu + 32'd1;
 		end
 	always @(posedge clk) begin : pace_credit
-		reg signed [13:0] n;
-		if (rst) credit <= 13'sd0;
+		reg signed [16:0] n;
+		if (rst) credit <= 16'sd0;
 		else begin
-			n = credit + ((sys_ce && !(pace_long && !dma_charge && dma_block)) ? 14'sd1 : 14'sd0)
-			           - (t_take ? $signed({7'd0, t_cost}) : 14'sd0)
-			           - ((pace_long && dma_charge) ? $signed({11'd0, dma_wc}) : 14'sd0);
-			credit <= (n > CREDIT_MAX) ? CREDIT_MAX : (n < -14'sd1000) ? -13'sd1000 : n[12:0];
+			n = credit + ((sys_ce && !(pace_long && !dma_charge && dma_block)) ? 17'sd1 : 17'sd0)
+			           - (t_take ? $signed({10'd0, t_cost}) : 17'sd0)
+			           - ((pace_long && dma_charge) ? $signed({14'd0, dma_wc}) : 17'sd0);
+			credit <= (n > CREDIT_MAX) ? CREDIT_MAX : (n < -17'sd5000) ? -16'sd5000 : n[15:0];
 		end
 	end
 	wire        cpu_ce = d_calibrated && cpu_ready && !vz_active_w && !dma_block && !dma_ram_wait   // a DMA owns the bus

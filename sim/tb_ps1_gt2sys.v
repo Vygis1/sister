@@ -21,7 +21,7 @@ module tb_ps1_gt2sys;
 	ps1_top dut (
 		.card2_fill(0), .card2_in(0), .joy2(0),
 		.toc_addr(0), .toc_data(0), .toc_we(0), .xa_pop(0), .xa_wdata(0), .xa_we(0), // inputs this bench does not drive, tied: an open input simulates as X
-		.cap_every_vsync(0), .cc_flush(cc_flush_r), .cd_trace_idx(0), .dbg_perf_sel(0), .dbg_rsel(0), .dbg_watch(0), .fb_cap_go(0), .fbr_addr(0), .fbr_req(0), .hr_go(0), .hr_line(0), .joy1(0), .vram_flush(0), .dma_relax(1'b0), .cd_edc_on(1'b0), .pace_long(1'b1), .wq_off(1'b0), .dma_charge(1'b1), .ev_idx(6'd0), .card_in(1'b0), .card_fill(1'b0), .card_wq_pop(1'b0), .card_wq_clr(1'b0), 
+		.cap_every_vsync(0), .cc_flush(cc_flush_r), .cd_trace_idx(0), .dbg_perf_sel(0), .dbg_rsel(0), .dbg_watch(0), .fb_cap_go(0), .fbr_addr(0), .fbr_req(0), .hr_go(0), .hr_line(0), .joy1(0), .vram_flush(0), .dma_relax(1'b0), .cd_edc_on(1'b0), .pace_long(1'b1), .wq_off(1'b0), .lead_big(1'b0), .run_ahead(1'b0), .dma_charge(1'b1), .ev_idx(6'd0), .card_in(1'b0), .card_fill(1'b0), .card_wq_pop(1'b0), .card_wq_clr(1'b0), 
 		.cpu_halt(1'b0),   // nothing halts the processor in simulation
 		.gte_old(4'd0), .gte_snap_arm(1'b0), .gte_snap_go(1'b0), .gte_snap_skip(16'd0), .gte_snap_idx(7'd0), .tty_idx(12'd0), .gtr_idx(11'd0), .gtr_arm(1'b0), .gtr_pops(1'b0), .gtr_halt(1'b0), .fb_hr_raw(1'b0), .fb_hr_base(24'd0),
 		.clk(clk), .rst(rst), .cpu_run(cpu_run),
