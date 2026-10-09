@@ -389,7 +389,10 @@ module ps1_cdrom #(
 		if (sb_addr >= 12'h92C && sb_addr <= 12'h92F) edc_st2[(sb_addr[1:0]) * 8 +: 8] <= sb_data;
 	end
 	wire        edc_ok = sb_audio || (edc_mode != 8'd2)
-	                     || (edc_sub[5] ? ((edc_st2 == 32'd0) || (edc_st2 == edc_run)) : (edc_st1 == edc_f1));
+	                     // (an EDC of 0 is "none recorded" -- in Form 2 by the standard, and in the
+	                     // images tools/ps1/mktestdisc.py made before it wrote them, every Form 1
+	                     // sector: refused three times each, a 417-sector program took minutes)
+	                     || (edc_sub[5] ? ((edc_st2 == 32'd0) || (edc_st2 == edc_run)) : ((edc_st1 == 32'd0) || (edc_st1 == edc_f1)));
 	reg  [23:0] edc_lba; reg [1:0] edc_tries;
 	wire        edc_pass = !edc_on || edc_ok || ((edc_lba == fill_lba) && (edc_tries == 2'd3));
 	reg         sb_stale;

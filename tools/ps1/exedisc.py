@@ -16,6 +16,7 @@ reference logs were made from properly mastered discs. (A game's sectors: local 
 """
 import io
 import os
+import struct
 import sys
 
 import pycdlib
@@ -42,6 +43,22 @@ def iso_bytes(exe):
     return data + bytes(2048 * 64)
 
 
+_EDC_T = []
+for _i in range(256):
+    _x = _i
+    for _ in range(8):
+        _x = (_x >> 1) ^ 0xD8018001 if _x & 1 else _x >> 1
+    _EDC_T.append(_x)
+
+
+def edc(b):
+    """the CD EDC: CRC-32, reflected 0xD8018001, starting at 0 (ECMA-130)"""
+    c = 0
+    for v in b:
+        c = (c >> 8) ^ _EDC_T[(c ^ v) & 0xFF]
+    return c
+
+
 def raw_sectors(iso):
     out = bytearray()
     for lba in range(len(iso) // 2048):
@@ -52,6 +69,9 @@ def raw_sectors(iso):
         s[12:16] = bytes((bcd(mm), bcd(ss), bcd(ff), 2))             # header: MSF, mode 2
         s[16:24] = bytes((0, 0, 8, 0, 0, 0, 8, 0))                   # subheader: data, form 1 (twice)
         s[24:24 + 2048] = iso[2048 * lba:2048 * (lba + 1)]
+        # the sector's EDC (subheader + data), as a mastered disc has it: the drive checks it and
+        # has a bad sector sent again (rtl/ps1_cdrom.v; an EDC of 0 it takes as "none recorded")
+        s[0x818:0x81C] = struct.pack('<I', edc(s[16:0x818]))
         out += s
     return bytes(out)
 

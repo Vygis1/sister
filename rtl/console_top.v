@@ -276,7 +276,10 @@ module console_top #(
 	reg          cpu_pace = 1'b1, gpu_fast = 1'b0;   // the CPU at the console's own pace (r3000 t_cost): the default
 	wire         cpu_fast = !cpu_pace;
 	reg          dma_relax = 1'b0;                              // ctrl 0xEC bit 14: see ps1_top
-	reg          pace_long = 1'b0, dma_charge = 1'b0;           // ctrl 0xEC bits 15, 16: see ps1_top
+	// ctrl 0xEC bits 15, 16 (see ps1_top): on by default -- the processor makes up a DDR3 stall as
+	// a console never has one, a DMA costs it the console's time. ps1-tests on the board pass as
+	// they did with both off (2026-10-09), and GT2 gains 2-5 fps
+	reg          pace_long = 1'b1, dma_charge = 1'b1;
 	reg  [5:0]   ev_idx = 6'd0;
 	// the PlayStation's memory card: ctrl 0x134 {fill aimed at the card, card in},
 	// 0x138 the queue of sectors it has stored (see ps1_sio.v / pc/server.py)

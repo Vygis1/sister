@@ -26,7 +26,7 @@ TESTS = os.path.join(ROOT, 'build', 'ps1tests')
 OUT = os.path.join(ROOT, 'build', 'ps1suite')
 CTRL = 0x80000
 FB = 0x100000
-PACE = int(os.environ.get('PS1_PACE', '0x1000'), 0)      # ctrl 0xEC: bit 12 = CPU at the console's pace
+PACE = int(os.environ.get('PS1_PACE', '0x19000'), 0)     # ctrl 0xEC: 12 the console's pace, 15 the long lead, 16 DMA charged
 # interactive (a pad, a disc swap) or open-ended: not run unattended
 SKIP = {'input_pad', 'cdrom_disc-swap', 'cdrom_terminal', 'spu_toolbox', 'spu_ram-sandbox', 'gpu_benchmark',
         'mdec_step-by-step-log', 'gte-fuzz',
