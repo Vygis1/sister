@@ -904,7 +904,9 @@ module r3000 (
 			    && ea[31:29] != 3'b111 && ea[28:23] == 6'd0) begin
 				// the oldest of four still going out: wait for its room
 				if (!wq_off) begin cw = {3'd0, until(wqr[wq_w], ctime)}; c = c + cw; end
-				wq_t = ((until(wq_free, ctime) != 6'd0) ? wq_free : ctime) + 16'd7;
+				// 8 cycles a store: chain-looping's g += i on the board, 7 -> 15,024 ticks, 9 -> 17,016,
+				// the console 16,040 (cpu/access-time's RAM reads 4.94-5.20 either way, console 5.21)
+				wq_t = ((until(wq_free, ctime) != 6'd0) ? wq_free : ctime) + 16'd8;
 				wqa[wq_w] <= ea[28:2]; wqr[wq_w] <= wq_t; wq_w <= wq_w + 2'd1;
 				wq_free <= wq_t;
 			end
