@@ -198,7 +198,7 @@ module tb_ps1_gpu;
 	reg [7:0] frame [0:320*240-1];
 	always @(posedge clk) if (px_valid) frame[px_y * 320 + px_x] <= px_rgb;
 
-	integer k, fd, frames, cp_bad, cp_t0;
+	integer k, fd, frames, cp_bad, cp_t0, cp_d0, cp_m0;
 	reg [15:0] cp_src [0:45*5-1];
 	reg [15:0] p;
 	integer busy_clks = 0, r_tex = 0, r_dst = 0, r_full = 0, r_clut = 0;
@@ -522,6 +522,17 @@ module tb_ps1_gpu;
 		gp0(32'h8000_0000); gp0({16'd400, 16'd0}); gp0({16'd400, 16'd320}); gp0({16'd8, 16'd320});
 		idle();
 		$display("    BANDWIDTH copy 320x8: %0d clocks, %0d.%02d a pixel", busy_clks - cp_t0, (busy_clks - cp_t0) / 2560, ((busy_clks - cp_t0) % 2560) * 100 / 2560);
+
+		// ...and its rectangles: 320x16 opaque, then semi-transparent (console: x1.5)
+		gp0(32'hE100_0000 | 32'h0000_0100); gp0(32'hE300_0000); gp0(32'hE400_0000 | 32'd1023 | (32'd511 << 10));
+		cp_t0 = busy_clks;
+		gp0(32'h6040_2010); gp0({16'd420, 16'd0}); gp0({16'd16, 16'd320});
+		idle();
+		$display("    BANDWIDTH rect 320x16: %0d clocks", busy_clks - cp_t0);
+		cp_t0 = busy_clks; cp_d0 = r_dst; cp_m0 = misses;
+		gp0(32'h6240_2010); gp0({16'd440, 16'd0}); gp0({16'd16, 16'd320});
+		idle();
+		$display("    BANDWIDTH semi rect 320x16: %0d clocks, %0d waiting on the destination, %0d cache misses", busy_clks - cp_t0, r_dst - cp_d0, misses - cp_m0);
 
 		$display("");
 		$display("    ENGINE BUSY CLOCKS: %0d", busy_clks);
