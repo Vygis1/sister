@@ -1125,11 +1125,13 @@ module ps1_top #(
 	// the MDEC (1F801820h / 24h), on DMA channels 0 and 1
 	wire        mdec_wr, mdec_in_ready, mdec_dreq0, mdec_pop, mdec_rvalid, mdec_dreq1;
 	wire [31:0] mdec_rdata, mdec_odata;
+	wire [31:0] mdec_dbg_stat, dma_dbg_mdma, dma_dbg_madr, mdec_dbg_cnt;
 	ps1_mdec u_mdec (
 		.clk(clk), .rst(core_rst),
 		.sel(mdec_hit & c_req & cpu_ce_io), .we(c_we), .a2(c_addr[2]), .wdata(c_dout), .rdata(mdec_rdata),
 		.in_wr(mdec_wr), .in_data(gp0_data), .in_ready(mdec_in_ready), .dreq0(mdec_dreq0),
-		.out_rd(mdec_pop), .out_data(mdec_odata), .out_valid(mdec_rvalid), .dreq1(mdec_dreq1), .rd_stall(mdec_rd_stall), .out_depth(mdec_depth)
+		.out_rd(mdec_pop), .out_data(mdec_odata), .out_valid(mdec_rvalid), .dreq1(mdec_dreq1), .rd_stall(mdec_rd_stall), .out_depth(mdec_depth), .dbg_stat(mdec_dbg_stat),
+		.dbg_idx(dbg_sio_idx[2:0]), .dbg_cnt(mdec_dbg_cnt)
 	);
 	ps1_dma u_dma (
 		.clk(clk), .rst(core_rst),
@@ -1147,7 +1149,7 @@ module ps1_top #(
 		.hog(dma_hog), .in_flight(dma_in_flight),
 		.gpu_active(dma_gpu_active),
 		.ll_hdr(dma_ll_hdr), .dbg_node_v(dbg_node_v), .dbg_node_addr(dbg_node_addr), .dbg_node_hdr(dbg_node_hdr),
-		.irq(dma_irq), .dbg_dma(dbg_dma)
+		.irq(dma_irq), .dbg_dma(dbg_dma), .dbg_mdma(dma_dbg_mdma), .dbg_madr1(dma_dbg_madr)
 	);
 	// the words a DMA moved this clock, for the processor's pace (the console's DMA moves a word a
 	// cycle): into a device, out of one into RAM, a line of the ordering-table clear, a list header
@@ -1500,6 +1502,13 @@ module ps1_top #(
 	                : (dbg_perf_sel[4:0] >= 5'd12 && dbg_perf_sel[4:0] <= 5'd17) ? cpu_cost[(5'd17 - dbg_perf_sel[4:0]) * 32 +: 32]
 	                : (dbg_perf_sel[4:0] == 5'd18) ? {16'd0, sio_dbg_wp}
 	                : (dbg_perf_sel[4:0] == 5'd19) ? sio_dbg_q
+	                // the MDEC and its two channels (Syphon Filter's movies stopped part way through a frame)
+	                : (dbg_perf_sel[4:0] == 5'd20) ? mdec_dbg_stat
+	                : (dbg_perf_sel[4:0] == 5'd21) ? dma_dbg_mdma
+	                : (dbg_perf_sel[4:0] == 5'd22) ? dma_dbg_madr
+	                // 23: words in / out of the MDEC per decode command (0xEC bits 26:24: 0 the
+	                // current one, 1 {its word count, the log's write pointer}, 2-7 the ones before)
+	                : (dbg_perf_sel[4:0] == 5'd23) ? mdec_dbg_cnt
 	                : 32'd0;
 
 	// --- introspection capture ---------------------------------------------------

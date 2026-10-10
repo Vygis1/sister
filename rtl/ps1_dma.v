@@ -117,6 +117,8 @@ module ps1_dma #(
 	// the engine's state, next-pointer and channel-2 busy, for seeing whether a
 	// linked list ever ends
 	output wire [31:0] dbg_dma,
+	output wire [31:0] dbg_mdma,      // (debug) the MDEC channels: busy, parked, sync modes, blocks to go
+	output wire [31:0] dbg_madr1,
 	// every linked-list node header as it is read: where it was and what it said
 	output reg         ll_hdr,        // a list node's header was taken this clock (any node, empty too)
 	output reg         dbg_node_v,
@@ -579,6 +581,8 @@ module ps1_dma #(
 		bwords = (n == 16'd0) ? 32'h0001_0000 : {16'd0, n};
 	endfunction
 	assign dbg_dma = {st, cur, chcr[2][24], next};
+	assign dbg_mdma = {chcr[0][24], chcr[1][24], m_park, chcr[0][10:9], chcr[1][10:9], bcr[0][27:16], bcr[1][27:16]};
+	assign dbg_madr1 = {madr[0][15:2], 2'b00, madr[1][15:2], 2'b00};
 	// channel 1 takes the MDEC's word the clock it writes it to RAM
 	assign mdec_pop = (st == S_GWR) && (cur == 3'd1) && mdec_rvalid;
 	// ...and from the moment such a transfer is ASKED for: the BIOS starts the

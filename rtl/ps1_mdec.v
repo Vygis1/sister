@@ -19,8 +19,8 @@
 // about 1100 clocks a block, 7000 a macroblock -- ~7500 macroblocks a second at 52.6 MHz,
 // near the chip's 9000.
 //
-// The requests: dreq0 when a command wants more words and the input FIFO is empty (DMA0
-// sends 32-word blocks); dreq1 when 32 words are out, or the last few once decoding is done.
+// The requests: dreq0 when a command wants more words and the 256-word input FIFO has room for
+// a 32-word block (DMA0's size); dreq1 when 32 words are out, or the last few once decoding is done.
 //////////////////////////////////////////////////////////////////////////////////
 `default_nettype none
 
@@ -47,16 +47,24 @@ module ps1_mdec (
 	// for the word rather than taking a stale one (ps1-tests mdec/frame reads a whole frame
 	// word by word without looking, and came out as blocks of noise)
 	output wire        rd_stall,
-	output wire [1:0]  out_depth     // the depth being put out (DMA1 re-orders 15- and 24-bit)
+	output wire [1:0]  out_depth,    // the depth being put out (DMA1 re-orders 15- and 24-bit)
+	output wire [31:0] dbg_stat,     // (debug) the status word, as 1F801824h reads
+	input  wire [2:0]  dbg_idx,      // (debug) the per-command word counts, the last 8 commands:
+	output reg  [31:0] dbg_cnt       //   {words pushed in [15:0] of the command's, words read out}
 );
 	// --- the FIFOs: 32 words each -------------------------------------------------------------
-	reg [31:0] ififo [0:31]; reg [4:0] iw, ir; reg [5:0] icnt;
+	// The data-in FIFO: 256 words, asked for 32 at a time whenever 32 are free -- DuckStation's
+	// (mdec.cpp: DATA_IN_FIFO_SIZE 1024 bytes, data_in_request at 32 words of space). With 32 words
+	// taken only when empty, DMA0 was still reading a frame's last words when Syphon Filter's player
+	// wrote the next frame over them (one buffer for both): the MDEC decoded the head of one frame
+	// and the tail of the next, put out 27 macroblocks too few, and the player dropped the movie.
+	(* ram_style = "distributed" *) reg [31:0] ififo [0:255]; reg [7:0] iw, ir; reg [8:0] icnt;
 	reg [31:0] ofifo [0:31]; reg [4:0] ow, orr; reg [5:0] ocnt;
 	wire       cpu_push = sel && we && !a2;
 	wire       cpu_pop  = sel && !we && !a2;
 	wire       push     = in_wr || cpu_push;
 	wire [31:0] push_d  = in_wr ? in_data : wdata;
-	assign in_ready = icnt != 6'd32;
+	assign in_ready = icnt != 9'd256;
 	assign out_data = ofifo[orr];
 	assign out_valid = ocnt != 6'd0;
 
@@ -82,6 +90,14 @@ module ps1_mdec (
 	reg [2:0]  blk;                   // colour: 0 Cr 1 Cb 2-5 Y1-Y4
 	reg [14:0] coef [0:63];           // the IDCT's input, by matrix position
 	reg [63:0] cval;                  // which coefficients were written (the rest are 0)
+	// a column u of the coefficients with nothing in it (most of a movie's): pass 1 gives zeros for
+	// it, so it is passed over in a clock and pass 2 reads its t[y][u] as 0
+	wire [7:0] cnz;
+	genvar gu;
+	generate for (gu = 0; gu < 8; gu = gu + 1) begin : g_cnz
+		assign cnz[gu] = cval[gu] | cval[8+gu] | cval[16+gu] | cval[24+gu] | cval[32+gu] | cval[40+gu] | cval[48+gu] | cval[56+gu];
+	end endgenerate
+	reg [7:0]  tnz;                   // pass 1's columns that were worked out
 	reg [15:0] hw;                    // the halfword in hand
 	reg        hw_hi;                 // the word's high half is next
 	reg [15:0] hw_next;               // that high half
@@ -114,8 +130,14 @@ module ps1_mdec (
 	reg [2:0]  i_k;                   // and the sum's term
 	wire [25:0] sc_w = scw[{i_k, i_b[2:1]}];
 	wire [12:0] sc_q = i_b[0] ? sc_w[25:13] : sc_w[12:0];   // sc[{i_k, i_b}]
-	reg signed [31:0] acc;
-	reg        mac_v; reg signed [15:0] mac_c; reg signed [12:0] mac_m;
+	// Two sums at once: the scale table holds two neighbouring entries a word (M[k][b], M[k][b+1]),
+	// so one coefficient times both gives the outputs b and b+1 together -- ~700 clocks a block
+	// where one multiply a clock took ~1100. DuckStation takes 448 CPU clocks (13 us) a block; at
+	// 1100 of ours (22 us) Syphon Filter's player wrote its next frame over input DMA0 had not yet
+	// read, and the MDEC put out a frame short.
+	reg signed [31:0] acc, acc1;
+	reg        mac_v; reg signed [15:0] mac_c; reg signed [12:0] mac_m, mac_m1;
+	reg        w2;                    // the second of the pair is written next
 	reg        last_term;
 	reg [8:0]  cp;                    // colour / mono output: the pixel
 	reg [1:0]  pk;                    // 24-bit packing: bytes in hand
@@ -189,24 +211,44 @@ module ps1_mdec (
 	assign rd_stall = (ocnt == 6'd0) && busy;
 	assign out_depth = depth;
 	wire       want_more = (kind != 2'd0) && (to_come != 16'd0);
-	assign dreq0 = en_in && want_more && icnt == 6'd0;
+	assign dreq0 = en_in && want_more && icnt <= 9'd224;
 	assign dreq1 = en_out && (ocnt >= 6'd32 || (ocnt != 6'd0 && !busy));
+	assign dbg_stat = {ocnt == 6'd0, icnt == 9'd256, busy, dreq0, dreq1, depth, sgn, b15, 4'd0,
+		              mono ? 3'd4 : (blk < 3'd2 ? {2'b10, blk[0]} : {1'b0, blk[1:0] - 2'd2}),
+		              (kind == 2'd1) ? left - 16'd1 : (kind != 2'd0 ? left : 16'hFFFF)};
 	always @(*) begin
 		if (!a2) rdata = (ocnt != 6'd0) ? ofifo[orr] : 32'hFFFFFFFF;
-		else rdata = {ocnt == 6'd0, icnt == 6'd32, busy, dreq0, dreq1, depth, sgn, b15, 4'd0,
+		else rdata = {ocnt == 6'd0, icnt == 9'd256, busy, dreq0, dreq1, depth, sgn, b15, 4'd0,
 		              mono ? 3'd4 : (blk < 3'd2 ? {2'b10, blk[0]} : {1'b0, blk[1:0] - 2'd2}),
 		              (kind == 2'd1) ? left - 16'd1 : (kind != 2'd0 ? left : 16'hFFFF)};
 	end
 
+	// (debug) words in and out per decode command: Syphon Filter's player waited for 12 macroblocks
+	// of a frame that never came out -- lost going in, or coming out?
+	reg [15:0] cn_in, cn_out; reg [31:0] cn_log [0:7]; reg [2:0] cn_wp; reg [15:0] cn_cmd; reg [12:0] cn_drop;
+	always @(posedge clk) begin
+		if (rst) begin cn_in <= 16'd0; cn_out <= 16'd0; cn_wp <= 3'd0; cn_drop <= 13'd0; end
+		else begin
+			if (st == S_IDLE && icnt != 9'd0 && ififo[ir][31:29] == 3'd1) begin
+				cn_log[cn_wp] <= {cn_in, cn_out}; cn_wp <= cn_wp + 3'd1;
+				cn_in <= 16'd0; cn_out <= 16'd0; cn_cmd <= ififo[ir][15:0];
+			end else begin
+				if (push && icnt != 9'd256) cn_in <= cn_in + 16'd1;
+				if ((cpu_pop || out_rd) && ocnt != 6'd0) cn_out <= cn_out + 16'd1;
+			end
+			if (push && icnt == 9'd256) cn_drop <= cn_drop + 13'd1;   // (a word pushed into a full FIFO: lost)
+		end
+		dbg_cnt <= (dbg_idx == 3'd0) ? {cn_in, cn_out} : (dbg_idx == 3'd1) ? {cn_cmd, cn_drop, cn_wp} : cn_log[cn_wp - dbg_idx + 3'd1];
+	end
 	integer n;
 	always @(posedge clk) begin
 		// --- the FIFOs' pushes and pops (the engine's below) --------------------------------------
-		if (push && icnt != 6'd32) begin ififo[iw] <= push_d; iw <= iw + 5'd1; end
+		if (push && icnt != 9'd256) begin ififo[iw] <= push_d; iw <= iw + 8'd1; end
 		if ((cpu_pop || out_rd) && ocnt != 6'd0) orr <= orr + 5'd1;
 		if (ow_v) begin ofifo[ow] <= ow_d; ow <= ow + 5'd1; end
 		ocnt <= ocnt + (ow_v ? 6'd1 : 6'd0) - (((cpu_pop || out_rd) && ocnt != 6'd0) ? 6'd1 : 6'd0);
 		ow_v <= 1'b0;
-		if (push && icnt != 6'd32 && to_come != 16'd0) to_come <= to_come - 16'd1;
+		if (push && icnt != 9'd256 && to_come != 16'd0) to_come <= to_come - 16'd1;
 
 		// --- the control register -----------------------------------------------------------------
 		if (sel && we && a2) begin
@@ -214,28 +256,28 @@ module ps1_mdec (
 		end
 
 		mac_v <= 1'b0;
-		if (mac_v) acc <= acc + mac_c * mac_m;
+		if (mac_v) begin acc <= acc + mac_c * mac_m; acc1 <= acc1 + mac_c * mac_m1; end
 
 		begin : eng
 			reg pop_in;
 			pop_in = 1'b0;
 			case (st)
-			S_IDLE: if (icnt != 6'd0) begin
+			S_IDLE: if (icnt != 9'd0) begin
 					pop_in = 1'b1;
 					depth <= ififo[ir][28:27]; sgn <= ififo[ir][26]; b15 <= ififo[ir][25];
 					case (ififo[ir][31:29])
 					3'd1: if (ififo[ir][15:0] != 16'd0) begin
-					            kind <= 2'd1; left <= ififo[ir][15:0]; to_come <= ififo[ir][15:0] - (icnt - 6'd1);
+					            kind <= 2'd1; left <= ififo[ir][15:0]; to_come <= ({7'd0, icnt} - 16'd1 >= ififo[ir][15:0]) ? 16'd0 : ififo[ir][15:0] - ({7'd0, icnt} - 16'd1);
 					            dc_next <= 1'b1; blk <= 3'd0; busy <= 1'b1; st <= S_WORD; end
 					3'd2: begin kind <= 2'd2; left <= ififo[ir][0] ? 16'd32 : 16'd16; tcol <= ififo[ir][0];
-					            to_come <= (ififo[ir][0] ? 16'd32 : 16'd16) - (icnt - 6'd1); tix <= 6'd0; busy <= 1'b1; st <= S_TBL; end
-					3'd3: begin kind <= 2'd3; left <= 16'd32; to_come <= 16'd32 - (icnt - 6'd1); tix <= 6'd0; busy <= 1'b1; st <= S_TBL; end
+					            to_come <= ({7'd0, icnt} - 16'd1 >= (ififo[ir][0] ? 16'd32 : 16'd16)) ? 16'd0 : (ififo[ir][0] ? 16'd32 : 16'd16) - ({7'd0, icnt} - 16'd1); tix <= 6'd0; busy <= 1'b1; st <= S_TBL; end
+					3'd3: begin kind <= 2'd3; left <= 16'd32; to_come <= ({7'd0, icnt} - 16'd1 >= 16'd32) ? 16'd0 : 16'd32 - ({7'd0, icnt} - 16'd1); tix <= 6'd0; busy <= 1'b1; st <= S_TBL; end
 					default: ;            // no function: the word is taken, nothing else
 					endcase
 				end
 			// a table's words
 			S_TBL: if (left == 16'd0) begin kind <= 2'd0; busy <= 1'b0; st <= S_IDLE; end
-				else if (icnt != 6'd0) begin
+				else if (icnt != 9'd0) begin
 					pop_in = 1'b1;
 					if (kind == 2'd2) qtw[tix[4:0]] <= ififo[ir];
 					else              scw[tix[4:0]] <= {ififo[ir][31:19], ififo[ir][15:3]};
@@ -246,7 +288,7 @@ module ps1_mdec (
 			S_WORD: if (left == 16'd0) begin
 					// the command's words are all taken (the block in hand is dropped)
 					kind <= 2'd0; busy <= 1'b0; st <= S_IDLE;
-				end else if (icnt != 6'd0) begin
+				end else if (icnt != 9'd0) begin
 					pop_in = 1'b1;
 					left <= left - 16'd1;
 					hw <= ififo[ir][15:0]; hw_next <= ififo[ir][31:16];
@@ -270,7 +312,7 @@ module ps1_mdec (
 						end else begin
 							// past 63: the block is done (the level is dropped)
 							k <= 7'd64;
-							i_a <= 3'd0; i_b <= 3'd0; i_k <= 3'd0; acc <= 32'sd0; last_term <= 1'b0;
+							i_a <= 3'd0; i_b <= 3'd0; i_k <= 3'd0; acc <= 32'sd0; acc1 <= 32'sd0; w2 <= 1'b0; last_term <= 1'b0;
 							st <= S_P1;
 						end
 					end
@@ -280,7 +322,7 @@ module ps1_mdec (
 			S_DQ: begin
 					coef[zz(dq_k)] <= dq_c; cval[zz(dq_k)] <= 1'b1;
 					if (dq_k == 6'd63) begin
-						i_a <= 3'd0; i_b <= 3'd0; i_k <= 3'd0; acc <= 32'sd0; last_term <= 1'b0;
+						i_a <= 3'd0; i_b <= 3'd0; i_k <= 3'd0; acc <= 32'sd0; acc1 <= 32'sd0; w2 <= 1'b0; last_term <= 1'b0;
 						st <= S_P1;
 					end else st <= S_BEND;
 				end
@@ -290,33 +332,42 @@ module ps1_mdec (
 					else st <= S_WORD;
 				end
 			// pass 1: t[y][u] = round(sum_v c[v][u] * M[v][y]); i_a = u, i_b = y, i_k = v
-			S_P1: begin
+			S_P1: if (i_b == 3'd0 && i_k == 3'd0 && !cnz[i_a]) begin   // an empty column
+					tnz[i_a] <= 1'b0;
+					if (i_a == 3'd7) begin i_a <= 3'd0; st <= S_P2; end
+					else i_a <= i_a + 3'd1;
+				end else begin
+					tnz[i_a] <= 1'b1;
 					mac_v <= 1'b1;
 					mac_c <= cval[{i_k, i_a}] ? {{1{coef[{i_k, i_a}][14]}}, coef[{i_k, i_a}]} : 16'sd0;
-					mac_m <= sc_q;
+					mac_m <= sc_w[12:0]; mac_m1 <= sc_w[25:13];          // (i_b even: y and y+1)
 					i_k <= i_k + 3'd1;
 					if (i_k == 3'd7) st <= S_P1W;
 				end
 			S_P1W: if (!mac_v) begin
-					tt[{i_b, i_a}] <= (acc + 32'sd16384) >>> 15;
-					acc <= 32'sd0;
-					if (i_b == 3'd7) begin
-						i_b <= 3'd0;
-						if (i_a == 3'd7) begin i_a <= 3'd0; st <= S_P2; end
-						else begin i_a <= i_a + 3'd1; st <= S_P1; end
-					end else begin i_b <= i_b + 3'd1; st <= S_P1; end
+					if (!w2) begin tt[{i_b, i_a}] <= (acc + 32'sd16384) >>> 15; w2 <= 1'b1; end
+					else begin
+						tt[{i_b | 3'd1, i_a}] <= (acc1 + 32'sd16384) >>> 15;
+						w2 <= 1'b0; acc <= 32'sd0; acc1 <= 32'sd0;
+						if (i_b == 3'd6) begin
+							i_b <= 3'd0;
+							if (i_a == 3'd7) begin i_a <= 3'd0; st <= S_P2; end
+							else begin i_a <= i_a + 3'd1; st <= S_P1; end
+						end else begin i_b <= i_b + 3'd2; st <= S_P1; end
+					end
 				end
 			// pass 2: s[y][x] = round(sum_u t[y][u] * M[u][x]); i_a = y, i_b = x, i_k = u
 			S_P2: begin
 					mac_v <= 1'b1;
-					mac_c <= tt[{i_a, i_k}];
-					mac_m <= sc_q;
+					mac_c <= tnz[i_k] ? tt[{i_a, i_k}] : 16'sd0;
+					mac_m <= sc_w[12:0]; mac_m1 <= sc_w[25:13];          // (x and x+1)
 					i_k <= i_k + 3'd1;
 					if (i_k == 3'd7) st <= S_P2W;
 				end
 			S_P2W: if (!mac_v) begin : p2w
-					reg [31:0] s; reg [8:0] base;
-					s = (acc + 32'sd16384) >>> 15;
+					reg [31:0] s; reg [8:0] base; reg [2:0] xb;
+					s  = ((w2 ? acc1 : acc) + 32'sd16384) >>> 15;
+					xb = w2 ? (i_b | 3'd1) : i_b;
 					// where the block's pixel goes: mono 0-63, Cr 0-63, Cb 64-127, Y in the 16x16 at 128
 					if (mono) base = 9'd0;
 					else if (blk == 3'd0) base = 9'd0;
@@ -324,10 +375,12 @@ module ps1_mdec (
 					else base = 9'd128;
 					// (Y1 top left, Y2 top right, Y3 bottom left, Y4 bottom right: blk 2-5, so the
 					// bottom half is blk[2] and the right half blk[0])
-					if (mono || blk < 3'd2) mb[base + {3'd0, i_a, i_b}] <= wclamp(s[8:0]);
-					else mb[9'd128 + {1'b0, blk[2], i_a, blk[0], i_b}] <= wclamp(s[8:0]);
-					acc <= 32'sd0;
-					if (i_b == 3'd7) begin
+					if (mono || blk < 3'd2) mb[base + {3'd0, i_a, xb}] <= wclamp(s[8:0]);
+					else mb[9'd128 + {1'b0, blk[2], i_a, blk[0], xb}] <= wclamp(s[8:0]);
+					w2 <= !w2;
+					if (!w2) ;                                            // (the pair's second next clock)
+					else if (i_b == 3'd6) begin
+						acc <= 32'sd0; acc1 <= 32'sd0;
 						i_b <= 3'd0;
 						if (i_a == 3'd7) begin
 							i_a <= 3'd0;
@@ -337,7 +390,7 @@ module ps1_mdec (
 							else if (blk == 3'd5) begin blk <= 3'd0; cp <= 9'd0; pk <= 2'd0; st <= S_COL; end
 							else begin blk <= blk + 3'd1; st <= (k == 7'd63) ? S_BEND : S_BEND; end
 						end else begin i_a <= i_a + 3'd1; st <= S_P2; end
-					end else begin i_b <= i_b + 3'd1; st <= S_P2; end
+					end else begin i_b <= i_b + 3'd2; st <= S_P2; acc <= 32'sd0; acc1 <= 32'sd0; end
 				end
 			// a colour macroblock out, row-major: 15-bit two pixels a word, 24-bit three bytes each
 			// (a word out only when the FIFO, with the one already on its way, has room)
@@ -372,13 +425,13 @@ module ps1_mdec (
 				end
 			default: st <= S_IDLE;
 			endcase
-			if (pop_in) ir <= ir + 5'd1;
-			icnt <= icnt + ((push && icnt != 6'd32) ? 6'd1 : 6'd0) - (pop_in ? 6'd1 : 6'd0);
+			if (pop_in) ir <= ir + 8'd1;
+			icnt <= icnt + ((push && icnt != 9'd256) ? 9'd1 : 9'd0) - (pop_in ? 9'd1 : 9'd0);
 		end
 
 		// --- reset: a write of bit 31 of 1824h (the tables stay) -----------------------------------
 		if (rst || (sel && we && a2 && wdata[31])) begin
-			iw <= 5'd0; ir <= 5'd0; icnt <= 6'd0; ow <= 5'd0; orr <= 5'd0; ocnt <= 6'd0; ow_v <= 1'b0;
+			iw <= 8'd0; ir <= 8'd0; icnt <= 9'd0; ow <= 5'd0; orr <= 5'd0; ocnt <= 6'd0; ow_v <= 1'b0;
 			kind <= 2'd0; left <= 16'd0; to_come <= 16'd0; busy <= 1'b0; st <= S_IDLE; blk <= 3'd0;
 			dc_next <= 1'b1; mac_v <= 1'b0; depth <= 2'd0; sgn <= 1'b0; b15 <= 1'b0;
 			if (rst) begin en_in <= 1'b0; en_out <= 1'b0; end
