@@ -111,7 +111,11 @@ module tb_ps1_gpu;
 
 	// a megabyte of lines with some latency
 	reg [127:0] mem [0:65535];
+`ifdef TB_RD
+	localparam RD = `TB_RD;
+`else
 	localparam RD = 6;
+`endif
 	reg [127:0] pd [0:RD-1];
 	reg         pv [0:RD-1];
 	integer pi;
@@ -194,7 +198,8 @@ module tb_ps1_gpu;
 	reg [7:0] frame [0:320*240-1];
 	always @(posedge clk) if (px_valid) frame[px_y * 320 + px_x] <= px_rgb;
 
-	integer k, fd, frames;
+	integer k, fd, frames, cp_bad, cp_t0;
+	reg [15:0] cp_src [0:45*5-1];
 	reg [15:0] p;
 	integer busy_clks = 0, r_tex = 0, r_dst = 0, r_full = 0, r_clut = 0;
 	always @(posedge clk) begin
@@ -245,6 +250,19 @@ module tb_ps1_gpu;
 		check(p == {1'b0, 5'h00, 5'h1F, 5'h1F}, "the quad is yellow inside");
 		p = vram_px(10'd260, 9'd230);
 		check(p == {1'b0, 5'h0C, 5'h04, 5'h02}, "and the fill survives below it");
+
+		// --- VRAM -> VRAM: a copy out of the triangle's gradient, odd source and destination
+		// columns, rows longer than one 16-pixel chunk, to a place nothing else uses
+		for (k = 0; k < 45*5; k = k + 1) cp_src[k] = vram_px(10'd61 + k % 45, 9'd81 + k / 45);
+		cp_t0 = busy_clks;
+		gp0(32'h8000_0000); gp0({16'd81, 16'd61}); gp0({16'd401, 16'd703}); gp0({16'd5, 16'd45});
+		idle();
+		$display("    copy 45x5: %0d busy clocks", busy_clks - cp_t0);
+		cp_bad = 0;
+		for (k = 0; k < 45*5; k = k + 1) if (vram_px(10'd703 + k % 45, 9'd401 + k / 45) !== cp_src[k]) cp_bad = cp_bad + 1;
+		check(cp_bad == 0, "a VRAM copy lands every pixel where it was sent");
+		if (cp_bad != 0) $display("    %0d of 225 copied pixels wrong", cp_bad);
+		check(vram_px(10'd702, 9'd401) == 16'd0 && vram_px(10'd748, 9'd401) == 16'd0, "and nothing either side of it");
 
 		// upload a 4x4 15-bit texture at (512,0): a magenta/cyan checker
 		gp0(32'hA000_0000); gp0({16'd0, 16'd512}); gp0({16'd4, 16'd4});
@@ -497,6 +515,13 @@ module tb_ps1_gpu;
 			$display("    64 Gouraud textured quads 10x10: %0d clocks, %0d each (console ~270)", n, n / 64);
 			$display("    drawn? sprite %h  triangle %h  quad %h", vram_px(10'd23, 9'd303), vram_px(10'd301, 9'd101), vram_px(10'd405, 9'd325));
 		end
+
+		// the shape of ps1-tests gpu/bandwidth's vramToVram: 320 wide, aligned (here 8 rows of it).
+		// The board's old engine took 3.9 clocks a pixel; the console 2.
+		cp_t0 = busy_clks;
+		gp0(32'h8000_0000); gp0({16'd400, 16'd0}); gp0({16'd400, 16'd320}); gp0({16'd8, 16'd320});
+		idle();
+		$display("    BANDWIDTH copy 320x8: %0d clocks, %0d.%02d a pixel", busy_clks - cp_t0, (busy_clks - cp_t0) / 2560, ((busy_clks - cp_t0) % 2560) * 100 / 2560);
 
 		$display("");
 		$display("    ENGINE BUSY CLOCKS: %0d", busy_clks);

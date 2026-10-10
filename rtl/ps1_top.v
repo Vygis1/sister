@@ -692,7 +692,11 @@ module ps1_top #(
 	// If this is tried again: give the run its own arbiter port, or let it be
 	// preempted, so it cannot push the engine's reads back. Do not simply turn
 	// it on again.
-	ps1_cache #(.IDXBITS(13), .FAST_ACK(1), .BRAM(1), .B_LINE(1)) ccache (
+	// The DMA's reads go round the cache (B_NOALLOC): four lines from memory per miss, the
+	// first answered on its beat, and the processor's lines left where they are. Allocating, a
+	// block transfer larger than the cache paid a whole DDR3 round trip (and often a dirty
+	// write-back) a line: ps1-tests gpu/bandwidth cpuToVram 1456 ms, the console 772.
+	ps1_cache #(.IDXBITS(13), .FAST_ACK(1), .BRAM(1), .B_LINE(1), .B_NOALLOC(1)) ccache (
 		.flush(cc_flush), .flush_busy(cc_flush_busy), .inv_v(1'b0), .inv_line(25'd0),
 		.clk(clk), .rst(core_rst),   // a program is loaded under the cache's feet: forget every line
 		// the buffered store first; the processor's reads only once it is gone
