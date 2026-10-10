@@ -93,7 +93,7 @@ module tb_ps1_scan;
 	wire [23:0]  bk_addr, vc_addr; wire bk_req, bk_we, bk_ready, vc_req, vc_we, vc_ready, vc_valid;
 	wire [127:0] bk_wdata, vc_wdata, vc_rdata; wire [15:0] bk_wmask, vc_wmask;
 	wire         inv_v; wire [24:0] inv_line; wire bk_busy;
-	ps1_vram_port vp ( .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
+	ps1_vram_port vp ( .n_req(1'b0), .n_addr(25'd0), .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
 		.clk(clk), .rst(rst),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata),
 		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around),

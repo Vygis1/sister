@@ -778,7 +778,9 @@ module ps1_top #(
 	wire [8:0]  fpx_y;
 	wire [15:0] fpx_rgb;
 
-	ps1_gpu #(.CLK_HZ(CLK_HZ)) gpu (
+	wire vn_req, vn_ack; wire [24:0] vn_addr; wire [127:0] vn_line;   // the raster's read-ahead (ps1_vram_port n_*)
+	ps1_gpu #(.CLK_HZ(CLK_HZ), .READ_AHEAD(1)) gpu (
+		.vn_req(vn_req), .vn_addr(vn_addr), .vn_ack(vn_ack), .vn_line(vn_line),
 		.clk(clk), .rst(core_rst),
 		.sel(gpu_hit & c_req & cpu_ce), .we(c_we), .a4(c_addr[2]), .dma_active(dma_gpu_active), .cap_every_vsync(cap_every_vsync), .gpu_fast(gpu_fast), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun),
 		.wdata(c_dout), .rdata(gpu_rdata),
@@ -861,6 +863,7 @@ module ps1_top #(
 		.v_addr(v_addr), .v_req(v_req & d_calibrated), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata),
 		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around), .v_lin(v_lin), .v_one(v_one),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack),
+		.n_req(vn_req & d_calibrated), .n_addr(vn_addr), .n_ack(vn_ack), .n_line(vn_line),
 		.eng_idle(!gpu.busy), .host_flush(vram_flush), .busy(bk_busy),
 		.g_addr(gp_addr), .g_req(gp_req), .g_around(gp_around), .g_lin(gp_lin),
 		.g_rdata(gp_rdata), .g_line(gp_line), .g_ack(gp_ack),
@@ -868,15 +871,14 @@ module ps1_top #(
 		.inv_v(bk_inv_v), .inv_line(bk_inv_line)
 	);
 	assign vram_flush_busy = vc_flush_busy || bk_busy;
-	vram_wc u_wc (
-		.clk(clk), .rst(core_rst),
-		.g_addr(gp_addr), .g_req(gp_req), .g_we(1'b0), .g_be(4'hF), .g_wdata(32'd0),
-		.g_lwe(1'b0), .g_wdata128(128'd0), .g_around(gp_around), .g_lin(gp_lin), .c_around(wc_around), .c_lin(wc_lin),
-		.g_rdata(gp_rdata), .g_line(gp_line), .g_ack(gp_ack),
-		.c_addr(wc_addr), .c_req(wc_req), .c_we(wc_we), .c_lwe(wc_lwe), .c_be(wc_be), .c_wdata(wc_wdata),
-		.c_be16(wc_be16), .c_wdata128(wc_wdata128), .c_rdata(wc_rdata),
-		.c_line(wc_line), .c_ack(wc_ack)
-	);
+	// Reads go straight to the cache. vram_wc was the engine's write combiner; the writes have
+	// gone to the block writer for a long time and what was left of it passed reads through a
+	// registered stage of its own: two clocks on every texel, palette and destination line the
+	// board read, which tb_ps1_gpu (wired straight) never had.
+	assign wc_addr = gp_addr; assign wc_req = gp_req; assign wc_around = gp_around; assign wc_lin = gp_lin;
+	assign wc_we = 1'b0; assign wc_lwe = 1'b0; assign wc_be = 4'hF; assign wc_wdata = 32'd0;
+	assign wc_be16 = 16'd0; assign wc_wdata128 = 128'd0;
+	assign gp_rdata = wc_rdata; assign gp_line = wc_line; assign gp_ack = wc_ack;
 
 	// Port B here is the scanout: it reads around the cache so that walking the
 	// displayed frame every 1/60 s stops evicting what the drawing engine is using.

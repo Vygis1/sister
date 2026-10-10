@@ -44,6 +44,15 @@ module ps1_vram_port (
 	// to be flushed every eight pixels. The run's other lines are kept right by the cache:
 	// the write that makes one stale clears it there when it lands.
 	input  wire         v_one,
+	// A second reader: the rasteriser reading its next destination line ahead while its writes go
+	// on through the port above (a semi-transparent span otherwise stopped for a round trip at
+	// every line). One line, answered with the gathered bytes over it; an answer that a block of
+	// its line overtook (queued, in flight or landing while it was out) is dropped and the read
+	// goes again. Port reads wait while it is out. n_req is held until n_ack, then dropped.
+	input  wire         n_req,
+	input  wire [24:0]  n_addr,
+	output wire         n_ack,
+	output wire [127:0] n_line,
 	output wire [31:0]  v_rdata,
 	output wire [127:0] v_line,
 	output wire         v_ack,
@@ -76,6 +85,10 @@ module ps1_vram_port (
 	wire [15:0]  r_fwd_m;
 	wire [127:0] r_fwd_d;
 	wire         rd = v_req && !v_we;
+	// the read path is the second reader's: its read is out, or it asks and the port does not read
+	reg          n_out;
+	wire         sel_n = n_out || (!rd && n_req);
+	wire [28:0]  r_addr = sel_n ? {n_addr, 4'd0} : v_addr;
 
 	ps1_gpu_blk #(.QAW(2)) blk (
 		.clk(clk), .rst(rst),
@@ -84,14 +97,19 @@ module ps1_vram_port (
 		.flush(eng_idle || host_flush || (rd && r_hold)), .idle(idle),
 		.m_addr(m_addr), .m_req(m_req), .m_we(m_we), .m_wdata(m_wdata), .m_wmask(m_wmask), .m_ready(m_ready),
 		.inv_v(inv_v), .inv_line(inv_line),
-		.r_line(v_addr[28:4]), .r_run(v_around && !v_one), .r_hold(r_hold), .r_fwd_m(r_fwd_m), .r_fwd_d(r_fwd_d)
+		.r_line(r_addr[28:4]), .r_run(!sel_n && v_around && !v_one), .r_hold(r_hold), .r_fwd_m(r_fwd_m), .r_fwd_d(r_fwd_d)
 	);
 	assign busy = !idle;
 
-	assign g_addr   = v_addr;
-	assign g_req    = rd && !r_hold;
-	assign g_around = v_around;
-	assign g_lin    = v_lin;
+	assign g_addr   = r_addr;
+	// (once out, the second reader's request stays up to its answer: the combiner took it, and
+	// it is the answer that is judged)
+	assign g_req    = sel_n ? (n_out || (n_req && !r_hold)) : (rd && !r_hold);
+	assign g_around = sel_n ? 1'b1 : v_around;     // a destination read: a run along the row
+	assign g_lin    = sel_n ? 1'b1 : v_lin;
+	always @(posedge clk)
+		if (rst || g_ack) n_out <= 1'b0;
+		else if (sel_n && g_req) n_out <= 1'b1;
 
 	// the gathered bytes over the cache's answer
 	reg [127:0] fwd_line;
@@ -99,7 +117,7 @@ module ps1_vram_port (
 	always @(*)
 		for (k = 0; k < 16; k = k + 1)
 			fwd_line[k*8 +: 8] = r_fwd_m[k] ? r_fwd_d[k*8 +: 8] : g_line[k*8 +: 8];
-	wire [3:0]  fwd_be = r_fwd_m[v_addr[3:2]*4 +: 4];
+	wire [3:0]  fwd_be = r_fwd_m[v_addr[3:2]*4 +: 4];   // (the port's word: used only when the port reads)
 	reg  [31:0] fwd_word;
 	always @(*)
 		for (k = 0; k < 4; k = k + 1)
@@ -107,7 +125,9 @@ module ps1_vram_port (
 
 	assign v_rdata = fwd_word;
 	assign v_line  = fwd_line;
-	assign v_ack   = v_we ? w_ack : (g_ack && !r_hold);
+	assign v_ack   = v_we ? w_ack : (g_ack && !r_hold && !sel_n);
+	assign n_ack   = n_out && g_ack && !r_hold;
+	assign n_line  = fwd_line;
 endmodule
 
 `default_nettype wire

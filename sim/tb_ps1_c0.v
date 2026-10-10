@@ -91,7 +91,7 @@ module tb_ps1_c0;
 		$display("  cycles=%0d done=%0d  words produced (rd_have rises)=%0d  dma requests=%0d  rvalids=%0d", cycles, done, n_have, n_rd, n_rvalid);
 		$display("  RAM word0=%08h (expect 62086208)  DMA st=%0d words left=%0d  GPU busy=%b ds=%0d", mem[24'h01_0000 + 24'h10000/16 * 0 + 24'h1000][31:0], dut.u_dma.st, dut.u_dma.words, dut.gpu.busy, dut.gpu.ds);
 		$display("  words the CPU collected at 0x80100100: %08h %08h %08h %08h", mem[24'h01_0000 + 24'h10010][31:0], mem[24'h01_0000 + 24'h10010][63:32], mem[24'h01_0000 + 24'h10010][95:64], mem[24'h01_0000 + 24'h10010][127:96]);
-		$display("  final: gpu ds=%0d busy=%b rd_have=%b cx=%0d cy=%0d | wc st=%0d acc_v=%b c_req=%b | vcache st=%0d | cpu pc=%08h", dut.gpu.ds, dut.gpu.busy, dut.gpu.rd_have, dut.gpu.cx, dut.gpu.cy, dut.u_wc.st, dut.u_wc.acc_v, dut.u_wc.c_req, dut.vcache.st, pc);
+		$display("  final: gpu ds=%0d busy=%b rd_have=%b cx=%0d cy=%0d | vcache st=%0d | cpu pc=%08h", dut.gpu.ds, dut.gpu.busy, dut.gpu.rd_have, dut.gpu.cx, dut.gpu.cy, dut.vcache.st, pc);
 		$display("  stores=%0d correct=%0d", nst, nok);
 		if (nst == 8 && nok == 8) $display("tb_ps1_c0: PASS"); else $display("tb_ps1_c0: FAIL");
 		$finish;

@@ -188,9 +188,12 @@ module ps1_dma #(
 	always @(*) begin
 		for (k = 0; k < 7; k = k + 1)
 			want[k] = dpcr[k*4 + 3] && chcr[k][24]
-			          // (a mode-0 channel waits for bit 28 -- except the SPU's, which goes when the
-			          // SPU asks, as on the chip: ps1-tests spu/memory-transfer starts one without it)
-			          && (chcr[k][10:9] != 2'd0 || chcr[k][28] || k == 4)
+			          // (a mode-0 channel waits for bit 28 -- except the SPU's and the GPU's, which go
+			          // when their device asks, as on the chip and in DuckStation, where the trigger
+			          // stands in for a request only on channels with no device behind them:
+			          // ps1-tests spu/memory-transfer and dma/chopping start them without it, and
+			          // chopping waited here for ever)
+			          && (chcr[k][10:9] != 2'd0 || chcr[k][28] || k == 4 || k == 2)
 			          // (the MDEC's: only while it asks for a block)
 			          && (k != 0 || mdec_dreq0) && (k != 1 || mdec_dreq1);
 	end
