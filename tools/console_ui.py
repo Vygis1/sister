@@ -111,12 +111,23 @@ def send_file(local, card_path):
     JOB.update(stage='looking at the card', total=total)
     have = card_size(card_path)
     start = 0
-    if 0 < have <= total:
-        start = (have // CHUNK) * CHUNK
-        if start == have and start > 0:
-            start -= CHUNK                           # (the last whole piece is checked again)
-        log('%s is on the card up to %d MB: carrying on from %d MB' % (card_path, have >> 20, start >> 20))
     with open(local, 'rb') as f:
+        # Carry on only from what is really this file: every piece already there is checked
+        # against ours first. (A different, shorter file under the same name -- yesterday's core --
+        # was taken for a stopped copy of this one, and only the end was sent: a core made of two
+        # halves went into the flash and did not start.)
+        if have > 0:
+            JOB['stage'] = 'checking what the card already has'
+            good = 0
+            while good + CHUNK <= min(have, total):
+                f.seek(good); blob = f.read(CHUNK)
+                if card_crc(card_path, good, CHUNK) != zlib.crc32(blob) & 0xFFFFFFFF:
+                    break
+                good += CHUNK
+                JOB['done'] = good
+            start = good if have <= total else 0     # (longer than ours: not a stopped copy of it)
+            log('%s: %d MB of it already on the card and checked; sending from there' % (card_path, start >> 20)
+                if start else '%s: what the card has is not this file; sending all of it' % card_path)
         off = start
         t0, sent = time.time(), 0
         while off < total:
@@ -142,6 +153,11 @@ def send_file(local, card_path):
     size = card_size(card_path)
     if size != total:
         raise IOError('the card has %d bytes, the file is %d' % (size, total))
+    if total <= 64 << 20:                            # (a core: the whole of it, once more, in one look)
+        JOB['stage'] = 'checking the whole file on the card'
+        with open(local, 'rb') as f:
+            if card_crc(card_path, 0, total) != zlib.crc32(f.read()) & 0xFFFFFFFF:
+                raise IOError('the whole file on the card is not this one -- send it again')
     return '%s on the card (%d MB, every piece checked)' % (card_path, total >> 20)
 
 def wait_core(want, secs):
@@ -184,9 +200,14 @@ def install(core):
             raise IOError('the install has not finished in ten minutes')
     if j.get('error'):
         raise IOError('install: ' + j['error'])
-    JOB['stage'] = 'starting the console'
-    esp_post('/api/boot?core=1')
-    if not wait_core(cid, 40):
+    # (asked up to three times: the first boot after an install does not always take -- the
+    # menu's own switch asks twice for the same reason; seen here 2026-10-10, a good core stayed dark)
+    for attempt in range(3):
+        JOB['stage'] = 'starting the console' + ('' if attempt == 0 else ' (asking again)')
+        esp_post('/api/boot?core=1')
+        if wait_core(cid, 15):
+            break
+    else:
         raise IOError('installed, but the %s did not come up' % CORE_NAME[cid])
     return 'the %s core is in the flash and running -- it stays after power-off' % CORE_NAME[cid]
 
