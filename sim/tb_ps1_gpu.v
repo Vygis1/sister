@@ -51,7 +51,9 @@ module tb_ps1_gpu;
 	wire        vblank, hblank, dot_ce, irq;
 
 	wire v_lin_w, v_one_w, g_lin_w;
-	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
+	localparam RA = 1;             // the raster's destination read-ahead (ps1_top builds it in)
+	wire vn_req, vn_ack; wire [24:0] vn_addr; wire [127:0] vn_line;
+	ps1_gpu #(.READ_AHEAD(RA)) gpu ( .vn_req(vn_req), .vn_addr(vn_addr), .vn_ack(vn_ack), .vn_line(vn_line), .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .a4(a4), .dma_active(1'b0), .cap_every_vsync(1'b0), .gpu_fast(1'b1),
 		.no_tcache(1'b0), .no_ccache(1'b0), .no_trun(1'b0), .wdata(wdata), .rdata(rdata),
@@ -79,7 +81,7 @@ module tb_ps1_gpu;
 	wire [28:0]  gp_addr; wire gp_req, gp_around, gp_ack; wire [31:0] gp_rdata; wire [127:0] gp_line;
 	wire [23:0]  bk_addr, vc_addr; wire bk_req, bk_we, bk_ready, vc_req, vc_we, vc_ready, vc_valid; wire [127:0] bk_wdata, vc_wdata, vc_rdata; wire [15:0] bk_wmask, vc_wmask;
 	wire         inv_v; wire [24:0] inv_line; wire bk_busy;
-	ps1_vram_port vp ( .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
+ 	ps1_vram_port vp ( .n_req(vn_req), .n_addr(vn_addr), .n_ack(vn_ack), .n_line(vn_line), .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
 		.clk(clk), .rst(rst),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata), .v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack), .eng_idle(!gpu.busy), .host_flush(1'b0), .busy(bk_busy),
@@ -198,7 +200,9 @@ module tb_ps1_gpu;
 	reg [7:0] frame [0:320*240-1];
 	always @(posedge clk) if (px_valid) frame[px_y * 320 + px_x] <= px_rgb;
 
-	integer k, fd, frames, cp_bad, cp_t0, cp_d0, cp_m0;
+	integer k, fd, frames, cp_bad, cp_t0, cp_d0, cp_m0, cp_f0, cp_x0, cp_n0, cp_r0;
+	integer n_out_clks = 0, r_run_clks = 0;
+	always @(posedge clk) begin if (vn_req) n_out_clks = n_out_clks + 1; if (gpu.r_busy) r_run_clks = r_run_clks + 1; end
 	reg [15:0] cp_src [0:45*5-1];
 	reg [15:0] p;
 	integer busy_clks = 0, r_tex = 0, r_dst = 0, r_full = 0, r_clut = 0;
@@ -529,10 +533,11 @@ module tb_ps1_gpu;
 		gp0(32'h6040_2010); gp0({16'd420, 16'd0}); gp0({16'd16, 16'd320});
 		idle();
 		$display("    BANDWIDTH rect 320x16: %0d clocks", busy_clks - cp_t0);
-		cp_t0 = busy_clks; cp_d0 = r_dst; cp_m0 = misses;
+		cp_t0 = busy_clks; cp_d0 = r_dst; cp_m0 = misses; cp_f0 = r_full; cp_x0 = r_tex; cp_n0 = n_out_clks; cp_r0 = r_run_clks;
 		gp0(32'h6240_2010); gp0({16'd440, 16'd0}); gp0({16'd16, 16'd320});
 		idle();
 		$display("    BANDWIDTH semi rect 320x16: %0d clocks, %0d waiting on the destination, %0d cache misses", busy_clks - cp_t0, r_dst - cp_d0, misses - cp_m0);
+		$display("      write held %0d, texel %0d, read-ahead out %0d, raster busy %0d", r_full - cp_f0, r_tex - cp_x0, n_out_clks - cp_n0, r_run_clks - cp_r0);
 
 		$display("");
 		$display("    ENGINE BUSY CLOCKS: %0d", busy_clks);

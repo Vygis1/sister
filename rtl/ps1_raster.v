@@ -36,7 +36,8 @@
 `default_nettype none
 
 module ps1_raster #(
-	parameter CLK_HZ = 50_000_000    // (the console-pace mode's rate is worked out from it)
+	parameter CLK_HZ = 50_000_000,   // (the console-pace mode's rate is worked out from it)
+	parameter READ_AHEAD = 0         // read the next destination line on n_* while writing (see dn_*)
 ) (
 	input  wire        clk,
 	input  wire        rst,
@@ -106,6 +107,11 @@ module ps1_raster #(
 	output reg         v_one,             // a read whose run's other lines the asker never uses
 	input  wire [31:0] v_rdata,
 	input  wire [127:0] v_line,
+	// the second reader (ps1_vram_port n_*): the next destination line, read while the writes go on
+	output reg          n_req,
+	output reg  [24:0]  n_addr,
+	input  wire         n_ack,
+	input  wire [127:0] n_line,
 	input  wire        v_ack,
 
 	// the rest of a texel run, offered by the video cache a line at a time
@@ -553,6 +559,14 @@ module ps1_raster #(
 	reg [24:0]  dl_a;
 	reg         dl_v;
 	wire        dl_hit = dl_v && (dl_a == waE[28:4]);
+	// ...and the line after it, read ahead on the second reader while this one is blended. A
+	// semi-transparent span stopped for a round trip at every line: 82% of its time on the board,
+	// 2.5x the console (ps1-tests gpu/bandwidth). Taken over in a clock when the span gets there;
+	// patched with this pipeline's writes like the line in hand, dropped like it by the engine's.
+	reg [127:0] dn_d;
+	reg [24:0]  dn_a;
+	reg         dn_v;
+	wire        dn_hit = dn_v && (dn_a == waE[28:4]);
 	wire        missE  = needE && !dl_hit;
 	wire [31:0] dstw   = dl_d[waE[3:2]*32 +: 32];
 	wire [15:0] dst0 = dstw[15:0], dst1 = dstw[31:16];
@@ -580,7 +594,10 @@ module ps1_raster #(
 	reg        cl_loading;
 	reg  [3:0] cl_wait;       // clocks to let a read-around run finish offering
 	wire       want_tex = vC && missC && !tfill_d;  // a line just landed: look again first
-	wire       want_dst = vE && missE;
+	// (not a line the second reader is already reading: wait for that)
+	wire       want_dst = vE && missE && !dn_hit && !(n_req && n_addr == waE[28:4]);
+	wire       want_dn  = (READ_AHEAD != 0) && busy && c_blnd && dl_v && !n_req
+	                      && !(dn_v && dn_a == dl_a + 25'd1);
 	wire       want_fetch = (cl_loading && (cl_wait == 4'd0)) || want_dst || want_tex;
 
 
@@ -650,6 +667,21 @@ module ps1_raster #(
 	// on up. A miss in C or E holds everything above it as well as itself.
 	wire mvE = vE && !missE && f_free;              // E's pair goes out (or is dropped)
 	wire eFree = !vE || mvE;
+
+	// the second reader's line, with the writes it cannot have seen
+	reg [127:0] dn_in;
+	integer nb;
+	always @(*) begin
+		dn_in = n_line;
+		if (wreq && waddr[28:4] == n_addr)
+			for (nb = 0; nb < 4; nb = nb + 1)
+				if (wbe[nb]) dn_in[waddr[3:2]*32 + nb*8 +: 8] = wdata[nb*8 +: 8];
+		if (mvE && waE[28:4] == n_addr) begin
+			if (landE0) dn_in[waE[3:2]*32      +: 16] = outE0;
+			if (landE1) dn_in[waE[3:2]*32 + 16 +: 16] = outE1;
+		end
+	end
+
 	wire mvD = vD && eFree;
 	wire dFree = !vD || mvD;
 	wire mvC = vC && !missC && dFree && !cl_loading;
@@ -667,7 +699,7 @@ module ps1_raster #(
 		if (rst) begin
 			busy <= 1'b0; scanning <= 1'b0; row_in <= 1'b0;
 			vB <= 1'b0; vC <= 1'b0; vD <= 1'b0; vE <= 1'b0; wreq <= 1'b0; lastF <= 1'b0;
-			fs <= F_IDLE; fwho <= 2'd0; faddr <= 29'd0; dst_run <= 1'b0; cl_have <= 32'd0; cl_req <= 5'd0; cl_loading <= 1'b0;
+			fs <= F_IDLE; fwho <= 2'd0; faddr <= 29'd0; dst_run <= 1'b0; n_req <= 1'b0; n_addr <= 25'd0; dn_v <= 1'b0; dn_a <= 25'd0; dn_d <= 128'd0; cl_have <= 32'd0; cl_req <= 5'd0; cl_loading <= 1'b0;
 			cl_wait <= 4'd0;
 			cl_v <= 1'b0; cl_tag <= 16'd0; cl_depth <= 2'd0; dl_v <= 1'b0; dl_a <= 25'd0; dl_d <= 128'd0;
 			px <= 0; py <= 0; ea0 <= 0; ea1 <= 0; ea2 <= 0; er0 <= 0; er1 <= 0; er2 <= 0;
@@ -753,6 +785,9 @@ module ps1_raster #(
 				xE <= xD; yE <= yD; pE0 <= pixD0; pE1 <= pixD1;
 			end
 
+			// the span has reached the line read ahead: it is the line in hand now
+			if (vE && missE && dn_hit) begin dl_d <= dn_d; dl_a <= dn_a; dl_v <= 1'b1; dn_v <= 1'b0; end
+
 			// --- F: the write ------------------------------------------------------------
 			if (f_free) begin
 				wreq  <= mvE && (landE0 || landE1);
@@ -764,6 +799,10 @@ module ps1_raster #(
 				if (mvE && dl_hit) begin
 					if (landE0) dl_d[waE[3:2]*32      +: 16] <= outE0;
 					if (landE1) dl_d[waE[3:2]*32 + 16 +: 16] <= outE1;
+				end
+				if (mvE && dn_hit) begin
+					if (landE0) dn_d[waE[3:2]*32      +: 16] <= outE0;
+					if (landE1) dn_d[waE[3:2]*32 + 16 +: 16] <= outE1;
 				end
 			end
 			// the primitive is over when its last pair has gone out (or was empty)
@@ -808,6 +847,20 @@ module ps1_raster #(
 				cl_v <= 1'b0; cl_have <= 32'd0;
 			end
 			if (inv_en && dl_v && dl_a == inv_line) dl_v <= 1'b0;
+			if (inv_en && dn_v && dn_a == inv_line) dn_v <= 1'b0;
+			// --- the second reader -------------------------------------------------------------
+			// The answer has the bytes the port took before this clock. What it takes in this one
+			// (F's write) and what F loads now (E's pair) are put in here; an engine write taking
+			// the port now drops the line instead.
+			if (n_ack) begin
+				n_req <= 1'b0;
+				dn_d  <= dn_in;
+				dn_a  <= n_addr;
+				dn_v  <= !(inv_en && inv_line == n_addr);
+			end else if (want_dn) begin
+				n_req  <= 1'b1;
+				n_addr <= dl_a + 25'd1;
+			end
 			if (clut_flush) begin cl_v <= 1'b0; cl_have <= 32'd0; end   // GP0(01)
 		end
 	end

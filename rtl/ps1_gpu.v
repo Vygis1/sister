@@ -50,7 +50,8 @@
 `default_nettype none
 
 module ps1_gpu #(
-	parameter CLK_HZ = 50_000_000    // (the raster's 60 Hz and the swap waits are worked out from it)
+	parameter CLK_HZ = 50_000_000,   // (the raster's 60 Hz and the swap waits are worked out from it)
+	parameter READ_AHEAD = 0         // the raster reads its next destination line on vn_* (ps1_vram_port n_*)
 ) (
 	input  wire        clk,
 	input  wire        rst,
@@ -102,6 +103,10 @@ module ps1_gpu #(
 	output reg  [127:0] v_wdata128,
 	input  wire [31:0] v_rdata,
 	input  wire [127:0] v_line,     // the whole 16 bytes that read came from
+	output wire         vn_req,     // the raster's second reader (see ps1_raster n_*)
+	output wire [24:0]  vn_addr,
+	input  wire         vn_ack,
+	input  wire [127:0] vn_line,
 	input  wire        v_ack,
 
 	// --- and display ------------------------------------------------------------------------
@@ -1623,7 +1628,8 @@ module ps1_gpu #(
 	// ==================================================================================
 	// the pixel pipeline: polygons and rectangles, two pixels a clock (ps1_raster.v)
 	// ==================================================================================
-	ps1_raster #(.CLK_HZ(CLK_HZ)) u_raster (
+	ps1_raster #(.CLK_HZ(CLK_HZ), .READ_AHEAD(READ_AHEAD)) u_raster (
+		.n_req(vn_req), .n_addr(vn_addr), .n_ack(vn_ack), .n_line(vn_line),
 		.clk(clk), .rst(rst),
 		.start(r_start), .busy(r_busy), .always_in(r_rect),
 		.bx0(r_bx0), .bx1(r_bx1), .by0(r_by0), .by1(r_by1),
