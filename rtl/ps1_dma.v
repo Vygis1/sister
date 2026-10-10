@@ -205,6 +205,13 @@ module ps1_dma #(
 	integer    ok;
 	reg [23:0] ll_cur, ll_prev1, ll_prev2;   // the list's node now and the two before
 	reg        ll_loop;                      // it has come back to one of them
+	// A linked list steps aside between nodes for any other channel that wants the bus, MADR at
+	// the next node, and is picked up again after it (MiSTer's dma.vhd: every node ends in PAUSING
+	// -> OFF and the channels are arbitrated again). Syphon Filter adds a packet to its list twice
+	// and the list goes round it for ever; libgpu's ClearOTag then waits on channel 6 -- which
+	// never got the bus here, so it timed out for 4 s and the game skipped its title screen.
+	reg        ll_park;
+	wire       ll_others = (want & 7'b111_1011) != 7'd0;
 	// a linked-list node's header: its payload next, or -- an empty node, most of an ordering
 	// table -- straight on to the node it points to (by way of S_DONE that was a clock more a node)
 	task ll_node; input [31:0] h; reg [23:0] na;
@@ -230,6 +237,7 @@ module ps1_dma #(
 				// cycles, HDR_HOLD clocks), then the processor's window (LL_GAP)
 				if (ll_loop) begin blk_gap <= LL_GAP[5:0] + HDR_HOLD[5:0]; hdr_hold <= HDR_HOLD[5:0]; end
 				st <= S_LL;
+				if (ll_others) begin madr[2] <= na; ll_park <= 1'b1; st <= S_IDLE; end   // (see ll_park)
 			end
 		end
 	endtask
@@ -245,7 +253,7 @@ module ps1_dma #(
 			st <= S_IDLE; cur <= 3'd0;
 			r_req <= 1'b0; r_we <= 1'b0; r_lwe <= 1'b0; r_be16 <= 16'd0; r_wdata128 <= 128'd0; otc_n <= 32'd0; gp0_wr <= 1'b0; gpu_rd <= 1'b0; dbg_node_v <= 1'b0; spu_wr <= 1'b0; spu_rd <= 1'b0;
 			cd_rd <= 1'b0; cd_go <= 1'b0; cd_go_info <= 32'd0; cd_words <= 16'd0; mdec_wr <= 1'b0;
-			lb_v <= 1'b0; blk_gap <= 6'd0; hdr_hold <= 6'd0; ll_hdr <= 1'b0; ll_loop <= 1'b0; ll_cur <= 24'd0; ll_prev1 <= 24'hFF_FFFF; ll_prev2 <= 24'hFF_FFFF; m_park <= 2'b00; m1b <= 2'd0; m1r <= 3'd0; m1w <= 3'd0;
+			lb_v <= 1'b0; blk_gap <= 6'd0; hdr_hold <= 6'd0; ll_hdr <= 1'b0; ll_loop <= 1'b0; ll_cur <= 24'd0; ll_prev1 <= 24'hFF_FFFF; ll_prev2 <= 24'hFF_FFFF; ll_park <= 1'b0; m_park <= 2'b00; m1b <= 2'd0; m1r <= 3'd0; m1w <= 3'd0;
 		end else begin
 			if (blk_gap != 6'd0) blk_gap <= blk_gap - 6'd1;
 			if (hdr_hold != 6'd0) hdr_hold <= hdr_hold - 6'd1;
@@ -288,9 +296,11 @@ module ps1_dma #(
 			S_IDLE: begin
 					// lowest channel number first is wrong on the real part
 					// (DPCR has priorities) but nothing here runs two at once
+					// (a list that stepped aside goes after the channel it stepped aside for)
 					for (i = 6; i >= 0; i = i - 1)
-						if (want[i]) cur <= i[2:0];
+						if (want[i] && !(i == 2 && ll_park && ll_others)) cur <= i[2:0];
 					if (want != 7'd0) st <= S_PICK;
+					if (!ll_others) ll_park <= 1'b0;
 				end
 
 			S_PICK: begin
@@ -525,6 +535,7 @@ module ps1_dma #(
 						if ({3'd0, next[20:2], 2'b00} == ll_cur || {3'd0, next[20:2], 2'b00} == ll_prev1) ll_loop <= 1'b1;
 						if (ll_loop) begin blk_gap <= LL_GAP[5:0] + HDR_HOLD[5:0]; hdr_hold <= HDR_HOLD[5:0]; end
 						st <= S_LL;
+						if (ll_others) begin madr[2] <= {3'd0, next[20:2], 2'b00}; ll_park <= 1'b1; st <= S_IDLE; end   // (see ll_park)
 					end else if (cur <= 3'd1 && chcr[cur][10:9] == 2'd1 && bcr[cur][31:16] > 16'd1) begin
 						// an MDEC block done, more to come: back to the arbiter, not finished
 						bcr[cur][31:16] <= bcr[cur][31:16] - 16'd1;
