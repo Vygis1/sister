@@ -222,6 +222,10 @@ static void discReopen() {
 }
 
 static void xaService();                       // (below, with the XA decoder)
+static volatile bool xaTaskUp = false;
+// XA in a task of its own, above loop() and the menu on core 1: in loop() it waited behind the
+// web server, the pads and the menu, and the drive's 93 ms of sound ran out between visits
+static void xaTask(void *) { xaTaskUp = true; for (;;) { xaService(); vTaskDelay(1); } }
 
 static void cardReaderTask(void *) {
   for (;;) {
@@ -372,7 +376,7 @@ static void xaService() {
       if (k > 1024) k = 1024;
       uint32_t t = tail % XA_PEND;
       if (k > XA_PEND - t) k = XA_PEND - t;           // (one contiguous stretch a write)
-      fpga.busWrite(XA_CTRL + 0x6000, xaPend + t, k);
+      fpga.busWriteFast(XA_CTRL + 0x6000, xaPend + t, k);
       tail += k; xaPushed += k;
     }
   }
@@ -411,6 +415,7 @@ static void discTask(void *) {
 static String   fetchUrl, fetchPath, fetchErr;
 static volatile bool fetchBusy = false;
 static volatile bool listsStale = true;   // the card's listings need reading again (see refreshLists)
+static volatile bool cardChanged = false; // ...and the TV menu's: a file came or went (menu.h rescans)
 static volatile uint64_t fetchDone = 0, fetchTotal = 0;
 static volatile uint32_t fetchStalls = 0;
 
@@ -1175,7 +1180,7 @@ static void onLibraryUpload() {
     if ((libBytes & 0xFFFF) < u.currentSize) libFile.flush();
 
   } else if (u.status == UPLOAD_FILE_END) {
-    listsStale = true;                                   // a file came or went
+    listsStale = true; cardChanged = true;               // a file came or went
     if (libFile) {
       libFile.flush();
       uint32_t wrote = libFile.size();
@@ -1238,7 +1243,7 @@ static void onPutUpload() {
     if (done < u.currentSize) { putFailed = true; putErr = "the card stopped taking data"; putFile.close(); }
   } else if (u.status == UPLOAD_FILE_END) {
     if (putFile) { putFile.flush(); putFile.close(); }
-    listsStale = true;
+    listsStale = true; cardChanged = true;
   } else if (u.status == UPLOAD_FILE_ABORTED) {
     if (putFile) putFile.close();
     putFailed = true; putErr = "the upload was cut off";
@@ -1448,7 +1453,14 @@ void setup() {
   // drops bytes on a sustained write -- a 632 MB disc image died at twelve and
   // then at seventeen megabytes. Reads for the drive need 300 kB/s; this gives
   // several times that with margin.
+#if CONFIG_IDF_TARGET_ESP32S3
   haveCard = sdInfo.responded && SD.begin(PIN_SD_CS, sdBus, 8000000);
+#else
+  // (the T8: its card is in its own slot on the board, not on jumpers -- 20 MHz. Double-speed
+  // discs need ~700 kB/s, which 8 MHz could barely give; an upload is checked piece by piece)
+  haveCard = sdInfo.responded && SD.begin(PIN_SD_CS, sdBus, 20000000);
+  if (!haveCard && sdInfo.responded) haveCard = SD.begin(PIN_SD_CS, sdBus, 8000000);
+#endif
   // CORE 0, not 1: reading the card blocks inside the SPI driver, and on the
   // same core as loop() that starves the web server and the serial console
   // together -- the board goes completely deaf while the drive is being fed,
@@ -1628,6 +1640,8 @@ void setup() {
   xaChIn  = (uint8_t *)heap_caps_malloc(128, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   xaChOut = (uint32_t *)heap_caps_malloc(xa::MAX_CHUNK * 4, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!xaChIn || !xaChOut) { Serial.println("xa: no internal RAM for the decoder: no CD audio"); xaPend = nullptr; }
+  if (xaPend && xTaskCreatePinnedToCore(xaTask, "xa", 6144, nullptr, 2, nullptr, 1) != pdPASS)
+    Serial.println("xa: no task (it runs from loop() instead)");
   pads::begin();
   menu::menuButton = []() { bool m = pads::menuPressed; pads::menuPressed = false; return m; };
 }
@@ -1887,7 +1901,7 @@ static void serialCommand(String c) {
 void loop() {
   server.handleClient();
   pads::poll();
-  xaService();
+  if (!xaTaskUp) xaService();                     // (normally its own task: see setup)
 
   serviceSerial(false);
 }

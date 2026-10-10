@@ -162,6 +162,7 @@ module ps1_top #(
 	// Where the machine's time goes, so "it feels slow" can be measured instead
 	// of guessed at. One counter at a time, chosen by dbg_perf_sel.
 	input  wire [5:0]  dbg_perf_sel,
+	input  wire [5:0]  dbg_sio_idx,      // (the controller port's byte log: perf_sel 18 count, 19 entry)
 	// the TTY (DBG): every character the program prints through the BIOS, in a 16 kB ring --
 	// tty_count characters so far, the ring read a word (four characters, the first in [7:0])
 	// at tty_idx, a clock after the index
@@ -325,7 +326,7 @@ module ps1_top #(
 	// DMA was still walking, and the DMA read a node before it was written:
 	// one word of a triangle, and the engine waited for the rest for ever.
 	// I/O accesses (a GPUSTAT poll) still go through.
-	wire        dma_ram_wait = dma_in_flight && c_req && (c_addr[28:21] == 8'h00 || c_addr[28:19] == 10'b11_1111_1000);   // RAM or BIOS (= `cached`, declared below)
+	wire        dma_ram_wait = dma_in_flight && c_req && (c_addr[28:23] == 6'h00 || c_addr[28:19] == 10'b11_1111_1000);   // RAM or BIOS (= `cached`, declared below)
 	wire        dma_block;              // a DMA holds the processor (see below, after the decode)
 	// The console's pace: the processor runs on this clock, and each instruction it finishes
 	// is charged what the console's R3000A would have spent on it (r3000 t_cost); credit
@@ -426,7 +427,11 @@ module ps1_top #(
 	// ================================================================================
 	// CPU address decode
 	// ================================================================================
-	wire ram_hit  = (c_addr[28:21] == 8'h00);
+	// RAM: 2 MB, and the first 8 MB of the map are four copies of it (as the console's memory
+	// control leaves it, RAM_SIZE 0x0B88). Syphon Filter puts its stack at 0x807FFFF8 -- the top
+	// of the fourth copy -- and every return address saved there came back 0 when only the first
+	// 2 MB were RAM. (The line address below already wraps: it takes bits 20:4.)
+	wire ram_hit  = (c_addr[28:23] == 6'h00);
 	wire bios_hit = (c_addr[28:19] == 10'b11_1111_1000);   // 0x1FC00000, incl. bit 28
 	wire spad_hit = (c_addr[28:10] == {13'h1F80, 6'd0});
 	// The chip's CPU keeps executing during a DMA until it needs the bus: its
@@ -558,9 +563,12 @@ module ps1_top #(
 	// never waits for an instruction it already has. Addressed in the
 	// processor's own physical map, not the cache's DDR3 one, because that is
 	// what the fetch has to hand.
-	wire        fa_ram  = (cpu_fa[28:21] == 8'h00);
+	wire        fa_ram  = (cpu_fa[28:23] == 6'h00);              // (all four copies of RAM)
 	wire        fa_bios = (cpu_fa[28:19] == 10'b11_1111_1000);
-	wire [28:0] cpu_pa = c_addr[28:0];              // the physical address of the access
+	// the physical address of the access -- RAM's copies folded onto the first, so a store through
+	// one copy drops an instruction line fetched through another
+	wire [28:0] cpu_pa = (c_addr[28:23] == 6'h00) ? {8'd0, c_addr[20:0]} : c_addr[28:0];
+	wire [28:0] cpu_fa_n = fa_ram ? {8'd0, cpu_fa[20:0]} : cpu_fa[28:0];
 
 	// While verifying, the processor is told there is no hit so it fetches from
 	// memory as it used to, and what the cache holds is compared with what came
@@ -604,7 +612,7 @@ module ps1_top #(
 
 	ps1_icache u_icache (
 		.clk(clk), .rst(core_rst),
-		.fa(cpu_fa[28:0]), .fa_ok((fa_ram || fa_bios) && !no_icache),
+		.fa(cpu_fa_n), .fa_ok((fa_ram || fa_bios) && !no_icache),
 		.hit(ic_hit_raw), .word(cpu_fa_word), .fa2(29'd0), .fa2_ok(1'b0), .hit2(), .line2(),
 		// filled from the line the general cache hands back, but only for
 		// instruction fetches: data reads would push instructions out
@@ -1053,8 +1061,10 @@ module ps1_top #(
 		.m_line(mc_line), .m_req(mc_req), .m_we(mc_we), .m_wdata(mc_wdata),
 		.m_ready(mc_ready), .m_valid(mc_valid), .m_rdata(p_rdata[639:512]),
 		.wq_sector(card_wq_sector), .wq_count(card_wq_count), .wq_ovf(card_wq_ovf),
-		.wq_pop(card_wq_pop), .wq_clr_ovf(card_wq_clr)
+		.wq_pop(card_wq_pop), .wq_clr_ovf(card_wq_clr),
+		.dbg_idx(dbg_sio_idx), .dbg_q(sio_dbg_q), .dbg_wp(sio_dbg_wp)
 	);
+	wire [31:0] sio_dbg_q; wire [15:0] sio_dbg_wp;
 	// the CD-ROM controller: registers, FIFOs and the response protocol, no disc
 	wire [31:0] cd_rdata;
 	wire        cd_irq;
@@ -1335,7 +1345,17 @@ module ps1_top #(
 	wire [31:0] gtr_in  = gtr_pm ? (gin_gp1 ? gin_word : dbg_gpu_popword) : (gin_v ? gin_word : dbg_node_hdr);
 	reg [11:0] gtr_n; reg gtr_frozen, gtr_on;
 	wire       gtr_take = DBG && gtr_on && !gtr_frozen && gtr_ev;
-	wire       gtr_odd  = (dbg_gpu_pophead && (dbg_gpu_popword[31:24] >= 8'h03) && (dbg_gpu_popword[31:24] <= 8'h1E))
+	// (and the engine busy for 50 ms without taking a word: a stall -- Syphon Filter's title screen
+	// timed its DrawSync out twice and the game went to its demo instead)
+	reg  [23:0] gtr_still;
+	always @(posedge clk) gtr_still <= (dbg_gpu_pop || !gpu.busy) ? 24'd0 : (gtr_still == 24'hFFFFFF ? gtr_still : gtr_still + 24'd1);
+	wire       gtr_stall = (gtr_still == (CLK_HZ / 20));
+	// (and a processor store of a list header that points at itself: Syphon Filter's title screen
+	// sent a DR_AREA packet whose next was its own address, the DMA went round it for 4 s, the
+	// game's DrawSync timed out and it went to its demo; DuckStation never prints a timeout)
+	wire       gtr_self = c_req && c_we && cpu_ce && ram_hit && (c_be == 4'hF) && (c_dout[31:24] != 8'd0)
+	                   && (c_dout[23:21] == 3'd0) && (c_dout[20:2] == cpu_pa[20:2]);
+	wire       gtr_odd  = gtr_self || gtr_stall || (dbg_gpu_pophead && (dbg_gpu_popword[31:24] >= 8'h03) && (dbg_gpu_popword[31:24] <= 8'h1E))
 	                   || (dbg_node_v && gpu_xfer_dry)    // a list node while a CPU->VRAM transfer starves: it came up short
 	                   // a transfer command with anything in its low bits: no library sends one, but a
 	                   // packet's data word read as a command does (GT2: a06faf6f, then 7,752 words as pixels)
@@ -1478,6 +1498,8 @@ module ps1_top #(
 	assign dbg_perf = DBG_OLD ? perf[dbg_perf_sel]
 	                : (dbg_perf_sel[4:0] == 5'd11) ? {16'd0, cd_edc_bad}
 	                : (dbg_perf_sel[4:0] >= 5'd12 && dbg_perf_sel[4:0] <= 5'd17) ? cpu_cost[(5'd17 - dbg_perf_sel[4:0]) * 32 +: 32]
+	                : (dbg_perf_sel[4:0] == 5'd18) ? {16'd0, sio_dbg_wp}
+	                : (dbg_perf_sel[4:0] == 5'd19) ? sio_dbg_q
 	                : 32'd0;
 
 	// --- introspection capture ---------------------------------------------------

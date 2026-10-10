@@ -246,7 +246,8 @@ module console_top #(
 	wire [15:0]  n64_fb_wpr;
 	wire         n64_fb_halve;
 	assign d_wmask = (CORE_PS1 != 0) ? ps1_d_wmask : (CORE_N64 != 0) ? n64_d_wmask : 16'hFFFF;
-	reg  [5:0]   perf_sel;   // 64 now: the drawing engine, and where in a frame it is busy
+	reg  [5:0]   perf_sel;
+	reg  [5:0]   sio_idx = 6'd0;   // the controller port's byte log entry (0xEC bits 29:24; perf_sel 19)   // 64 now: the drawing engine, and where in a frame it is busy
 	// --- the debug switches, TIED OFF ----------------------------------------
 	// Each of these kept a second implementation alive so the two could be
 	// compared on the board: the instruction cache, the instruction buffer, the
@@ -626,7 +627,7 @@ module console_top #(
 			16'h0110: cd_trace_idx <= wdata[5:0];
 			16'h00EC: begin perf_sel <= wdata[5:0];
 			                cpu_pace <= wdata[12]; gpu_fast <= wdata[13]; dma_relax <= wdata[14];
-			                pace_long <= wdata[15]; dma_charge <= wdata[16]; wq_off <= wdata[17]; lead_big <= wdata[18]; run_ahead <= wdata[19]; end
+			                pace_long <= wdata[15]; dma_charge <= wdata[16]; wq_off <= wdata[17]; lead_big <= wdata[18]; run_ahead <= wdata[19]; sio_idx <= wdata[29:24]; end
 			16'h0120: ev_idx <= wdata[5:0];         // which frame-event entry 0x120 reads back
 			16'h0134: begin card_in <= wdata[0]; card_fill <= wdata[1]; card2_in <= wdata[2]; card2_fill <= wdata[3]; end
 			16'h00F0: if (WEBVID) stream_ctl <= wdata;
@@ -1260,7 +1261,7 @@ module console_top #(
 			.gte_snap_data(gte_snap_data), .gte_snap_word(gte_snap_word), .gte_snap_state(gte_snap_state),
 			.gte_wt_idx(gte_wt_idx), .gte_wt_pc(gte_wt_pc), .gte_wt_data(gte_wt_data), .gte_wt_reg(gte_wt_reg),
 			.tty_idx(off[13:2]), .tty_word(ps1_tty_word), .tty_count(ps1_tty_count), .lost_cpu(ps1_lost_cpu), .lost_gpu(ps1_lost_gpu), .dbg_live(ps1_live), .dbg_cc_miss(ps1_cc_miss), .dbg_cpu_wait(ps1_cpu_wait),
-			.gtr_idx(off[12:2]), .gtr_word(ps1_gtr_word), .gtr_head(ps1_gtr_head), .gtr_stat(ps1_gtr_stat), .gtr_arm(ps1_gtr_arm), .dbg_rgb_odd(ps1_rgb_odd), .gtr_pops(wdata[1]), .gtr_halt(wdata[2]), .fb_hr_raw(fb_hr_raw), .fb_hr_base(fb_hr_base), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
+			.gtr_idx(off[12:2]), .gtr_word(ps1_gtr_word), .gtr_head(ps1_gtr_head), .gtr_stat(ps1_gtr_stat), .gtr_arm(ps1_gtr_arm), .dbg_rgb_odd(ps1_rgb_odd), .gtr_pops(wdata[1]), .gtr_halt(wdata[2]), .fb_hr_raw(fb_hr_raw), .fb_hr_base(fb_hr_base), .dbg_dma(ps1_dbg_dma), .dbg_gpu2(ps1_dbg_gpu2), .dbg_disp(ps1_dbg_disp), .dbg_draw(ps1_dbg_draw), .dbg_v2c(ps1_dbg_v2c), .dbg_c0(ps1_dbg_c0), .dbg_perf_sel(perf_sel), .dbg_sio_idx(sio_idx), .dbg_perf(ps1_dbg_perf), .no_icache(no_icache), .no_ibuf(no_ibuf), .ic_verify(ic_verify), .no_overlap(no_overlap), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun), .no_capfirst(no_capfirst), .gte_old(gte_old), .cpu_fast(cpu_fast), .gpu_fast(gpu_fast), .cd_disc_in(cd_disc_in), .cd_sb_we(cd_sb_we), .cd_sb_addr(cd_sb_addr), .cd_sb_data(cd_sb_data), .cd_sb_done(cd_sb_done), .cd_sb_lba(cd_sb_lba),
 			.cd_fill_lba_o(cd_fill_lba), .cd_fill_room_o(cd_fill_room), .cd_fill_run_o(cd_fill_run), .cd_dbg_o(cd_dbg), .cd_dbg_cmds_o(cd_dbg_cmds), .cd_dbg_setloc_o(cd_dbg_setloc), .cd_dbg_seek_o(cd_dbg_seek), .cd_dbg_hdr_o(cd_dbg_hdr), .cd_trace_idx(cd_trace_idx), .cc_flush(cc_flush), .cc_flush_busy(cc_flush_busy), .cd_trace_data(cd_trace_data), .cd_trace_wp(cd_trace_wp), .cd_dma_words_o(cd_dma_words),
 			.dbg_icv_pc(ps1_icv_pc), .dbg_icv_got(ps1_icv_got), .dbg_icv_want(ps1_icv_want), .dbg_icv_n(ps1_icv_n),
 			.dbg_exec(ps1_dbg_exec), .dbg_rsel(ps1_rsel), .dbg_rval(ps1_rval),

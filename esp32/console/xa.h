@@ -169,12 +169,15 @@ XA_FAST int Decoder::chunk(const uint8_t *ch, uint32_t *out) {
           ring[1][p] = ring[1][p + 32] = stereo ? smp[2 * i + 1] : smp[i];
           i++;
         }
-        int64_t l = 0, r = 0;
+        // 32-bit, as the full-rate path: the samples are clipped to 16 bits and each table's
+        // coefficients add up to at most 56,030 in magnitude, so the sum stays inside +-1.84e9
+        // and comes out exactly as in 64 bits -- which the ESP32 multiplies in software (an
+        // 18.9 kHz sector took 28 ms, a 37.8 kHz one 12: Syphon Filter's music fell behind)
+        int32_t l = 0, r = 0;
         const int32_t *wl = &ring[0][p + 7], *wr = &ring[1][p + 7];   // ((p + 7 + k) & 31, k < 25)
-        for (int k = 0; k < 25; k++) {
-          l += (int64_t)wl[k] * T18900[six][k];
-          if (stereo) r += (int64_t)wr[k] * T18900[six][k];
-        }
+        const int16_t *t = T18900[six];
+        if (stereo) for (int k = 0; k < 25; k++) { l += wl[k] * t[k]; r += wr[k] * t[k]; }
+        else        for (int k = 0; k < 25; k++)   l += wl[k] * t[k];
         int32_t L = clip16(l >> 15), R = stereo ? clip16(r >> 15) : L;
         out[n++] = ((uint32_t)(R & 0xFFFF) << 16) | (uint32_t)(L & 0xFFFF);
         six += 3;

@@ -88,8 +88,17 @@ module ps1_sio #(
 	output wire [4:0]  wq_count,
 	output reg         wq_ovf,
 	input  wire        wq_pop,         // the PC has it
-	input  wire        wq_clr_ovf
+	input  wire        wq_clr_ovf,
+	// (debugging) the last 64 bytes exchanged: {cycles since the last byte [31:21], slot, select,
+	// the pad's byte index [18:16], ACK, sent [14:7]... see below}; dbg_wp counts them
+	input  wire [5:0]  dbg_idx,
+	output reg  [31:0] dbg_q,
+	output reg  [15:0] dbg_wp
 );
+	reg [31:0] dlog [0:63];
+	reg [10:0] dgap = 11'd0;             // (in 16-clock steps, up to ~650 us)
+	reg [3:0]  dpre = 4'd0;
+	initial dbg_wp = 16'd0;
 	reg        txen, joy_sel, rxen, ack_ien, slot;
 	reg [15:0] mode, baud;
 	reg        irq_flag;
@@ -261,6 +270,8 @@ module ps1_sio #(
 				if (timer != SHIFT_CYCLES[11:0]) timer <= timer + 12'd1;
 				else if (byte_done) begin
 					busy <= 1'b0;
+					dlog[dbg_wp[5:0]] <= {dgap, slot, joy_sel, pad_idx, reply_ack, tx_byte, reply};
+					dbg_wp <= dbg_wp + 16'd1; dgap <= 11'd0;
 					rx_byte <= reply; rx_full <= 1'b1;
 					if (reply_ack) begin ack_wait <= 1'b1; ack_timer <= 8'd0; end
 					if (joy_sel) begin
@@ -294,6 +305,9 @@ module ps1_sio #(
 				end
 			end
 
+			dpre <= dpre + 4'd1;
+			if (!(busy && byte_done) && dpre == 4'd15 && dgap != 11'h7FF) dgap <= dgap + 11'd1;
+			dbg_q <= dlog[dbg_wp[5:0] + dbg_idx];          // (dbg_idx 0: the oldest kept)
 			// ---- /ACK: a pulse a little after the byte, raising IRQ7 if enabled ----
 			if (ack_wait) begin
 				if (ack_timer != ACK_DELAY[7:0]) ack_timer <= ack_timer + 8'd1;

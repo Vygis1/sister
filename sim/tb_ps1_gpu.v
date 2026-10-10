@@ -539,6 +539,20 @@ module tb_ps1_gpu;
 		$display("    BANDWIDTH semi rect 320x16: %0d clocks, %0d waiting on the destination, %0d cache misses", busy_clks - cp_t0, r_dst - cp_d0, misses - cp_m0);
 		$display("      write held %0d, texel %0d, read-ahead out %0d, raster busy %0d", r_full - cp_f0, r_tex - cp_x0, n_out_clks - cp_n0, r_run_clks - cp_r0);
 
+		// Syphon Filter's title fade (board trace, 2026-10-10): texpage 02C0 (semi mode 2, subtract),
+		// a semi-transparent 416x272 rectangle at (-208,-136) over a 320x240 area offset to its middle,
+		// then a 2x1 copy. The GPU hung there on the board (the game's DrawSync timed out).
+		gp0(32'hE300_0000); gp0(32'hE400_0000 | 32'd319 | (32'd239 << 10)); gp0(32'hE500_0000 | 32'd160 | (32'd120 << 11));
+		cp_t0 = busy_clks;
+		gp0(32'hE100_02C0); gp0(32'h0000_0000);
+		gp0(32'h620F_0F0F); gp0(32'hFF78_FF30); gp0(32'h0110_01A0);
+		gp0(32'h8000_0000); gp0(32'h0000_0000); gp0(32'h0000_0000); gp0(32'h0001_0002);
+		gp0(32'h0000_0000); gp0(32'h0000_0000);
+		fork : fade
+			begin idle(); $display("    SYPHON fade + copy done: %0d clocks", busy_clks - cp_t0); disable fade; end
+			begin repeat (3000000) @(posedge clk); $display("    SYPHON fade HUNG: gpu ds %0d busy %b raster busy %b", gpu.ds, gpu.busy, gpu.r_busy); errors = errors + 1; disable fade; end
+		join
+		gp0(32'hE500_0000); gp0(32'hE100_0100);
 		$display("");
 		$display("    ENGINE BUSY CLOCKS: %0d", busy_clks);
 		$display("    raster held: texel line %0d, destination line %0d, block queue %0d, palette %0d clocks", r_tex, r_dst, r_full, r_clut);

@@ -67,6 +67,11 @@ public:
 
   void begin(uint32_t hz = 10000000) {
     settings_ = SPISettings(hz, MSBFIRST, SPI_MODE0);
+    // The disc's sectors faster than the rest. At 5 MHz the link carries ~600 kB/s and a game
+    // streaming at double speed needs 705 (Syphon Filter: more sectors late than on time, its
+    // menu never loaded). A sector the link garbles fails the drive's EDC check and is asked
+    // for again, so here speed costs a resend, not a wrong byte; installs stay at `hz`.
+    sectorSettings_ = SPISettings(hz > CD_HZ ? hz : CD_HZ, MSBFIRST, SPI_MODE0);
     lock_ = xSemaphoreCreateMutex();
     spi_.begin(sck_, miso_, mosi_, cs_);
     pinMode(cs_, OUTPUT);
@@ -118,7 +123,7 @@ public:
   // takes it only if it is the LBA it asked for, so a stale one is harmless.
   void cdSector(uint32_t lba, const uint8_t *raw) {
     xSemaphoreTake(lock_, portMAX_DELAY);
-    spi_.beginTransaction(settings_);
+    spi_.beginTransaction(sectorSettings_);
     digitalWrite(cs_, LOW);
     spi_.transfer(CMD_CD_SECTOR);
     spi_.transfer((lba >> 16) & 0xFF);
@@ -259,6 +264,21 @@ public:
     xSemaphoreGive(lock_);
   }
   void busWrite(uint32_t addr, uint32_t v) { busWrite(addr, &v, 1); }
+  // A stream of words at the disc's clock, in one SPI call: the XA samples (37 kB a second of
+  // music at 18.9 kHz, resampled). Byte by byte at 5 MHz they took the link from the disc and
+  // the drive's 93 ms of sound ran dry -- Syphon Filter's intro was a garbled mess. (Little-endian
+  // words are already in the order the board takes them: low byte first.)
+  void busWriteFast(uint32_t addr, const uint32_t *w, size_t n) {
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    spi_.beginTransaction(sectorSettings_);
+    digitalWrite(cs_, LOW);
+    spi_.transfer(CMD_BUS_WRITE);
+    spi_.transfer(addr >> 24); spi_.transfer(addr >> 16); spi_.transfer(addr >> 8); spi_.transfer(addr);
+    spi_.writeBytes((const uint8_t *)w, n * 4);
+    digitalWrite(cs_, HIGH);
+    spi_.endTransaction();
+    xSemaphoreGive(lock_);
+  }
 
   uint32_t busRead(uint32_t addr) {
     uint8_t r[4];
@@ -317,7 +337,10 @@ private:
   }
 
   SPIClass   &spi_;
-  SPISettings settings_;
+  SPISettings settings_, sectorSettings_;
+public:
+  static const uint32_t CD_HZ = 10000000;     // the disc's sectors (see begin)
+private:
   SemaphoreHandle_t lock_ = nullptr;   // one transfer at a time, from whichever task
   int sck_, miso_, mosi_, cs_, prog_, done_;
 };

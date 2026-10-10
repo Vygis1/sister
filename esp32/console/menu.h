@@ -930,6 +930,7 @@ static void draw() {
   osd(logo ? 5 : gameIn ? 3 : 1);
 }
 
+static void rescanIfChanged();          // (below, by openMenu)
 static void go(Page p, int sel = 0) {
   backStack.push_back(nav);
   nav = { p, sel, 0 };
@@ -1034,7 +1035,7 @@ static void pickItem(bool second = false) {
   case P_HOME: {
     int k = s;
     if (gameIn) { if (k == 0) { closeMenu(); return; } k--; }
-    if (k < (int)consoles.size()) { cur = consoles[k]; go(P_GAMES); }
+    if (k < (int)consoles.size()) { cur = consoles[k]; rescanIfChanged(); go(P_GAMES); }
     else go(P_SETTINGS);
     break; }
   case P_GAMES:
@@ -1129,7 +1130,16 @@ static void keyInput(uint16_t edge) {
   draw();
 }
 
+// A game (or a core) put on the card from the PC: the lists read again. They were read once, at
+// start-up, and a game copied over Wi-Fi stayed out of the menu until the ESP32 restarted.
+static void rescanIfChanged() {
+  if (!cardChanged) return;
+  cardChanged = false;
+  scan();
+  Serial.println("menu: the card changed -- its games read again");
+}
 static void openMenu() {
+  rescanIfChanged();
   open_ = true;
   uint32_t c = fpga.busRead(NES_CTRL);
   if (c & 1) fpga.busWrite(NES_CTRL, c | 4);       // pause
