@@ -34,6 +34,8 @@
 #include "link.h"
 #include "sdprobe.h"
 #include "xa.h"
+#include <esp_rom_crc.h>
+#include <esp_heap_caps.h>
 
 // --- wiring ------------------------------------------------------------------
 // ESP32-S3. The bus names differ from the classic ESP32 -- FSPI and HSPI rather
@@ -1106,6 +1108,9 @@ static void apiInstallCard() {
 // Without this, every rebuilt core means unplugging the card, carrying it to a
 // PC and carrying it back -- which rather undoes the point of the thing being
 // standalone.
+static void serviceSerial(bool inUpload);
+static void serviceDuringUpload();     // (below: the pads and the serial port, kept going)
+
 static File    libFile;
 static uint32_t libBytes;               // this upload's own count (job.done is shared)
 static bool    libFailed;
@@ -1163,6 +1168,7 @@ static void onLibraryUpload() {
       return;
     }
     job.done += u.currentSize; libBytes += u.currentSize;
+    serviceDuringUpload();
     // Every 64 kB. FatFs keeps a sector buffer and a dirty FAT; left alone
     // across a megabyte of streaming those turn into one enormous flush at the
     // end, and the writes before it start failing short.
@@ -1186,6 +1192,100 @@ static void onLibraryUpload() {
     }
     if (!libFailed) job.stage = "on the card";
   }
+}
+
+// --- a file to the card a piece at a time ------------------------------------------------
+// POST /api/put?path=/roms/ps1/X.bin&off=N with one file part: those bytes, written at N.
+// A whole disc in one upload over this chip's Wi-Fi (shared with Bluetooth) failed part way
+// and started again from nothing; a piece that fails is sent again by itself, and
+// GET /api/stat?path= says how far a file got, so a stopped copy carries on.
+// GET /api/crc?path=&off=&len= is the CRC-32 of what the card holds there, for the sender
+// to check each piece against what it sent.
+static File     putFile;
+static bool     putFailed;
+static String   putPath, putErr;
+static uint32_t putOff, putBytes;
+
+static bool putPathOk(const String &p) {
+  return (p.startsWith("/roms/") || p.startsWith("/cores/")) && p.indexOf("..") < 0;
+}
+
+static void onPutUpload() {
+  HTTPUpload &u = server.upload();
+  if (u.status == UPLOAD_FILE_START) {
+    putFailed = false; putErr = ""; putBytes = 0;
+    putPath = server.arg("path"); putOff = (uint32_t)strtoul(server.arg("off").c_str(), nullptr, 10);
+    if (!haveCard)            { putFailed = true; putErr = "no card fitted"; return; }
+    if (!putPathOk(putPath))  { putFailed = true; putErr = "the path must be under /roms or /cores"; return; }
+    // the folders on the way (one level at a time: SD.mkdir does not make parents)
+    for (int i = 1; (i = putPath.indexOf('/', i)) > 0; i++) SD.mkdir(putPath.substring(0, i));
+    if (putOff == 0) { SD.remove(putPath); putFile = SD.open(putPath, FILE_WRITE); }
+    else {
+      putFile = SD.open(putPath, "r+");
+      if (putFile && putFile.size() < putOff) { putFile.close(); putFailed = true; putErr = "the file is shorter than the offset"; return; }
+      if (putFile) putFile.seek(putOff);
+    }
+    if (!putFile) { putFailed = true; putErr = "could not open " + putPath; }
+  } else if (u.status == UPLOAD_FILE_WRITE && !putFailed) {
+    size_t done = 0;
+    for (int tries = 0; done < u.currentSize && tries < 200; tries++) {   // (the card pauses to erase now and then)
+      size_t n = putFile.write(u.buf + done, u.currentSize - done);
+      done += n;
+      if (n == 0) delay(2);
+    }
+    putBytes += done;
+    serviceDuringUpload();
+    if (done < u.currentSize) { putFailed = true; putErr = "the card stopped taking data"; putFile.close(); }
+  } else if (u.status == UPLOAD_FILE_END) {
+    if (putFile) { putFile.flush(); putFile.close(); }
+    listsStale = true;
+  } else if (u.status == UPLOAD_FILE_ABORTED) {
+    if (putFile) putFile.close();
+    putFailed = true; putErr = "the upload was cut off";
+  }
+}
+
+static void putReply() {
+  if (putFailed) { server.send(500, "text/plain", putErr); return; }
+  File f = SD.open(putPath);
+  uint32_t size = f ? (uint32_t)f.size() : 0;
+  if (f) f.close();
+  server.send(200, "application/json", "{\"wrote\":" + String(putBytes) + ",\"size\":" + String(size) + "}");
+}
+
+static void statReply() {
+  String p = server.arg("path");
+  if (!haveCard || !putPathOk(p)) { server.send(400, "text/plain", "bad path"); return; }
+  File f = SD.open(p);
+  if (!f) { server.send(200, "application/json", "{\"size\":-1}"); return; }
+  uint32_t size = (uint32_t)f.size(); f.close();
+  server.send(200, "application/json", "{\"size\":" + String(size) + "}");
+}
+
+static void crcReply() {
+  String p = server.arg("path");
+  uint32_t off = (uint32_t)strtoul(server.arg("off").c_str(), nullptr, 10);
+  uint32_t len = (uint32_t)strtoul(server.arg("len").c_str(), nullptr, 10);
+  if (!haveCard || !putPathOk(p)) { server.send(400, "text/plain", "bad path"); return; }
+  File f = SD.open(p);
+  if (!f) { server.send(404, "text/plain", "no such file"); return; }
+  if (off > f.size()) { f.close(); server.send(400, "text/plain", "offset past the end"); return; }
+  if (len == 0 || off + len > f.size()) len = f.size() - off;
+  f.seek(off);
+  static uint8_t *buf = nullptr;
+  if (!buf) buf = (uint8_t *)ps_malloc(32768);
+  if (!buf) { f.close(); server.send(500, "text/plain", "no memory"); return; }
+  uint32_t crc = 0, left = len;
+  while (left) {
+    int n = f.read(buf, left < 32768 ? left : 32768);
+    if (n <= 0) break;
+    crc = esp_rom_crc32_le(crc, buf, n);
+    left -= n;
+  }
+  f.close();
+  if (left) { server.send(500, "text/plain", "the card would not read it all"); return; }
+  char hex[12]; snprintf(hex, sizeof hex, "%08x", (unsigned)crc);
+  server.send(200, "application/json", "{\"crc\":\"" + String(hex) + "\",\"len\":" + String(len) + "}");
 }
 
 // --- installing from the browser -----------------------------------------------
@@ -1296,6 +1396,12 @@ static String linkPins() {
 }                      // what the pins saw at power-up (the "pins" command)
 
 void setup() {
+  // Small allocations to PSRAM too. By default everything under 4 kB comes out of internal
+  // RAM, and the menu's strings broke it into pieces: minutes after boot 9 kB was free with
+  // nothing over 3 kB, Wi-Fi could not get a packet buffer and the chip fell off the network
+  // (2026-10-10, T8 with a DualShock 4 in). Wi-Fi, Bluetooth and task stacks still take
+  // internal RAM: they ask for it by name.
+  heap_caps_malloc_extmem_enable(64);
   Serial.begin(115200);
   delay(300);
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -1428,6 +1534,16 @@ void setup() {
     Serial.println(WiFi.status() == WL_CONNECTED
                    ? "joined, also reachable at " + WiFi.localIP().toString()
                    : String("could not join - the access point is still up"));
+#if !CONFIG_IDF_TARGET_ESP32S3
+    // On the T8 the access point is not free: it shares the radio and the internal RAM with
+    // Bluetooth, and with a pad in the network barely worked. Joined, it goes; it stays (as
+    // above) when the home network cannot be reached.
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
+      Serial.println("access point off (joined the home network)");
+    }
+#endif
   }
 
   // The network exists now, so a remembered http:// image can go back in.
@@ -1485,6 +1601,9 @@ void setup() {
             []{ server.send(libFailed ? 500 : 200, "text/plain",
                             libFailed ? job.error : "saved"); },
             []{ libIsRom = true;  onLibraryUpload(); });
+  server.on("/api/put",  HTTP_POST, putReply, onPutUpload);
+  server.on("/api/stat", HTTP_GET,  statReply);
+  server.on("/api/crc",  HTTP_GET,  crcReply);
   // Fetching a game back off the card is what lets the Ethernet side load it
   // into a running console: the card holds it, the register bus delivers it.
   server.on("/api/rom", HTTP_GET, []{
@@ -1770,13 +1889,37 @@ void loop() {
   pads::poll();
   xaService();
 
-  static String line;
+  serviceSerial(false);
+}
+
+// The serial port and the pads, kept going from inside an upload. server.handleClient() does
+// not come back until a request is done, and a piece of a disc takes ~15 s to arrive: the pad
+// lines pc/pad.py sends ten times a second overflowed the port and came out as nonsense
+// commands, Bluetooth went unread, and the menu could not be opened while a game was copied.
+static String serLine;                  // (the line being gathered: the loop and uploads share it)
+static String heldCmd[4];               // commands that came in during an upload, for the loop
+static int    heldN = 0;
+static void serviceSerial(bool inUpload) {
+  if (!inUpload)
+    for (int i = 0; i < heldN; i++) serialCommand(heldCmd[i]);
+  if (!inUpload) heldN = 0;
   while (Serial.available()) {
     char ch = Serial.read();
     if (ch == char(10) || ch == char(13)) {
-      if (line.length()) { serialCommand(line); line = ""; }
-    } else if (line.length() < 64) {
-      line += ch;
+      if (serLine.length()) {
+        if (!inUpload || serLine[0] == 'P') serialCommand(serLine);   // (a pad line: at once)
+        else if (heldN < 4) heldCmd[heldN++] = serLine;               // (the rest: after it)
+        serLine = "";
+      }
+    } else if (serLine.length() < 64) {
+      serLine += ch;
     }
   }
+}
+static void serviceDuringUpload() {
+  static uint32_t t = 0;
+  if (millis() - t < 4) return;
+  t = millis();
+  pads::poll();
+  serviceSerial(true);
 }
