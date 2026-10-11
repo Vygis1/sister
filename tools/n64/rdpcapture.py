@@ -85,10 +85,16 @@ class Board:
 def parse(cmds):
     """the colour image and the RDRAM ranges the list's loads read: [(addr, bytes)]"""
     img = (0, 0, 0, 0)                      # fmt, size, width, addr
-    ranges, color = [], None
-    for i in range(0, len(cmds) - 7, 8):
+    ranges, color, drawn = [], None, {}
+    i = 0
+    while i + 8 <= len(cmds):
         w0, w1 = struct.unpack('>II', cmds[i:i + 8])
         op = (w0 >> 24) & 0x3F
+        # (a command's length in doublewords: triangles carry their coefficients)
+        i += 8 * ({0x08: 4, 0x09: 6, 0x0A: 12, 0x0B: 14, 0x0C: 12, 0x0D: 14, 0x0E: 20, 0x0F: 22,
+                   0x24: 2, 0x25: 2}.get(op, 1))
+        if 0x08 <= op <= 0x0F or op in (0x24, 0x25, 0x36):
+            drawn[color] = drawn.get(color, 0) + 1
         if op == 0x3D:
             img = ((w0 >> 21) & 7, (w0 >> 19) & 3, (w0 & 0x3FF) + 1, w1 & 0xFFFFFF)
         elif op == 0x3F:
@@ -116,6 +122,9 @@ def parse(cmds):
             s = [l, 1]
     if s:
         spans.append(tuple(s))
+    # the picture: the colour image most of the drawing went to (a frame may clear its depth
+    # buffer through the colour image first)
+    color = max((k for k in drawn if k), key=lambda k: drawn[k], default=color)
     return color, spans
 
 
