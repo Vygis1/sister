@@ -276,6 +276,8 @@ module tb_ps1_raster;
 		// 4-bit CLUT at (0, 500): entries 1..15 distinct, 0 anything; 8-bit CLUT at (64, 501)
 		for (i = 0; i < 16; i = i + 1) set_px(i, 500, {i[0], 5'd31 - i, i[3:0] * 2, i * 2 + 1});
 		for (i = 0; i < 256; i = i + 1) set_px(64 + i, 501, (i == 0) ? 16'h0000 : {i[7], i[4:0], i[7:3], 5'd9 + i[3:0]});
+		// a second 8-bit CLUT at (128, 502), different colours: palette switching (the raster's second level)
+		for (i = 0; i < 256; i = i + 1) set_px(128 + i, 502, (i == 0) ? 16'h0000 : {i[6], i[3:0], i[7], i[7:3], 5'd3 + i[4:0]});
 
 		grads(32'h80_0000, 32'h40_0000, 32'h20_0000, 0, 0,  0,0,0,0,0,  0,0,0,0,0);
 		fr = 8'd200; fg = 8'd100; fb = 8'd50;
@@ -312,6 +314,23 @@ module tb_ps1_raster;
 		tp_depth = 1; tp_x = 8; clut = {1'b0, 9'd501, 6'd4};
 		grads(32'h80_0000, 32'h80_0000, 32'h80_0000, 32'h0_8000, 32'h0_8000,  0,0,0, 32'h0_A000, 32'h0_1000,  0,0,0, -32'h0_2000, 32'h0_F000);
 		setup_tri(200, 130, 320, 150, 240, 230);       run("8-bit textured");
+		// switching palettes: A, B, A again (from the second level), B again; then a write into A's
+		// entries while B is in use, and A once more -- it must show what VRAM holds now
+		clut = {1'b0, 9'd502, 6'd8};
+		setup_tri(210, 135, 330, 155, 250, 235);       run("8-bit, a second palette");
+		clut = {1'b0, 9'd501, 6'd4};
+		setup_tri(205, 140, 325, 160, 245, 240);       run("8-bit, the first palette again (kept)");
+		clut = {1'b0, 9'd502, 6'd8};
+		setup_tri(215, 145, 335, 165, 255, 245);       run("8-bit, the second again (kept)");
+		begin : over_a
+			reg [1:0] sd; reg st, sr, sg, ss;
+			sd = tp_depth; st = is_tex; ss = is_semi;
+			is_tex = 0; is_semi = 0; fr = 8'd16; fg = 8'd200; fb = 8'd96;
+			rect(64 + 32, 501, 40, 1, 0, 0);         run("a flat line drawn over the first palette");
+			is_tex = st; tp_depth = sd; fr = 8'd200; fg = 8'd100; fb = 8'd50;
+		end
+		clut = {1'b0, 9'd501, 6'd4};
+		setup_tri(200, 150, 320, 170, 240, 250);       run("8-bit, the first palette after the write");
 		tp_depth = 2; tp_x = 12;
 		grads(32'h80_0000, 32'h80_0000, 32'h80_0000, 32'h0_8000, 32'h0_8000,  0,0,0, 32'h0_A000, 32'h0_1000,  0,0,0, -32'h0_2000, 32'h0_F000);
 		setup_tri(400, 20, 620, 40, 460, 220);         run("15-bit textured, large");

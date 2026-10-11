@@ -787,6 +787,7 @@ module ps1_top #(
 	wire [15:0] fpx_rgb;
 
 	wire vn_req, vn_ack; wire [24:0] vn_addr; wire [127:0] vn_line;   // the raster's read-ahead (ps1_vram_port n_*)
+	wire [31:0] gpu_dbg_tf; wire gpu_eng_busy, gpu_eng_f_empty;   // (from the GPU by port: see ps1_gpu eng_busy)
 	ps1_gpu #(.CLK_HZ(CLK_HZ), .READ_AHEAD(1)) gpu (
 		.vn_req(vn_req), .vn_addr(vn_addr), .vn_ack(vn_ack), .vn_line(vn_line),
 		.clk(clk), .rst(core_rst),
@@ -801,7 +802,7 @@ module ps1_top #(
 		.s_addr(s_addr), .s_req(s_req), .s_rdata(s_rdata), .s_ack(s_ack), .s_line(s_vline),
 		.px_valid(px_valid), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb),
 		.vblank(gpu_vblank), .hblank(gpu_hblank), .dot_ce(gpu_dot_ce), .irq(gpu_irq),
-		.dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_pophead(dbg_gpu_pophead), .dbg_popword(dbg_gpu_popword),
+		.dbg_tf_sel(dbg_perf_sel[2:0]), .dbg_tf(gpu_dbg_tf), .eng_busy(gpu_eng_busy), .eng_f_empty(gpu_eng_f_empty), .dbg_gpu(dbg_gpu_st), .dbg_gpu2(dbg_gpu2), .dbg_pop(dbg_gpu_pop), .dbg_pophead(dbg_gpu_pophead), .dbg_popword(dbg_gpu_popword),
 		.dbg_in_v(gin_v), .dbg_in_type(gin_type), .dbg_in_word(gin_word), .dbg_disp(dbg_disp), .dbg_behind(gpu_behind), .dbg_live(gpu_live), .dbg_draw(dbg_draw), .dbg_v2c(dbg_v2c), .dbg_c0(dbg_c0), .dbg_xfer(gpu_xfer), .dbg_xfer_dry(gpu_xfer_dry), .dbg_xfer_on(gpu_xfer_on), .rd_stall(gpu_rd_stall),
 		.fpx_valid(fpx_valid), .fpx_x(fpx_x), .fpx_y(fpx_y), .fpx_rgb(fpx_rgb),
 		.scan_start(scan_start), .scan_done(scan_done), .scan_abort(scan_abort), .every_flip(fs_en || hdmi_on), .scan_busy(scan_busy), .scan_hold(fb_hold || (fs_en && fs_hold)), .scan_enable(fs_en ? fs_want : (fb_want || hdmi_on)), .disp_w(gpu_disp_w), .disp_v480(gpu_v480), .cap_weave(gpu_weave), .cap_field(gpu_wfield),
@@ -872,7 +873,7 @@ module ps1_top #(
 		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around), .v_lin(v_lin), .v_one(v_one),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack),
 		.n_req(vn_req & d_calibrated), .n_addr(vn_addr), .n_ack(vn_ack), .n_line(vn_line),
-		.eng_idle(!gpu.busy), .host_flush(vram_flush), .busy(bk_busy),
+		.eng_idle(!gpu_eng_busy), .host_flush(vram_flush), .busy(bk_busy),
 		.g_addr(gp_addr), .g_req(gp_req), .g_around(gp_around), .g_lin(gp_lin),
 		.g_rdata(gp_rdata), .g_line(gp_line), .g_ack(gp_ack),
 		.m_addr(bk_m_addr), .m_req(bk_m_req), .m_we(bk_m_we), .m_wdata(bk_m_wdata), .m_wmask(bk_m_wmask), .m_ready(bk_m_ready),
@@ -1295,7 +1296,7 @@ module ps1_top #(
 	reg  [5:0]  ev_p;
 	reg  [31:0] ev_disp_d;
 	reg         ev_dma_d, ev_draw_d;
-	wire        ev_draw = gpu.busy || !gpu.f_empty || dma_gpu_active;
+	wire        ev_draw = gpu_eng_busy || !gpu_eng_f_empty || dma_gpu_active;
 	assign ev_wp   = ev_p;
 	assign ev_data = ev_ring[ev_idx];
 	always @(posedge clk) begin
@@ -1350,7 +1351,7 @@ module ps1_top #(
 	// (and the engine busy for 50 ms without taking a word: a stall -- Syphon Filter's title screen
 	// timed its DrawSync out twice and the game went to its demo instead)
 	reg  [23:0] gtr_still;
-	always @(posedge clk) gtr_still <= (dbg_gpu_pop || !gpu.busy) ? 24'd0 : (gtr_still == 24'hFFFFFF ? gtr_still : gtr_still + 24'd1);
+	always @(posedge clk) gtr_still <= (dbg_gpu_pop || !gpu_eng_busy) ? 24'd0 : (gtr_still == 24'hFFFFFF ? gtr_still : gtr_still + 24'd1);
 	wire       gtr_stall = (gtr_still == (CLK_HZ / 20));
 	// (and a processor store of a list header that points at itself: Syphon Filter's title screen
 	// sent a DR_AREA packet whose next was its own address, the DMA went round it for 4 s, the
@@ -1392,7 +1393,7 @@ module ps1_top #(
 			if (dma_hog)                     perf[4] <= perf[4] + 32'd1;
 			if (vc_m_req && vc_m_ready)      perf[5] <= perf[5] + 32'd1;
 			if (cc_m_req && cc_m_ready)      perf[6] <= perf[6] + 32'd1;
-			if (gpu.busy)                    perf[7] <= perf[7] + 32'd1;
+			if (gpu_eng_busy)                perf[7] <= perf[7] + 32'd1;
 			// 8 instruction fetches that the instruction cache answered,
 			// 9 fetches it missed, 10 loads, 11 stores, 12 clocks spent
 			// collecting a load, 13 clocks a store took
@@ -1484,7 +1485,7 @@ module ps1_top #(
 			// idle" was tried and fails because it is idle between primitives
 			// too; what is needed is a stretch of the frame that is quiet every
 			// time, and this is the only way to find out whether one exists.
-			perf[{2'b10, ph_bin}] <= perf[{2'b10, ph_bin}] + (gpu.busy ? 32'd1 : 32'd0);
+			perf[{2'b10, ph_bin}] <= perf[{2'b10, ph_bin}] + (gpu_eng_busy ? 32'd1 : 32'd0);
 			if (cap_done)                                perf[31] <= cap_clk;
 			perf[48] <= {12'd0, gpu.frame_len};
 			if (gpu.frame_tick)                          perf[49] <= perf[49] + 32'd1;
@@ -1509,6 +1510,9 @@ module ps1_top #(
 	                // 23: words in / out of the MDEC per decode command (0xEC bits 26:24: 0 the
 	                // current one, 1 {its word count, the log's write pointer}, 2-7 the ones before)
 	                : (dbg_perf_sel[4:0] == 5'd23) ? mdec_dbg_cnt
+	                // 24-28: the raster's texel fetches (ps1_raster tf_*): count, total latency,
+	                // clocks waited, textured pairs, the worst latency (read twice, take the difference)
+	                : (dbg_perf_sel[4:0] >= 5'd24 && dbg_perf_sel[4:0] <= 5'd31) ? gpu_dbg_tf
 	                : 32'd0;
 
 	// --- introspection capture ---------------------------------------------------

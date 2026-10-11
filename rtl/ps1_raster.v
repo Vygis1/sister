@@ -128,7 +128,12 @@ module ps1_raster #(
 	output wire        st_tex_miss,      // holding for a texel line
 	output wire        st_dst_miss,      // holding for a destination line
 	output wire        st_full,          // holding for the block writer
-	output wire        st_clut           // loading the palette
+	output wire        st_clut,          // loading the palette
+	// (debug) the texel-fetch counters (tf_* below), one at a time: 0 fetches, 1 their summed
+	// latency, 2 clocks waited, 3 textured pairs, 4 the worst fetch. Through a port: read from
+	// ps1_top by hierarchical name, Vivado built them as zeros without a word.
+	input  wire [2:0]  dbg_tf_sel,
+	output reg  [31:0] dbg_tf
 );
 	// ------------------------------------------------------------------------------------
 	// helpers, as in ps1_gpu.v
@@ -281,17 +286,31 @@ module ps1_raster #(
 	// console never spends -- it walks spans, not boxes.
 	reg  row_in;                                    // this row has had a pixel inside
 	wire span_done = !always_in && row_in && !in_a && !in_b;
-	wire row_end = (px + 12'sd2 > bx1) || (il_skip && (py[0] == il_field)) || span_done;
-	wire last    = row_end && (py >= by1);
+	// A row outside the drawing area is over in a clock, and so is the primitive once the scan
+	// is below the area: a polygon hanging off the screen (Syphon Filter's floors do, by hundreds
+	// of rows) was walked a pair at a time down every clipped row -- 114,000 of a frame's 132,000
+	// empty-pair clocks in sim/tb_ps1_replay.
+	wire below   = (py >= $signed({3'b0, da_y1}));
+	wire row_end = (px + 12'sd2 > bx1) || (il_skip && (py[0] == il_field)) || span_done || !row_ok;
+	wire last    = row_end && ((py >= by1) || below);
 
 	// eight ahead: when neither of the next four pairs is inside, jump
 	wire signed [23:0] e8_0 = ea0 + (sx0 <<< 3), e8_1 = ea1 + (sx1 <<< 3), e8_2 = ea2 + (sx2 <<< 3);
 	// a convex shape: if this pair and the one eight on are both outside on the
 	// same side of every edge, the ones between are too
-	wire skip8 = !always_in && !in_a && !in_b && (px + 12'sd8 <= bx1)
-	             && !inside3(e8_0, e8_1, e8_2, apos)
-	             && ((ea0 < 0) == (e8_0 < 0)) && ((ea1 < 0) == (e8_1 < 0)) && ((ea2 < 0) == (e8_2 < 0))
-	             && ((eb0 < 0) == (e8_0 < 0)) && ((eb1 < 0) == (e8_1 < 0)) && ((eb2 < 0) == (e8_2 < 0));
+	// An edge function is linear along the row, so when ONE edge has this pixel and the one N on
+	// strictly outside, every pixel between is outside too -- whatever the other two edges say.
+	// (Asking all three to keep their signs, as this first did, stopped jumping wherever a far
+	// edge happened to cross between, and on Syphon Filter's big floor triangles the scanner
+	// spent twice as many clocks walking empty pairs as pairs with pixels in them.)
+	function out2; input signed [23:0] e0, e1; input pos;
+		out2 = pos ? (e0 < 0 && e1 < 0) : (e0 > 0 && e1 > 0);
+	endfunction
+	wire signed [23:0] e32_0 = ea0 + (sx0 <<< 5), e32_1 = ea1 + (sx1 <<< 5), e32_2 = ea2 + (sx2 <<< 5);
+	wire skip32 = !always_in && (px + 12'sd32 <= bx1)
+	              && (out2(ea0, e32_0, apos) || out2(ea1, e32_1, apos) || out2(ea2, e32_2, apos));
+	wire skip8 = !always_in && (px + 12'sd8 <= bx1)
+	             && (out2(ea0, e8_0, apos) || out2(ea1, e8_1, apos) || out2(ea2, e8_2, apos));
 
 	// ------------------------------------------------------------------------------------
 	// B: the pair, registered; texel addresses; the texture cache
@@ -498,6 +517,43 @@ module ps1_raster #(
 	// address, and the console shows the old colours until they do.
 	wire        cl_ok    = !cl_need || (cl_v && cl_tag == clut && (cl_depth == 2'd1 || tp_depth == 2'd0) && !no_ccache);
 
+	// The second level: the last eight palettes, in block RAM. Syphon Filter draws a frame from
+	// twelve 8-bit palettes and switched 185 times (sim/tb_ps1_replay): 185 loads of 32 lines,
+	// a DDR3 round trip each, were 17% of the engine's time. Keeping eight avoids 172 of them; a
+	// switch to one of these is a copy of its lines into the store above at a line a clock. The
+	// pixel pipeline reads the store above exactly as before. A copy here is dropped by any write
+	// into its palette in VRAM (and by GP0(01)): unlike the palette in use, which the chip itself
+	// does not reload until its address changes, these must come back as VRAM now holds them.
+	localparam CL2 = 8;
+	(* ram_style = "block" *) reg [127:0] c2data [0:CL2*32-1];
+	reg [15:0]     c2tag [0:CL2-1];
+	reg [CL2-1:0]  c2v, c2d8;                       // valid; holds all 256 entries
+	reg [2:0]      c2rr;                            // the next one to replace
+	reg [2:0]      c2fill;                          // where the load from DDR3 is going
+	reg            c2fill_v;
+	reg            c2hit; reg [2:0] c2hit_i;
+	integer        ci;
+	always @(*) begin
+		c2hit = 1'b0; c2hit_i = 3'd0;
+		for (ci = 0; ci < CL2; ci = ci + 1)
+			if (c2v[ci] && c2tag[ci] == clut && (c2d8[ci] || tp_depth == 2'd0)) begin c2hit = 1'b1; c2hit_i = ci[2:0]; end
+	end
+	// the copy: a read a clock, written into the store above the clock after
+	reg            cp_on;                           // copying in place of a load
+	reg  [2:0]     cp_slot;
+	reg  [5:0]     cp_i;                            // the next line to read
+	reg            cp_w;                            // a line read last clock: write it now
+	reg  [4:0]     cp_wi;
+	reg  [127:0]   c2q;
+	always @(posedge clk) c2q <= c2data[{cp_slot, cp_i[4:0]}];
+	// a write into a held palette's lines drops it ([24:7] the VRAM row and the line's high bits,
+	// [6:0] the line along it, as cl_off7 below)
+	function c2cover; input [15:0] tag; input d8; input [24:0] line;
+		reg [24:0] b; reg [6:0] o;
+		begin b = vaddr({tag[5:0], 4'd0}, tag[14:6]) >> 4; o = line[6:0] - b[6:0];
+		      c2cover = (line[24:7] == b[24:7]) && (o < (d8 ? 7'd32 : 7'd2)); end
+	endfunction
+
 	// ------------------------------------------------------------------------------------
 	// D: shading
 	// ------------------------------------------------------------------------------------
@@ -598,10 +654,12 @@ module ps1_raster #(
 	wire       want_dst = vE && missE && !dn_hit && !(n_req && n_addr == waE[28:4]);
 	wire       want_dn  = (READ_AHEAD != 0) && busy && c_blnd && dl_v && !n_req
 	                      && !(dn_v && dn_a == dl_a + 25'd1);
-	wire       want_fetch = (cl_loading && (cl_wait == 4'd0)) || want_dst || want_tex;
+	wire       want_fetch = (cl_loading && (cl_wait == 4'd0) && !cp_on) || want_dst || want_tex;
 
 
 	assign st_tex_miss = busy && want_tex && !cl_loading && !want_dst;
+
+
 	assign st_dst_miss = busy && want_dst && !cl_loading;
 	assign st_full     = busy && wreq && !v_ack;
 	assign st_clut     = busy && cl_loading;
@@ -653,10 +711,12 @@ module ps1_raster #(
 	// never once fired, because with a linear run the demand and the offers do
 	// not collide. It cost 128 flip-flops and a 128-bit multiplexer, and the
 	// design missed fitting by 24 slices with it in. Left out deliberately.
-	wire        cl_wr_off = cl_off_in && !cl_wr_dem;
-	wire [4:0]  cl_wr_i   = cl_wr_dem ? cl_req : cl_off_i;
-	wire [127:0] cl_wr_d  = cl_wr_dem ? v_line : tx_line;
-	wire        cl_wr     = cl_wr_dem || cl_wr_off;
+	wire        cl_wr_off = cl_off_in && !cl_wr_dem && !cp_w && !cp_on;
+	wire [4:0]  cl_wr_i   = cl_wr_dem ? cl_req : cp_w ? cp_wi : cl_off_i;
+	wire [127:0] cl_wr_d  = cl_wr_dem ? v_line : cp_w ? c2q : tx_line;
+	wire        cl_wr     = cl_wr_dem || cp_w || cl_wr_off;
+	// (the second level's one write port: the lines of a load from DDR3, as they land)
+	always @(posedge clk) if (c2fill_v && (cl_wr_dem || cl_wr_off)) c2data[{c2fill, cl_wr_i}] <= cl_wr_d;
 	wire [31:0] cl_nhave  = cl_have | ((cl_wr ? 32'd1 : 32'd0) << cl_wr_i);
 	wire        cl_full   = (cl_nhave & cl_mask) == cl_mask;
 
@@ -686,6 +746,40 @@ module ps1_raster #(
 	wire dFree = !vD || mvD;
 	wire mvC = vC && !missC && dFree && !cl_loading;
 	wire cFree = !vC || mvC;
+
+	// (debug, read by ps1_top's perf_sel 24-28) the texel fetches: how many, how long each took
+	// from going out to its answer (all of them, and the worst), the clocks the pipeline stood
+	// waiting for one, and the pairs that went through C. On Syphon Filter the board waits for
+	// texture 20% of the time, where a model of this cache on the game's own drawing lists says
+	// misses should cost 1-2%: more misses than the model, or slower ones?
+	reg [31:0] tf_n, tf_lat, tf_wait, tf_pairs; reg [15:0] tf_max, tf_cur;
+	// ...and where the cache's lines come from and go: run lines taken (offered by the video cache),
+	// lines dropped by a write ([31:16] the engine's: fills, copies, uploads; [15:0] our own pixels),
+	// and valid lines replaced by another (a conflict)
+	reg [31:0] tf_offer, tf_evict; reg [15:0] tf_inv_e, tf_inv_w;
+	always @(posedge clk) begin
+		if (rst) begin tf_n <= 32'd0; tf_lat <= 32'd0; tf_wait <= 32'd0; tf_pairs <= 32'd0; tf_max <= 16'd0; tf_cur <= 16'd0;
+		               tf_offer <= 32'd0; tf_evict <= 32'd0; tf_inv_e <= 16'd0; tf_inv_w <= 16'd0; end
+		else begin
+			if (tfill_go && !own_fill) tf_offer <= tf_offer + 32'd1;
+			if (tfill_go && tvalid[tidx(tfill_addr)] && ttagv[tidx(tfill_addr)] != ttag(tfill_addr)) tf_evict <= tf_evict + 32'd1;
+			if (inv_go && tvalid[tidx(inv_a)] && (ttagv[tidx(inv_a)] == ttag(inv_a))) begin
+				if (w_done) tf_inv_w <= tf_inv_w + 16'd1; else tf_inv_e <= tf_inv_e + 16'd1;
+			end
+			if (fs == F_REQ && fwho == 2'd0) begin
+				if (f_ack) begin
+					tf_n <= tf_n + 32'd1; tf_lat <= tf_lat + {16'd0, tf_cur} + 32'd1;
+					if (tf_cur + 16'd1 > tf_max) tf_max <= tf_cur + 16'd1;
+					tf_cur <= 16'd0;
+				end else if (tf_cur != 16'hFFFF) tf_cur <= tf_cur + 16'd1;
+			end
+			if (st_tex_miss) tf_wait <= tf_wait + 32'd1;
+			if (mvC && is_tex) tf_pairs <= tf_pairs + 32'd1;
+		end
+		dbg_tf <= (dbg_tf_sel == 3'd0) ? tf_n : (dbg_tf_sel == 3'd1) ? tf_lat : (dbg_tf_sel == 3'd2) ? tf_wait
+		        : (dbg_tf_sel == 3'd3) ? tf_pairs : (dbg_tf_sel == 3'd4) ? {16'd0, tf_max}
+		        : (dbg_tf_sel == 3'd5) ? tf_offer : (dbg_tf_sel == 3'd6) ? {tf_inv_e, tf_inv_w} : tf_evict;
+	end
 	wire mvB = vB && cFree;
 	assign advBC = mvB;
 	wire bFree = !vB || mvB;
@@ -700,7 +794,7 @@ module ps1_raster #(
 			busy <= 1'b0; scanning <= 1'b0; row_in <= 1'b0;
 			vB <= 1'b0; vC <= 1'b0; vD <= 1'b0; vE <= 1'b0; wreq <= 1'b0; lastF <= 1'b0;
 			fs <= F_IDLE; fwho <= 2'd0; faddr <= 29'd0; dst_run <= 1'b0; n_req <= 1'b0; n_addr <= 25'd0; dn_v <= 1'b0; dn_a <= 25'd0; dn_d <= 128'd0; cl_have <= 32'd0; cl_req <= 5'd0; cl_loading <= 1'b0;
-			cl_wait <= 4'd0;
+			cl_wait <= 4'd0; c2v <= {CL2{1'b0}}; c2rr <= 3'd0; c2fill_v <= 1'b0; cp_on <= 1'b0; cp_w <= 1'b0;
 			cl_v <= 1'b0; cl_tag <= 16'd0; cl_depth <= 2'd0; dl_v <= 1'b0; dl_a <= 25'd0; dl_d <= 128'd0;
 			px <= 0; py <= 0; ea0 <= 0; ea1 <= 0; ea2 <= 0; er0 <= 0; er1 <= 0; er2 <= 0;
 			cr <= 0; cg <= 0; cb <= 0; cu <= 0; cv <= 0; rr <= 0; rg <= 0; rb <= 0; ru <= 0; rv <= 0;
@@ -721,7 +815,11 @@ module ps1_raster #(
 				cb <= bx0[0] ? cb_0 - db_dx : cb_0; rb <= bx0[0] ? cb_0 - db_dx : cb_0;
 				cu <= bx0[0] ? cu_0 - du_dx : cu_0; ru <= bx0[0] ? cu_0 - du_dx : cu_0;
 				cv <= bx0[0] ? cv_0 - dv_dx : cv_0; rv <= bx0[0] ? cv_0 - dv_dx : cv_0;
-				if (!cl_ok) begin cl_loading <= 1'b1; cl_have <= 32'd0; cl_v <= 1'b0; end
+				if (!cl_ok) begin
+					cl_loading <= 1'b1; cl_have <= 32'd0; cl_v <= 1'b0;
+					if (c2hit && !no_ccache) begin cp_on <= 1'b1; cp_slot <= c2hit_i; cp_i <= 6'd0; end
+					else begin c2fill <= c2rr; c2fill_v <= 1'b1; c2v[c2rr] <= 1'b0; c2rr <= c2rr + 3'd1; end
+				end
 			end
 
 			// --- A: the scanner ------------------------------------------------------------
@@ -734,6 +832,11 @@ module ps1_raster #(
 					ea0 <= er0 + sy0; ea1 <= er1 + sy1; ea2 <= er2 + sy2;
 					rr <= rr + dr_dy; rg <= rg + dg_dy; rb <= rb + db_dy; ru <= ru + du_dy; rv <= rv + dv_dy;
 					cr <= rr + dr_dy; cg <= rg + dg_dy; cb <= rb + db_dy; cu <= ru + du_dy; cv <= rv + dv_dy;
+				end else if (skip32) begin
+					px <= px + 12'd32;
+					ea0 <= e32_0; ea1 <= e32_1; ea2 <= e32_2;
+					cr <= cr + (dr_dx <<< 5); cg <= cg + (dg_dx <<< 5); cb <= cb + (db_dx <<< 5);
+					cu <= cu + (du_dx <<< 5); cv <= cv + (dv_dx <<< 5);
 				end else if (skip8) begin
 					px <= px + 12'd8;
 					ea0 <= e8_0; ea1 <= e8_1; ea2 <= e8_2;
@@ -751,7 +854,7 @@ module ps1_raster #(
 			if (bFree) begin
 				// a pair with nothing in it is not sent down, except the last one,
 				// which carries the end of the primitive
-				vB    <= scanning && !hold && pace_ok && (a_ok || b_ok || last) && !skip8;
+				vB    <= scanning && !hold && pace_ok && (a_ok || b_ok || last) && !skip8 && !skip32;
 				lastB <= last;
 				okB0  <= a_ok; okB1 <= b_ok;
 				xB    <= px[9:0]; yB <= py[8:0];
@@ -813,7 +916,7 @@ module ps1_raster #(
 			case (fs)
 			// not when a write is pending, nor when F is taking one this clock
 			F_IDLE: if (want_fetch && !wreq && !(mvE && (landE0 || landE1))) begin
-					if (cl_loading && (cl_wait == 4'd0)) begin fwho <= 2'd2; faddr <= {cl_base[24:7], cl_base[6:0] + {2'd0, cl_next}, 4'd0}; cl_req <= cl_next; end
+					if (cl_loading && (cl_wait == 4'd0) && !cp_on) begin fwho <= 2'd2; faddr <= {cl_base[24:7], cl_base[6:0] + {2'd0, cl_next}, 4'd0}; cl_req <= cl_next; end
 					else if (want_dst)   begin fwho <= 2'd1; faddr <= waE; dst_run <= 1'b1; end
 					else                 begin fwho <= 2'd0; faddr <= (needC0 && !hitC0) ? taC0 : taC1; dst_run <= 1'b0; end
 					fs <= F_REQ;
@@ -836,7 +939,27 @@ module ps1_raster #(
 				cl_have <= cl_nhave;
 				if (cl_loading && cl_full) begin
 					cl_loading <= 1'b0; cl_v <= 1'b1; cl_tag <= clut; cl_depth <= tp_depth;
+					cp_on <= 1'b0;
+					if (c2fill_v && !cp_on) begin
+						c2v[c2fill] <= 1'b1; c2tag[c2fill] <= clut; c2d8[c2fill] <= (tp_depth == 2'd1);
+					end
+					c2fill_v <= 1'b0;
 				end
+			end
+			// the copy: a line read a clock (only the lines this palette needs)
+			cp_w <= 1'b0;
+			if (cp_on && cp_i < cl_lines) begin
+				cp_w <= 1'b1; cp_wi <= cp_i[4:0]; cp_i <= cp_i + 6'd1;
+			end
+			// writes into VRAM drop the second level's copies they land in, and the one being saved
+			begin : c2drop
+				integer di;
+				for (di = 0; di < CL2; di = di + 1) begin
+					if (inv_en && c2cover(c2tag[di], c2d8[di], inv_line)) c2v[di] <= 1'b0;
+					if (w_done && c2cover(c2tag[di], c2d8[di], waddr[28:4])) c2v[di] <= 1'b0;
+				end
+				if (c2fill_v && ((inv_en && c2cover(clut, tp_depth == 2'd1, inv_line))
+				                 || (w_done && c2cover(clut, tp_depth == 2'd1, waddr[28:4])))) c2fill_v <= 1'b0;
 			end
 			// hold off the next palette demand while the run is still offering
 			if (no_trun)                    cl_wait <= 4'd0;
@@ -861,7 +984,7 @@ module ps1_raster #(
 				n_req  <= 1'b1;
 				n_addr <= dl_a + 25'd1;
 			end
-			if (clut_flush) begin cl_v <= 1'b0; cl_have <= 32'd0; end   // GP0(01)
+			if (clut_flush) begin cl_v <= 1'b0; cl_have <= 32'd0; c2v <= {CL2{1'b0}}; c2fill_v <= 1'b0; end   // GP0(01)
 		end
 	end
 endmodule

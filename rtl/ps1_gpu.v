@@ -184,6 +184,10 @@ module ps1_gpu #(
 	output wire        dbg_behind,  // at work on a command and behind the console's time for it
 	output wire [11:0] dbg_live,    // {behind, raster busy, waits: texel, destination, queue, palette, ds}
 	output wire [31:0] dbg_draw,    // the drawing area and offset
+	input  wire [2:0]  dbg_tf_sel,  // the raster's texel-fetch counters (ps1_raster dbg_tf)
+	output wire        eng_busy,    // the drawing engine is at work (ps1_top reads it: by port, not by
+	output wire        eng_f_empty, //   hierarchical name, which Vivado built as a constant)
+	output wire [31:0] dbg_tf,
 	// VRAM->CPU accounting, for the read-back the BIOS hangs on: words the
 	// engine produced, words the CPU took, words the DMA took, and reads of
 	// GPUREAD that found nothing waiting (each one hands the CPU a status
@@ -1649,7 +1653,8 @@ module ps1_gpu #(
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack && r_busy),
 		.tx_valid(tx_valid), .tx_addr(tx_addr), .tx_line(tx_line),
 		.inv_en(e_req && e_we && v_ack && !r_busy), .inv_line(e_addr[28:4]),
-		.st_tex_miss(r_st_tex), .st_dst_miss(r_st_dst), .st_full(r_st_full), .st_clut(r_st_clut)
+		.st_tex_miss(r_st_tex), .st_dst_miss(r_st_dst), .st_full(r_st_full), .st_clut(r_st_clut),
+		.dbg_tf_sel(dbg_tf_sel), .dbg_tf(dbg_tf)
 	);
 
 	// ==================================================================================
@@ -2031,6 +2036,8 @@ module ps1_gpu #(
 	assign dbg_gpu  = {disp_on, busy, ds[5:0], cmd[7:0], argc[3:0], f_count[11:0]};   // fits 32 bits: the count is capped for display
 	assign dbg_gpu2 = cmd_hist;
 	assign dbg_behind = (ds != D_IDLE) && r_behind;
+	assign eng_busy = busy;
+	assign eng_f_empty = f_empty;
 	assign dbg_live   = {dbg_behind, r_busy, r_st_tex, r_st_dst, r_st_full, r_st_clut, ds[5:0]};
 	assign dbg_pop = f_pop; assign dbg_popword = f_head; assign dbg_pophead = f_pop && (ds == D_IDLE);
 	assign dbg_in_v    = f_push || (wr_r && a4_r);
