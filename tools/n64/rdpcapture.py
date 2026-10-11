@@ -131,23 +131,26 @@ def parse(cmds):
 def grab(name):
     d = capdir(name)
     b = Board()
+    # (a game that sends a frame in pieces through one buffer -- Super Mario 64 -- has its colour
+    # image and modes only in the first: tried again until the list caught sets its colour image)
     for tries in range(400):
         b.freeze(True)
         time.sleep(0.01)
         st, cur, end = b.dp(3), b.dp(2), b.dp(1)
-        # the frame's list all done (CURRENT at END) and the pipe idle (STATUS bits 5/6: pipe, cmd busy)
+        # the list all done (CURRENT at END) and the pipe idle (STATUS bits 5/6: pipe, cmd busy)
         if cur == end and not (st & 0x60):
-            break
+            start, end = b.dp(0) & 0xFFFFF8, b.dp(1) & 0xFFFFF8
+            cmds = b.read(start, end - start)
+            color, spans = parse(cmds)
+            if color:
+                break
         b.freeze(False)
-        time.sleep(0.003)
+        time.sleep(0.003 + 0.011 * (tries % 5))
     else:
         b.freeze(False)
-        raise SystemExit('never caught the RDP idle at the end of a list')
+        raise SystemExit('never caught the RDP idle at the end of a list that sets its colour image')
     try:
-        start, end = b.dp(0) & 0xFFFFF8, b.dp(1) & 0xFFFFF8
         print('frozen: DPC START %06x END %06x STATUS %08x (try %d)' % (start, end, st, tries))
-        cmds = b.read(start, end - start)
-        color, spans = parse(cmds)
         print('%d commands; colour image fmt %d size %d width %d at %06x; %d texture ranges, %d lines'
               % (len(cmds) // 8, color[0], color[1], color[2], color[3], len(spans), sum(n for _, n in spans)))
         tex = {}
