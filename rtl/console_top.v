@@ -275,7 +275,12 @@ module console_top #(
 	// 35 ms of work a frame against a 33.3 ms frame). Inverted so that the many
 	// tools that write this register with only a counter number in it leave
 	// the pace alone. Bit 13 lets the drawing engine past the chip's fill rate.
-	reg          cpu_pace = 1'b1, gpu_fast = 1'b0;   // the CPU at the console's own pace (r3000 t_cost): the default
+	// The CPU and the GPU run AHEAD of the console's own pace by default (ctrl 0xEC bits 12/13 =
+	// 0/1). Held to it, every DDR3 wait our GPU has and the console's VRAM did not made frames
+	// late: Syphon Filter's first level 17.9 / 15.3 / 11.2 fps paced, 19.5 / 18.2 / 19.7 not
+	// (DuckStation 20.0). A game still waits for its vblanks, so it does not run fast; it stops
+	// missing them. tools/ps1/ps1suite.py writes 0xEC = PACE (0x19000) for the timing tests.
+	reg          cpu_pace = 1'b0, gpu_fast = 1'b1;
 	wire         cpu_fast = !cpu_pace;
 	reg          dma_relax = 1'b0;                              // ctrl 0xEC bit 14: see ps1_top
 	// ctrl 0xEC bits 15, 16 (see ps1_top): on by default -- the processor makes up a DDR3 stall as
@@ -800,6 +805,19 @@ module console_top #(
 		if (off[15:14] == 2'b10) ctrl_rdata = ps1_tty_word;
 		if (off[15:13] == 3'b110) ctrl_rdata = ps1_gtr_word;
 		if (off[15:13] == 3'b111) ctrl_rdata = {30'd0, ps1_gtr_head};
+		// A PlayStation image without its debugging (PS1_DBG=0) reads none of it back, so none of it
+		// is built: the I/O and interrupt probes, the PC, node and read/write traces, the watch and
+		// snapshots, the GP0 ring, the perf counters, the drive's command trace, the frame events,
+		// the GTE snapshot and write trace, the TTY and the GPU trace (rings in block RAM, most of
+		// them). Wired to this mux, synthesis had to keep every one of them in every image.
+		// (Kept: the PC, the vblank count and display start (frame-rate measurement), the memory line window, the cache and VRAM flushes, the frame, the drive's
+		// transport, the cards and XA -- what the console UI, the menu and the PC side use.)
+		if (!PS1_DBG && (((off >= 16'h0038) && (off <= 16'h0078) && off != 16'h004C && off != 16'h006C) || off == 16'h0090 || off == 16'h0094
+		                 || ((off >= 16'h009C) && (off <= 16'h00A8)) || ((off >= 16'h00B0) && (off <= 16'h00D0))
+		                 || off == 16'h00D8 || off == 16'h00DC || off == 16'h00E4 || off == 16'h00E8 || off == 16'h00EC
+		                 || ((off >= 16'h0100) && (off <= 16'h0114)) || off == 16'h0120 || off == 16'h0124
+		                 || ((off >= 16'h0190) && (off <= 16'h01B0)) || off[15:14] == 2'b10 || off[15:13] == 3'b110 || off[15:13] == 3'b111))
+			ctrl_rdata = 32'd0;
 	end
 
 	// --- the cartridge ---------------------------------------------------------
