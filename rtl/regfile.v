@@ -49,6 +49,7 @@ module regfile #(
 	parameter        CORE_SNES = 0,
 	parameter        WEBVID   = 0,    // the picture to the web page as well (see eth_top)
 	parameter        N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
+	parameter        N64_ISV  = 0,    // the N64's ISViewer text capture (n64_top ISV)
 	parameter        PS1_DBG  = 1,    // the PlayStation's debug hardware (ps1_top DBG)
 	parameter        CLK_HZ   = 50_000_000   // the console's clock (eth_top's cclk)
 )(
@@ -367,7 +368,7 @@ module regfile #(
 	localparam MD_ONLY = ((CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS);
 
 	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .PS1_DBG(PS1_DBG), .CLK_HZ(CLK_HZ),
+	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG), .CLK_HZ(CLK_HZ),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),

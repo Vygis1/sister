@@ -22,7 +22,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..'))   # mipsasm
-from mipsasm import Asm, ZERO, T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, SP, S0, S4, S6, S7, A0, A1  # noqa: E402
+from mipsasm import Asm, ZERO, T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, SP, S0, S3, S4, S5, S6, S7, A0, A1  # noqa: E402
 from n64model import CICS  # noqa: E402  (the boot chips, by their boot code's CRC32)
 
 STATUS_AFTER_IPL3 = 0x241000E0
@@ -69,6 +69,33 @@ def program():
         a.ori(S0, ZERO, seed)
         a.lui(T9, back >> 16)
         a.label('not%d' % cic)
+    # libdragon's open-source IPL3 (" Libdragon IPL3 " at ROM 0x290: every modern homebrew ROM,
+    # n64-systemtest among them) is not a loader to stand in for: it sets the machine up and finds
+    # the program itself, and the ROM is laid out for it. So, as the PIF does: its boot code into
+    # the RSP's memory and a jump there, with the registers the PIF leaves.
+    a.lw(T1, 0x290, S7); a.nop()
+    a.lw(T2, 0x294, S7); a.nop()
+    a.lui(T3, 0x204C); a.ori(T3, T3, 0x6962)         # " Lib"
+    a.bne(T1, T3, 'nintendo'); a.nop()
+    a.lui(T3, 0x6472); a.ori(T3, T3, 0x6167)         # "drag"
+    a.bne(T2, T3, 'nintendo'); a.nop()
+    a.addiu(T2, S7, 0x40)                            # ROM 0x40 ...
+    a.lui(T3, 0xA400); a.ori(T3, T3, 0x0040)         # ... to DMEM 0x40
+    a.ori(T4, ZERO, (0x1000 - 0x40) // 4)
+    a.label('pifcopy')
+    a.lw(T5, 0, T2); a.nop()
+    a.sw(T5, 0, T3)
+    a.addiu(T2, T2, 4)
+    a.addiu(T4, T4, -1)
+    a.bne(T4, ZERO, 'pifcopy')
+    a.addiu(T3, T3, 4)                               # (delay slot)
+    a.lui(T0, 0x3400); a.mtc0(T0, 12)                # Status as the PIF leaves it
+    a.or_(S3, ZERO, ZERO); a.ori(S4, ZERO, 1); a.or_(S5, ZERO, ZERO)
+    a.or_(S6, S0, ZERO); a.or_(S7, ZERO, ZERO)       # (cartridge, NTSC, cold reset, the seed)
+    a.lui(SP, 0xA400); a.ori(SP, SP, 0x1FF0)
+    a.lui(T3, 0xA400); a.ori(T3, T3, 0x0040)
+    a.jr(T3); a.nop()
+    a.label('nintendo')
     a.lw(T1, 8, S7); a.nop()                         # the entry point
     a.subu(T1, T1, T9)                               # (less the chip's offset)
     # destination: the entry point's physical address, through KSEG1

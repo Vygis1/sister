@@ -52,14 +52,14 @@ case "${1:-nes}" in
          EXTRA="-ip $MIG_XCI" ;;
   n64|nintendo64)
          # (at 62.5 MHz: the console's MMCM, 1000 MHz / 16 -- the RCP's own clock)
-         NAME=n64;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:1 -gen CLK_DIV:${N64_DIV:-16} -gen N64_DBG:${N64_DBG:-1}"
+         NAME=n64;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:1 -gen CLK_DIV:${N64_DIV:-16} -gen N64_DBG:${N64_DBG:-1} -gen N64_ISV:${N64_ISV:-0} -gen JTAG_DBG:${JTAG:-0}"
          # RDRAM and the cartridge live in DDR3: the memory controller again.
          EXTRA="-ip $MIG_XCI" ;;
   snes|superfamicom)
          # The cartridge lives in DDR3 (cart_ddr3, as the Mega Drive's); work RAM, VRAM and
          # sound RAM are block RAM. 50 MHz by default (SNES_DIV): ~3170 clocks a line, the PPU
          # draws one in ~1550.
-         NAME=snes;  GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:0 -gen CORE_SNES:1 -gen CLK_DIV:${SNES_DIV:-20}"
+         NAME=snes;  GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:0 -gen CORE_SNES:1 -gen CLK_DIV:${SNES_DIV:-20} -gen JTAG_DBG:${JTAG:-0}"
          EXTRA="-ip $MIG_XCI" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;
   shell) NAME=shell; TOP=shell_top; XDC=boards/qmtech_a100t/shell_top.xdc ;;

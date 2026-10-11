@@ -594,7 +594,11 @@ module vr4300 #(
 					case (fn)
 					6'h01, 6'h02, 6'h06, 6'h08: ;          // TLBR/TLBWI/TLBWR/TLBP: in the COP0 block below
 					6'h18: is_eret = 1'b1;
-					default: exc = X_RI + 5'd1;
+					// the rest do nothing: "on both VR4300 and RSP, unused COP0 opcodes are
+					// completely ignored" (n64brew, Emux). n64-systemtest probes for the emulator
+					// extension (XDETECT, function 0x20) before it has exception handlers, so a
+					// Reserved Instruction here took it into the ELF header at 0x80000180.
+					default: ;
 					endcase
 				end else exc = X_RI + 5'd1;
 			endcase

@@ -196,6 +196,38 @@ module tb_n64_top;
 	reg [127:0] ring [0:511]; reg [8:0] ring_w = 0; integer rk, notrace = 0, stopexc = 0;
 	reg [127:0] re;
 	initial begin notrace = $test$plusargs("NOTRACE"); stopexc = $test$plusargs("STOPEXC"); end
+	// (every CPU access to the ISViewer's registers and buffer, the first 40)
+	integer isv_acc = 0;
+	always @(posedge clk) if (dut.c_dreq && dut.c_daddr >= 32'h13FF_0000 && dut.c_daddr < 32'h13FF_1000 && isv_acc < 40) begin
+		isv_acc = isv_acc + 1;
+		$display("tb_n64_top: ISViewer %s %08h line %032h mask %04h", dut.c_dwe ? "write" : "read ", dut.c_daddr, dut.c_line, dut.c_mask);
+	end
+	// +PCSAMPLE: the program counter every 200,000 instructions (where a long run spends its time)
+	reg [31:0] pcs_next = 32'd200000;
+	always @(posedge clk) if ($test$plusargs("PCSAMPLE") && dbg_retired >= pcs_next) begin
+		$display("tb_n64_top: %0d retired, pc %08x", dbg_retired, dbg_pc); pcs_next = pcs_next + 32'd200000;
+	end
+	// +PILOG: every PI DMA, as it starts (RDRAM, cartridge, length) and as it ends (where RDRAM got to)
+	reg pib_d = 0;
+	always @(posedge clk) if ($test$plusargs("PILOG")) begin
+		if (dut.pi_we && dut.pi_widx == 4'd3 && !dut.pi_busy)
+			$display("tb_n64_top: PI DMA dram %06x cart %08x len %06x  (retired %0d)", dut.pi_dram, dut.pi_cart, dut.pi_wval[23:0] + 24'd1, dbg_retired);
+		if (pib_d && !dut.pi_busy) $display("tb_n64_top: PI DMA done, dram now %06x cart %08x", dut.pi_dram, dut.pi_cart);
+		pib_d <= dut.pi_busy;
+	end
+	// the ISViewer's text (n64_top isv_*), as it is written: n64-systemtest's results
+	reg [21:0] isv_seen = 22'd0; reg [21:0] iq; reg [7:0] ic;
+	always @(posedge clk) if (dut.isv_wp != isv_seen) begin
+		for (iq = isv_seen; iq != dut.isv_wp; iq = iq + 22'd1) begin
+			case (iq[1:0])
+			2'd0: ic = dut.isv_b0[iq[10:2]]; 2'd1: ic = dut.isv_b1[iq[10:2]];
+			2'd2: ic = dut.isv_b2[iq[10:2]]; default: ic = dut.isv_b3[iq[10:2]];
+			endcase
+			$write("%c", ic);
+		end
+		isv_seen = dut.isv_wp;
+	end
+
 	initial tf = $fopen("../../sim/n64/sys.trace", "w");
 	always @(posedge clk) begin
 		if (!notrace) begin
@@ -254,7 +286,7 @@ module tb_n64_top;
 		if (!$value$plusargs("FRAMES%d", maxf)) maxf = 0;
 		if (!$value$plusargs("MAXI%d", maxi)) maxi = 0;      // stop after this many instructions
 		// the end: two frames with no RDRAM write after the boot's copy is done
-		while ((quiet < 2 || dbg_retired < 1000) && !(maxf != 0 && frames >= maxf) && !(maxi != 0 && dbg_retired >= maxi)) begin
+		while (((quiet < 2 && maxi == 0) || dbg_retired < 1000 || (maxi != 0 && dbg_retired < maxi)) && !(maxf != 0 && frames >= maxf) && !(maxi != 0 && dbg_retired >= maxi)) begin
 			@(posedge clk);
 			if (frames != last_frame) begin
 				quiet = (rdram_writes == last_wr) ? quiet + 1 : 0;
@@ -262,7 +294,7 @@ module tb_n64_top;
 				if (frames % 10 == 0) $display("  frame %0d: %0d retired, pc %08x", frames, dbg_retired, dbg_pc);
 			end
 		end
-		$display("tb_n64_top: done after %0d instructions, VI origin %08x width %0d status %08x", dbg_retired, vi_origin, vi_width, vi_status);
+		$display("tb_n64_top: done after %0d instructions, pc %08x, VI origin %08x width %0d status %08x", dbg_retired, dbg_pc, vi_origin, vi_width, vi_status);
 		$display("tb_n64_top: pipelined reads out %0d, arbiter %0d; RSP read-ahead live %0d b %05x n %05x r %05x drop %0d; DMA busy %0d, RSP halted %0d, rd_rd req %0d ack %0d, flush_p %0d",
 		         dut.rdp_out, dut.st, dut.u_rsp_ra.live, dut.u_rsp_ra.b, dut.u_rsp_ra.n, dut.u_rsp_ra.r, dut.u_rsp_ra.drop,
 		         dut.u_rsp.dma_busy, dut.u_rsp.halted, dut.rd_rd_req, dut.rd_rd_ack, dut.x_flush_p);

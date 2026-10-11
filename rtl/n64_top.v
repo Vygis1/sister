@@ -49,6 +49,8 @@ module n64_top #(
 	parameter [23:0] CART_LINE  = 24'h10_0000,     // the cartridge at 16 MB
 	parameter        CLK_HZ     = 50_000_000,      // this core's clock
 	parameter        DBG        = 1,               // 0: the debug window shows only the frame and sound
+	parameter        ISV        = 0,               // 1: the ISViewer text capture (n64-systemtest, tools/n64/systest.py):
+	                                               // four 512-byte buffers that cost the 62.5 MHz build its timing
 	                                               // counts (the rest is gone, and the room with it)
 	parameter [10:0] HALFLINE   = CLK_HZ / 31250   // (one HDMI line, 32 us: see "the VI's clock")
 ) (
@@ -86,7 +88,7 @@ module n64_top #(
 	output wire [31:0]  dbg_pc,
 	output wire [31:0]  dbg_retired,
 	// the debug window: dbg_sel picks what dbg_q shows (see "the debug window" below)
-	input  wire [31:0]  dbg_sel,        // [5:0] what dbg_q shows, [15:8] the DMA log's entry, [25:16] a DMEM/IMEM doubleword
+	input  wire [31:0]  dbg_sel,        // [5:0] what dbg_q shows, [7] FREEZE (below), [15:8] the DMA log's entry, [25:16] a DMEM/IMEM doubleword
 	output reg  [31:0]  dbg_q,
 	// --- the picture, for the frame stream ------------------------------------------
 	// word i of the frame is RDRAM at the VI's origin + 4i, its bytes in address
@@ -135,6 +137,10 @@ module n64_top #(
 	wire [4:0]  tr_rd, tr_code;
 	wire [63:0] tr_val;
 	wire        cpu_rst = rst || !run;
+	// FREEZE (dbg_sel[7], for looking at a frame over JTAG): the memory port serves only the
+	// picture (HDMI), the host's line reads and the AI; the CPU, the RSP, the RDP and the PI
+	// wait for it, so nothing is drawn and nothing moves. Cleared, all of them carry on.
+	wire        frz = dbg_sel[7];
 	wire        mi_irq;
 	reg  [31:0] retired;
 	wire [7:0]  cpu_stall;
@@ -275,6 +281,7 @@ module n64_top #(
 	wire [63:0]  sp_q;
 	wire         sp_ack;
 	reg          sp_busy, sp_for_d, sp_ia2;
+	reg  [31:0]  sp_ifor;              // the fetch an SP-memory read was launched for
 	reg  [7:0]   c_dbe_q;
 	reg          c_dwe_q;
 	reg  [63:0]  c_dwdata_q;
@@ -392,6 +399,18 @@ module n64_top #(
 				3'd6: reg_read = {19'd0, mi_intr[1], 11'd0, si_busy || (si_we && (si_widx == 3'd1 || si_widx == 3'd4))};
 				default: reg_read = 32'd0;
 				endcase
+			end else if (a[31:20] == 12'h047) begin                 // RI: as IPL3 leaves it
+				// (our boot stands in for IPL3, and RDRAM needs no setting up here. libdragon's
+				// open-source IPL3 -- every modern homebrew ROM, n64-systemtest among them -- runs
+				// the RDRAM setup when RI_SELECT reads 0 and calibrates chips we do not have;
+				// non-zero is the warm boot it then takes, sizing memory by writing to it)
+				case (a[4:2])
+				3'd0: reg_read = 32'h0000_000E;                      // RI_MODE
+				3'd1: reg_read = 32'h0000_0040;                      // RI_CONFIG
+				3'd3: reg_read = 32'h0000_0014;                      // RI_SELECT
+				3'd4: reg_read = 32'h0006_3634;                      // RI_REFRESH
+				default: reg_read = 32'd0;
+				endcase
 			end else if (a[31:20] == 12'h040 && a[19:16] == 4'h4) begin  // SP
 				reg_read = sp_regs[{1'b0, a[4:2]}];
 			end else if (a[31:20] == 12'h040 && a[19:16] == 4'h8) begin  // SP_PC
@@ -481,6 +500,69 @@ module n64_top #(
 	wire [2:0]   wb_n = wb_wp - wb_rp;
 	wire         wb_full = wb_n == 3'd4;
 	wire         wb_empty = wb_n == 3'd0;
+
+	// --- ISViewer: a game's (or a test ROM's) text out, as the development cartridge took it --
+	// The program writes words of text at 0x13FF0020.. and then their count at 0x13FF0014.
+	// n64-systemtest prints its results this way and finds the thing by writing a word there and
+	// reading it back. The words go straight into a 2 kB ring at the place the text has got to
+	// (four byte banks: a word lands in all four at once, at any byte alignment), and the count
+	// moves that place on. The PC reads the ring through the debug window (dbg_sel[31], below),
+	// and a count that would leave no room for the next 512 bytes waits for it, so nothing is
+	// lost however fast the program prints -- from the first line, before the PC can have said
+	// anything. Nobody reading for 2 s: the wait is given up, and text is overwritten from then on
+	// (a game printing debug text pauses once, briefly), until the PC says how far it has read.
+	reg  [7:0]  isv_b0 [0:511], isv_b1 [0:511], isv_b2 [0:511], isv_b3 [0:511];
+	reg  [21:0] isv_wp = 22'd0;          // bytes put in the ring (the chunk being written starts here)
+	reg  [21:0] isv_rp = 22'd0;          // bytes the PC has read
+	reg         isv_fc = 1'b1;           // hold the program when the ring is full (see above)
+	reg  [31:0] isv_to = 32'd0;          // how long a count has waited
+	reg         isv_wait = 1'b0;         // the count, waiting for the PC to read the ring
+	// (the CPU's address comes 8-byte aligned; which word of the line is in the byte mask)
+	wire [1:0]  isv_ws  = c_mask[3:0] != 4'd0 ? 2'd0 : c_mask[7:4] != 4'd0 ? 2'd1 : c_mask[11:8] != 4'd0 ? 2'd2 : 2'd3;
+	wire [31:0] isv_ea  = {c_daddr[31:4], isv_ws, 2'b00};
+	wire        isv_buf = (ISV != 0) && c_daddr >= 32'h13FF_0020 && c_daddr < 32'h13FF_0220;
+	wire        isv_len = (ISV != 0) && isv_ea[31:2] == 30'h04FF_C005;   // 0x13FF0014
+	wire [6:0]  isv_i   = isv_ea[8:2] - 7'd8;                      // the word in the buffer
+	wire [21:0] isv_p0  = isv_wp + {13'd0, isv_i, 2'b00};           // where its first byte goes
+	wire [3:0]  isv_off = {isv_ws, 2'b00};                         // its bytes in the CPU's line
+	wire [15:0] isv_n   = {c_line[8 * (isv_off + 4'd2) +: 8], c_line[8 * (isv_off + 4'd3) +: 8]};
+	wire [9:0]  isv_nc  = (isv_n > 16'd512) ? 10'd512 : isv_n[9:0];
+	wire        isv_room = (isv_wp - isv_rp) <= 22'd1536;
+	wire        isv_room_after = (isv_wp + {12'd0, isv_nc} - isv_rp) <= 22'd1536;
+	// byte j of the word is in bank (p0 + j) % 4, row (p0 + j) / 4 (plain muxes: a function
+	// reading the arrays from a continuous assignment simulates wrong in xsim)
+	wire [21:0] isv_p1 = isv_p0 + 22'd1, isv_p2 = isv_p0 + 22'd2, isv_p3 = isv_p0 + 22'd3;
+	wire [7:0]  isv_r0 = isv_p0[1:0] == 2'd0 ? isv_b0[isv_p0[10:2]] : isv_p0[1:0] == 2'd1 ? isv_b1[isv_p0[10:2]] : isv_p0[1:0] == 2'd2 ? isv_b2[isv_p0[10:2]] : isv_b3[isv_p0[10:2]];
+	wire [7:0]  isv_r1 = isv_p1[1:0] == 2'd0 ? isv_b0[isv_p1[10:2]] : isv_p1[1:0] == 2'd1 ? isv_b1[isv_p1[10:2]] : isv_p1[1:0] == 2'd2 ? isv_b2[isv_p1[10:2]] : isv_b3[isv_p1[10:2]];
+	wire [7:0]  isv_r2 = isv_p2[1:0] == 2'd0 ? isv_b0[isv_p2[10:2]] : isv_p2[1:0] == 2'd1 ? isv_b1[isv_p2[10:2]] : isv_p2[1:0] == 2'd2 ? isv_b2[isv_p2[10:2]] : isv_b3[isv_p2[10:2]];
+	wire [7:0]  isv_r3 = isv_p3[1:0] == 2'd0 ? isv_b0[isv_p3[10:2]] : isv_p3[1:0] == 2'd1 ? isv_b1[isv_p3[10:2]] : isv_p3[1:0] == 2'd2 ? isv_b2[isv_p3[10:2]] : isv_b3[isv_p3[10:2]];
+	wire [31:0] isv_word = {isv_r0, isv_r1, isv_r2, isv_r3};
+	integer ib;
+	reg [21:0] isv_pk; reg [1:0] isv_jk;
+	always @(posedge clk) begin
+		if (c_dreq && c_dwe && is_cart(c_daddr) && isv_buf)
+			for (ib = 0; ib < 4; ib = ib + 1) begin
+				isv_jk = ib[1:0] - isv_p0[1:0];                         // the word's byte for bank ib
+				isv_pk = isv_p0 + {20'd0, isv_jk};
+				if (c_mask[isv_off + isv_jk])
+					case (ib)
+					0: isv_b0[isv_pk[10:2]] <= c_line[8 * (isv_off + isv_jk) +: 8];
+					1: isv_b1[isv_pk[10:2]] <= c_line[8 * (isv_off + isv_jk) +: 8];
+					2: isv_b2[isv_pk[10:2]] <= c_line[8 * (isv_off + isv_jk) +: 8];
+					default: isv_b3[isv_pk[10:2]] <= c_line[8 * (isv_off + isv_jk) +: 8];
+					endcase
+			end
+		if (c_dreq && c_dwe && isv_len) isv_wp <= isv_wp + {12'd0, isv_nc};
+		// (the PC: dbg_sel = {2'b11, bytes read, 8'd0} shows how far the text has got)
+		if (dbg_sel[31:30] == 2'b11) begin isv_rp <= dbg_sel[29:8]; isv_fc <= 1'b1; isv_to <= 32'd0; end
+		else if (isv_wait) begin
+			isv_to <= isv_to + 32'd1;
+			if (isv_to >= 2 * CLK_HZ) isv_fc <= 1'b0;                  // nobody is reading
+		end else isv_to <= 32'd0;
+	end
+	wire [8:0]  isv_row = dbg_sel[16:8];
+	wire [31:0] isv_q   = dbg_sel[30] ? {10'd0, isv_wp}
+	                                  : {isv_b0[isv_row], isv_b1[isv_row], isv_b2[isv_row], isv_b3[isv_row]};
 
 	// --- requests waiting for the DDR3 port ------------------------------------------------
 	// The CPU may give up a fetch: the one behind a taken branch's delay slot is
@@ -628,7 +710,11 @@ module n64_top #(
 			if (dp_irq) mi_intr[5] <= 1'b1;
 			// the RSP's memory's answers
 			if (sp_ack && sp_for_d) begin d_ready_r <= 1'b1; d_rdata_r <= sp_q; dsp_pend <= 1'b0; end
-			if (sp_ack && !sp_for_d) begin i_ready_r <= 1'b1; i_rdata_r <= sp_ia2 ? sp_q[31:0] : sp_q[63:32]; isp_pend <= 1'b0; end
+			// (only if that fetch is still the one wanted: the one behind a taken branch's delay slot is
+			// given up while its read is out, and its word was handed to the branch's target. libdragon's
+			// IPL3 runs from DMEM and went off into its own data -- n64-systemtest never started. Not the
+			// one wanted: dropped, and the read goes out again for the fetch that is)
+			if (sp_ack && !sp_for_d && isp_pend && ipa == sp_ifor) begin i_ready_r <= 1'b1; i_rdata_r <= sp_ia2 ? sp_q[31:0] : sp_q[63:32]; isp_pend <= 1'b0; end
 			i_replay <= 1'b0; d_replay <= 1'b0; pi_we <= 1'b0;
 			// a DMA has finished: the PI's interrupt; the uncached lines may be stale
 			if (pi_done) begin mi_intr[4] <= 1'b1; il_v <= 1'b0; dl_v <= 1'b0; end
@@ -688,6 +774,7 @@ module n64_top #(
 			// --- the instruction port ----------------------------------------------------
 			if (i_req) begin
 				ip <= 1'b0;                                   // whatever was waiting is given up
+				isp_pend <= 1'b0;                             // (an SP-memory one too: set again below if it is one)
 				ipa <= i_addr;
 				i_from_cache <= 1'b0;
 				if (i_cacheable && i_hit_now) begin
@@ -729,7 +816,11 @@ module n64_top #(
 						end else begin
 							d_ready_r <= 1'b0; dp_store <= 1'b1; dpline <= c_line; dpmask <= c_mask;
 						end
+					end else if (isv_len && isv_fc && !isv_room_after) begin
+						d_ready_r <= 1'b0; isv_wait <= 1'b1;            // (the ISViewer's ring is full: see below)
 					end else d_ready_r <= 1'b1;                   // the cartridge is not written
+				end else if (is_cart(c_daddr) && isv_buf) begin
+					d_ready_r <= 1'b1; d_rdata_r <= {isv_word, isv_word};   // the ISViewer's buffer, read back
 				end else if (d_cacheable && d_hit_now) begin
 					d_ready_r <= 1'b1; d_from_cache <= 1'b1;
 				end else if (d_cacheable) begin
@@ -795,6 +886,8 @@ module n64_top #(
 			if (i_replay && !i_req) begin i_ready_r <= 1'b1; i_from_cache <= 1'b1; end
 			if (d_replay) begin d_ready_r <= 1'b1; d_from_cache <= 1'b1; end
 
+			if (isv_wait && (isv_room || !isv_fc)) begin isv_wait <= 1'b0; d_ready_r <= 1'b1; end
+
 			// a store waiting for room goes in as soon as there is some
 			if (dp_store && !wb_full && !c_dreq) begin
 				wb_addr[wb_wp[1:0]] <= line_of(dpa); wb_data[wb_wp[1:0]] <= dpline; wb_mask[wb_wp[1:0]] <= dpmask;
@@ -810,7 +903,7 @@ module n64_top #(
 				else if (fill_pending && !run) begin
 					d_addr <= CART_LINE + {4'd0, fill_wline}; d_wdata <= fill_wbuf; d_wmask <= 16'hFFFF;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_FILL;
-				end else if (!wb_empty) begin
+				end else if (!wb_empty && !frz) begin
 					d_addr <= wb_addr[wb_rp[1:0]]; d_wdata <= wb_data[wb_rp[1:0]]; d_wmask <= wb_mask[wb_rp[1:0]];
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_WB;
 				end else if (ad_rd_req && !ad_rd_ack && rd_ok) begin
@@ -819,18 +912,18 @@ module n64_top #(
 					// it waited ~170 us a line, and SM64's 32,006 samples a second played at 5,839 --
 					// the sound stretched and chopped to nothing.
 					d_addr <= ad_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_AREAD;
-				end else if (!rw_empty) begin
+				end else if (!rw_empty && !frz) begin
 					// the RSP's posted DMA writes, before any read
 					d_addr <= rw_head[167:144]; d_wmask <= rw_head[143:128]; d_wdata <= rw_head[127:0];
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_RWRITE;
-				end else if (x_qv && !x_qr && !x_flush_p && rd_ok && !dp_cop && rd_rd_req && !rd_rd_ack) begin
+				end else if (x_qv && !x_qr && !x_flush_p && rd_ok && !dp_cop && rd_rd_req && !rd_rd_ack && !frz) begin
 					// the RSP's DMA reads ahead of the CPU's while its DMA is waiting for a line: one
 					// is two clocks of the port (it is pipelined), where a CPU miss holds it a round
 					// trip, and while the RSP's DMA waits its microcode does nothing else. (Always
 					// first, its read-ahead's window kept the CPU's misses waiting: an I-cache line
 					// took 87 clocks.)
 					d_addr <= RDRAM_LINE + {4'd0, x_ql}; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 2'd1;
-				end else if (dp_cop && !c_dreq) begin
+				end else if (dp_cop && !c_dreq && !frz) begin
 					// CACHE: {operation [4:2], cache [1:0]}; 0 = I, 1 = D. Write-backs are
 					// nothing to do (the data cache writes through); the rest invalidate --
 					// by index, or by index when the tag matches (the hit forms)
@@ -838,10 +931,10 @@ module n64_top #(
 					// goes over the four lines that share the chip's index, a clock each)
 					if (cop_idx && dpcop[1:0] == 2'd0 && cop_k != 3'd3) cop_k <= cop_k + 3'd1;   // (the I-cache's)
 					else begin dp_cop <= 1'b0; d_ready_r <= 1'b1; cop_k <= 3'd0; end
-				end else if (dp && !c_dreq && rd_ok) begin
+				end else if (dp && !c_dreq && rd_ok && !frz) begin
 					d_addr <= line_of(dpa); d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1;
 					d_for <= dpa; st <= dp_fill ? S_DFILL : S_DREAD; pf_b <= 1'b0;
-				end else if (ip && !i_req && rd_ok) begin
+				end else if (ip && !i_req && rd_ok && !frz) begin
 					d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; i_for <= ipa;
 					if (ip_fill) begin d_addr <= line_of({ipa[31:5], 5'd0}); st <= S_IFILL0; if_b <= 1'b0; end
 					else begin d_addr <= line_of(ipa); st <= S_IREAD; end
@@ -851,9 +944,9 @@ module n64_top #(
 					// second holding the port -- a third of its time -- while the RSP's DMA waited)
 					d_addr <= RDRAM_LINE + {4'd0, hv_base[22:4]} + {17'd0, hv_k}; d_we <= 1'b0; d_wmask <= 16'hFFFF;
 					d_req <= 1'b1; st <= S_RQ; rq_own <= 2'd3;
-				end else if (pd_rd_req && !pd_rd_ack && rd_ok) begin
+				end else if (pd_rd_req && !pd_rd_ack && rd_ok && !frz) begin
 					d_addr <= pd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_PREAD;
-				end else if (pd_wr_req && !pd_wr_ack) begin
+				end else if (pd_wr_req && !pd_wr_ack && !frz) begin
 					d_addr <= pd_wr_line; d_wdata <= pd_wr_data; d_wmask <= pd_wr_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_PWRITE;
 				end else if (1'b0) begin                     // (the RSP's DMA reads: the read-ahead, below)
@@ -862,18 +955,18 @@ module n64_top #(
 				// arrives when it looks full -- MIG cannot be held off -- and across the clock
 				// crossing it looks fuller than it is, by the pops not yet seen. 56 and then 6 both
 				// lost lines and hung the RDP.)
-				end else if (rq_valid && !rq_ready && rd_ok) begin
+				end else if (rq_valid && !rq_ready && rd_ok && !frz) begin
 					d_addr <= rq_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 2'd0;
-				end else if (x_qv && !x_qr && !x_flush_p && rd_ok) begin
+				end else if (x_qv && !x_qr && !x_flush_p && rd_ok && !frz) begin
 					d_addr <= RDRAM_LINE + {4'd0, x_ql}; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_RQ; rq_own <= 2'd1;
-				end else if (cf_req && !cf_ack && rd_ok) begin
+				end else if (cf_req && !cf_ack && rd_ok && !frz) begin
 					d_addr <= cf_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_CREAD;
-				end else if (cw_req && !cw_ack) begin
+				end else if (cw_req && !cw_ack && !frz) begin
 					d_addr <= cw_line; d_wdata <= cw_data; d_wmask <= cw_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_CWRITE;
-				end else if (sd_rd_req && !sd_rd_ack && rd_ok) begin
+				end else if (sd_rd_req && !sd_rd_ack && rd_ok && !frz) begin
 					d_addr <= sd_rd_line; d_we <= 1'b0; d_wmask <= 16'hFFFF; d_req <= 1'b1; st <= S_SREAD;
-				end else if (sd_wr_req && !sd_wr_ack) begin
+				end else if (sd_wr_req && !sd_wr_ack && !frz) begin
 					d_addr <= sd_wr_line; d_wdata <= sd_wr_data; d_wmask <= sd_wr_mask;
 					d_we <= 1'b1; d_req <= 1'b1; st <= S_SWRITE;
 				end else if (fr_pending && rd_ok) begin
@@ -1418,7 +1511,7 @@ module n64_top #(
 	wire         sp_go_i = isp_pend && !sp_busy && !dsp_pend;
 	always @(posedge clk) begin
 		if (rst) sp_busy <= 1'b0;
-		else if (sp_go_d || sp_go_i) begin sp_busy <= 1'b1; sp_for_d <= sp_go_d; sp_ia2 <= ipa[2]; end
+		else if (sp_go_d || sp_go_i) begin sp_busy <= 1'b1; sp_for_d <= sp_go_d; sp_ia2 <= ipa[2]; sp_ifor <= ipa; end
 		else if (sp_ack) sp_busy <= 1'b0;
 	end
 	// the SP's registers, written by the CPU
@@ -1695,6 +1788,7 @@ module n64_top #(
 			6'd60: dbg_q <= retired;
 			default: dbg_q <= 32'hDEB0_0000 | {26'd0, dbg_sel[5:0]};
 			endcase
+		if (dbg_sel[31]) dbg_q <= isv_q;                          // the ISViewer's ring (above)
 	end
 
 endmodule

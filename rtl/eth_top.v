@@ -39,6 +39,7 @@ module eth_top #(
 	// framebuffer directly, in the PHY's clock, and would need a crossing of its own)
 	parameter WEBVID   = 0,
 	parameter N64_DBG  = 1,      // the N64's debug window: 0 for a shipping image (n64_top DBG)
+	parameter N64_ISV  = 0,      // the N64's ISViewer text capture, for n64-systemtest (n64_top ISV)
 	parameter PS1_DBG  = 1,      // the PlayStation's debug hardware: 0 for a shipping image (ps1_top DBG)
 	parameter JTAG_DBG = 0,      // the register bus over JTAG (jtag_axi + jtag_bus, tools/jtag.py): debug builds
 	// The console's clock: the MMCM's 1000 MHz VCO divided by this. 20 is 50 MHz,
@@ -386,7 +387,7 @@ module eth_top #(
 		.go(bus_we && bus_ack && bus_addr == 32'h0000_0014 && bus_wdata == 32'hB007_0000));
 
 	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .PS1_DBG(PS1_DBG),
+	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG),
 	          .CLK_HZ(1_000_000_000 / CLK_DIV)) u_regs (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wdata_wmask),
 		.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid),

@@ -737,8 +737,7 @@ class VR4300:
                 self.npc = (self.pc + 4) & M64
                 self.next_delay = False
                 self.llbit = 0
-            else:
-                raise Exc(RI)
+            # (the rest do nothing: "unused COP0 opcodes are completely ignored" -- n64brew, Emux)
         else:
             raise Exc(RI)
 

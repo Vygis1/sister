@@ -78,6 +78,7 @@ module console_top #(
 	// and the cartridge are in DDR3.
 	parameter CORE_N64 = 0,
 	parameter N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
+	parameter N64_ISV  = 0,    // the N64's ISViewer text capture (n64_top ISV)
 	// The PlayStation's debug hardware -- the performance counters, the event ring, the GTE
 	// snapshot and write trace, the PC / register / GP0 / DMA-list traces: ~9,000 bits of
 	// flip-flops and their logic on a chip at 99.9% of its slices. 0 for a shipping image: each
@@ -1133,7 +1134,7 @@ module console_top #(
 
 	// --- the Nintendo 64 -------------------------------------------------------------
 	generate if (CORE_N64) begin : g_n64
-		n64_top #(.CLK_HZ(CLK_HZ), .DBG(N64_DBG)) u_n64 (
+		n64_top #(.CLK_HZ(CLK_HZ), .DBG(N64_DBG), .ISV(N64_ISV)) u_n64 (
 			.clk(clk), .rst(rst),
 			// held in reset (and the cartridge filling) until the host releases it
 			.run(n64_sel && run),
