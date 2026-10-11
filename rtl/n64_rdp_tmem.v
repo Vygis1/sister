@@ -120,12 +120,27 @@ module n64_rdp_tmem (
 	reg  [63:0]  dw;                      // the source doubleword, big-endian
 	reg          split;                   // 32-bit or YUV: halves to the two 2 kB
 	reg  [127:0] lbuf; reg [18:0] ltag; reg lv;
-	localparam [2:0] L_IDLE = 3'd0, L_FETCH = 3'd1, L_WAIT = 3'd2, L_WRITE = 3'd3, L_WRITE2 = 3'd4, L_NEXT = 3'd5;
+	reg  [127:0] lbuf2; reg [18:0] ltag2; reg lv2;   // the line after lbuf's (a doubleword across two)
+	localparam [2:0] L_IDLE = 3'd0, L_FETCH = 3'd1, L_WAIT = 3'd2, L_WRITE = 3'd3, L_WRITE2 = 3'd4, L_NEXT = 3'd5,
+	                 L_WAIT2 = 3'd6;
 	reg  [2:0]   ls;
 	assign busy = ls != L_IDLE;
 	wire [63:0]  dw_line = {lbuf[8 * {src[3], 3'd0} +: 8], lbuf[8 * {src[3], 3'd1} +: 8], lbuf[8 * {src[3], 3'd2} +: 8],
 	                        lbuf[8 * {src[3], 3'd3} +: 8], lbuf[8 * {src[3], 3'd4} +: 8], lbuf[8 * {src[3], 3'd5} +: 8],
 	                        lbuf[8 * {src[3], 3'd6} +: 8], lbuf[8 * {src[3], 3'd7} +: 8]};
+	// A tile's row starts wherever the image puts it: a 58-texel 16-bit image has rows 116 bytes
+	// apart, so every other row starts 4 bytes into a doubleword (Mario Kart 64's OPTION and DATA
+	// labels came out with every other row from the wrong bytes). The loads take the eight bytes
+	// from src itself -- across two lines when they run over -- as n64rdp.py (parallel-RDP) reads a
+	// texel at its own byte address. (LOAD_TLUT keeps its aligned doubleword: it picks its entry.)
+	wire [18:0]  sl0 = src[22:4], sl1 = src[22:4] + 19'd1;
+	wire         cross = (mode != M_TLUT) && (src[3:0] > 4'd8);
+	wire [255:0] lwin = {lbuf2, lbuf};
+	reg  [63:0]  dw_un;
+	always @(*) begin : un
+		integer k;
+		for (k = 0; k < 8; k = k + 1) dw_un[63 - 8 * k -: 8] = lwin[8 * ({1'b0, src[3:0]} + k) +: 8];
+	end
 	// this doubleword's swap: the row's (LOAD_TILE) or the line counter's (LOAD_BLOCK)
 	wire         odd = (mode == M_BLOCK) ? tacc[11] : row[0];
 
@@ -133,11 +148,11 @@ module n64_rdp_tmem (
 		wen <= 4'd0;
 		if (mr_ack) mr_req <= 1'b0;
 		if (rst) begin
-			ls <= L_IDLE; mr_req <= 1'b0; lv <= 1'b0;
+			ls <= L_IDLE; mr_req <= 1'b0; lv <= 1'b0; lv2 <= 1'b0;
 		end else case (ls)
 		L_IDLE: if (go) begin : start
 			reg [11:0] npix; reg [23:0] base;
-			lv <= 1'b0;
+			lv <= 1'b0; lv2 <= 1'b0;
 			split <= (t_size == 2'd3) || (t_fmt == 3'd1);
 			case (op)
 			6'h33: begin                                             // LOAD_BLOCK
@@ -180,10 +195,16 @@ module n64_rdp_tmem (
 			endcase
 		end
 		L_FETCH: begin
-			if (lv && ltag == src[22:4]) begin dw <= dw_line; ls <= L_WRITE; end
-			else begin mr_req <= 1'b1; mr_line <= {5'd0, src[22:4]}; ls <= L_WAIT; end
+			if (lv && ltag == sl0 && (!cross || (lv2 && ltag2 == sl1))) begin
+				dw <= (mode == M_TLUT) ? dw_line : dw_un; ls <= L_WRITE;
+			end else if (!(lv && ltag == sl0)) begin
+				// (the line after the last one is often this one: no second read)
+				if (lv2 && ltag2 == sl0) begin lbuf <= lbuf2; ltag <= ltag2; end
+				else begin mr_req <= 1'b1; mr_line <= {5'd0, sl0}; ls <= L_WAIT; end
+			end else begin mr_req <= 1'b1; mr_line <= {5'd0, sl1}; ls <= L_WAIT2; end
 		end
-		L_WAIT: if (mr_ack) begin lbuf <= mr_data; ltag <= src[22:4]; lv <= 1'b1; ls <= L_FETCH; end
+		L_WAIT: if (mr_ack) begin lbuf <= mr_data; ltag <= sl0; lv <= 1'b1; ls <= L_FETCH; end
+		L_WAIT2: if (mr_ack) begin lbuf2 <= mr_data; ltag2 <= sl1; lv2 <= 1'b1; ls <= L_FETCH; end
 		L_WRITE: begin
 			// the doubleword into TMEM
 			if (mode == M_TLUT) begin : tl
