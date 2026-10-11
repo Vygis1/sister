@@ -280,7 +280,22 @@ module eth_top #(
 		);
 		assign cclk_locked = mmcm_locked;
 		BUFG bufg200 (.I(clk200_raw), .O(clk200));
-		assign pclk_raw_w = pclk_raw; assign pclk5_raw_w = pclk5_raw; assign hlocked_w = mmcm_locked;
+		if (CORE_N64 != 0) begin : g_n64pclk
+			// The N64's picture at the N64's own rate. Its VI interrupt -- the game's clock -- is
+			// locked to HDMI's frame (n64_top "the VI's clock"), so HDMI's rate IS the game's speed:
+			// at 25.000 MHz that was 59.52 Hz, 0.5% slower than a real NTSC N64 (3094 VI clocks x
+			// 263 lines at 48.681812 MHz = 59.826 Hz). Its own MMCM: 50 / 2 x 25.125 = 628.125 MHz,
+			// /25 = 25.125 MHz (59.821 Hz, 0.008% off), /5 = 125.625 MHz for the serialisers.
+			wire vfb, vp_raw, vp5_raw, vlocked;
+			MMCME2_BASE #(.CLKIN1_PERIOD(20.0), .CLKFBOUT_MULT_F(25.125), .DIVCLK_DIVIDE(2),
+			              .CLKOUT0_DIVIDE_F(25.0), .CLKOUT1_DIVIDE(5)) u_vmmcm (
+				.CLKIN1(sys_clk), .CLKFBIN(vfb), .CLKFBOUT(vfb), .CLKOUT0(vp_raw), .CLKOUT1(vp5_raw), .LOCKED(vlocked),
+				.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
+				.CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .CLKFBOUTB());
+			assign pclk_raw_w = vp_raw; assign pclk5_raw_w = vp5_raw; assign hlocked_w = vlocked;
+		end else begin : g_pclk
+			assign pclk_raw_w = pclk_raw; assign pclk5_raw_w = pclk5_raw; assign hlocked_w = mmcm_locked;
+		end
 
 		wire        ui_clk, ui_rst, calib_done;
 		wire [27:0] app_addr;
@@ -352,7 +367,7 @@ module eth_top #(
 	BUFG bufgpx  (.I(pclk_raw_w),  .O(vid_pclk));
 	BUFG bufgpx5 (.I(pclk5_raw_w), .O(vid_pclk5));
 	assign vid_locked = hlocked_w;
-	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .FS441(CORE_PS1 != 0 || CORE_N64 != 0)) u_hdmi (
+	hdmi_tx #(.SIM(0), .PSEUDO(1), .EXT_CLK(1), .FS441(CORE_PS1 != 0 || CORE_N64 != 0), .PX125(CORE_N64 != 0)) u_hdmi (
 		.clk50(1'b0), .rst(1'b0), .sim_pclk(1'b0),
 		.ext_pclk(vid_pclk), .ext_pclk5(vid_pclk5), .ext_locked(vid_locked),
 		.pclk(), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(vid_rgb), .frame_start(),

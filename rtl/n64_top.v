@@ -52,7 +52,7 @@ module n64_top #(
 	parameter        ISV        = 0,               // 1: the ISViewer text capture (n64-systemtest, tools/n64/systest.py):
 	                                               // four 512-byte buffers that cost the 62.5 MHz build its timing
 	                                               // counts (the rest is gone, and the room with it)
-	parameter [10:0] HALFLINE   = CLK_HZ / 31250   // (one HDMI line, 32 us: see "the VI's clock")
+	parameter [10:0] HALFLINE   = CLK_HZ / 31406   // (one HDMI line, 800 clocks of 25.125 MHz: 31.84 us -- see "the VI's clock")
 ) (
 	input  wire         clk,
 	input  wire         rst,

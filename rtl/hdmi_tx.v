@@ -47,6 +47,7 @@ module hdmi_tx #(
 	parameter EXT_CLK = 0,               // 1: the clocks come in (ext_*), from an MMCM already there
 	parameter AUDIO = 1,                 // 1: HDMI with audio; 0: DVI
 	parameter NULLPK = 0,                // (bring-up) 1: every packet a null packet
+	parameter PX125 = 0,                 // 1: the pixel clock is 25.125 MHz (the N64's 59.82 Hz): audio paced and regenerated for it
 	parameter PKMASK = 4'b1111,          // (bring-up) packets sent: [0] audio, [1] ACR, [2] AVI, [3] Audio InfoFrame
 	parameter FS441 = 0,                 // 1: 44.1 kHz audio (the PlayStation's), else 48 kHz
 	// 0: 640 x 480 at 60 Hz (25 MHz pixels, VIC 1, 4:3); 1: 1280 x 720 at 60 Hz (74.25 MHz, VIC 4,
@@ -160,7 +161,9 @@ module hdmi_tx #(
 	// CTS 31250, exact at 25 MHz)
 	// (720p: 74.25 MHz / 48000 = 74250 / 48, and 742500 / 441)
 	localparam [19:0] A_ADD = FS441 ? 20'd441 : 20'd48;
-	localparam [19:0] A_TOP = RES ? (FS441 ? 20'd742500 : 20'd74250) : (FS441 ? 20'd250000 : 20'd25000);
+	// (25.125 MHz: 251250 / 441 and 25125 / 48 -- with ACR N 9408 CTS 41875 and N 6144 CTS 25125)
+	localparam [19:0] A_TOP = RES ? (FS441 ? 20'd742500 : 20'd74250)
+	                        : PX125 ? (FS441 ? 20'd251250 : 20'd25125) : (FS441 ? 20'd250000 : 20'd25000);
 	reg [15:0] hl, hr;  reg [19:0] a48;  reg a_new;
 	initial begin hl = 16'd0; hr = 16'd0; a48 = 20'd0; a_new = 1'b0; end
 	always @(posedge pclk) begin
@@ -233,6 +236,8 @@ module hdmi_tx #(
 	wire [55:0] aif = {8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h01, 8'h70};
 	wire [55:0] acr = RES ? (FS441 ? {8'h80, 8'h18, 8'h00, 8'hD4, 8'h42, 8'h01, 8'h00}    // N 6272, CTS 82500
 	                               : {8'h00, 8'h18, 8'h00, 8'hCA, 8'h22, 8'h01, 8'h00})   // N 6144, CTS 74250
+	                      : PX125 ? (FS441 ? {8'hC0, 8'h24, 8'h00, 8'h93, 8'hA3, 8'h00, 8'h00}    // N 9408, CTS 41875
+	                                       : {8'h00, 8'h18, 8'h00, 8'h25, 8'h62, 8'h00, 8'h00})   // N 6144, CTS 25125
 	                      : (FS441 ? {8'h90, 8'h1B, 8'h00, 8'h12, 8'h7A, 8'h00, 8'h00}    // N 7056, CTS 31250
 	                               : {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00});  // N 6144, CTS 25000
 	// (clock regeneration on every 32nd line, ~980 a second as hdl-util/hdmi sends it -- not
