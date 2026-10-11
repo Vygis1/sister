@@ -24,7 +24,6 @@ pick from the menu.
 | Part | Notes |
 |---|---|
 | **QMTECH Artix-7 XC7A100T core board** (DDR3, 8 MB SPI flash) | The console. [BOARD.md](BOARD.md) has its facts. |
-| **LAN8720 Ethernet module** on header U4 | Required for now even without a network: the console images and the shell take their 50 MHz clock from it. |
 | **HDMI breakout**: a bare HDMI socket on a 2 x 10 2.54 mm header | Plugs straight onto header U4, pins 7-26. |
 | **LilyGO T8** (ESP32-WROVER, microSD slot) | The menu, the SD card, Bluetooth pads. It has to be a *classic* ESP32 -- the S3, C3 and C6 have no Bluetooth Classic, which PlayStation pads need. (An ESP32-S3 also works, without Bluetooth pads.) |
 | **microSD card**, FAT32 | Cores, games, saves. Cards above 32 GB come exFAT: reformat them as FAT32. |
@@ -147,13 +146,14 @@ the picture's take effect at once, in the game behind the menu):
 | Master System | Full speed. |
 | Mega Drive | Full speed, stereo. Cartridges up to 4 MB. |
 | Super NES | New. Passes the CPU and sound-CPU test ROMs on the board. LoROM and HiROM cartridges up to 6 MB; no add-on chips (Super FX, SA-1, DSP-1...). Save RAM is 8 kB and is not yet written to the card. Hi-res screens are shown 256 wide. No commercial game tried yet. |
-| PlayStation | Boots the real BIOS, plays commercial games (Crash Bandicoot at 30 fps), memory card, CD audio from the disc image. |
-| Nintendo 64 | Runs Super Mario 64, slower than the real console in busy scenes; the RDP (graphics) is still being completed. |
+| Super NES | Plays Super Mario World; save RAM kept on the SD card. No enhancement chips (Super FX, SA-1) yet. |
+| PlayStation | Boots the real BIOS, plays commercial games at the console's own frame rates (Crash Bandicoot 30 fps, Syphon Filter 20), memory card, CD audio and XA from the disc image, FMVs. |
+| Nintendo 64 | Plays Super Mario 64 and Mario Kart 64 at close to the console's speed (SM64 27-30 of its 30 fps); the RDP (graphics) still lacks a few modes. |
 
 ## When something goes wrong
 
-- **No picture at all:** the LAN8720 module must be plugged in (it is the clock).
-  Check the HDMI breakout is the right way round (the socket faces outward).
+- **No picture at all:** check the HDMI breakout is the right way round (the socket
+  faces outward).
 - **The menu does not appear:** the ESP32 cannot reach the FPGA. Check the four SPI
   wires and the ground; short wires.
 - **A switch ends on the shell's screen:** the core on the card is missing or did

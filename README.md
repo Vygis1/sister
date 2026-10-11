@@ -1,46 +1,74 @@
 # fpga-console
 
-**Five game consoles in hardware on one inexpensive FPGA board:** the NES, the Sega
-Master System, the Sega Mega Drive, the Sony PlayStation and the Nintendo 64. It
-plugs into a TV over HDMI, shows a menu, loads games from an SD card, and takes
-PlayStation, Xbox and Switch pads over Bluetooth. No PC.
+### Six classic game consoles, rebuilt as hardware, on one inexpensive FPGA board.
 
-Nothing is emulated in software: every CPU, video chip and sound chip is written for
-this project in Verilog and runs as logic in the FPGA. The board becomes whichever
-console you pick.
+NES · Master System · Mega Drive · Super NES · PlayStation · Nintendo 64
+
+Plug it into a TV over HDMI, pick a console and a game from the menu, play with a
+Bluetooth pad. No PC, no emulator software, no operating system underneath.
 
 <p align="center">
-  <img src="docs/images/menu_consoles.png" width="400" alt="the console menu">
-  <img src="docs/images/menu_games.png" width="400" alt="a console's games">
+  <img src="docs/images/menu_home.png" width="420" alt="the console menu on the TV">
+  <img src="docs/images/menu_settings.png" width="420" alt="the settings page">
 </p>
+
+---
+
+## What makes it different
+
+**Nothing here is emulated in software.** Every processor, graphics chip and sound
+chip of every console -- the 6502, Z80, 68000, 65816, SPC700, MIPS R3000 and VR4300,
+the PlayStation's GTE and GPU, the N64's RSP and RDP, the YM2612, the SPU -- is
+written from scratch for this project in Verilog and runs as real logic gates
+inside the FPGA. When you pick a console, the board *becomes* that console.
+
+That means the timing comes from hardware, not from a host computer's scheduler: no
+input lag from an OS, no audio crackle from a busy CPU, and the original console's
+behaviour reproduced cycle by cycle where it matters.
 
 ## What it plays
 
-| | |
+| Console | State |
 |---|---|
-| **NES** | Full speed. Mappers NROM, MMC1, UxROM, CNROM, MMC3, AxROM. |
+| **NES** | Full speed. Mappers NROM, MMC1, UxROM and MMC3 -- most of the library. |
 | **Master System** | Full speed. |
-| **Mega Drive** | Full speed, stereo; cartridges to 4 MB. |
-| **PlayStation** | Boots the real BIOS and plays commercial games -- Crash Bandicoot at 30 frames a second -- with memory cards, CD audio and XA. Discs from the SD card. |
-| **Nintendo 64** | Super Mario 64 runs; slower than the real console in busy scenes, and the graphics chip is still being completed. |
+| **Mega Drive** | Full speed, stereo FM and PSG; cartridges up to 4 MB. |
+| **Super NES** | New. Super Mario World plays; save RAM kept on the SD card. The 65816 and SPC700 are bus-cycle exact against over 750,000 recorded test cases. No enhancement chips (Super FX, SA-1) yet. |
+| **PlayStation** | Boots the real BIOS from your own dump and plays commercial games from disc images on the SD card -- Crash Bandicoot, Syphon Filter, Gran Turismo 2, Resident Evil 2 -- at the console's own frame rates (Crash 30 fps, Syphon Filter 20, as on a real PlayStation). Memory cards, CD audio, XA streaming audio and FMV movies. |
+| **Nintendo 64** | Super Mario 64 and Mario Kart 64 play at close to full speed (SM64 at 27-30 of its 30 frames a second), with the picture at the N64's own 59.82 Hz. The graphics chip still lacks a few modes. |
 
-Each is checked against independent references: Klaus Dormann's 6502 test and the
-nestest log, ZEXDOC and ZEXALL for the Z80, a self-checking program for the 68000,
-krom's N64 tests, GTE vectors recorded on a real PlayStation, and bit-exact models of
-the PlayStation's SPU and the N64's RSP and RDP. [docs/CONSOLES.md](docs/CONSOLES.md)
-has how each machine is built.
+Video settings on the TV menu: sharp or smooth scaling, scanlines, and the N64's own
+video filters (anti-aliasing, de-dithering) switchable per taste.
+
+## How it is checked
+
+A core is only as good as the evidence that it behaves like the original, so every
+part is held against independent references rather than "looks right":
+
+- **CPUs:** Klaus Dormann's 6502 suite and the nestest log; ZEXDOC/ZEXALL for the
+  Z80; the SingleStepTests recordings for the 65816 and SPC700 (every instruction,
+  every bus cycle); gilyon's SNES CPU and SPC tests; a self-checking 2,500-case
+  program for the R3000; krom's N64 CPU, RSP and RDP test ROMs.
+- **Graphics and sound:** GTE results recorded on a real PlayStation; bit-exact
+  models of the PlayStation's SPU and the N64's RSP and RDP, compared word for word
+  with the hardware; frames captured from the running board and replayed through
+  the models.
+- **Real games, measured:** frame rates on the board against the real console and
+  against DuckStation; bugs traced to the instruction that causes them (most
+  recently: Tekken 2 needed the R3000's load-delay slot on coprocessor moves).
 
 ## The hardware
 
-| | |
-|---|---|
-| **QMTECH Artix-7 XC7A100T** core board | the consoles (256 MB DDR3, 8 MB flash) |
-| **HDMI breakout** on header U4 | the picture and the sound |
-| **LilyGO T8** (ESP32-WROVER) with a microSD card | the menu, the games, Bluetooth pads |
-| **LAN8720** module | the consoles' clock (and Ethernet, for development) |
+All off-the-shelf parts:
 
-**[docs/GUIDE.md](docs/GUIDE.md) is the guide to building one:** the parts, the
-wiring, the first programming, the SD card, and how to play.
+| Part | Role |
+|---|---|
+| **QMTECH Artix-7 XC7A100T** core board (256 MB DDR3, 8 MB flash) | the consoles |
+| **HDMI breakout** on header U4 | picture and sound to the TV |
+| **LilyGO T8** (ESP32) with a microSD card | the menu, the games, Bluetooth pads |
+
+PlayStation, Xbox and Switch pads connect over Bluetooth. **[docs/GUIDE.md](docs/GUIDE.md)**
+is the step-by-step guide: parts, wiring, first programming, the SD card, playing.
 
 ## How it fits together
 
@@ -51,49 +79,55 @@ wiring, the first programming, the SD card, and how to play.
                  +-- DDR3: cartridges, RAM, VRAM
 ```
 
-- Each console is its own FPGA image, so it has the whole chip. **The shell**, a small
-  image at the start of the flash, writes a console into the flash and starts it; it
-  shows its progress on the TV.
-- The **ESP32** draws the menu (as text over the HDMI picture), loads games from the
-  SD card into the console over four wires -- every chunk checked against a sum the
-  FPGA keeps -- and passes the pads through. Switching console takes about a minute;
-  another game for the same console a few seconds.
-- The picture is scaled to 640 x 480 and the sound goes out as HDMI audio (48 kHz, or
-  44.1 kHz for the PlayStation and N64).
+- **Each console is its own FPGA image** and gets the whole chip. A small resident
+  image, *the shell*, writes the chosen console into the flash and starts it,
+  showing its progress on the TV.
+- **The ESP32 runs the menu** (drawn as text over the HDMI picture), streams games
+  from the SD card into the console -- every chunk checked against a sum the FPGA
+  keeps -- and passes the pads through. PlayStation discs are read from the card
+  sector by sector as the game asks for them.
+- **Saves live on the SD card:** PlayStation memory cards (in the format DuckStation
+  reads), N64 EEPROM and SNES save RAM.
+- **Out to the TV:** 640 x 480 HDMI with HDMI audio, 48 kHz or 44.1 kHz.
 
 ## Repository layout
 
 ```
 rtl/        the consoles and the board: nes, sms (z80, vdp), md_* (m68k, ym2612),
-            ps1_* (r3000), n64_* (vr4300, rsp, rdp); hdmi_tx, osd, shell_top, esp_bus
+            snes_*, ps1_* (r3000, gte, gpu, spu, mdec, cdrom), n64_* (vr4300, rsp, rdp);
+            hdmi_tx, osd, shell_top, esp_bus
 esp32/      the ESP32 firmware: the menu, game loading, Bluetooth pads
-sim/        testbenches (tb_*.v) and models
-tools/      build, flash, simulation and release scripts; per console (nes/ sms/ md/
-            ps1/ n64/) the reference models, tests and board debugging (tools/README.md)
-boards/     constraints for the QMTECH board, HDMI, the LAN8720, DDR3
-pc/ web/    the development server and page (docs/DEVELOPMENT.md)
-docs/       the guide, and design notes for each part
+sim/        testbenches (tb_*.v)
+tools/      build, flash, simulation and release scripts; per console the reference
+            models, tests and board debugging tools (tools/README.md)
+boards/     constraints for the QMTECH board, HDMI, DDR3
+docs/       the guide, and design notes for each console
 ```
 
 ## Building from source
 
-    ./tools/core.sh nes | sms | md | ps1 | n64 | shell      # an FPGA image (Vivado 2026.1)
-    ./tools/sim.sh tb_md_vdp                               # a testbench
+    ./tools/core.sh nes | sms | md | snes | ps1 | n64 | shell   # an FPGA image (Vivado 2026.1)
+    ./tools/sim.sh tb_ps1_tekseq                               # a testbench
 
-The N64 needs `AREA=1` and the PlayStation `EFFORT=1` (they fill the chip). The
-ESP32 firmware builds with the Arduino CLI; [esp32/README.md](esp32/README.md) has
-the commands. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the development setup
-over Ethernet, the register bus and debugging a running core.
+The PlayStation and N64 fill the chip: they build with `EFFORT=1` and `AREA=1`. The
+ESP32 firmware builds with the Arduino CLI ([esp32/README.md](esp32/README.md)).
+[tools/README.md](tools/README.md) lists the models, tests and board-debugging tools.
 
-## Status
+## Status and what's next
 
-Release **0.2.0** -- [CHANGELOG.md](CHANGELOG.md).
+Version **0.2.0** with much since -- see [CHANGELOG.md](CHANGELOG.md) and
+[docs/ROADMAP.md](docs/ROADMAP.md). Known gaps right now:
 
-- **Nintendo 64:** below full speed (SM64 draws about 24 frames a second of its
-  30); the graphics chip lacks some modes.
-- **PlayStation:** about one frame in ten can be late on busy scenes.
-- The consoles take their 50 MHz clock from the LAN8720 module, so it has to be
-  plugged in even without a network.
+- **Nintendo 64:** YUV textures and a few RDP modes; Super Smash Bros. does not boot yet.
+- **PlayStation:** some high-resolution (480i) menus, such as Gran Turismo 2's, are garbled.
+- **Super NES:** no enhancement-chip cartridges yet; the core is days old and
+  still meeting new games.
+
+## Supporting the project
+
+This is built in spare time, one console chip at a time. A Patreon is on the way for
+anyone who would like to help it along -- the link will be here. In the meantime, the
+most useful things are trying it on your own board and reporting what a game does.
 
 ## Legal
 
