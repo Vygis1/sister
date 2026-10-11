@@ -166,8 +166,19 @@ module fb_ddr #(
 	reg         hr_raw_d; reg [23:0] hr_base_d;
 	reg  [8:0]  lf_have, lf_line;   // the line in the buffer / being fetched
 	wire [23:0] lf_fbase  = FB_LINE + (disp_f[lf_line[0]] ? 24'h00_A000 : 24'd0);   // (weave) the row's field's front copy
-	reg  [6:0]  lf_w;
-	reg         lf_on, lf_wait;     // fetching / a read of it is out
+	reg  [6:0]  lf_w;               // words of the line received
+	reg  [6:0]  lf_iss;             // ...and asked for
+	reg  [2:0]  lf_out;             // reads of it out (up to LF_OUT at once)
+	reg         lf_on;              // fetching
+	localparam [2:0] LF_OUT = 3'd4;
+	// HDMI's lines come first, several reads in flight. One read at a time, behind the capture's
+	// writes, a 640-wide line (80 reads) took most of the one HDMI line a 480-line mode allows it
+	// (the ring is four lines, three of them on screen); while a capture was writing, lines came
+	// late and the ring showed one four lines old -- a band that crept up the screen as the
+	// PlayStation's 59.29 Hz drifted against HDMI's 60 (the BIOS logo, in 640 x 480, worst).
+	// The capture can wait: its queue is sixteen deep and `hold` pauses the scanout.
+	wire        lf_ask = lf_on && (lf_iss < lf_words) && (lf_out < LF_OUT) && rs == R_IDLE;
+	wire        lf_got = (lf_out != 3'd0) && m_valid;
 
 	always @(posedge clk) begin
 		if (rst) begin
@@ -177,7 +188,7 @@ module fb_ddr #(
 			m_req <= 1'b0; m_we <= 1'b0; m_addr <= 24'd0; m_wdata <= 128'd0;
 			rs <= R_IDLE; rc_v <= 1'b0; rc_line <= 24'd0; rc_data <= 128'd0;
 			hr_ack <= 1'b0; hr_rdata <= 32'd0; wr_busy <= 1'b0;
-			lf_have <= 9'h1FF; lf_line <= 9'd0; lf_w <= 7'd0; lf_on <= 1'b0; lf_wait <= 1'b0; lf_we <= 1'b0;
+			lf_have <= 9'h1FF; lf_line <= 9'd0; lf_w <= 7'd0; lf_iss <= 7'd0; lf_out <= 3'd0; lf_on <= 1'b0; lf_we <= 1'b0;
 			disp_b <= 1'b0; pend <= 1'b0; disp_f <= 2'b00; pend_f <= 2'b00; cap_par <= 1'b0;
 			end_wp[0] <= 0; end_wp[1] <= 0;
 		end else begin
@@ -191,7 +202,7 @@ module fb_ddr #(
 			if (cap_go || (hdmi_on && !armed && !capturing && !finishing && !pend)) begin armed <= 1'b1; cap_ready <= 1'b0; finishing <= 1'b0; end
 			// a line wanted that is not in the buffer: fetch it
 			if (hdmi_on && !lf_on && lf_want != lf_have && lf_want < 9'd480) begin
-				lf_on <= 1'b1; lf_line <= lf_want; lf_w <= 7'd0;
+				lf_on <= 1'b1; lf_line <= lf_want; lf_w <= 7'd0; lf_iss <= 7'd0;
 				// the top of HDMI's frame: a finished capture goes on screen
 				if (lf_want == 9'd0 && pend) begin disp_b <= ~disp_b; pend <= 1'b0; end
 				// ...and a field whose capture is all written goes on screen there too
@@ -249,22 +260,22 @@ module fb_ddr #(
 					wr_busy <= 1'b0;
 				end
 			end else if (!m_req) begin
-				if (!q_empty && !wr_busy) begin
+				if (lf_ask) begin
+					// (the picture first: it cannot wait)
+					m_addr <= (weave ? lf_fbase : disp_base) + lf_line * STRIDE + {17'd0, lf_iss}; m_we <= 1'b0; m_req <= 1'b1;
+					lf_iss <= lf_iss + 7'd1;
+				end else if (!q_empty && !wr_busy) begin
 					m_addr  <= q_addr[q_rp[QB-1:0]];
 					m_wdata <= q_data[q_rp[QB-1:0]];
 					m_we <= 1'b1; m_req <= 1'b1; wr_busy <= 1'b1;
-				end else if (lf_on && !lf_wait && rs == R_IDLE) begin
-					// (before the host's reads: the picture cannot wait)
-					m_addr <= (weave ? lf_fbase : disp_base) + lf_line * STRIDE + {17'd0, lf_w}; m_we <= 1'b0; m_req <= 1'b1;
-					lf_wait <= 1'b1;
-				end else if (rs == R_IDLE && hr_req && !hr_hit && q_empty && !lf_wait) begin
+				end else if (rs == R_IDLE && hr_req && !hr_hit && q_empty && !lf_on && lf_out == 3'd0) begin
 					m_addr <= (hr_raw ? hr_base : disp_base) + {8'd0, hr_line}; m_we <= 1'b0; m_req <= 1'b1;
 					rs <= R_WAIT;
 				end
 			end
-			if (lf_wait && m_valid) begin
+			lf_out <= lf_out + ((!m_req && lf_ask) ? 3'd1 : 3'd0) - (lf_got ? 3'd1 : 3'd0);
+			if (lf_got) begin
 				lf_we <= 1'b1; lf_addr <= {lf_line[1:0], lf_w}; lf_data <= m_rdata;
-				lf_wait <= 1'b0;
 				if (lf_w + 7'd1 >= lf_words) begin lf_on <= 1'b0; lf_have <= lf_line; end
 				else lf_w <= lf_w + 7'd1;
 			end
@@ -276,7 +287,7 @@ module fb_ddr #(
 					hr_ack <= 1'b1;
 					rs <= R_DONE;
 				end
-			R_WAIT: if (m_valid && !lf_wait) begin
+			R_WAIT: if (m_valid && lf_out == 3'd0) begin
 					rc_data <= m_rdata; rc_line <= {8'd0, hr_line}; rc_v <= 1'b1;
 					hr_rdata <= m_rdata[hr_addr[1:0]*32 +: 32];
 					hr_ack <= 1'b1;
