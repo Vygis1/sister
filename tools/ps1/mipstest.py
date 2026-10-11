@@ -544,6 +544,31 @@ class Gen:
         a.li(T0, 0x7654321); a.sw(T0, 0x40, S0); a.li(T0, 0x2222); a.mtc2(T0, 10); a.nop(); a.nop()
         a.lwc2(4, 0x40, S0); a.mfc2(T2, 10); a.nop(); self.check(T2, 0x2222)  # LWC2 VXY2, then read IR2
         a.mfc2(T2, 4); a.nop(); self.check(T2, 0x7654321)
+        # A move FROM a coprocessor is a load: the next instruction (its delay slot) still reads the
+        # register's old value (DuckStation: WriteRegDelayed for MFC0, MFC2, CFC2). Tekken 2's fighter
+        # loop has `bgtz` / `mfc2 t0,SZ1` in the slot / `mtc2 t0,VXY0` at the target -- the GTE must get
+        # the vertex t0 was loaded with. Written at once, every fighter came out as a fan of spikes.
+        a.li(T0, 0x5555); a.mtc2(T0, 9); a.nop(); a.nop()                    # IR1 = 0x5555
+        a.li(T2, 0x1234)
+        a.mfc2(T2, 9); a.addu(T3, T2, ZERO); a.nop()                        # the slot sees the old T2
+        self.check(T3, 0x1234); self.check(T2, 0x5555)
+        a.li(T0, 0x00777777); a.ctc2(T0, 6); a.nop(); a.nop()                # TRY
+        a.li(T2, 0x4321)
+        a.cfc2(T2, 6); a.addu(T3, T2, ZERO); a.nop()
+        self.check(T3, 0x4321); self.check(T2, 0x00777777)
+        a.li(T2, 0x6789)
+        a.mfc0(T2, C0_SR); a.addu(T3, T2, ZERO); a.nop()
+        self.check(T3, 0x6789); self.check(T2, 0x40400000)
+        # Tekken 2's shape: the move in a branch's delay slot, the reader at the branch target
+        a.li(T0, 0x00ABCDEF); a.li(T1, 1)
+        a.bgtz(T1, 'mfc_tgt')
+        a.mfc2(T0, 9)                                                         # (IR1 = 0x5555)
+        a.label('mfc_tgt')
+        a.mtc2(T0, 0); a.nop(); a.nop()                                      # VXY0 = the OLD t0
+        a.mfc2(T2, 0); a.nop(); self.check(T2, 0x00ABCDEF); self.check(T0, 0x5555)
+        # ...and the slot's own write to the same register wins over the move's
+        a.li(T2, 0x1111)
+        a.mfc2(T2, 9); a.li(T2, 0x2222); a.nop(); self.check(T2, 0x2222)
         # the same RAM through KSEG0 and KSEG1 is the same RAM
         a.li(T0, 0x0BADF00D); a.sw(T0, 0x20, S0)
         a.li(S1, SCRATCH | 0x80000000); a.lw(T2, 0x20, S1); a.nop(); self.check(T2, 0x0BADF00D)
@@ -680,7 +705,7 @@ class Gen:
         self.check(T2, 0x44444444)
         a.lw(T3, EXCAUSE - EXCN, S0); a.nop()
         a.andi(T3, T3, 0x7C); self.check(T3, 4 << 2)
-        a.mfc0(T3, C0_BADVADDR); self.check(T3, SCRATCH + 2)
+        a.mfc0(T3, C0_BADVADDR); a.nop(); self.check(T3, SCRATCH + 2)
         # an exception in a branch delay slot: EPC is the BRANCH, Cause.BD set
         a.la(T4, 'bd_site')
         a.label('bd_site')
@@ -722,16 +747,19 @@ class Gen:
         a.li(K0, EXCN)
         a.lw(K1, 0, K0); a.nop()
         a.addiu(K1, K1, 1); a.sw(K1, 0, K0)
-        a.mfc0(K1, C0_CAUSE); a.sw(K1, EXCAUSE - EXCN, K0)
-        a.mfc0(K1, C0_EPC);   a.sw(K1, EXEPC - EXCN, K0)
+        # (MFC0 is a load: its value is there one instruction later -- hence the NOPs)
+        a.mfc0(K1, C0_CAUSE); a.nop(); a.sw(K1, EXCAUSE - EXCN, K0)
+        a.mfc0(K1, C0_EPC);   a.nop(); a.sw(K1, EXEPC - EXCN, K0)
         # An interrupt returns to EPC itself; anything else steps past the
         # instruction that caused it -- or past the branch, if it was in a
         # delay slot, since re-executing the branch re-executes the slot.
         a.mfc0(K1, C0_CAUSE)
+        a.nop()
         a.andi(K1, K1, 0x7C)
         a.beq(K1, ZERO, 'exc_ret'); a.nop()
         a.mfc0(K1, C0_EPC)
         a.mfc0(K0, C0_CAUSE)
+        a.nop()
         a.bltz(K0, 'exc_bd'); a.nop()
         a.addiu(K1, K1, 4)
         a.j('exc_go'); a.nop()
@@ -742,6 +770,7 @@ class Gen:
         a.rfe()
         a.label('exc_ret')
         a.mfc0(K1, C0_EPC)
+        a.nop()
         a.jr(K1)
         a.rfe()
 

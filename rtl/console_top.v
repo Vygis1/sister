@@ -1275,7 +1275,7 @@ module console_top #(
 			.dbg_gpu_wr(ps1_dbg_gpu_wr), .dbg_mem(ps1_dbg_mem), .dbg_daddr(ps1_dbg_daddr),
 			.dbg_irq(ps1_dbg_irq), .dbg_gpu_st(ps1_dbg_gpu_st),
 			.dbg_cause(ps1_dbg_cause), .dbg_epc(ps1_dbg_epc),
-			.gte_snap_arm(1'b0),   // (the GTE snapshot: ps1_top DBG_OLD, off)
+			.gte_snap_arm((PS1_DBG >= 2) && gte_snap_arm),   // (the GTE snapshot: only in a PS1_DBG=2 image -- it costs area)
  .gte_snap_go(gte_snap_go), .gte_snap_skip(gte_snap_skip), .gte_snap_idx(gte_snap_idx),
 			.gte_snap_data(gte_snap_data), .gte_snap_word(gte_snap_word), .gte_snap_state(gte_snap_state),
 			.gte_wt_idx(gte_wt_idx), .gte_wt_pc(gte_wt_pc), .gte_wt_data(gte_wt_data), .gte_wt_reg(gte_wt_reg),

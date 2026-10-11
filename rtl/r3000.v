@@ -144,6 +144,15 @@ module r3000 (
 	reg [31:0] rf_lo, rf_hi;        // the live-value table: 00 bank 0, 01 bank 1, 1x bank 2
 	reg [31:0] rf_live;             // written since reset
 	reg        rf_w0, rf_w1, rf_w2; // this enable's writes (blocking, decided below)
+	// A move FROM a coprocessor (MFC0 / MFC2 / CFC2) is a load on the chip: its value reaches the
+	// register one instruction late, through the load delay slot (DuckStation: WriteRegDelayed for
+	// all three). Tekken 2's fighter loop depends on it -- `bgtz ...` / `mfc2 t0,SZ1` in the slot /
+	// `mtc2 t0,VXY0` at the branch target must hand the GTE the vertex t0 already held. Written at
+	// once, VXY0 got SZ1 and nine polygons in ten had a corner hundreds of pixels away.
+	reg        cop_ld;              // (blocking, set by exec: this instruction is such a move)
+	reg [4:0]  cop_ld_r;
+	reg [31:0] cop_ld_v;
+	reg        go_fast;             // (blocking: S_EXEC takes the next instruction straight away)
 	reg [31:0] s_a0, s_a1, s_ra, s_sp;   // copies of four registers for the debugger
 	reg [31:0] s_t1;
 	integer k;
@@ -418,6 +427,7 @@ module r3000 (
 		c2_we  <= 1'b0;
 		c2_cmd <= 1'b0;
 		rf_w0 = 1'b0; rf_w1 = 1'b0; rf_w2 = 1'b0;
+		cop_ld = 1'b0; cop_ld_r = 5'd0; cop_ld_v = 32'd0; go_fast = 1'b0;
 		if (rst) begin
 			rf_live <= 32'd0; rf_lo <= 32'd0; rf_hi <= 32'd0;
 			s_a0 <= 32'd0; s_a1 <= 32'd0; s_ra <= 32'd0; s_sp <= 32'd0; s_t1 <= 32'd0;
@@ -593,8 +603,9 @@ module r3000 (
 					// unusual -- a load, a store, an exception, a co-processor or
 					// divider stall, a misaligned jump, an interrupt, a cache miss
 					// -- goes the long way round, which is unchanged.
-					if (nst == S_FETCH && !no_overlap && !irq_now
-					    && (npc[1:0] == 2'b00) && fetch_hit) begin
+					go_fast = nst == S_FETCH && !no_overlap && !irq_now
+					          && (npc[1:0] == 2'b00) && fetch_hit;
+					if (go_fast) begin
 						if (ld_commit) begin
 							if (!(wb_en && wb_reg == ld_creg) && ld_creg != 5'd0)
 								rf_w1 = 1'b1;
@@ -610,6 +621,13 @@ module r3000 (
 						if_fast <= 1'b1;
 						st      <= S_EXEC;
 					end else st <= nst;
+					// a coprocessor move enters the load delay pipeline where a load whose word
+					// has just arrived would: straight to about-to-commit when the next
+					// instruction (the slot) is taken now, pending for the fetch cycle otherwise
+					if (cop_ld) begin
+						if (go_fast) begin ld_commit <= 1'b1; ld_creg <= cop_ld_r; ld_cval <= cop_ld_v; end
+						else         begin ld_pend   <= 1'b1; ld_reg  <= cop_ld_r; ld_val  <= cop_ld_v; end
+					end
 				end
 
 			// ---------------------------------------------------------------------------------
@@ -1044,13 +1062,13 @@ module r3000 (
 					if (w[25]) begin                               // RFE
 						SR <= {SR[31:4], SR[5:2]};
 					end else case (w[25:21])
-					5'h00: case (d)                                // MFC0
-						5'd8:  wreg(t, BADVADDR);
-						5'd12: wreg(t, SR);
-						5'd13: wreg(t, CAUSE);
-						5'd14: wreg(t, EPC);
-						5'd15: wreg(t, PRID);
-						default: wreg(t, 32'd0);
+					5'h00: case (d)                                // MFC0 (through the load delay slot)
+						5'd8:  wdly(t, BADVADDR);
+						5'd12: wdly(t, SR);
+						5'd13: wdly(t, CAUSE);
+						5'd14: wdly(t, EPC);
+						5'd15: wdly(t, PRID);
+						default: wdly(t, 32'd0);
 						endcase
 					5'h04: case (d)                                // MTC0
 						5'd12: SR    <= vb;
@@ -1089,7 +1107,7 @@ module r3000 (
 						c2_cmd  <= 1'b1;
 						c2_word <= w[24:0];
 					end else case (w[25:21])
-					5'h00, 5'h02: wreg(t, c2_rdata);               // MFC2 / CFC2
+					5'h00, 5'h02: wdly(t, c2_rdata);               // MFC2 / CFC2 (through the load delay slot)
 					5'h04, 5'h06: begin                            // MTC2 / CTC2
 						c2_we    <= 1'b1;
 						c2_ctl_r <= w[22];
@@ -1145,6 +1163,16 @@ module r3000 (
 			wb_en  <= 1'b1;
 			wb_reg <= r;
 			wb_val <= v;
+		end
+	endtask
+
+	task wdly;                 // a coprocessor move: the value goes through the load delay slot
+		input [4:0]  r;
+		input [31:0] v;
+		begin
+			cop_ld   = (r != 5'd0);
+			cop_ld_r = r;
+			cop_ld_v = v;
 		end
 	endtask
 
