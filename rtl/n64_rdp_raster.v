@@ -302,7 +302,7 @@ module n64_rdp_raster (
 		.sa0(sa0), .sa1(sa1), .sa2(sa2), .sa3(sa3), .sq0(sq0), .sq1(sq1), .sq2(sq2), .sq3(sq3),
 		.sp_valid(sp_valid), .sp_ready(sp_ready), .sp_x0(x), .sp_x1(x_end),
 		.sp_xl({xleft[0], xleft[1], xleft[2], xleft[3]}), .sp_xr({xright[0], xright[1], xright[2], xright[3]}),
-		.sp_acc({acc_rgba[0], acc_rgba[1], acc_rgba[2], acc_rgba[3], acc_z, acc_s, acc_t, acc_w}),
+		.sp_acc({acc_rgba[0], acc_rgba[1], acc_rgba[2], acc_rgba[3], acc_z, acc_s, acc_t, acc_w}), .sp_dx0(cdx0),
 		.sp_slot(sp_slot),
 		.sl_y({sl_y[1], sl_y[0]}), .sl_row({sl_row[1], sl_row[0]}),
 		.sl_clo({sl_clo[1], sl_clo[0]}), .sl_zlo({sl_zlo[1], sl_zlo[0]}), .sl_filled(sl_filled),
@@ -324,6 +324,11 @@ module n64_rdp_raster (
 	wire signed [15:0] dy16 = {{3{dy_s[12]}}, dy_s};
 	wire signed [15:0] xf16 = {8'd0, xfrac};
 	wire signed [15:0] dxb = $signed({3'd0, x}) - $signed(base_x[15:0]);   // x - base_x
+	// COPY mode: s, t, w are the span's at its first framebuffer word: unflipped, (end_x - x)
+	// words back from the span's value (n64rdp.py interpolate_st_copy)
+	reg  [12:0]  cdx0;
+	wire [12:0]  cdw = (fb_fmt == 3'd1) ? cdx0 >> 3 : (fb_fmt == 3'd4) ? cdx0 >> 1 : (fb_fmt == 3'd0) ? cdx0 : cdx0 >> 2;
+	wire signed [15:0] dxm = copy_mode ? -$signed({3'd0, cdw}) : dxb;
 
 	// =============================================================================
 	// the sequence
@@ -356,7 +361,7 @@ module n64_rdp_raster (
 			y <= lo >>> 2;
 			y_last <= (hi - 14'sd1) >>> 2;
 			sub <= 4'd0; at_ra <= 5'd4;
-			if ((((hi - 14'sd1) >>> 2) < (lo >>> 2)) || copy_mode) st <= S_DONE;
+			if (((hi - 14'sd1) >>> 2) < (lo >>> 2)) st <= S_DONE;
 			else st <= fill_mode ? S_Y : S_PRIM;
 		end
 		// the per-primitive values: drgba_dx (attr 4-7), drgba_dy (12-15), dz dx/dy (22, 30)
@@ -430,6 +435,7 @@ module n64_rdp_raster (
 			xe = (sx_max[15:3] > {2'd0, width} - 13'd1) ? {2'd0, width} - 13'd1 : sx_max[15:3];
 			x <= sx_min[15:3];
 			x_end <= xe;
+			cdx0 <= flip ? 13'd0 : sx_max[15:3] - sx_min[15:3];
 			sub <= 6'd0;
 			if (all_inv || all_over || all_under || (sc_field && (y[0] != sc_odd))) st <= S_LINE;
 			else if (sx_min[15:3] > xe) st <= S_LINE;
@@ -439,7 +445,7 @@ module n64_rdp_raster (
 				g_clo <= cline(row_px + {11'd0, sx_min[15:3]}, fb_fmt, fb_addr);
 				g_nc <= cline(row_px + {11'd0, xe}, fb_fmt, fb_addr) - cline(row_px + {11'd0, sx_min[15:3]}, fb_fmt, fb_addr) + 20'd1;
 				g_zlo <= zlinef(row_px + {11'd0, sx_min[15:3]}, z_addr);
-				g_nz <= (z_cmp || z_upd) ? zlinef(row_px + {11'd0, xe}, z_addr) - zlinef(row_px + {11'd0, sx_min[15:3]}, z_addr) + 20'd1 : 9'd0;
+				g_nz <= ((z_cmp || z_upd) && !copy_mode) ? zlinef(row_px + {11'd0, xe}, z_addr) - zlinef(row_px + {11'd0, sx_min[15:3]}, z_addr) + 20'd1 : 9'd0;
 				sl_y[nslot] <= y; sl_row[nslot] <= row_px;
 				sl_clo[nslot] <= cline(row_px + {11'd0, sx_min[15:3]}, fb_fmt, fb_addr);
 				sl_zlo[nslot] <= zlinef(row_px + {11'd0, sx_min[15:3]}, z_addr);
@@ -471,7 +477,7 @@ module n64_rdp_raster (
 				end
 				6'd2: begin
 					dm = (i == 6) ? dz_dx : (adx[i] & ~32'sh1F);
-					pa_de[i] <= dm * dxb;
+					pa_de[i] <= dm * dxm;
 				end
 				default: ;
 				endcase

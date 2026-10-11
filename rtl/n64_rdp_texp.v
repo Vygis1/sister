@@ -13,6 +13,12 @@
 // A request presented with its tile on clock c has its texel on `texel` on clock
 // c + 8. Nothing moves while ce is low (the pixel pipeline is stalled).
 //
+// COPY mode (copy = 1) goes the same way: the coordinates shifted but never clamped, the
+// pixel's offset in the framebuffer word added to s, and out of stage 8 on `cword` the 16-bit
+// word the copy pipe writes (n64rdp.py sample_texture_copy / _copy_word): the TMEM word, its
+// TLUT entry, or -- the 8 and 4-bit texels, in the word's first half -- two texels a byte
+// each, read by the first two ports. (an 8-bit framebuffer: cword[7:0] is the byte)
+//
 // Not yet: YUV, the convert stage (SET_CONVERT's K0-K3) and convert_one.
 //////////////////////////////////////////////////////////////////////////////////
 
@@ -27,12 +33,17 @@ module n64_rdp_texp (
 	input  wire [47:0]  tsz,
 	// the modes
 	input  wire         tlut, tlut_type, sample_quad, mid_texel_en, bilerp,
+	// COPY mode: the pixel's offset in its framebuffer word (dx & ~dx_mask); an 8-bit framebuffer
+	input  wire         copy,
+	input  wire [2:0]   soff,
+	input  wire         fb8,
 	// TMEM: the first reads (either half) and the second (the high half), a clock later
 	output reg  [10:0]  fa0, fa1, fa2, fa3,
 	input  wire [15:0]  fq0, fq1, fq2, fq3,
 	output reg  [10:0]  sa0, sa1, sa2, sa3,
 	input  wire [15:0]  sq0, sq1, sq2, sq3,
-	output reg  [39:0]  texel              // {r, g, b, a}, 10 bits each, signed
+	output reg  [39:0]  texel,             // {r, g, b, a}, 10 bits each, signed
+	output reg  [15:0]  cword              // COPY mode's word (beside texel)
 );
 	integer      i;
 
@@ -86,6 +97,11 @@ module n64_rdp_texp (
 	end endfunction
 	function [39:0] ia16; input [15:0] w; ia16 = {2'b00, w[15:8], 2'b00, w[15:8], 2'b00, w[15:8], 2'b00, w[7:0]}; endfunction
 	function [39:0] rep4; input [7:0] v; rep4 = {2'b00, v, 2'b00, v, 2'b00, v, 2'b00, v}; endfunction
+	// COPY mode's texel a byte: 8-bit the byte, 4-bit the nibble twice, else the high byte
+	function [7:0] cp_samp; input [15:0] w; input bsel, nsel; input [1:0] sz; reg [7:0] b; reg [3:0] n; begin
+		b = bsel ? w[7:0] : w[15:8]; n = nsel ? b[3:0] : b[7:4];
+		cp_samp = (sz == 2'd1) ? b : (sz == 2'd0) ? {n, n} : w[15:8];
+	end endfunction
 
 	// --- the modes, carried down the stages: {fmt, size, line, tmem, palette, tlut,
 	// tlut_type, sample_quad, bilerp} (31 bits) ------------------------------------------------
@@ -110,15 +126,23 @@ module n64_rdp_texp (
 	reg  [9:0]   mk_1;                    // {mask_s, mirror_s, mask_t, mirror_t} of the request
 	reg  [4:0]   fx_1, fy_1;
 	reg          mid_1, upr_1, up_1;      // mid-texel; fx + fy >= 32 as fetched; and after mid-texel
+	// COPY mode, down the stages: {copy, the two-texel word, the 16-bit word's offset (0-3),
+	// an 8-bit framebuffer; its pixel's offset odd}
+	reg  [5:0]   cp_1, cp_2, cp_3, cp_4, cp_5, cp_6, cp_7;
+	wire [1:0]   so_in = fb8 ? soff[2:1] : soff[1:0];
+	wire         rep_in = so_in < 2'd2 && size_i != 2'd2 && !tlut;
 	always @(posedge clk) if (ce) begin : coord
 		reg signed [16:0] sc, tcv;
 		reg [4:0] ffx, ffy;
-		sc = clamp_c(clamp_s, s_in, shift_s, slo, shi);
-		tcv = clamp_c(clamp_t, t_in, shift_t, tlo, thi);
-		ffx = (sample_quad || tlut) ? sc[4:0] : 5'd0;
-		ffy = (sample_quad || tlut) ? tcv[4:0] : 5'd0;
+		sc = clamp_c(clamp_s && !copy, s_in, shift_s, slo, shi);
+		tcv = clamp_c(clamp_t && !copy, t_in, shift_t, tlo, thi);
+		ffx = ((sample_quad || tlut) && !copy) ? sc[4:0] : 5'd0;
+		ffy = ((sample_quad || tlut) && !copy) ? tcv[4:0] : 5'd0;
 		fx_1 <= ffx; fy_1 <= ffy;
-		si_1 <= sc >>> 5; ti_1 <= tcv >>> 5;
+		// (COPY: s + the offset; two texels from s + 2 * the offset)
+		si_1 <= (sc >>> 5) + (!copy ? 12'sd0 : rep_in ? $signed({9'd0, so_in, 1'b0}) : $signed({10'd0, so_in}));
+		ti_1 <= tcv >>> 5;
+		cp_1 <= {copy, rep_in, so_in, fb8, soff[0]};
 		mk_1 <= {mask_s, mirror_s, mask_t, mirror_t};
 		mid_1 <= mid_texel_en && bilerp && ffx == 5'h10 && ffy == 5'h10;
 		upr_1 <= ({1'b0, ffx} + {1'b0, ffy}) >= 6'h20;
@@ -149,8 +173,9 @@ module n64_rdp_texp (
 		if (`M_TLUT(m1) && !`M_SQ(m1)) begin
 			ts_2[1] <= s0_1; ts_2[3] <= s0_1; tt_2[2] <= t0_1; tt_2[3] <= t0_1; ts_2[0] <= s0_1; tt_2[0] <= t0_1;
 		end
-		lo_2[0] <= up_1 ? 2'd3 : 2'd0; lo_2[1] <= 2'd1; lo_2[2] <= 2'd2; lo_2[3] <= 2'd3;
+		lo_2[0] <= cp_1[5] ? cp_1[3:2] : up_1 ? 2'd3 : 2'd0; lo_2[1] <= 2'd1; lo_2[2] <= 2'd2; lo_2[3] <= 2'd3;
 		fx_2 <= fx_1; fy_2 <= fy_1; mid_2 <= mid_1; upr_2 <= upr_1; up_2 <= up_1;
+		cp_2 <= cp_1;
 		m2 <= m1;
 	end
 
@@ -188,7 +213,7 @@ module n64_rdp_texp (
 			endcase
 		end
 		fx_3 <= fx_2; fy_3 <= fy_2; mid_3 <= mid_2; upr_3 <= upr_2; up_3 <= up_2;
-		m3 <= m2;
+		m3 <= m2; cp_3 <= cp_2;
 	end
 
 	// --- 4: TMEM reads (its own register) -----------------------------------------------------------
@@ -197,12 +222,13 @@ module n64_rdp_texp (
 	always @(posedge clk) if (ce) begin
 		for (i = 0; i < 4; i = i + 1) begin bix_4[i] <= bix_3[i]; wix_4[i] <= wix_3[i]; ts_4[i] <= ts_3[i]; lo_4[i] <= lo_3[i]; end
 		fx_4 <= fx_3; fy_4 <= fy_3; mid_4 <= mid_3; upr_4 <= upr_3; up_4 <= up_3;
-		m4 <= m3;
+		m4 <= m3; cp_4 <= cp_3;
 	end
 
 	// --- 5: the words: decoded, and (a TLUT, a 32-bit RGBA texel) the second reads ------------
 	reg  [15:0]  fw_5 [0:3];
 	reg  [39:0]  tx_5 [0:3];
+	reg  [15:0]  cw_5;
 	reg  [4:0]   fx_5, fy_5;  reg mid_5, up_5;
 	always @(posedge clk) if (ce) begin : r2
 		reg [15:0] w; reg [7:0] byt; reg [3:0] nib; reg [7:0] v; reg [10:0] e; reg [1:0] sz; reg [2:0] fm;
@@ -245,16 +271,20 @@ module n64_rdp_texp (
 			endcase
 		end
 		fx_5 <= fx_4; fy_5 <= fy_4; mid_5 <= mid_4; up_5 <= up_4;
-		m5 <= m4;
+		m5 <= m4; cp_5 <= cp_4;
+		// COPY: the word; or two texels, a byte each (8-bit: the byte; 4-bit: the nibble twice;
+		// 32-bit: the word's high byte)
+		if (cp_4[4]) cw_5 <= {cp_samp(fq0, bix_4[0][0], ts_4[0][0], sz), cp_samp(fq1, bix_4[1][0], ts_4[1][0], sz)};
+		else cw_5 <= fq0;
 	end
 
 	// --- 6: TMEM's second reads (its own register) --------------------------------------------
-	reg  [15:0]  fw_6 [0:3];  reg [39:0] tx_6 [0:3];
+	reg  [15:0]  fw_6 [0:3];  reg [39:0] tx_6 [0:3];  reg [15:0] cw_6, cw_7;
 	reg  [4:0]   fx_6, fy_6;  reg mid_6, up_6;
 	always @(posedge clk) if (ce) begin
 		for (i = 0; i < 4; i = i + 1) begin fw_6[i] <= fw_5[i]; tx_6[i] <= tx_5[i]; end
 		fx_6 <= fx_5; fy_6 <= fy_5; mid_6 <= mid_5; up_6 <= up_5;
-		m6 <= m5;
+		m6 <= m5; cp_6 <= cp_5; cw_6 <= cw_5;
 	end
 
 	// --- 7: the second words: a TLUT's colour, a 32-bit texel's blue and alpha --------------
@@ -270,7 +300,8 @@ module n64_rdp_texp (
 			else tx_7[i] <= tx_6[i];
 		end
 		fx_7 <= fx_6; fy_7 <= fy_6; mid_7 <= mid_6; up_7 <= up_6;
-		m7 <= m6;
+		m7 <= m6; cp_7 <= cp_6;
+		cw_7 <= `M_TLUT(m6) ? sq0 : cw_6;
 	end
 
 	// --- 8: the filter: mid-texel average; 3-tap bilinear; or the base texel ------------------
@@ -289,6 +320,8 @@ module n64_rdp_texp (
 			end else r = b;
 			texel[39 - 10 * i -: 10] <= r[9:0];
 		end
+		// (an 8-bit framebuffer takes a byte: a TLUT's high one; else the offset's)
+		cword <= (!cp_7[1] || (cp_7[0] && !`M_TLUT(m7))) ? cw_7 : {cw_7[15:8], cw_7[15:8]};
 	end
 	`undef M_FMT
 	`undef M_SIZE
