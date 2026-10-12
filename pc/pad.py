@@ -1,10 +1,13 @@
-"""pad.py - a game controller on this PC (PS5 DualSense, PS4, Xbox... anything SDL knows)
-as player 1, through the ESP32: its state goes down the ESP32's USB serial port as a line
-"P <buttons> <lx> <ly> <rx> <ry>" whenever it changes and ten times a second regardless,
-and the ESP32 (esp32/console/pads.h) lays it out for whichever console is running -- or
-for the shell's menu -- and writes it to the board. No network, no server.
-
-    python pc/pad.py [--port COM6]
+"""pad.py - the ESP32's serial port, held for the PC's tools; and, asked for, a game
+controller on this PC relayed to the board.
+    python pc/pad.py [--port COM8] [--relay]
+--relay: a controller on this PC (PS5 DualSense, PS4, Xbox... anything SDL knows) goes down
+the ESP32's USB serial port as a line "P <buttons> <lx> <ly> <rx> <ry>" whenever it changes
+and ten times a second regardless, and the ESP32 (esp32/console/pads.h) lays it out for
+whichever console is running. OFF unless asked: the board's pads are Bluetooth now, and a
+DualShock left plugged into this PC was relayed as a second player with its L2 reading held
+(2026-10-13: MediEvil's camera spun on its own). The tools' own presses (menunav through
+the tool port) still go through.
 
 It also holds the serial port for the PC's tools: on 127.0.0.1:5557 a line "R <addr>" or
 "W <addr> <value>" (hex) is passed to the ESP32, and its answer ("= <value>", "= ok") comes
@@ -154,10 +157,12 @@ def main():
     threading.Thread(target=tools_server, daemon=True).start()
     pad = None
     last, last_t = None, 0.0
-    print('pad: waiting for a controller (plug it into this PC); tools on %s:%d' % TOOLS)
+    relay = '--relay' in sys.argv
+    print('pad: tools on %s:%d%s' % (TOOLS[0], TOOLS[1], '; relaying a controller on this PC' if relay else '; no controller relayed (--relay for that)'))
+    quiet = True                      # nothing sent since the last press ended
     while True:
         for ev in pygame.event.get():
-            if ev.type == pygame.CONTROLLERDEVICEADDED and pad is None:
+            if ev.type == pygame.CONTROLLERDEVICEADDED and pad is None and relay:
                 pad = controller.Controller(ev.device_index)
                 print('pad: %s connected' % pad.name)
             elif ev.type == pygame.CONTROLLERDEVICEREMOVED and pad is not None:
@@ -174,7 +179,14 @@ def main():
         if override[0] and now < override[1]:
             line = override[0]                # (a tool's press, see tools_server)
         cur = line
-        if cur != last or now - last_t > 0.1:
+        if not relay:
+            # only a tool's press reaches the board; one release after it, then silence, so the
+            # ESP32 drops the "PC pad" (pads.h: a second without a line) instead of keeping a
+            # phantom player
+            if override[0] and now < override[1]: quiet = False
+            elif quiet: time.sleep(1 / 250); continue
+            else: quiet = True; line = 'P 0 0 0 0 0'
+        if cur != last or now - last_t > 0.1 or not relay:
             try:
                 write(line + '\n')
             except Exception as e:
