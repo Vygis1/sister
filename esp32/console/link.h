@@ -122,7 +122,7 @@ public:
   // one raw sector in one frame: the LBA it is, then its 2352 bytes. The board
   // takes it only if it is the LBA it asked for, so a stale one is harmless.
   void cdSector(uint32_t lba, const uint8_t *raw) {
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeBulk();
     spi_.beginTransaction(sectorSettings_);
     digitalWrite(cs_, LOW);
     spi_.transfer(CMD_CD_SECTOR);
@@ -209,7 +209,7 @@ public:
     uint8_t hdr[3] = { (uint8_t)(offset >> 16), (uint8_t)(offset >> 8),
                        (uint8_t)offset };
     unlock();
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeBulk();
     spi_.beginTransaction(settings_);
     digitalWrite(cs_, LOW);
     spi_.transfer(CMD_FLASH_WRITE);
@@ -234,7 +234,7 @@ public:
     // during a verify means comparing an image against itself one page late.
     if (!waitDone(100)) return false;
 
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeBulk();
     spi_.beginTransaction(settings_);
     digitalWrite(cs_, LOW);
     spi_.transfer(CMD_FLASH_PAGE);
@@ -264,12 +264,23 @@ public:
     xSemaphoreGive(lock_);
   }
   void busWrite(uint32_t addr, uint32_t v) { busWrite(addr, &v, 1); }
+  // A pad's word, ahead of everything else. The disc task sends sector after sector and the XA
+  // task its chunks, each holding the link for a millisecond or two and taking it again at
+  // once; the pads' write (loop(), the lowest priority, the other core) queued behind a run of
+  // them -- a button that arrived late, or a release that arrived after the next press. Raised
+  // here, the flag makes every bulk transfer step aside before it takes the lock (takeBulk), so
+  // the pad waits for the one transfer in flight and no more.
+  void padWrite(uint32_t addr, uint32_t v) {
+    urgent_ = true;
+    busWrite(addr, &v, 1);
+    urgent_ = false;
+  }
   // A stream of words at the disc's clock, in one SPI call: the XA samples (37 kB a second of
   // music at 18.9 kHz, resampled). Byte by byte at 5 MHz they took the link from the disc and
   // the drive's 93 ms of sound ran dry -- Syphon Filter's intro was a garbled mess. (Little-endian
   // words are already in the order the board takes them: low byte first.)
   void busWriteFast(uint32_t addr, const uint32_t *w, size_t n) {
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeBulk();
     spi_.beginTransaction(sectorSettings_);
     digitalWrite(cs_, LOW);
     spi_.transfer(CMD_BUS_WRITE);
@@ -297,7 +308,7 @@ public:
 
   // n words from addr up, in one frame (rtl/esp_bus.v CMD_BUS_RDBLK)
   void busReadBlock(uint32_t addr, uint32_t *out, size_t n) {
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeBulk();
     spi_.beginTransaction(settings_);
     digitalWrite(cs_, LOW);
     spi_.transfer(CMD_BUS_RDBLK);
@@ -319,6 +330,11 @@ public:
   }
 
 private:
+  // the lock for a long transfer: not while a pad's word is waiting (see padWrite)
+  void takeBulk() {
+    while (urgent_) vTaskDelay(1);
+    xSemaphoreTake(lock_, portMAX_DELAY);
+  }
   void frame(uint8_t cmd, const uint8_t *tx, size_t txn,
              uint8_t *rx, size_t rxn) {
     xSemaphoreTake(lock_, portMAX_DELAY);
@@ -342,5 +358,6 @@ public:
   static const uint32_t CD_HZ = 10000000;     // the disc's sectors (see begin)
 private:
   SemaphoreHandle_t lock_ = nullptr;   // one transfer at a time, from whichever task
+  volatile bool urgent_ = false;       // a pad's write is waiting for the lock
   int sck_, miso_, mosi_, cs_, prog_, done_;
 };

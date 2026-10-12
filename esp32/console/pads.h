@@ -300,10 +300,10 @@ static void poll() {
   for (int i = 0; i < 2; i++) {
     const In &p = np[i].in;
     uint32_t v = np[i].on ? word(p, which) : 0;
-    if (v != last[i] || again) { fpga.busWrite(i ? JOY2 : JOY1, v); last[i] = v; }
+    if (v != last[i] || again) { fpga.padWrite(i ? JOY2 : JOY1, v); last[i] = v; }
     if (which == 4) {
       uint32_t st = np[i].on ? stickWord(p) : 0;
-      if (st != lastStick[i] || again) { fpga.busWrite(i ? N64_STICK2 : N64_STICK1, st); lastStick[i] = st; }
+      if (st != lastStick[i] || again) { fpga.padWrite(i ? N64_STICK2 : N64_STICK1, st); lastStick[i] = st; }
     }
   }
   // the N64: which controllers are plugged in (pad 1 always; pad 2 when there is one)

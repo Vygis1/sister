@@ -287,7 +287,7 @@ static void xaService() {
     if (room > 0 && head != tail) {
       uint32_t k = head - tail;
       if (k > (uint32_t)room) k = room;
-      if (k > 1024) k = 1024;
+      if (k > 512) k = 512;                           // (2 kB: 1.6 ms of the link at a time, so a pad's word gets in between)
       uint32_t t = tail % XA_PEND;
       if (k > XA_PEND - t) k = XA_PEND - t;           // (one contiguous stretch a write)
       fpga.busWriteFast(XA_CTRL + 0x6000, xaPend + t, k);
