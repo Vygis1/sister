@@ -14,6 +14,7 @@
 // PlayStation's disc served sector by sector off the card, its XA audio decoded here.
 
 #include <Preferences.h>
+#include <vector>
 #include <SPI.h>
 #include <SD.h>
 #include "link.h"
@@ -87,8 +88,21 @@ bool haveCard = false;
 // which sector it wants next and how much room it has, this task reads that
 // sector off the card and sends it. "disc /discs/crash.bin" over serial (or the menu)
 // puts the disc in; "eject" takes it out.
+static const uint32_t XA_CTRL = 0x00080000;   // the console's register page (the drive's TOC, the XA FIFO)
 static File     discFile;
-static String   discPath;                 // a card path
+static String   discPath;                 // a card path: a .bin, or a .cue naming its tracks
+// A disc is a run of sectors laid end to end out of its files (a cue sheet's FILEs in order,
+// as pc/cdaudio.py laid them): segments of (first LBA, count, which file, first sector in it),
+// a PREGAP being silence that is in no file. The tracks' starts and kinds go to the drive as
+// its table of contents (ps1_cdrom.v toc_*: console 0x5000 + 4 * entry) so GetTN / GetTD and
+// Play know them, and an audio track's sectors reach it like any other -- it hears the audio
+// by their lack of a sync pattern. Tekken 2's and MediEvil's music is in tracks 2 and up.
+struct DiscSeg { uint32_t first, count, off; int8_t file; };
+struct DiscTrack { uint8_t number; bool audio; uint32_t start; };
+static std::vector<String>    discFiles;     // the files, by index (paths on the card)
+static std::vector<DiscSeg>   discSegs;
+static std::vector<DiscTrack> discTracks;
+static int      discCurFile = -1;         // which of discFiles `discFile` is open on
 static volatile bool discIn = false;
 static uint32_t discSectors = 0, discServed = 0, discMisses = 0, discIdle = 0, discFetches = 0;
 static uint8_t *discBuf = nullptr;        // one sector, for the card path
@@ -130,12 +144,18 @@ static void ringClear() {
 
 static void discReopen() {
   if (discFile) discFile.close();
-  discFile = SD.open(discPath);
+  discFile = discCurFile >= 0 && discCurFile < (int)discFiles.size() ? SD.open(discFiles[discCurFile]) : File();
   rdFilePos = -1; discSick = 0;
   Serial.println(discFile ? "disc: reopened the image" : "disc: the image will not open");
 }
+// the segment holding sector `lba` (nullptr past the end)
+static const DiscSeg *discSegAt(uint32_t lba) {
+  for (auto &g : discSegs) if (lba >= g.first && lba < g.first + g.count) return &g;
+  return nullptr;
+}
 
 static void xaService();                       // (below, with the XA decoder)
+static void discTocUpload();                   // (below, with the disc)
 static volatile bool xaTaskUp = false;
 // XA in a task of its own, above loop() and the menu on core 1: in loop() it waited behind the
 // web server, the pads and the menu, and the drive's 93 ms of sound ran out between visits
@@ -154,27 +174,37 @@ static void cardReaderTask(void *) {
     if (n > WINDOW - slot) n = WINDOW - slot;
     if (n > want + AHEAD - rdNext) n = want + AHEAD - rdNext;
     if (n > discSectors - rdNext) n = discSectors - rdNext;
+    // inside one segment of the disc: the file it is in, and no further than its end
+    const DiscSeg *seg = discSegAt(rdNext);
+    if (!seg) { vTaskDelay(1); continue; }
+    if (n > seg->first + seg->count - rdNext) n = seg->first + seg->count - rdNext;
     for (uint32_t k = 0; k < n; k++) ringLba[slot + k] = 0xFFFFFFFF;   // about to change under the drive
     rdBusy = true;
     if (!discIn) { rdBusy = false; continue; }                         // ejected in between
-    if (!discFile) discReopen();
-    bool ok = discFile;
-    if (ok && rdFilePos != (int64_t)rdNext) {
-      ok = discFile.seek((uint64_t)rdNext * 2352);
-      rdFilePos = ok ? rdNext : -1;
-    }
     uint32_t got = 0;
-    if (ok) {
-      // bytes, not sectors: a read can come back short (see the note that used to
-      // be here -- a lost remainder offset every sector after it by a few bytes)
-      uint8_t *dst = discWin + (size_t)slot * 2352;
-      uint32_t want_bytes = n * 2352;
-      for (int tries = 0; tries < 8 && got < want_bytes; tries++) {
-        int r = discFile.read(dst + got, want_bytes - got);
-        if (r <= 0) break;
-        got += (uint32_t)r;
+    uint8_t *dst = discWin + (size_t)slot * 2352;
+    uint32_t want_bytes = n * 2352;
+    if (seg->file < 0) {                                               // a PREGAP: silence
+      memset(dst, 0, want_bytes);
+      got = want_bytes;
+    } else {
+      if (discCurFile != seg->file) { discCurFile = seg->file; discReopen(); }
+      else if (!discFile) discReopen();
+      bool ok = discFile;
+      if (ok && rdFilePos != (int64_t)rdNext) {
+        ok = discFile.seek((uint64_t)(seg->off + (rdNext - seg->first)) * 2352);
+        rdFilePos = ok ? rdNext : -1;
       }
-      rdFilePos = (got == want_bytes) ? (int64_t)(rdNext + n) : -1;
+      if (ok) {
+        // bytes, not sectors: a read can come back short (see the note that used to
+        // be here -- a lost remainder offset every sector after it by a few bytes)
+        for (int tries = 0; tries < 8 && got < want_bytes; tries++) {
+          int r = discFile.read(dst + got, want_bytes - got);
+          if (r <= 0) break;
+          got += (uint32_t)r;
+        }
+        rdFilePos = (got == want_bytes) ? (int64_t)(rdNext + n) : -1;
+      }
     }
     rdBusy = false;
     uint32_t whole = got / 2352;
@@ -212,7 +242,6 @@ static const uint8_t *discSectorCard(uint32_t lba) {
 // read -- starts the decoder over, as the chip's does. The PC did this when it served the disc
 // (pc/server.py XaPump); off the card nobody did, and Gran Turismo 2 played no music. xa.h is
 // that decoder, checked word for word against it (tools/ps1/xatest.py).
-static const uint32_t XA_CTRL = 0x00080000;
 static const uint32_t XA_PEND = 16384;        // decoded words waiting for room in the FIFO
 static uint32_t *xaPend = nullptr, *xaOut = nullptr;
 // a sound group at a time through internal RAM (xa.h: PSRAM in the inner loop cost 28 ms a sector)
@@ -301,7 +330,7 @@ static void discTask(void *) {
     if (!discIn) { xaRun = false; vTaskDelay(20 / portTICK_PERIOD_MS); continue; }
     CdStatus st = fpga.cdStatus();
     if (!st.alive || st.core != CORE_PS1_ID) { xaRun = false; vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
-    if (!st.disc) { xaRun = false; fpga.cdDisc(true); vTaskDelay(1); continue; }   // the core was reset: tell it again
+    if (!st.disc) { xaRun = false; fpga.cdDisc(true); discTocUpload(); vTaskDelay(1); continue; }   // the core was reset: tell it again, and its tracks
     xaRun = true;
     if (!st.running || st.room == 0 || st.lba >= discSectors) {
       discIdle++;
@@ -336,16 +365,111 @@ static String discRecall() {
   return v;
 }
 
+static uint32_t msfFrames(const String &t) {   // "mm:ss:ff" -> sectors
+  int c1 = t.indexOf(':'), c2 = t.indexOf(':', c1 + 1);
+  if (c1 < 0 || c2 < 0) return 0;
+  return (uint32_t)t.substring(0, c1).toInt() * 4500 + (uint32_t)t.substring(c1 + 1, c2).toInt() * 75 + (uint32_t)t.substring(c2 + 1).toInt();
+}
+// The table of contents into the drive (pc/server.py upload_toc did this): track n's first
+// sector with its audio bit (entry n), its start as mm:ss (entry 80h+n), the lead-out (0 / 80h),
+// first and last track (FFh).
+static void discTocUpload() {
+  if (discTracks.empty()) return;
+  const uint32_t TOC = XA_CTRL + 0x5000;
+  for (auto &t : discTracks) {
+    uint32_t n = t.number & 0x7F, s = (t.start + 150) / 75;
+    fpga.busWrite(TOC + 4 * n, (t.audio ? 1u << 24 : 0) | t.start);
+    fpga.busWrite(TOC + 4 * (0x80 | n), ((s / 60) << 6) | (s % 60));
+  }
+  uint32_t s = (discSectors + 150) / 75;
+  fpga.busWrite(TOC + 4 * 0, discSectors);
+  fpga.busWrite(TOC + 4 * 0x80, ((s / 60) << 6) | (s % 60));
+  fpga.busWrite(TOC + 4 * 0xFF, ((uint32_t)discTracks.front().number << 8) | discTracks.back().number);
+}
+// A cue sheet into discFiles / discSegs / discTracks, as pc/cdaudio.py Disc._parse_cue lays a
+// disc out: the FILEs end to end, each track starting at its INDEX 01, the INDEX 00 gap before
+// it kept (it is in the file), a PREGAP as silence in no file. Only BINARY files: a cue naming
+// MP3 or WAV audio is refused (the PC decoded those; the card holds raw tracks).
+static bool discParseCue(const String &cuePath) {
+  File cf = SD.open(cuePath);
+  if (!cf || cf.size() > 16384) { if (cf) cf.close(); return false; }
+  String cue = cf.readString(); cf.close();
+  String dir = cuePath.substring(0, cuePath.lastIndexOf('/') + 1);
+  struct T { DiscTrack t; int32_t i0, i1; uint32_t pregap; };
+  std::vector<std::vector<T>> perFile;
+  discFiles.clear(); discSegs.clear(); discTracks.clear();
+  int at = 0;
+  while (at < (int)cue.length()) {
+    int nl = cue.indexOf('\n', at); if (nl < 0) nl = cue.length();
+    String line = cue.substring(at, nl); line.trim(); at = nl + 1;
+    String up = line; up.toUpperCase();
+    if (up.startsWith("FILE ")) {
+      int q1 = line.indexOf('"'), q2 = q1 >= 0 ? line.indexOf('"', q1 + 1) : -1;
+      String name = (q1 >= 0 && q2 > q1) ? line.substring(q1 + 1, q2) : line.substring(5, line.lastIndexOf(' '));
+      String kind = up.substring(up.lastIndexOf(' ') + 1);
+      if (kind != "BINARY" && kind != "MOTOROLA") { Serial.println("disc: " + name + " is " + kind + " -- only raw tracks play from the card"); return false; }
+      int slash = name.lastIndexOf('/'); if (slash < 0) slash = name.lastIndexOf('\\');
+      if (slash >= 0) name = name.substring(slash + 1);
+      discFiles.push_back(dir + name);
+      perFile.push_back({});
+    } else if (up.startsWith("TRACK ") && !perFile.empty()) {
+      int sp = up.indexOf(' ', 6);
+      T t; t.t.number = (uint8_t)up.substring(6, sp).toInt(); t.t.audio = up.indexOf("AUDIO", sp) >= 0; t.t.start = 0; t.i0 = -1; t.i1 = -1; t.pregap = 0;
+      perFile.back().push_back(t);
+    } else if (up.startsWith("INDEX ") && !perFile.empty() && !perFile.back().empty()) {
+      int sp = up.indexOf(' ', 6);
+      int which = up.substring(6, sp).toInt(); String msf = up.substring(sp + 1); msf.trim();
+      if (which == 0) perFile.back().back().i0 = (int32_t)msfFrames(msf);
+      else if (which == 1) perFile.back().back().i1 = (int32_t)msfFrames(msf);
+    } else if (up.startsWith("PREGAP ") && !perFile.empty() && !perFile.back().empty()) {
+      String msf = up.substring(7); msf.trim();
+      perFile.back().back().pregap = msfFrames(msf);
+    }
+  }
+  if (discFiles.empty()) return false;
+  uint32_t pos = 0;
+  for (size_t fi = 0; fi < discFiles.size(); fi++) {
+    File f = SD.open(discFiles[fi]);
+    if (!f) { Serial.println("disc: the cue names " + discFiles[fi] + ", which is not on the card"); return false; }
+    uint32_t fsec = f.size() / 2352; f.close();
+    uint32_t consumed = 0;
+    auto &tracks = perFile[fi];
+    for (size_t i = 0; i < tracks.size(); i++) {
+      T &t = tracks[i];
+      if (t.pregap) { discSegs.push_back({ pos, t.pregap, 0, -1 }); pos += t.pregap; }
+      uint32_t startIn = t.i1 >= 0 ? (uint32_t)t.i1 : 0;
+      if (startIn > consumed) { discSegs.push_back({ pos, startIn - consumed, consumed, (int8_t)fi }); pos += startIn - consumed; consumed = startIn; }
+      t.t.start = pos;
+      uint32_t endIn = fsec;
+      if (i + 1 < tracks.size()) endIn = tracks[i + 1].i0 >= 0 ? (uint32_t)tracks[i + 1].i0 : (tracks[i + 1].i1 >= 0 ? (uint32_t)tracks[i + 1].i1 : fsec);
+      if (endIn > consumed) { discSegs.push_back({ pos, endIn - consumed, consumed, (int8_t)fi }); pos += endIn - consumed; consumed = endIn; }
+      discTracks.push_back(t.t);
+    }
+  }
+  discSectors = pos;
+  return !discTracks.empty();
+}
+
 static bool discInsert(const String &path) {
   // Open the new image BEFORE letting go of the one in the drive. The old order
   // stopped the drive first, so a path that was not on the card left the console
   // with no disc at all -- the BIOS sat at its logo (2026-09-30).
-  File nf = SD.open(path);
-  if (!nf) return false;
+  String lo = path; lo.toLowerCase();
+  if (lo.endsWith(".cue")) {
+    if (!discParseCue(path)) return false;
+  } else {
+    File nf = SD.open(path);
+    if (!nf) return false;
+    uint32_t n = nf.size() / 2352; nf.close();
+    discFiles.clear(); discSegs.clear(); discTracks.clear();
+    discFiles.push_back(path);
+    discSegs.push_back({ 0, n, 0, 0 });
+    discTracks.push_back({ 1, false, 0 });
+    discSectors = n;
+  }
   readerPause();
   if (discFile) discFile.close();
-  discFile = nf;
-  discSectors = discFile.size() / 2352;
+  discCurFile = -1;
   if (!discWin) discWin = (uint8_t *)ps_malloc(WINDOW * 2352);
   if (!discWin) return false;
   winBase = 0; winCount = 0;
@@ -354,13 +478,16 @@ static bool discInsert(const String &path) {
   discRemember(path);
   discServed = 0; discMisses = 0; discIdle = 0; discFetches = 0;
   fpga.cdDisc(true);
+  discTocUpload();
   discIn = true;
+  if (discTracks.size() > 1) Serial.printf("disc: %u tracks, %u sectors, %u files\n", (unsigned)discTracks.size(), (unsigned)discSectors, (unsigned)discFiles.size());
   return true;
 }
 static void discEject() {
   readerPause();
   fpga.cdDisc(false);
   if (discFile) discFile.close();
+  discCurFile = -1;
   discPath = "";
   discRemember("");
 }

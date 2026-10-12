@@ -199,8 +199,8 @@ static void scan() {
     int m = machineOfFolder(dir.substring(dir.lastIndexOf('/') + 1));
     // A PlayStation disc with more than one track comes as a .cue and a .bin per track, and
     // listing every .bin showed Tekken 2 three times. The cue sheet is the game: one entry,
-    // named after it, playing its first FILE (the data track); the track files it names are
-    // not listed on their own. A .bin without a cue is listed as before.
+    // named after it, played as the cue (its audio tracks with it); the track files it names
+    // are not listed on their own. A .bin without a cue is listed as before.
     std::vector<String> cueBins;
     if (m == 4) {
       File g = SD.open(dir);
@@ -226,7 +226,7 @@ static void scan() {
           if (first.length()) {
             File t = SD.open(dir + "/" + first);
             if (t) {
-              lists[m].push_back({ pooled(dir + "/" + first), pooled(n.substring(0, n.length() - 4)), (int8_t)m, (uint32_t)t.size() });
+              lists[m].push_back({ pooled(dir + "/" + n), pooled(n.substring(0, n.length() - 4)), (int8_t)m, (uint32_t)t.size() });   // (the cue: console.ino discInsert lays its tracks out)
               t.close();
             }
           }
