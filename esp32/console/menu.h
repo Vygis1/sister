@@ -681,9 +681,9 @@ static String switchTo(int m) {
 
 // --- the pages -------------------------------------------------------------------------------
 // Each page is a list of items (screens.h draws it) and what picking one does; B goes back up
-// the way it came. The splash, the keyboard, the QR codes, the pairing page and the pad test
-// are pages of their own.
-enum Page { P_HOME, P_GAMES, P_SETTINGS, P_PICTURE, P_WIFI, P_NETS, P_KEYBOARD, P_QR,
+// the way it came. The splash, the pairing page and the pad test are pages of their own.
+// (The Wi-Fi pages -- networks, the keyboard, the QR codes -- went with the Wi-Fi, 2026-10-12.)
+enum Page { P_HOME, P_GAMES, P_SETTINGS, P_PICTURE,
             P_PADS, P_PAIR, P_TEST, P_MAPS, P_MAP, P_WAITBTN, P_SYSTEM, P_ABOUT };
 struct Nav { Page page; int sel, top; };
 static Nav nav = { P_HOME, 0, 0 };
@@ -696,19 +696,11 @@ static String note;                         // one line under the list: what jus
 static String gameName;                     // the game in the console now
 static uint32_t pageT0 = 0;                 // when this page came up (the pairing countdown)
 
-// Wi-Fi: the networks the last scan found, the one being typed for
-struct Net { String ssid; int rssi; bool open; };
-static std::vector<Net> nets;
-static String kbFor, kbText;
-static int kbLayer = 0, kbRow = 1, kbCol = 0;
-static bool kbHide = false;
 // mapping: the console's layout and button being set; which of its two pad buttons
 static int mapL = 0, mapB = 0, mapSlot = 0;
 
-static int bars(int rssi) { return rssi > -55 ? 3 : rssi > -67 ? 2 : rssi > -78 ? 1 : 0; }
 static scr::Chrome chrome() {
   scr::Chrome c;
-  c.wifiBars = WiFi.status() == WL_CONNECTED ? bars(WiFi.RSSI()) : -1;
   pads::Player p[2]; pads::view(p);
   c.pad1 = p[0].on; c.pad2 = p[1].on;
   if (gameIn) c.running = gameName.c_str();
@@ -745,8 +737,6 @@ static std::vector<Item> items() {
     break;
   case P_SETTINGS: {
     v.push_back(item("Picture", art::G_HEART, ui::PINK, "scaling, scanlines"));
-    bool on = WiFi.status() == WL_CONNECTED;
-    v.push_back(item("Wi-Fi", on ? art::G_WIFI0 + bars(WiFi.RSSI()) : art::G_WIFI0, on ? ui::WHITE : ui::GREY, on ? WiFi.SSID().c_str() : "not connected"));
     pads::Player p[2]; pads::view(p);
     int n = p[0].on + p[1].on;
     v.push_back(item("Controllers", art::G_PAD, ui::GREEN, std::to_string(n) + " connected"));
@@ -755,22 +745,6 @@ static std::vector<Item> items() {
     break; }
   case P_PICTURE:
     for (int k = 0; k < NVSET; k++) v.push_back(item(VSET[k].name, 0, 0, VSET[k].vals[vidVal(k)], ui::YELLOW));
-    break;
-  case P_WIFI: {
-    bool on = WiFi.status() == WL_CONNECTED;
-    v.push_back(item("Network", on ? art::G_WIFI0 + bars(WiFi.RSSI()) : art::G_WIFI0, on ? ui::GREEN : ui::GREY,
-                     on ? WiFi.SSID().c_str() : "not connected", on ? ui::WHITE : ui::GREY));
-    v.push_back(item("Choose a network", art::G_RIGHT, ui::WHITE, "", ui::GREY, true));
-    v.push_back(item("Connect with a phone", art::G_QUAD + 15, ui::WHITE, "QR code"));
-    v.push_back(item("Forget this network", art::G_CIRCLE, ui::RED));
-    break; }
-  case P_NETS:
-    for (auto &n : nets) {
-      Item x = item(n.ssid.c_str(), art::G_WIFI0 + bars(n.rssi), ui::WHITE);
-      if (!n.open) x.valueGlyph = art::G_LOCK;
-      v.push_back(x);
-    }
-    v.push_back(item("Scan again", art::G_RIGHT, ui::YELLOW, "", ui::GREY, true));
     break;
   case P_PADS: {
     pads::Player p[2]; pads::view(p);
@@ -820,9 +794,6 @@ static std::vector<std::string> info() {
       v.push_back("Xbox:       hold the pair button");
       v.push_back("Switch Pro: hold sync");
     }
-  } else if (nav.page == P_WIFI) {
-    if (WiFi.status() == WL_CONNECTED) v.push_back(std::string("address ") + WiFi.localIP().toString().c_str());
-    v.push_back(std::string("its own network: ") + AP_SSID + " / " + AP_PASS);
   } else if (nav.page == P_SYSTEM || nav.page == P_SETTINGS) {
     Status st = fpga.status();
     int cm = machineOfCore(st.core);
@@ -843,8 +814,6 @@ static const char *title() {
   case P_HOME: return "CONSOLES";
   case P_SETTINGS: return "SETTINGS";
   case P_PICTURE: return "PICTURE";
-  case P_WIFI: return "WI-FI";
-  case P_NETS: return "CHOOSE A NETWORK";
   case P_PADS: return "CONTROLLERS";
   case P_MAPS: return "BUTTON MAPPING";
   case P_SYSTEM: return "SYSTEM";
@@ -858,7 +827,6 @@ static std::vector<scr::Hint> hintsFor() {
                              : std::vector<H>{ { art::G_CROSS, "open" } };
   case P_GAMES: return { { art::G_CROSS, "play" }, { art::G_CIRCLE, "back" }, { 0, "L1/R1 page" } };
   case P_PICTURE: case P_SYSTEM: return { { art::G_CROSS, "change" }, { art::G_CIRCLE, "back" } };
-  case P_NETS: return { { art::G_CROSS, "connect" }, { art::G_CIRCLE, "back" } };
   case P_MAP: return { { art::G_CROSS, "set" }, { art::G_SQUARE, "second" }, { art::G_CIRCLE, "back" } };
   default: return { { art::G_CROSS, "open" }, { art::G_CIRCLE, "back" } };
   }
@@ -887,12 +855,6 @@ static void draw() {
     std::string t = std::string(MACHINES[cur].name) + "  " + std::to_string(n) + (n == 1 ? " game" : " games");
     scr::list(ch, t, items(), nav.sel, nav.top, {}, note.c_str(), hintsFor(), 1);
     break; }
-  case P_KEYBOARD:
-    scr::keyboard(ch, std::string("PASSWORD FOR ") + ui::fit(kbFor.c_str(), 20), kbText.c_str(), kbHide, kbLayer, kbRow, kbCol, note.c_str());
-    break;
-  case P_QR:
-    scr::qrPage(ch, AP_SSID, AP_PASS, std::string("http://") + WiFi.softAPIP().toString().c_str() + "/");
-    break;
   case P_PAIR: {
     pads::Player p[2]; pads::view(p);
     std::vector<std::string> names;
@@ -965,32 +927,6 @@ static void splash() {
   ui::palette(art::MENU_PAL);
 }
 
-// --- Wi-Fi ------------------------------------------------------------------------------------------
-static void scanNets() {
-  message("looking for networks", "a few seconds");
-  int n = WiFi.scanNetworks();
-  nets.clear();
-  for (int i = 0; i < n; i++) {
-    String s = WiFi.SSID(i);
-    if (!s.length()) continue;
-    bool dup = false;
-    for (auto &x : nets) if (x.ssid == s) { dup = true; if (WiFi.RSSI(i) > x.rssi) x.rssi = WiFi.RSSI(i); }
-    if (!dup) nets.push_back({ s, WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN });
-  }
-  WiFi.scanDelete();
-  std::sort(nets.begin(), nets.end(), [](const Net &a, const Net &b) { return a.rssi > b.rssi; });
-  if (nets.size() > 30) nets.resize(30);
-}
-// join it, and keep it for the next power-up (as the web page's join does)
-static bool joinNet(const String &ssid, const String &pass) {
-  message(String("joining ") + ssid, "up to 15 seconds");
-  prefs.begin("net", false); prefs.putString("ssid", ssid); prefs.putString("pass", pass); prefs.end();
-  WiFi.begin(ssid.c_str(), pass.c_str());
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(200);
-  return WiFi.status() == WL_CONNECTED;
-}
-
 // --- picking a game ---------------------------------------------------------------------------
 static void playGame(const Game &g) {
   // the N64 game running now: its save to the card while the N64 is still there
@@ -1042,32 +978,13 @@ static void pickItem(bool second = false) {
     if (!lists[cur].empty()) playGame(lists[cur][s]);
     break;
   case P_SETTINGS:
-    if (s == 0) go(P_PICTURE); else if (s == 1) go(P_WIFI); else if (s == 2) go(P_PADS);
-    else if (s == 3) go(P_SYSTEM); else go(P_ABOUT);
+    if (s == 0) go(P_PICTURE); else if (s == 1) go(P_PADS);
+    else if (s == 2) go(P_SYSTEM); else go(P_ABOUT);
     break;
   case P_PICTURE:
     vidStep(s);
     { Status st = fpga.status(); if (st.alive && machineOfCore(st.core) >= 0) applyVideo(); }
     draw();
-    break;
-  case P_WIFI:
-    if (s == 1) { scanNets(); go(P_NETS); }
-    else if (s == 2) go(P_QR);
-    else if (s == 3) {
-      prefs.begin("net", false); prefs.clear(); prefs.end();
-      WiFi.disconnect(false, true);
-      note = "forgotten"; draw();
-    }
-    break;
-  case P_NETS:
-    if (s >= (int)nets.size()) { scanNets(); nav.sel = 0; nav.top = 0; draw(); break; }
-    if (nets[s].open) {
-      bool ok = joinNet(nets[s].ssid, "");
-      back(); note = ok ? "connected: " + WiFi.localIP().toString() : "could not join " + nets[s].ssid; draw();
-    } else {
-      kbFor = nets[s].ssid; kbText = ""; kbLayer = 0; kbRow = 1; kbCol = 0;
-      go(P_KEYBOARD);
-    }
     break;
   case P_PADS:
     if (s == 2) { pads::cmd = pads::CMD_PAIR_ON; go(P_PAIR); }
@@ -1095,39 +1012,6 @@ static void pickItem(bool second = false) {
     break;
   default: break;
   }
-}
-
-// the keyboard's buttons
-static void keyInput(uint16_t edge) {
-  using namespace pads;
-  int cols = scr::kbCols(kbRow);
-  if (edge & M_UP)    { kbRow = (kbRow + scr::KB_ROWS - 1) % scr::KB_ROWS; }
-  if (edge & M_DOWN)  { kbRow = (kbRow + 1) % scr::KB_ROWS; }
-  if (edge & (M_UP | M_DOWN)) { cols = scr::kbCols(kbRow); if (kbCol >= cols) kbCol = cols - 1; }
-  if (edge & M_LEFT)  kbCol = (kbCol + cols - 1) % cols;
-  if (edge & M_RIGHT) kbCol = (kbCol + 1) % cols;
-  if (edge & M_Y) kbLayer = kbLayer == 1 ? 0 : 1;
-  if (edge & M_X) kbHide = !kbHide;
-  if (edge & M_B) { if (kbText.length()) kbText.remove(kbText.length() - 1); else { back(); return; } }
-  bool done = edge & M_START;
-  if (edge & M_A) {
-    int act; char c = scr::keyAt(kbLayer, kbRow, kbCol, act);
-    if (c && c != ' ' && kbText.length() < 63) kbText += c;
-    else if (act == 0) kbLayer = kbLayer == 1 ? 0 : 1;
-    else if (act == 1) kbLayer = kbLayer == 2 ? 0 : 2;
-    else if (act == 2 && kbText.length() < 63) kbText += ' ';
-    else if (act == 3 && kbText.length()) kbText.remove(kbText.length() - 1);
-    else if (act == 4) done = true;
-  }
-  if (done) {
-    bool ok = joinNet(kbFor, kbText);
-    if (ok) {
-      backStack.pop_back();             // (not back to the network list: to Wi-Fi)
-      back();
-      note = "connected: " + WiFi.localIP().toString();
-    } else note = "could not join -- the password?";
-  }
-  draw();
 }
 
 // A game (or a core) put on the card from the PC: the lists read again. They were read once, at
@@ -1203,7 +1087,7 @@ static void task(void *) {
       ~LogAfter() {
         if (!e) return;
         std::string it;
-        if (open_ && nav.page != P_KEYBOARD) { auto v = items(); if (nav.sel < (int)v.size()) it = v[nav.sel].text; }
+        if (open_) { auto v = items(); if (nav.sel < (int)v.size()) it = v[nav.sel].text; }
         Serial.printf("menu: buttons %04x (new %04x), %s, level %d, item %d [%s]\n", p, e, open_ ? "open" : "closed",
                       nav.page == P_HOME ? 0 : nav.page == P_GAMES ? 1 : 2, nav.sel, it.c_str());
       }
@@ -1215,8 +1099,7 @@ static void task(void *) {
     if (sysMenu && gameIn) { closeMenu(); continue; }
     uint16_t press = edge | (rep ? p : 0);
     // pages that are not lists
-    if (nav.page == P_KEYBOARD) { if (press) keyInput(press); continue; }
-    if (nav.page == P_QR || nav.page == P_ABOUT) { if (edge & (pads::M_B | pads::M_A)) back(); continue; }
+    if (nav.page == P_ABOUT) { if (edge & (pads::M_B | pads::M_A)) back(); continue; }
     if (nav.page == P_PAIR) {
       if (edge & (pads::M_B | pads::M_A)) { back(); continue; }
       if (millis() - lastDraw > 500) { lastDraw = millis(); draw(); }
@@ -1265,7 +1148,7 @@ static void task(void *) {
     else if ((edge & pads::M_Y) && nav.page == P_HOME) go(P_SETTINGS);
     else if (edge & pads::M_B) back();
     // (the settings pages show live things -- the pads coming and going, Wi-Fi: now and then)
-    if (open_ && (nav.page == P_PADS || nav.page == P_SETTINGS || nav.page == P_WIFI || nav.page == P_HOME) && millis() - lastDraw > 1000) {
+    if (open_ && (nav.page == P_PADS || nav.page == P_SETTINGS || nav.page == P_HOME) && millis() - lastDraw > 1000) {
       lastDraw = millis(); draw();
     }
   }

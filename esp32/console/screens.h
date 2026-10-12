@@ -41,8 +41,7 @@ static void chrome(const Chrome &ch, const std::vector<Hint> &h) {
   glyph(2, 1, art::G_HEART, PINK);
   text(4, 1, "BYBA GAMES", YELLOW);
   if (!ch.running.empty()) text(16, 1, fit(ch.running, 12), GREY);
-  // Wi-Fi, then the two pads
-  glyph(31, 1, ch.wifiBars < 0 ? art::G_WIFI0 : art::G_WIFI0 + ch.wifiBars, ch.wifiBars < 0 ? GREY : WHITE);
+  // the two pads
   glyph(33, 1, art::G_PAD, ch.pad1 ? GREEN : GREY); glyph(34, 1, '1', ch.pad1 ? GREEN : GREY);
   glyph(36, 1, art::G_PAD, ch.pad2 ? GREEN : GREY); glyph(37, 1, '2', ch.pad2 ? GREEN : GREY);
   hints(h);

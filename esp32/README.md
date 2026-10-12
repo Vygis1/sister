@@ -152,11 +152,13 @@ here and this paragraph goes away.
 
 ## What it does at power-up
 
-1. Brings up a Wi-Fi access point (or joins one, if `wifi.json` is on the card).
-2. Reads `index.json` and scans `/roms`.
-3. Asks the FPGA what it is, with PING. The answer says whether the shell or a
-   console core is loaded, and which.
-4. Serves the page.
+1. Mounts the card and scans `/cores` and `/roms` for the menu.
+2. Asks the FPGA what it is, with PING. The answer says whether the shell or a
+   console core is loaded, and which; a shell gets the slot's core started.
+3. Takes Bluetooth pads and draws the menu on the TV. There is no Wi-Fi and no web
+   page any more (removed 2026-10-12): on this chip Wi-Fi shared the one radio and the
+   internal RAM with Bluetooth, and pads lost and delayed buttons while it was up.
+   Cores and games go onto the card in a PC.
 
 Picking a console the board is not currently running means: install the core
 into a free slot if it is not already in one, then boot that slot. Picking a
@@ -193,14 +195,9 @@ you are looking at rather than making you guess.
 
 ### Talking to it over USB
 
-Everything the page does, typed into the serial port at 115200 -- useful because
-the page lives on this chip's own access point, so reaching it from a desktop
-otherwise means taking that desktop off its network:
+Typed into the serial port at 115200 (what the PC's tools use through pc/pad.py):
 
     state              what the board is, and what is on the card
     cores              the core library on the card
     install <name>     write a core from the card into the flash slot
     boot / shell       start the installed core / go back to the shell
-    scan               networks in range, with their exact spelling
-    wifi <ssid> <pass> join a network and remember it
-    wstatus            whether the station is up, and why it last was not
