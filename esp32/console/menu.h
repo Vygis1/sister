@@ -117,7 +117,7 @@ static void freshBoard() {
   // link -- which made the drive's ring-restart race (fixed in ps1_cdrom.v, sb_stale) likelier.
   bool kept = ui::v2 && fpga.busRead(OSD + 0x5C) == 0x000000;
   ui::forget();
-  if (!kept) { ui::loadGlyphs(); Serial.println("menu: the board's glyphs loaded"); }
+  if (!kept) { ui::loadGlyphs(); Log.println("menu: the board's glyphs loaded"); }
   ui::palette(art::MENU_PAL);
 }
 static void osd(uint32_t ctrl) { ui::ctrl(ctrl); }
@@ -174,7 +174,7 @@ static void tidy() {
   for (auto &n : loose) {
     String dir = String("/roms/") + MACHINES[machineOfName(n)].core;
     SD.mkdir(dir);
-    if (SD.rename("/roms/" + n, dir + "/" + n)) Serial.println("menu: moved " + n + " into " + dir);
+    if (SD.rename("/roms/" + n, dir + "/" + n)) Log.println("menu: moved " + n + " into " + dir);
   }
 }
 static void scan() {
@@ -384,7 +384,7 @@ static bool cardInsert() {
     File w = SD.open(CARD_PATH, FILE_WRITE);
     if (w) { w.write(d, CARD_BYTES); w.close(); }
     free(d);
-    Serial.println("menu: a new memory card, " + String(CARD_PATH));
+    Log.println("menu: a new memory card, " + String(CARD_PATH));
   }
   File f = SD.open(CARD_PATH);
   if (!f || f.size() != CARD_BYTES) { if (f) f.close(); return false; }
@@ -493,7 +493,7 @@ static void eepService(bool now_ = false) {
   if (!memcmp(now, eepLast, eepSize)) return;
   SD.mkdir("/saves"); SD.mkdir("/saves/n64");
   File f = SD.open(eepPath, FILE_WRITE);
-  if (f) { f.write(now, eepSize); f.close(); memcpy(eepLast, now, eepSize); Serial.println("menu: saved " + eepPath); }
+  if (f) { f.write(now, eepSize); f.close(); memcpy(eepLast, now, eepSize); Log.println("menu: saved " + eepPath); }
 }
 
 // --- the SNES's save RAM -------------------------------------------------------------
@@ -536,7 +536,7 @@ static void srmService(bool now_ = false) {
   if (!memcmp(now, srmLast, srmSize)) return;
   SD.mkdir("/saves"); SD.mkdir("/saves/snes");
   File f = SD.open(srmPath, FILE_WRITE);
-  if (f) { f.write(now, srmSize); f.close(); memcpy(srmLast, now, srmSize); Serial.println("menu: saved " + srmPath); }
+  if (f) { f.write(now, srmSize); f.close(); memcpy(srmLast, now, srmSize); Log.println("menu: saved " + srmPath); }
 }
 
 // The PlayStation's BIOS: SCPH*.BIN in /bios, /roms/ps1 or /roms.
@@ -612,7 +612,7 @@ static String load(const Game &g) {
     b.close();
     if (!ok) return "the BIOS file ended early";
     fpga.busWrite(NES_FILL_END, 1);
-    if (!cardInsert()) Serial.println("menu: no memory card (" + String(CARD_PATH) + ")");
+    if (!cardInsert()) Log.println("menu: no memory card (" + String(CARD_PATH) + ")");
     if (!discInsert(g.path)) return String("cannot open the disc ") + g.path;
     fpga.busWrite(VID_CTRL, 3);
     fpga.busWrite(NES_CTRL, 1);
@@ -708,7 +708,7 @@ static String switchTo(int m) {
       }
     }
     // not up: back in the shell (the fallback takes it there; else PROGRAM_B) for the next round
-    Serial.printf("menu: the %s did not come up (round %d)\n", M.name, round + 1);
+    Log.printf("menu: the %s did not come up (round %d)\n", M.name, round + 1);
     t0 = millis();
     while (millis() - t0 < 3000 && fpga.status().core != 0) delay(100);
     if (fpga.status().core != 0) { fpga.forceShell(); delay(3000); }
@@ -1000,7 +1000,7 @@ static void playGame(const Game &g) {
   backStack.clear(); nav = { P_HOME, 0, 0 };
   osd(0);
   prefs.begin("menu", false); prefs.putString("last", g.path); prefs.end();
-  Serial.println(String("menu: loaded ") + g.path + (loadFixes ? " (" + String(loadFixes) + " chunk(s) written again)" : ""));
+  Log.println(String("menu: loaded ") + g.path + (loadFixes ? " (" + String(loadFixes) + " chunk(s) written again)" : ""));
 }
 
 // --- what a button does on each page -----------------------------------------------------------
@@ -1059,7 +1059,7 @@ static void rescanIfChanged() {
   if (!cardChanged) return;
   cardChanged = false;
   scan();
-  Serial.println("menu: the card changed -- its games read again");
+  Log.println("menu: the card changed -- its games read again");
 }
 static void openMenu() {
   rescanIfChanged();
@@ -1127,7 +1127,7 @@ static void task(void *) {
         if (!e) return;
         std::string it;
         if (open_) { auto v = items(); if (nav.sel < (int)v.size()) it = v[nav.sel].text; }
-        Serial.printf("menu: buttons %04x (new %04x), %s, level %d, item %d [%s]\n", p, e, open_ ? "open" : "closed",
+        Log.printf("menu: buttons %04x (new %04x), %s, level %d, item %d [%s]\n", p, e, open_ ? "open" : "closed",
                       nav.page == P_HOME ? 0 : nav.page == P_GAMES ? 1 : 2, nav.sel, it.c_str());
       }
     } logAfter{ p, edge };
@@ -1208,7 +1208,7 @@ static void begin() {
       uint8_t c = fpga.status().core;
       if (c != 0 && c != 255) break;
     }
-    Serial.printf("menu: booted the slot's core (%u)\n", fpga.status().core);
+    Log.printf("menu: booted the slot's core (%u)\n", fpga.status().core);
   }
   // The task first -- its stack wants one piece of internal RAM, which Bluetooth leaves
   // short and the card's list (hundreds of small names) leaves in pieces -- then the card:
@@ -1218,10 +1218,10 @@ static void begin() {
   uint32_t stack = 0;
   for (uint32_t st : { 10240u, 9216u, 8192u, 7168u })
     if ((ok = xTaskCreatePinnedToCore(task, "menu", st, nullptr, 1, nullptr, 1)) == pdPASS) { stack = st; break; }
-  Serial.printf("menu: task %s (stack %u), internal RAM %u free, largest block %u\n", ok == pdPASS ? "running" : "NOT STARTED",
+  Log.printf("menu: task %s (stack %u), internal RAM %u free, largest block %u\n", ok == pdPASS ? "running" : "NOT STARTED",
                 (unsigned)stack, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)big);
   scan();
-  for (int m : consoles) Serial.printf("menu: %s, %u games\n", MACHINES[m].name, (unsigned)lists[m].size());
+  for (int m : consoles) Log.printf("menu: %s, %u games\n", MACHINES[m].name, (unsigned)lists[m].size());
   scanned = true;
 }
 

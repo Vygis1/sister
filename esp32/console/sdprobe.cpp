@@ -6,6 +6,7 @@
 // is strictly before that: is there a card on the end of these four wires.
 
 #include "sdprobe.h"
+#include "log.h"
 #include <driver/gpio.h>
 
 // A card is specified to accept commands at 400 kHz or less until it is
@@ -280,11 +281,11 @@ void sdPinReport(int sck, int miso, int mosi, int cs) {
   struct { const char *name; int pin; } pins[] = {
     {"SCK ", sck}, {"MISO", miso}, {"MOSI", mosi}, {"CS  ", cs},
   };
-  Serial.println("    wire      GPIO  state");
+  Log.println("    wire      GPIO  state");
   for (auto &e : pins)
-    Serial.println("    " + String(e.name) + "      " +
+    Log.println("    " + String(e.name) + "      " +
                    (e.pin < 10 ? " " : "") + String(e.pin) + "   " + pinState(e.pin));
-  Serial.println("    (a powered module holds MISO and CS high; all four "
+  Log.println("    (a powered module holds MISO and CS high; all four "
                  "floating means no power)");
 }
 
@@ -375,7 +376,7 @@ bool sdRailFloating(int driven, int a, int b, int c) {
   // Every one of them had to sit low when the driven pin was low AND be dragged
   // high when it went high. Anything less is coincidence.
   bool coupled = (lowCount == 3 && highCount == 3);
-  Serial.println(String("    coupling test: driving GPIO") + driven +
+  Log.println(String("    coupling test: driving GPIO") + driven +
                  " high pulled " + highCount + " of 3 other pins up" +
                  (coupled ? "  -> THEY ARE ALL TIED TOGETHER" : "  -> independent"));
   return coupled;

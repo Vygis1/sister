@@ -189,11 +189,11 @@ static void usbLine(const String &l) {
 // --- Bluetooth pads ------------------------------------------------------------------------
 static ControllerPtr slot[2];
 static void onConnected(ControllerPtr c) {
-  for (auto &s : slot) if (!s) { s = c; Serial.printf("pads: %s in\n", c->getModelName().c_str()); return; }
-  Serial.println("pads: a third pad -- ignored");
+  for (auto &s : slot) if (!s) { s = c; Log.printf("pads: %s in\n", c->getModelName().c_str()); return; }
+  Log.println("pads: a third pad -- ignored");
 }
 static void onDisconnected(ControllerPtr c) {
-  for (auto &s : slot) if (s == c) { s = nullptr; Serial.println("pads: a pad left"); }
+  for (auto &s : slot) if (s == c) { s = nullptr; Log.println("pads: a pad left"); }
 }
 static bool btOn(int i) { return slot[i] && slot[i]->isConnected() && slot[i]->isGamepad(); }
 static In fromBt(ControllerPtr c) {
@@ -257,7 +257,7 @@ static void poll() {
     if (c == CMD_FORGET) {
       BP32.forgetBluetoothKeys();
       for (auto &s : slot) if (s) s->disconnect();
-      Serial.println("pads: paired pads forgotten");
+      Log.println("pads: paired pads forgotten");
     } else if (c == CMD_PAIR_ON) { BP32.enableNewBluetoothConnections(true); pairing = true; }
     else if (c == CMD_PAIR_OFF) { BP32.enableNewBluetoothConnections(false); pairing = false; }
   }
@@ -323,9 +323,9 @@ static void begin() {
 #if PADS_BT
   BP32.setup(&onConnected, &onDisconnected);
   BP32.enableNewBluetoothConnections(true);
-  Serial.println("pads: Bluetooth up -- pair a pad with SHARE + PS; or a pad on the PC (pc/pad.py)");
+  Log.println("pads: Bluetooth up -- pair a pad with SHARE + PS; or a pad on the PC (pc/pad.py)");
 #else
-  Serial.println("pads: a pad on the PC (pc/pad.py, over this USB port)");
+  Log.println("pads: a pad on the PC (pc/pad.py, over this USB port)");
 #endif
 }
 

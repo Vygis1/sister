@@ -17,6 +17,7 @@
 #include <vector>
 #include <SPI.h>
 #include <SD.h>
+#include "log.h"
 #include "link.h"
 #include "sdprobe.h"
 #include "xa.h"
@@ -79,6 +80,7 @@ SPIClass fpgaBus(VSPI), sdBus(HSPI);
 #endif
 FpgaLink fpga(fpgaBus, PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_PROG_B, PIN_DONE);
 Preferences prefs;
+ConsoleLog Log;                 // (log.h: quiet until "log on")
 
 bool haveCard = false;
 
@@ -146,7 +148,7 @@ static void discReopen() {
   if (discFile) discFile.close();
   discFile = discCurFile >= 0 && discCurFile < (int)discFiles.size() ? SD.open(discFiles[discCurFile]) : File();
   rdFilePos = -1; discSick = 0;
-  Serial.println(discFile ? "disc: reopened the image" : "disc: the image will not open");
+  Log.println(discFile ? "disc: reopened the image" : "disc: the image will not open");
 }
 // the segment holding sector `lba` (nullptr past the end)
 static const DiscSeg *discSegAt(uint32_t lba) {
@@ -407,7 +409,7 @@ static bool discParseCue(const String &cuePath) {
       int q1 = line.indexOf('"'), q2 = q1 >= 0 ? line.indexOf('"', q1 + 1) : -1;
       String name = (q1 >= 0 && q2 > q1) ? line.substring(q1 + 1, q2) : line.substring(5, line.lastIndexOf(' '));
       String kind = up.substring(up.lastIndexOf(' ') + 1);
-      if (kind != "BINARY" && kind != "MOTOROLA") { Serial.println("disc: " + name + " is " + kind + " -- only raw tracks play from the card"); return false; }
+      if (kind != "BINARY" && kind != "MOTOROLA") { Log.println("disc: " + name + " is " + kind + " -- only raw tracks play from the card"); return false; }
       int slash = name.lastIndexOf('/'); if (slash < 0) slash = name.lastIndexOf('\\');
       if (slash >= 0) name = name.substring(slash + 1);
       discFiles.push_back(dir + name);
@@ -430,7 +432,7 @@ static bool discParseCue(const String &cuePath) {
   uint32_t pos = 0;
   for (size_t fi = 0; fi < discFiles.size(); fi++) {
     File f = SD.open(discFiles[fi]);
-    if (!f) { Serial.println("disc: the cue names " + discFiles[fi] + ", which is not on the card"); return false; }
+    if (!f) { Log.println("disc: the cue names " + discFiles[fi] + ", which is not on the card"); return false; }
     uint32_t fsec = f.size() / 2352; f.close();
     uint32_t consumed = 0;
     auto &tracks = perFile[fi];
@@ -480,7 +482,7 @@ static bool discInsert(const String &path) {
   fpga.cdDisc(true);
   discTocUpload();
   discIn = true;
-  if (discTracks.size() > 1) Serial.printf("disc: %u tracks, %u sectors, %u files\n", (unsigned)discTracks.size(), (unsigned)discSectors, (unsigned)discFiles.size());
+  if (discTracks.size() > 1) Log.printf("disc: %u tracks, %u sectors, %u files\n", (unsigned)discTracks.size(), (unsigned)discSectors, (unsigned)discFiles.size());
   return true;
 }
 static void discEject() {
@@ -650,7 +652,7 @@ static bool installCard(File &f) {
         if (!fpga.readPage(SLOT_BASE + i * PAGE, got) && !fpga.readPage(SLOT_BASE + i * PAGE, got)) good = false;
         else if (memcmp(want, got, PAGE)) {
           good = false;
-          Serial.printf("install: page %u wrong, sector %u again\n", i, sec);
+          Log.printf("install: page %u wrong, sector %u again\n", i, sec);
         }
       }
     }
@@ -660,7 +662,7 @@ static bool installCard(File &f) {
     }
     job.done = p1;
   }
-  if (redone) Serial.printf("install: %u sector(s) written again\n", redone);
+  if (redone) Log.printf("install: %u sector(s) written again\n", redone);
   job.stage = "verified";
   return true;
 }
@@ -742,9 +744,9 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 #if CONFIG_IDF_TARGET_ESP32S3
-  Serial.println("\nconsole: ESP32-S3 front door");
+  Log.println("\nconsole: ESP32-S3 front door");
 #else
-  Serial.println("\nconsole: ESP32 (T8) front door");
+  Log.println("\nconsole: ESP32 (T8) front door");
 #endif
 
   // Before ANY peripheral claims a pin. Once SPI owns them through the GPIO
@@ -796,7 +798,7 @@ void setup() {
   xaOut  = (uint32_t *)ps_malloc(xa::MAX_OUT * 4);
   xaSec  = (uint8_t *)ps_malloc(2352);
   xaPend = (xaOut && xaSec) ? (uint32_t *)ps_malloc(XA_PEND * 4) : nullptr;   // (xaPend set: XA on)
-  if (!xaPend) Serial.println("xa: no PSRAM for the decoder: no CD audio");
+  if (!xaPend) Log.println("xa: no PSRAM for the decoder: no CD audio");
   xaDec.reset();
   xTaskCreatePinnedToCore(discTask, "disc", 8192, nullptr, 2, nullptr, 0);
   // the card reader on the OTHER core: the two buses then work at once (see
@@ -806,8 +808,8 @@ void setup() {
   // the disc that was in goes back in
   { String was = discRecall();
     if (was.length()) {
-      Serial.println("disc: putting " + was + " back in");
-      if (!discInsert(was)) Serial.println("disc: ...but it would not open");
+      Log.println("disc: putting " + was + " back in");
+      if (!discInsert(was)) Log.println("disc: ...but it would not open");
     } }
   sdWhy = sdProbeSummary(sdInfo, haveCard);
   if (haveCard) {
@@ -820,9 +822,9 @@ void setup() {
     sdWhy += ", filesystem sees " + String((double)total / 1073741824.0, 1) +
              " GB, " + String((double)(total - used) / 1073741824.0, 1) + " GB free";
   }
-  Serial.println("SD: " + sdWhy);
-  if (sd.verdict) Serial.println("    " + String(sd.verdict));
-  Serial.println(String("    MISO idles ") +
+  Log.println("SD: " + sdWhy);
+  if (sd.verdict) Log.println("    " + String(sd.verdict));
+  Log.println(String("    MISO idles ") +
                  (sd.misoHigh ? "HIGH (module has power)"
                               : "LOW (no power, or not connected)"));
   // Only when the CARD did not answer. Gating this on "did it mount" was wrong:
@@ -831,29 +833,29 @@ void setup() {
   // A diagnostic that fires on the wrong condition is worse than none, because
   // it sends you to check the thing that is already fine.
   if (!sdInfo.responded) {
-    Serial.print(pinMap);
+    Log.print(pinMap);
     sdPinReport(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
     if (sdRailFloating(PIN_SD_MOSI, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_CS))
-      Serial.println("    => the module IS wired to these four pins and has NO "
+      Log.println("    => the module IS wired to these four pins and has NO "
                      "POWER. Its supply rail is floating, which is why the pins "
                      "drag each other around. Check VCC and GND at the module.");
     else
-      Serial.println("    => these pins are genuinely unconnected - the wires "
+      Log.println("    => these pins are genuinely unconnected - the wires "
                      "are not reaching the module at all.");
   }
 
   Status s = fpga.status();
-  Serial.printf("FPGA: %s", s.alive ? "answering" : "NOT ANSWERING");
-  if (!s.alive) Serial.print("\n" + bootPins);
-  if (s.alive) Serial.printf(", protocol %u, core %u", s.version, s.core);
-  Serial.println();
+  Log.printf("FPGA: %s", s.alive ? "answering" : "NOT ANSWERING");
+  if (!s.alive) Log.print("\n" + bootPins);
+  if (s.alive) Log.printf(", protocol %u, core %u", s.version, s.core);
+  Log.println();
 
   menu::begin();
   xaChIn  = (uint8_t *)heap_caps_malloc(128, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   xaChOut = (uint32_t *)heap_caps_malloc(xa::MAX_CHUNK * 4, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (!xaChIn || !xaChOut) { Serial.println("xa: no internal RAM for the decoder: no CD audio"); xaPend = nullptr; }
+  if (!xaChIn || !xaChOut) { Log.println("xa: no internal RAM for the decoder: no CD audio"); xaPend = nullptr; }
   if (xaPend && xTaskCreatePinnedToCore(xaTask, "xa", 6144, nullptr, 2, nullptr, 1) != pdPASS)
-    Serial.println("xa: no task (it runs from loop() instead)");
+    Log.println("xa: no task (it runs from loop() instead)");
   pads::begin();
   menu::menuButton = []() { bool m = pads::menuPressed; pads::menuPressed = false; return m; };
 }
@@ -1055,6 +1057,9 @@ static void serialCommand(String c) {
       return;
     }
     Serial.println("  installing " + cardCore + " from the card");
+  } else if (c == "log on" || c == "log off") {
+    Log.on = c.endsWith("on");
+    Serial.println(Log.on ? "  logging on (until a reset)" : "  logging off");
   } else if (c == "boot" || c == "core") {
     fpga.boot(true);
     Serial.println("  booting the core");
@@ -1063,7 +1068,7 @@ static void serialCommand(String c) {
     Serial.println(PIN_PROG_B >= 0 ? "  pulled PROGRAM_B, back in the shell"
                                    : "  PROGRAM_B is not wired");
   } else if (c.length()) {
-    Serial.println("  state | cores | install <name> | boot | shell");
+    Serial.println("  state | cores | install <name> | boot | shell | log on|off");
   }
 }
 
