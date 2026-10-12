@@ -197,6 +197,44 @@ static void scan() {
   if (SD.exists("/discs")) dirs.push_back("/discs");
   for (auto &dir : dirs) {
     int m = machineOfFolder(dir.substring(dir.lastIndexOf('/') + 1));
+    // A PlayStation disc with more than one track comes as a .cue and a .bin per track, and
+    // listing every .bin showed Tekken 2 three times. The cue sheet is the game: one entry,
+    // named after it, playing its first FILE (the data track); the track files it names are
+    // not listed on their own. A .bin without a cue is listed as before.
+    std::vector<String> cueBins;
+    if (m == 4) {
+      File g = SD.open(dir);
+      while (g) {
+        File f = g.openNextFile();
+        if (!f) break;
+        String n = baseName(f);
+        String lo = n; lo.toLowerCase();
+        if (!f.isDirectory() && n[0] != '.' && lo.endsWith(".cue") && f.size() < 8192) {
+          String cue = f.readString();
+          String first;
+          int at = 0;
+          while ((at = cue.indexOf("FILE ", at)) >= 0) {
+            int q1 = cue.indexOf('"', at), q2 = q1 >= 0 ? cue.indexOf('"', q1 + 1) : -1;
+            if (q1 < 0 || q2 < 0) break;
+            String bin = cue.substring(q1 + 1, q2);
+            int slash = bin.lastIndexOf('/'); if (slash < 0) slash = bin.lastIndexOf('\\');
+            if (slash >= 0) bin = bin.substring(slash + 1);
+            cueBins.push_back(bin);
+            if (!first.length()) first = bin;
+            at = q2 + 1;
+          }
+          if (first.length()) {
+            File t = SD.open(dir + "/" + first);
+            if (t) {
+              lists[m].push_back({ pooled(dir + "/" + first), pooled(n.substring(0, n.length() - 4)), (int8_t)m, (uint32_t)t.size() });
+              t.close();
+            }
+          }
+        }
+        f.close();
+      }
+      if (g) g.close();
+    }
     {
       File g = SD.open(dir);
       while (g) {
@@ -206,6 +244,7 @@ static void scan() {
         String lo = n; lo.toLowerCase();
         // (a PlayStation's are its raw 2352-byte .bin images; its BIOS is not a game)
         bool ok = m != 4 || (lo.endsWith(".bin") && !lo.startsWith("scph"));
+        if (ok && m == 4) for (auto &cb : cueBins) if (cb == n) { ok = false; break; }   // (a cue's track)
         if (!f.isDirectory() && n.length() && n[0] != '.' && ok) {
           int dot = n.lastIndexOf('.');
           lists[m].push_back({ pooled(dir + "/" + n), pooled(dot > 0 ? n.substring(0, dot) : n), (int8_t)m, (uint32_t)f.size() });
