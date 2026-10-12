@@ -57,7 +57,7 @@ module nes #(
 	input  wire [7:0]  joy2,
 
 	// --- audio --------------------------------------------------------------
-	output wire [15:0] audio,          // signed 16-bit, at whatever rate ce runs
+	output reg  [15:0] audio,          // signed 16-bit, at whatever rate ce runs (a clock behind the APU)
 
 	// --- video --------------------------------------------------------------
 	output wire [8:0]  px,
@@ -280,7 +280,10 @@ module nes #(
 		.sample(apu_sample)
 	);
 
-	assign audio = apu_sample;
+	// Registered: the sweep units, the channel outputs, the non-linear mixer's tables and the
+	// HDMI audio filter's multiplier made one 19.7 ns path at 50 MHz (0.003 ns to spare on the
+	// 2026-10-12 build). A sample 20 ns late is no sample late.
+	always @(posedge clk) audio <= apu_sample;
 
 	// --- OAM DMA ---------------------------------------------------------------
 	wire [15:0] dma_addr = {dma_page, dma_count[7:0]};
