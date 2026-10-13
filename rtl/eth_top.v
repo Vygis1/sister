@@ -31,6 +31,8 @@ module eth_top #(
 	parameter CORE_PS1 = 0,
 	parameter CORE_N64 = 0,
 	parameter CORE_SNES = 0,
+	parameter CORE_GB  = 0,     // the Game Boy (gb_top): its own image, the cartridge in DDR3, core id 'B'
+	parameter CORE_A26 = 0,     // the Atari 2600 (a26_top): its own image, core id 'A'
 	// 1: the network (see the top). 0: none -- the ESP32 alone.
 	parameter NET      = 0,
 	// 1: the picture to the web page too, as a UDP stream (net_core's streamer, the
@@ -251,7 +253,7 @@ module eth_top #(
 	wire [15:0]  d_wdata_wmask;
 	wire         d_ready, d_valid, d_calibrated;
 
-	localparam HAS_DDR3 = MD_DDR3 || CORE_PS1 || CORE_N64 || CORE_SNES;
+	localparam HAS_DDR3 = MD_DDR3 || CORE_PS1 || CORE_N64 || CORE_SNES || CORE_GB;
 	// the HDMI clocks, from the memory's MMCM (below)
 	wire         vid_pclk, vid_pclk5, vid_locked;
 	wire         pclk_raw_w, pclk5_raw_w, hlocked_w;
@@ -390,7 +392,7 @@ module eth_top #(
 	// take every frame, and the command byte says which one answers (0x3x the drive,
 	// everything else this). Byte 0 out is the signature from both alike.
 	wire rf_esp_miso, e_miso; wire [7:0] e_cmd;
-	esp_bus #(.CORE_ID(CORE_GG ? 8'h47 : CORE_SNES ? 8'h46 : CORE_PS1 ? 8'h50 : CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
+	esp_bus #(.CORE_ID(CORE_GB ? 8'h42 : CORE_A26 ? 8'h41 : CORE_GG ? 8'h47 : CORE_SNES ? 8'h46 : CORE_PS1 ? 8'h50 : CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
 		.clk(cclk), .rst(rst),
 		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(e_miso), .spi_cs_n(esp_cs_n),
 		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
@@ -408,7 +410,7 @@ module eth_top #(
 	icap_reboot u_reboot (.clk(cclk), .rst(rst),
 		.go(bus_we && bus_ack && bus_addr == 32'h0000_0014 && bus_wdata == 32'hB007_0000));
 
-	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD),
+	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD), .CORE_GB(CORE_GB), .CORE_A26(CORE_A26),
 	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG),
 	          .RELEASE(RELEASE), .PS1_DCIDX(PS1_DCIDX),
 	          .CLK_HZ(1_000_000_000 / CLK_DIV)) u_regs (

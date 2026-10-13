@@ -42,7 +42,7 @@ module tb_a26;
 	wire        dbg_sync, dbg_rdy;
 
 	a26_top #(.CLK_HZ(3_579_545), .PIX_HZ(3_579_545)) dut (
-		.clk(clk), .rst(rst),
+		.clk(clk), .rst(rst), .pause(1'b0),
 		.rom_wr(1'b0), .rom_wr_addr(15'd0), .rom_wr_data(8'd0),
 		.rom_len(rom_len), .scheme(scheme),
 		.joy0(joy0), .joy1(joy1),

@@ -6,6 +6,8 @@
 #   ./tools/core.sh md           just the Mega Drive
 #   ./tools/core.sh ps1          just the PlayStation
 #   ./tools/core.sh n64          just the Nintendo 64
+#   ./tools/core.sh gb           just the Game Boy
+#   ./tools/core.sh a26          just the Atari 2600
 #   ./tools/core.sh shell        the golden image
 #   ./tools/core.sh dev          both consoles in one image, for JTAG
 #
@@ -65,9 +67,18 @@ case "${1:-nes}" in
          # draws one in ~1550.
          NAME=snes;  GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:0 -gen CORE_N64:0 -gen CORE_SNES:1 -gen CLK_DIV:${SNES_DIV:-20} -gen JTAG_DBG:${JTAG:-0}"
          EXTRA="-ip $MIG_XCI" ;;
+  gb|gameboy)
+         # The Game Boy (gb_top.v): its cartridge in DDR3 (cart_ddr3 + cart_cache, as the SNES's),
+         # so the memory controller again; 160 x 144 tripled on HDMI, stereo sound.
+         NAME=gb;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_GB:1 -gen JTAG_DBG:${JTAG:-0}"
+         EXTRA="-ip $MIG_XCI" ;;
+  a26|atari|atari2600)
+         # The Atari 2600 (a26_top.v): its cartridge (up to 32 kB) in the core's own block RAM,
+         # filled through the program window like the Master System's; no memory controller.
+         NAME=a26;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_A26:1"; EXTRA="$NOMIG" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;
   shell) NAME=shell; TOP=shell_top; XDC=boards/qmtech_a100t/shell_top.xdc ;;
-  *) echo "usage: tools/core.sh [nes|sms|gg|md|ps1|n64|snes|dev|shell]" >&2; exit 1 ;;
+  *) echo "usage: tools/core.sh [nes|sms|gg|md|ps1|n64|snes|gb|a26|dev|shell]" >&2; exit 1 ;;
 esac
 # RELEASE=1: the shipping image. Everything a developer or a PC on the network read is left
 # out -- the logic analyser, the PC sound ring, the frame reader, the bare-CPU test slot, the

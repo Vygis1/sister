@@ -62,7 +62,7 @@ module `GB_TB_NAME;
 	reg  [7:0]  joy = 8'h00;
 
 	gb_top #(.CLK_HZ(`GB_TB_CLK)) dut (
-		.clk(clk), .rst(rst),
+		.clk(clk), .rst(rst), .pause(1'b0),
 		.rom_addr(rom_addr), .rom_req(rom_req), .rom_ack(rom_ack), .rom_data(rom_data),
 		.joy(joy),
 		.px_x(px_x), .px_y(px_y), .px_shade(px_shade), .pixel_en(pixel_en), .frame_start(frame_start),

@@ -43,8 +43,11 @@ static const Machine MACHINES[] = {
   { "PlayStation",   "ps1", 'P', 0xFFFFFFFF },          // a disc image: any size
   { "Super NES",     "snes", 'F', 6 * 1024 * 1024 + 512 },   // (+ a copier header, sometimes)
   { "Game Gear",     "gg",  'G', 256 * 1024 },               // (its cartridge is block RAM, as the Master System's)
+  { "Game Boy",      "gb",  'B', 8 * 1024 * 1024 },          // (the cartridge in DDR3, as the SNES's)
+  { "Atari 2600",    "a26", 'A', 32 * 1024 },                // (the cartridge in the core's own block RAM)
 };
-static const int NMACH = 7;
+static const int NMACH = 9;
+static const uint32_t A26_CFG = NES + 0x1C8;       // [15:0] the image's size, [19:16] its bank scheme (0: by the size)
 static const uint32_t SNES_CFG = NES + 0x180;      // [0] HiROM, [15:8] log2 ROM size, [23:16] log2 save RAM
 static const uint32_t CARD_CTL = NES + 0x134;
 
@@ -56,6 +59,11 @@ static int machineOfName(const String &n) {
   if (l.endsWith(".z64") || l.endsWith(".n64") || l.endsWith(".v64")) return 3;
   if (l.endsWith(".sfc") || l.endsWith(".smc")) return 5;
   if (l.endsWith(".gg")) return 6;
+  // (a Game Boy Color game is .gbc: the core is a DMG, which runs the ones made for both but
+  // not the colour-only ones, so those are not moved in by their name -- put a .gbc in /roms/gb
+  // by hand to try it; an Atari's .bin is anybody's, so only .a26 says Atari)
+  if (l.endsWith(".gb")) return 7;
+  if (l.endsWith(".a26")) return 8;
   return -1;
 }
 static int machineOfCore(uint8_t id) {
@@ -155,6 +163,8 @@ static int machineOfFolder(String n) {
   if (n == "ps1" || n == "psx" || n == "playstation" || n == "discs") return 4;
   if (n == "snes" || n == "sfc" || n == "superfamicom" || n == "super nes") return 5;
   if (n == "gg" || n == "gamegear" || n == "game gear") return 6;
+  if (n == "gb" || n == "gameboy" || n == "game boy") return 7;
+  if (n == "a26" || n == "a2600" || n == "atari" || n == "atari2600" || n == "atari 2600") return 8;
   return -1;
 }
 static String baseName(File &e) {
@@ -560,6 +570,29 @@ static String findBios() {
   return "";
 }
 
+// The Atari's bank scheme (a26_top's numbers): a tag in the name says -- "(F8SC)", "[E0]" -- as
+// the dumps' names often do; otherwise the size, with the Super Chip told the way Stella tells it
+// (every 4 kB bank's first 128 bytes repeated in its second 128: the chip's RAM, read through
+// those addresses, was dumped as whatever the dumper saw there twice). 0 leaves it to the core.
+static uint32_t a26Scheme(const String &name, File &f, uint32_t size) {
+  String u = name; u.toUpperCase();
+  static const char *const TAG[] = { "F8SC", "F6SC", "F4SC", "F8", "F6", "F4", "FE", "E0", "3F", "FA" };
+  static const uint8_t NUM[] = { 9, 10, 11, 2, 3, 4, 5, 6, 7, 8 };
+  for (int i = 0; i < 10; i++)
+    if (u.indexOf(String("(") + TAG[i] + ")") >= 0 || u.indexOf(String("[") + TAG[i] + "]") >= 0) return NUM[i];
+  if (size == 8192 || size == 16384 || size == 32768) {
+    bool sc = true;
+    uint8_t a[128], b[128];
+    for (uint32_t bank = 0; bank < size && sc; bank += 4096) {
+      f.seek(bank);
+      if (f.read(a, 128) != 128 || f.read(b, 128) != 128 || memcmp(a, b, 128)) sc = false;
+    }
+    f.seek(0);
+    if (sc) return size == 8192 ? 9 : size == 16384 ? 10 : 11;
+  }
+  return 0;
+}
+
 static String load(const Game &g) {
   if (g.m != 4) cardIn = false;
   File f = SD.open(g.path);
@@ -646,6 +679,21 @@ static String load(const Game &g) {
     f.seek(base);
     if (!streamBanks(f, rom)) err = "the file ended early";
     srmBegin(g.path, ramLog ? 1u << ramLog : 0);     // the save in
+    fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
+    if (!err.length()) fpga.busWrite(NES_CTRL, 1);
+  } else if (g.m == 7) {                             // Game Boy: into DDR3, bank by bank, as the SNES
+    fpga.busWrite(NES_CONSOLE, 7);                   // first: the fill only reaches the selected core
+    if (!streamBanks(f, size)) err = "the file ended early";
+    fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
+    if (!err.length()) fpga.busWrite(NES_CTRL, 1);   // (the core reads the header itself)
+  } else if (g.m == 8) {                             // Atari 2600: the image, its size and scheme
+    if (size < 2048) err = "too small for an Atari cartridge";
+    uint32_t scheme = a26Scheme(g.name, f, size);
+    fpga.busWrite(NES_CONSOLE, 8);                   // first: the fill only reaches the selected core
+    fpga.busWrite(NES_CART_BANK, 0);
+    if (!err.length() && !stream(f, NES_PRG, size)) err = "the file ended early";
+    // colour, both difficulty switches at B
+    fpga.busWrite(A26_CFG, (size & 0xFFFF) | scheme << 16);
     fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);
   } else {                                           // N64: big-endian (.z64) whatever the file

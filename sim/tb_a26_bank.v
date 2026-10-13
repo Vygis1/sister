@@ -27,7 +27,7 @@ module tb_a26_bank;
 	wire [15:0] dbg_pc;
 
 	a26_top #(.CLK_HZ(3_579_545), .PIX_HZ(3_579_545)) dut (
-		.clk(clk), .rst(rst),
+		.clk(clk), .rst(rst), .pause(1'b0),
 		.rom_wr(1'b0), .rom_wr_addr(15'd0), .rom_wr_data(8'd0),
 		.rom_len(rom_len), .scheme(scheme),
 		.joy0(8'h00), .joy1(8'h00),

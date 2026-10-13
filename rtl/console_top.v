@@ -91,6 +91,10 @@ module console_top #(
 	parameter PS1_DCIDX = 8,   // the PlayStation's data cache: 2^n lines of 16 bytes (ps1_top DCIDX)
 	// The Super Nintendo (snes_top.v). Its own image; the cartridge in DDR3.
 	parameter CORE_SNES = 0,
+	// The Game Boy (gb_top.v): its own image, the cartridge in DDR3 like the SNES's.
+	parameter CORE_GB  = 0,
+	// The Atari 2600 (a26_top.v): its own image, the cartridge in the core's 32 kB block RAM.
+	parameter CORE_A26 = 0,
 	parameter WEBVID   = 0,    // the picture to the web page as well (see eth_top); without it the stream registers read 0
 	parameter CLK_HZ   = 50_000_000   // the console's clock: only the N64 is written for others
 )(
@@ -191,15 +195,21 @@ module console_top #(
 	localparam [3:0] CONSOLE_N64 = 4'd4;
 	localparam [3:0] CONSOLE_SNES = 4'd5;
 	localparam [3:0] CONSOLE_GG  = 4'd6;
+	localparam [3:0] CONSOLE_GB  = 4'd7;
+	localparam [3:0] CONSOLE_A26 = 4'd8;
 	// Read by the host rather than assumed, so a build without a given core
 	// reports that honestly instead of selecting it and showing a black screen.
-	localparam [7:0] CORES_BUILT = (CORE_NES ? 8'b0000_0001 : 8'd0)
-	                             | (CORE_SMS ? 8'b0000_0010 : 8'd0)
-	                             | (CORE_MD  ? 8'b0000_0100 : 8'd0)
-	                             | (CORE_PS1 ? 8'b0000_1000 : 8'd0)
-	                             | (CORE_N64 ? 8'b0001_0000 : 8'd0)
-	                             | (CORE_SNES ? 8'b0010_0000 : 8'd0)
-	                             | (CORE_GG  ? 8'b0100_0000 : 8'd0);
+	// A bit per console number: sixteen, since the Atari is number 8 (read back in 0x20's
+	// top half; the eight that were there keep their places).
+	localparam [15:0] CORES_BUILT = (CORE_NES ? 16'h0001 : 16'd0)
+	                              | (CORE_SMS ? 16'h0002 : 16'd0)
+	                              | (CORE_MD  ? 16'h0004 : 16'd0)
+	                              | (CORE_PS1 ? 16'h0008 : 16'd0)
+	                              | (CORE_N64 ? 16'h0010 : 16'd0)
+	                              | (CORE_SNES ? 16'h0020 : 16'd0)
+	                              | (CORE_GG  ? 16'h0040 : 16'd0)
+	                              | (CORE_GB  ? 16'h0080 : 16'd0)
+	                              | (CORE_A26 ? 16'h0100 : 16'd0);
 
 	// Which core is selected out of reset: the first one this image actually
 	// contains.
@@ -219,6 +229,8 @@ module console_top #(
 	                               : CORE_N64 ? CONSOLE_N64
 	                               : CORE_SNES ? CONSOLE_SNES
 	                               : CORE_GG  ? CONSOLE_GG
+	                               : CORE_GB  ? CONSOLE_GB
+	                               : CORE_A26 ? CONSOLE_A26
 	                                          : CONSOLE_NES;
 
 	wire [15:0] dbg_pc;
@@ -574,6 +586,8 @@ module console_top #(
 	wire snes_sel = (console_sel == CONSOLE_SNES);
 	wire gg_sel   = (console_sel == CONSOLE_GG);
 	wire smsgg_sel = sms_sel || gg_sel;        // the Z80 machine, either way
+	wire gb_sel   = (console_sel == CONSOLE_GB);
+	wire a26_sel  = (console_sel == CONSOLE_A26);
 	wire core_rst = rst || !run;
 	wire snes_rst = core_rst || !snes_sel;
 	// the SNES cartridge's shape, from the loader (it reads the header): [0] HiROM,
@@ -619,6 +633,17 @@ module console_top #(
 	wire signed [15:0] snes_audio_l, snes_audio_r;
 	wire        snes_frame_st;
 	wire [23:0] snes_vid_rgb;
+	// the Game Boy's and the Atari's, up here for the muxes that come before their sections
+	wire [15:0] gb_dbg_pc, a26_dbg_pc;
+	wire signed [15:0] gb_audio_l, gb_audio_r, a26_audio_l, a26_audio_r;
+	wire        gb_frame_st, a26_frame_st;
+	wire [23:0] gb_vid_rgb, a26_vid_rgb;
+	// the Atari's cartridge and switches, from the loader (ctrl 0x1C8): [15:0] the image's size
+	// in bytes, [19:16] its bank scheme (a26_top: 0 = by the size), [20] the TV type switch at
+	// black and white, [21] / [22] the left / right difficulty switch at A
+	reg  [22:0] a26_cfg;
+	wire gb_rst   = core_rst || !gb_sel;
+	wire a26_rst  = core_rst || !a26_sel;
 	wire nes_rst  = core_rst || !nes_sel;
 	wire z80_rst  = core_rst || !smsgg_sel;
 	wire md_rst   = core_rst || !md_sel;
@@ -633,6 +658,7 @@ module console_top #(
 			chr_is_ram <= 1'b0;
 			test_mode <= 1'b0;
 			snes_cfg <= 24'h000F00;
+			a26_cfg <= {7'd0, 16'd4096};
 		end else if (ctrl_we) begin
 			case (off)
 			16'h0004: begin run <= wdata[0]; mirror_v <= wdata[1]; cpu_halt <= wdata[2]; end
@@ -666,6 +692,7 @@ module console_top #(
 			16'h0178: n64_vi_slow <= wdata[0];                         // the N64's VI at half rate
 			16'h017C: vid_opt <= wdata[15:0];                          // the picture's settings (n64_vid; the menu's Video page)
 			16'h0180: snes_cfg <= wdata[23:0];                         // the SNES cartridge's shape
+			16'h01C8: a26_cfg <= wdata[22:0];                          // the Atari's cartridge and switches
 			16'h001C: begin
 				mapper_id  <= wdata[3:0];
 				prg_last   <= wdata[13:8];
@@ -675,7 +702,7 @@ module console_top #(
 			// no explanation, so the write is ignored and the read-back shows
 			// the host what actually happened.
 			16'h0020: begin
-				if (wdata[3:0] < 4'd8 && CORES_BUILT[wdata[2:0]]) console_sel <= wdata[3:0];
+				if (wdata[3:0] < 4'd9 && CORES_BUILT[wdata[3:0]]) console_sel <= wdata[3:0];
 				test_mode <= !RELEASE && wdata[8];
 			end
 			default: ;
@@ -695,10 +722,10 @@ module console_top #(
 		// NES's PC while the Mega Drive was selected returned a tied-off zero
 		// and looked exactly like a CPU that had stopped -- the most misleading
 		// possible answer, since a stuck PC is the first thing anyone checks.
-		16'h0014: ctrl_rdata = snes_sel ? {8'd0, snes_dbg_pc} : ps1_sel ? ps1_dbg_pc : n64_sel ? n64_dbg_pc : md_sel ? md_dbg_pc : {16'd0, dbg_pc};
+		16'h0014: ctrl_rdata = gb_sel ? {16'd0, gb_dbg_pc} : a26_sel ? {16'd0, a26_dbg_pc} : snes_sel ? {8'd0, snes_dbg_pc} : ps1_sel ? ps1_dbg_pc : n64_sel ? n64_dbg_pc : md_sel ? md_dbg_pc : {16'd0, dbg_pc};
 		16'h0018: ctrl_rdata = nmi_count;
 		16'h001C: ctrl_rdata = {17'd0, chr_is_ram, prg_last, 4'd0, mapper_id};
-		16'h0020: ctrl_rdata = {8'd0, CORES_BUILT, 7'd0, test_mode, 4'd0, console_sel};
+		16'h0020: ctrl_rdata = {CORES_BUILT, 7'd0, test_mode, 4'd0, console_sel};
 		16'h0024: ctrl_rdata = con_count;
 		16'h0028: ctrl_rdata = {16'd0, md_sel ? md_z80_pc : z80_pc};   // the Z80's PC (the Mega Drive's sound CPU when it runs)
 		// Lines the Mega Drive's cache asked for, and lines it got. Equal and
@@ -766,6 +793,7 @@ module console_top #(
 		16'h0178: ctrl_rdata = {31'd0, n64_vi_slow};
 		16'h017C: ctrl_rdata = {16'd0, vid_opt};
 		16'h0180: ctrl_rdata = {8'd0, snes_cfg};
+		16'h01C8: ctrl_rdata = {9'd0, a26_cfg};
 		16'h0190: ctrl_rdata = {5'd0, gte_snap_state, gte_snap_word};
 		16'h0194: ctrl_rdata = gte_snap_data;
 		16'h019C: ctrl_rdata = gte_wt_pc;
@@ -874,7 +902,7 @@ module console_top #(
 
 	// --- the picture for HDMI: the running core's ----------------------------------------
 	wire [23:0] n64_vid_rgb, nes_vid_rgb, sms_vid_rgb, md_vid_rgb, ps1_vid_rgb;
-	assign vid_rgb = snes_sel ? snes_vid_rgb : n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : smsgg_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : ps1_sel ? ps1_vid_rgb : 24'd0;
+	assign vid_rgb = gb_sel ? gb_vid_rgb : a26_sel ? a26_vid_rgb : snes_sel ? snes_vid_rgb : n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : smsgg_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : ps1_sel ? ps1_vid_rgb : 24'd0;
 
 	// --- the NES ---------------------------------------------------------------
 	wire [8:0] nes_px, nes_py;
@@ -1178,6 +1206,125 @@ module console_top #(
 		assign snes_hword = 32'd0; assign snes_dirty = 1'b0;
 	end endgenerate
 
+	// --- the Game Boy ---------------------------------------------------------------------
+	// Its cartridge in DDR3 through cart_ddr3 (filled like the SNES's: bank by bank through the
+	// program window, then the end strobe), read through cart_cache. gb_top asks for one byte at
+	// a time (rom_req / rom_ack); the cache answers with the 16-bit word holding it, which
+	// cart_ddr3 gives as {even byte, odd byte} (the 68000's order, see cart_ddr3.v), so the
+	// address's low bit picks the half. A miss is a DDR3 read, tens of clocks: the core asks
+	// four T-cycles (48 clocks at 50 MHz) before it needs the byte and pauses the whole machine
+	// if it is not there yet, so a slow line costs time, never a wrong byte. The cache is reset
+	// with the core, so a new cartridge never answers out of the last one's lines.
+	// The picture: 160 x 144 shades, tripled to 480 x 432 like the Game Gear's LCD. Sound: its
+	// two channels into HDMI's stereo (audio_lr, below). No battery saves yet: gb_top's save
+	// port (sav_*) is there for when the loader learns to read and write it.
+	generate if (CORE_GB) begin : g_gb
+		wire [19:0]  b_m_addr; wire b_m_req, b_m_ready, b_m_valid; wire [127:0] b_m_data;
+		cart_ddr3 #(.BASE(24'h00_0000)) u_gb_cart (
+			.clk(clk), .rst(rst),
+			.host_windex(md_windex_full), .host_we(prog_we && gb_sel),
+			.wdata(wdata), .fill_end(fill_end && gb_sel),
+			.m_addr(b_m_addr), .m_req(b_m_req), .m_ready(b_m_ready),
+			.m_data(b_m_data), .m_valid(b_m_valid),
+			.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata),
+			.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid),
+			.d_calibrated(d_calibrated)
+		);
+		wire [22:0] rom_addr; wire rom_req; wire [15:0] c_word; wire c_ack;
+		cart_cache #(.IDXBITS(8)) u_gb_cc (.clk(clk), .rst(gb_rst),
+			.a_addr({1'b0, rom_addr[22:1]}), .a_req(rom_req), .a_data(c_word), .a_ack(c_ack),
+			.b_addr(23'd0), .b_req(1'b0), .b_data(), .b_ack(),
+			.m_addr(b_m_addr), .m_req(b_m_req), .m_ready(b_m_ready), .m_data(b_m_data), .m_valid(b_m_valid),
+			.dbg_hits(), .dbg_misses(), .dbg_stall(), .dbg_prefetch());
+		wire [7:0] px_x, px_y; wire [1:0] px_shade; wire px_en;
+		gb_top #(.CLK_HZ(CLK_HZ)) u_gb (
+			.clk(clk), .rst(gb_rst), .pause(cpu_halt),        // (halt: the menu pauses the game)
+			.rom_addr(rom_addr), .rom_req(rom_req), .rom_ack(c_ack),
+			.rom_data(rom_addr[0] ? c_word[7:0] : c_word[15:8]),
+			.joy(joy1[7:0]),
+			.px_x(px_x), .px_y(px_y), .px_shade(px_shade), .pixel_en(px_en), .frame_start(gb_frame_st),
+			.audio_l(gb_audio_l), .audio_r(gb_audio_r),
+			.sav_addr(15'd0), .sav_q(), .cram_dirty(), .sav_clear(1'b0),
+			.sio_data(), .sio_start(),
+			.dbg_pc(gb_dbg_pc), .dbg_halted()
+		);
+		frame_hdmi #(.FMT(5), .DW(2), .SCALE(3)) u_hdmi (.clk(clk), .we(px_en), .wx({1'b0, px_x}), .wy({1'b0, px_y}), .wd(px_shade),
+			.w(9'd160), .h(9'd144),
+			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(gb_vid_rgb));
+	end else begin : g_gb
+		assign gb_vid_rgb = 24'd0; assign gb_dbg_pc = 16'd0; assign gb_frame_st = 1'b0;
+		assign gb_audio_l = 16'sd0; assign gb_audio_r = 16'sd0;
+	end endgenerate
+
+	// --- the Atari 2600 --------------------------------------------------------------------------
+	// Its cartridge is a26_top's own 32 kB of block RAM, filled through rom_wr from the same
+	// program window the Master System's is (the menu streams the file there from address 0;
+	// the bank register is ignored, as cart_mem ignores it). The window's writes are 32-bit
+	// words and the cartridge port takes a byte a clock, so each word goes in over the four
+	// clocks after it, low byte first -- the bus brings a word every few dozen clocks at the
+	// most (the ESP32's SPI), so one word is always done before the next arrives.
+	// The picture: 160 columns, each three pixels wide, and the lines between VBLANKs doubled
+	// -- 480 across and 384 down for the usual 192 lines.
+	generate if (CORE_A26) begin : g_a26
+		reg [31:0] wr_word; reg [14:0] wr_addr; reg [2:0] wr_n = 3'd0;
+		always @(posedge clk) begin
+			if (prog_we && a26_sel) begin wr_word <= wdata; wr_addr <= {md_windex[12:0], 2'b00}; wr_n <= 3'd4; end
+			else if (wr_n != 3'd0) begin wr_word <= {8'd0, wr_word[31:8]}; wr_addr <= wr_addr + 15'd1; wr_n <= wr_n - 3'd1; end
+		end
+		wire pix_ce, px_en; wire [7:0] px_x; wire [8:0] line; wire [6:0] color;
+		a26_top #(.CLK_HZ(CLK_HZ), .PIX_HZ(3_579_545)) u_a26 (
+			.clk(clk), .rst(a26_rst), .pause(cpu_halt),       // (halt: the menu pauses the game)
+			.rom_wr(wr_n != 3'd0), .rom_wr_addr(wr_addr), .rom_wr_data(wr_word[7:0]),
+			.rom_len(a26_cfg[15:0]), .scheme(a26_cfg[19:16]),
+			// the pads: the stick and fire in bits 0-4; a pad's SELECT and START (bits 6 and 7,
+			// either player's) are the console's GAME SELECT and GAME RESET switches
+			.joy0(joy1[7:0]), .joy1(joy2[7:0]),
+			.sw_reset(joy1[7] || joy2[7]), .sw_select(joy1[6] || joy2[6]),
+			.sw_color(!a26_cfg[20]), .sw_diff0(a26_cfg[21]), .sw_diff1(a26_cfg[22]),
+			.paddle(4'd0),
+			.pix_ce(pix_ce), .px_x(px_x), .line(line), .color(color), .pixel_en(px_en),
+			.frame_start(a26_frame_st), .line_end(), .vblank(), .vsync(),
+			.audio_l(a26_audio_l), .audio_r(a26_audio_r),
+			.dbg_pc(a26_dbg_pc), .dbg_sync(), .dbg_rdy()
+		);
+		// Which lines are the picture. Every game decides with VBLANK, most of them the same
+		// 192 lines from line 40 or so after VSYNC, some more, some starting elsewhere. Measured
+		// on each frame (the first and last line the TIA drew while VBLANK was off) and taken
+		// only when two frames in a row agree, so a frame drawn wrong during a game's own
+		// transition does not jump the picture about. At least 192 lines are shown (a shorter
+		// picture keeps its place at the top, black below), at most the 240 the buffer holds.
+		reg [8:0] f_first = 9'd0, f_last = 9'd0; reg f_any = 1'b0;      // this frame's
+		reg [8:0] c_top = 9'd0, c_h = 9'd0;                               // the last frame's
+		reg [8:0] w_top = 9'd40, w_h = 9'd192;                            // what is shown
+		wire [8:0] n_span = f_last - f_first + 9'd1;
+		wire [8:0] n_h = (n_span < 9'd192) ? 9'd192 : (n_span > 9'd240) ? 9'd240 : n_span;
+		always @(posedge clk) begin
+			if (a26_rst) begin
+				f_any <= 1'b0; w_top <= 9'd40; w_h <= 9'd192; c_top <= 9'd0; c_h <= 9'd0;
+			end else if (a26_frame_st) begin
+				if (f_any) begin
+					if (f_first == c_top && n_h == c_h) begin w_top <= f_first; w_h <= n_h; end
+					c_top <= f_first; c_h <= n_h;
+				end
+				f_any <= 1'b0;
+			end else if (px_en) begin
+				if (!f_any) begin f_first <= line; f_any <= 1'b1; end
+				f_last <= line;
+			end
+		end
+		// every colour clock of the window's lines is written, the blanked ones black: the
+		// buffer must not keep an old frame where this one draws nothing
+		wire [8:0] wy = line - w_top;
+		wire       in_win = (line >= w_top) && (wy < w_h) && (px_x < 8'd160);
+		frame_hdmi #(.FMT(6), .DW(7), .XSCALE(3), .YSCALE(2)) u_hdmi (.clk(clk), .we(pix_ce && in_win),
+			.wx({1'b0, px_x}), .wy(wy), .wd(px_en ? color : 7'd0),
+			.w(9'd160), .h(w_h),
+			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(a26_vid_rgb));
+	end else begin : g_a26
+		assign a26_vid_rgb = 24'd0; assign a26_dbg_pc = 16'd0; assign a26_frame_st = 1'b0;
+		assign a26_audio_l = 16'sd0; assign a26_audio_r = 16'sd0;
+	end endgenerate
+
 	// --- the Nintendo 64 -------------------------------------------------------------
 	generate if (CORE_N64) begin : g_n64
 		n64_top #(.CLK_HZ(CLK_HZ), .DBG(N64_DBG), .ISV(N64_ISV)) u_n64 (
@@ -1214,7 +1361,7 @@ module console_top #(
 	// memory (NES, Master System). Without this last case the port floats; with
 	// it in the wrong place it fights the core that legitimately drives it, which
 	// is the multi-driven net that showed up the first time PS1 was built.
-	generate if (!((CORE_MD && MD_DDR3) || CORE_PS1 || CORE_N64 || CORE_SNES)) begin : g_no_mem
+	generate if (!((CORE_MD && MD_DDR3) || CORE_PS1 || CORE_N64 || CORE_SNES || CORE_GB)) begin : g_no_mem
 		assign d_addr = 24'd0; assign d_req = 1'b0; assign d_we = 1'b0;
 		assign d_wdata = 128'd0;
 	end endgenerate
@@ -1238,7 +1385,9 @@ module console_top #(
 	wire       core_frame_st = nes_sel ? nes_frame_start :
 	                           sms_sel ? sms_frame_start :
 	                           md_sel  ? md_frame_st     :
-	                           snes_sel ? snes_frame_st  : 1'b0;
+	                           snes_sel ? snes_frame_st  :
+	                           gb_sel  ? gb_frame_st     :
+	                           a26_sel ? a26_frame_st    : 1'b0;
 	wire [8:0] core_px       = nes_sel ? nes_px  : sms_px;
 	wire [8:0] core_py       = nes_sel ? nes_py  : sms_py;
 	wire [7:0] core_rgb      = nes_sel ? nes_rgb : sms_rgb;
@@ -1255,12 +1404,18 @@ module console_top #(
 	wire [15:0] md_audio = 16'h8000 +
 	              {{1{md_audio_l[15]}}, md_audio_l[15:1]} +
 	              {{1{md_audio_r[15]}}, md_audio_r[15:1]};
+	wire [15:0] gb_audio = 16'h8000 +
+	              {{1{gb_audio_l[15]}}, gb_audio_l[15:1]} +
+	              {{1{gb_audio_r[15]}}, gb_audio_r[15:1]};
+	wire [15:0] a26_audio = 16'h8000 + a26_audio_l;   // (mono: both sides are the same)
 
 	assign     audio         = !run              ? 16'h8000
 	                         : nes_sel           ? nes_audio
 	                         : (sms_sel && !raw_z80) ? sms_audio
 	                         : md_sel            ? md_audio
 	                         : snes_sel          ? snes_audio
+	                         : gb_sel            ? gb_audio
+	                         : a26_sel           ? a26_audio
 	                                               : 16'h8000;
 
 	always @(posedge clk) begin
@@ -1343,15 +1498,16 @@ module console_top #(
 		assign gte_wt_pc = 32'd0; assign gte_wt_data = 32'd0; assign gte_wt_reg = 6'd0;
 		assign ps1_tty_word = 32'd0; assign ps1_tty_count = 32'd0; assign ps1_lost_cpu = 32'd0; assign ps1_lost_gpu = 32'd0; assign ps1_live = 32'd0; assign ps1_cc_miss = 32'd0; assign ps1_cpu_wait = 32'd0;
 		assign ps1_gtr_word = 32'd0; assign ps1_gtr_head = 2'd0; assign ps1_gtr_stat = 32'd0;
-		if (!CORE_N64 && (CORE_MD || CORE_SNES || CORE_GG) && !CORE_NES && !CORE_SMS) begin : g_md_lr
-			// the Mega Drive's (or the SNES's, or the Game Gear's) two channels, for HDMI's stereo:
-			// 48000 times a second (the SNES's 32 kHz held)
+		if (!CORE_N64 && (CORE_MD || CORE_SNES || CORE_GG || CORE_GB || CORE_A26) && !CORE_NES && !CORE_SMS) begin : g_md_lr
+			// the Mega Drive's (or the SNES's, the Game Gear's, the Game Boy's, the Atari's) two
+			// channels, for HDMI's stereo: 48000 times a second (the SNES's 32 kHz held)
 			reg [27:0] lr_div = 28'd0; reg lr_we = 1'b0;
 			always @(posedge clk) begin
 				lr_we <= lr_div + 28'd48_000 >= CLK_HZ;
 				lr_div <= (lr_div + 28'd48_000 >= CLK_HZ) ? lr_div + 28'd48_000 - CLK_HZ : lr_div + 28'd48_000;
 			end
-			assign audio_lr = gg_sel ? {gg_audio_r, gg_audio_l} : snes_sel ? {snes_audio_r, snes_audio_l} : {md_audio_r, md_audio_l};
+			assign audio_lr = gb_sel ? {gb_audio_r, gb_audio_l} : a26_sel ? {a26_audio_r, a26_audio_l} :
+			                  gg_sel ? {gg_audio_r, gg_audio_l} : snes_sel ? {snes_audio_r, snes_audio_l} : {md_audio_r, md_audio_l};
 			assign audio_lr_we = lr_we;
 		end else if (!CORE_N64) begin : g_no_lr      // the N64 drives it when it is the core
 			assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;
