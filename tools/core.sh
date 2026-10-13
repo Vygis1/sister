@@ -119,7 +119,9 @@ tools/vivado.sh build -top "$TOP" -xdc "$XDC" $GEN $EXTRA ${EFFORT:+-effort} ${I
 
 bad=0
 grep -qE "^ERROR" "$LOG"            && { echo " *** errors"; bad=1; }
-grep -qE "^CRITICAL WARNING:" "$LOG" && { echo " *** critical warnings"; bad=1; }
+# (the router's "did not meet timing" is not one when the recovery passes after it -- build.tcl
+# -- brought the slack back: the TIMING line below is the verdict on that)
+grep -E "^CRITICAL WARNING:" "$LOG" | grep -vq "\[Route 35-39\]" && { echo " *** critical warnings"; bad=1; }
 grep -qi "multi-driven" "$LOG"      && { echo " *** multi-driven nets"; bad=1; }
 [ -f "$OUT/$TOP.bin" ]        || { echo " *** no .bin produced"; bad=1; }
 # The image has to be newer than the marker above. A build that is interrupted
