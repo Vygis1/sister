@@ -790,6 +790,7 @@ module ps1_top #(
 	wire [31:0] gpu_dbg_tf; wire gpu_eng_busy, gpu_eng_f_empty;   // (from the GPU by port: see ps1_gpu eng_busy)
 	ps1_gpu #(.CLK_HZ(CLK_HZ), .READ_AHEAD(1)) gpu (
 		.vn_req(vn_req), .vn_addr(vn_addr), .vn_ack(vn_ack), .vn_line(vn_line),
+		.pfm_addr(pf_m_addr), .pfm_req(pf_m_req), .pfm_ready(pf_m_ready), .pfm_rdata(pf_m_rdata), .pfm_valid(pf_m_valid),
 		.clk(clk), .rst(core_rst),
 		.sel(gpu_hit & c_req & cpu_ce), .we(c_we), .a4(c_addr[2]), .dma_active(dma_gpu_active), .cap_every_vsync(cap_every_vsync), .gpu_fast(gpu_fast), .no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun),
 		.wdata(c_dout), .rdata(gpu_rdata),
@@ -969,9 +970,9 @@ module ps1_top #(
 	// ================================================================================
 	// the arbiter: VRAM port 0, CPU port 1, host-fill (and the sweep) port 2
 	// ================================================================================
-	wire [5:0]   p_ready;
-	wire [767:0] p_rdata;
-	wire [5:0]   p_valid;
+	wire [6:0]   p_ready;
+	wire [895:0] p_rdata;
+	wire [6:0]   p_valid;
 	// the host read shares port 2; it waits its turn behind a fill or the sweep
 	reg          hr_req, hr_go_d;
 	reg  [23:0]  hr_addr;
@@ -1011,13 +1012,17 @@ module ps1_top #(
 	// starvation guard still promotes anyone kept waiting 64 cycles.
 	wire [23:0]  sp_m_addr; wire sp_m_req, sp_m_we, sp_m_ready, sp_m_valid;
 	wire [127:0] sp_m_wdata, sp_m_rdata; wire [15:0] sp_m_wmask;
-	wire [143:0] p_addr  = {sp_m_addr,  hf_p_addr,  fb_m_addr,  bk_m_addr,  vc_m_addr,  cc_m_addr};
-	wire [5:0]   p_req   = {sp_m_req,   hf_req_r | vz_req | hr_turn | mc_turn, fb_m_req, bk_m_req, vc_m_req, cc_m_req};
-	wire [5:0]   p_we    = {sp_m_we,    hf_p_we,    fb_m_we,    bk_m_we,    vc_m_we,    cc_m_we};
-	wire [767:0] p_wdata = {sp_m_wdata, hf_p_wdata, fb_m_wdata, bk_m_wdata, vc_m_wdata, cc_m_wdata};
+	// 6: the rasteriser's texture prefetch (ps1_raster pf_m_*) -- line reads of texel tiles it will
+	// want soon, several in flight, last in line: they hide latency, they do not block anyone
+	wire [23:0]  pf_m_addr; wire pf_m_req, pf_m_ready, pf_m_valid; wire [127:0] pf_m_rdata;
+	wire [167:0] p_addr  = {pf_m_addr, sp_m_addr,  hf_p_addr,  fb_m_addr,  bk_m_addr,  vc_m_addr,  cc_m_addr};
+	wire [6:0]   p_req   = {pf_m_req & d_calibrated, sp_m_req,   hf_req_r | vz_req | hr_turn | mc_turn, fb_m_req, bk_m_req, vc_m_req, cc_m_req};
+	wire [6:0]   p_we    = {1'b0,      sp_m_we,    hf_p_we,    fb_m_we,    bk_m_we,    vc_m_we,    cc_m_we};
+	wire [895:0] p_wdata = {128'd0,    sp_m_wdata, hf_p_wdata, fb_m_wdata, bk_m_wdata, vc_m_wdata, cc_m_wdata};
 	wire [15:0]  vc_m_wmask, cc_m_wmask;
-	wire [95:0]  p_wmask = {sp_m_wmask, 16'hFFFF, 16'hFFFF, bk_m_wmask, vc_m_wmask, cc_m_wmask};
+	wire [111:0] p_wmask = {16'd0,     sp_m_wmask, 16'hFFFF, 16'hFFFF, bk_m_wmask, vc_m_wmask, cc_m_wmask};
 	assign sp_m_ready = p_ready[5]; assign sp_m_valid = p_valid[5]; assign sp_m_rdata = p_rdata[767:640];
+	assign pf_m_ready = p_ready[6]; assign pf_m_valid = p_valid[6]; assign pf_m_rdata = p_rdata[895:768];
 
 	assign cc_m_ready = p_ready[0]; assign vc_m_ready = p_ready[1]; assign bk_m_ready = p_ready[2]; assign fb_m_ready = p_ready[3]; assign hf_ready = p_ready[4];
 	assign cc_m_valid = p_valid[0]; assign vc_m_valid = p_valid[1]; assign fb_m_valid = p_valid[3];
@@ -1030,7 +1035,7 @@ module ps1_top #(
 	// the BIOS through them, acknowledging every line and issuing none.
 	// (PIPE: the CPU cache, the VRAM cache and the block writer replace or drop a request in the clock
 	// after it is taken, so they may go back to back)
-	mem_arb #(.PORTS(6), .AW(24), .PIPE(6'b000111)) arb (
+	mem_arb #(.PORTS(7), .AW(24), .PIPE(7'b1000111)) arb (
 		.clk(clk), .rst(rst),
 		.p_addr(p_addr), .p_req(p_req), .p_we(p_we), .p_wdata(p_wdata), .p_wmask(p_wmask),
 		.p_ready(p_ready), .p_rdata(p_rdata), .p_valid(p_valid),

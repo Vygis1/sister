@@ -53,7 +53,7 @@ module tb_ps1_gpu;
 	wire v_lin_w, v_one_w, g_lin_w;
 	localparam RA = 1;             // the raster's destination read-ahead (ps1_top builds it in)
 	wire vn_req, vn_ack; wire [24:0] vn_addr; wire [127:0] vn_line;
-	ps1_gpu #(.READ_AHEAD(RA)) gpu ( .vn_req(vn_req), .vn_addr(vn_addr), .vn_ack(vn_ack), .vn_line(vn_line), .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
+	ps1_gpu #(.READ_AHEAD(RA)) gpu ( .pfm_addr(pfm_addr), .pfm_req(pfm_req), .pfm_ready(pfm_ready), .pfm_rdata(pfm_rdata), .pfm_valid(pfm_valid), .vn_req(vn_req), .vn_addr(vn_addr), .vn_ack(vn_ack), .vn_line(vn_line), .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .a4(a4), .dma_active(1'b0), .cap_every_vsync(1'b0), .gpu_fast(1'b1),
 		.no_tcache(1'b0), .no_ccache(1'b0), .no_trun(1'b0), .wdata(wdata), .rdata(rdata),
@@ -113,6 +113,7 @@ module tb_ps1_gpu;
 
 	// a megabyte of lines with some latency
 	reg [127:0] mem [0:65535];
+	`include "ps1_pfmem.vh"
 `ifdef TB_RD
 	localparam RD = `TB_RD;
 `else

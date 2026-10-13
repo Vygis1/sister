@@ -28,6 +28,13 @@
 // run of eight offered by the video cache) and the block writer's queue being
 // full. Opaque pixels never read the framebuffer.
 //
+// Between A and B sits a queue of pairs (Q). The scanner runs ahead into it, and a pair's
+// texel lines are looked up in the cache as it goes IN: a line that is not there is asked
+// for at once (the prefetch queue, PQ), while the pairs ahead of it are still being drawn.
+// Fetched only when a pair reached C, every miss cost the whole round trip with the pipeline
+// stopped: on the board (MediEvil, texstall.py) 1.56 M fetches of 41 clocks in ten seconds,
+// 13% of ALL clocks, and in sim/tb_ps1_clut COLD1 LAT40 66% of the engine's time.
+//
 // Coordinates, edge functions, interpolants and the drawing rules are exactly
 // the old engine's (see ps1_gpu.v: edgefn, inside, in_area, modulate, blend,
 // the texture window), so the picture is the same; only the rate changed.
@@ -113,6 +120,14 @@ module ps1_raster #(
 	input  wire         n_ack,
 	input  wire [127:0] n_line,
 	input  wire        v_ack,
+
+	// --- the prefetch port: the look-ahead's tiles, fetched on a port of their own ---------------
+	// (see Q / PQ) -- line reads, several in flight, answered in order
+	output reg  [23:0]  pf_m_addr,
+	output reg          pf_m_req,
+	input  wire         pf_m_ready,
+	input  wire [127:0] pf_m_rdata,
+	input  wire         pf_m_valid,
 
 	// the rest of a texel run, offered by the video cache a line at a time
 	input  wire        tx_valid,
@@ -313,6 +328,39 @@ module ps1_raster #(
 	             && (out2(ea0, e8_0, apos) || out2(ea1, e8_1, apos) || out2(ea2, e8_2, apos));
 
 	// ------------------------------------------------------------------------------------
+	// Q: the pairs the scanner has made and B has not taken, with their texel lines looked
+	// up on the way in (see the header). The scanner stops only when Q is full.
+	// ------------------------------------------------------------------------------------
+	localparam QB = 5;                              // 32 pairs
+	reg  [101:0] qmem [0:(1<<QB)-1];                // {last, ok0, ok1, x, y, r0 g0 b0 r1 g1 b1, u0 v0 u1 v1}
+	reg  [QB-1:0] q_wp, q_rp;
+	reg  [QB:0]   q_n;
+	wire q_full  = q_n[QB];
+	wire q_empty = (q_n == 0);
+	// what goes in: exactly what B used to take from the scanner
+	wire [7:0]  uA0 = twin(cu[23:16],  tw_mx, tw_ox), vA0 = twin(cv[23:16],  tw_my, tw_oy);
+	wire [7:0]  uA1 = twin(cu1[23:16], tw_mx, tw_ox), vA1 = twin(cv1[23:16], tw_my, tw_oy);
+	wire [7:0]  rA0 = is_gour ? cr[23:16]  : fr, gA0 = is_gour ? cg[23:16]  : fg, bA0 = is_gour ? cb[23:16]  : fb;
+	wire [7:0]  rA1 = is_gour ? cr1[23:16] : fr, gA1 = is_gour ? cg1[23:16] : fg, bA1 = is_gour ? cb1[23:16] : fb;
+	wire        q_push = scanning && !hold && pace_ok && (a_ok || b_ok || last) && !skip8 && !skip32;
+	wire [101:0] q_in  = {last, a_ok, b_ok, px[9:0], py[8:0], rA0, gA0, bA0, rA1, gA1, bA1, uA0, vA0, uA1, vA1};
+	wire [101:0] q_out = qmem[q_rp];
+	always @(posedge clk) if (q_push) qmem[q_wp] <= q_in;
+	wire        q_pop;                              // (below: B takes the head)
+	always @(posedge clk) begin
+		if (rst || (start && !busy)) begin q_wp <= 0; q_rp <= 0; q_n <= 0; end
+		else begin
+			if (q_push) q_wp <= q_wp + 1'b1;
+			if (q_pop)  q_rp <= q_rp + 1'b1;
+			q_n <= q_n + (q_push ? 1'b1 : 1'b0) - (q_pop ? 1'b1 : 1'b0);
+		end
+	end
+	// the look-ahead: the pair's texel lines, and whether the cache has them NOW
+	wire [28:0] taA0 = vaddr(texx(uA0, tp_x, tp_depth), {tp_y, vA0});
+	wire [28:0] taA1 = vaddr(texx(uA1, tp_x, tp_depth), {tp_y, vA1});
+	wire        hitA0, hitA1;                       // (declared with the cache below)
+
+	// ------------------------------------------------------------------------------------
 	// B: the pair, registered; texel addresses; the texture cache
 	// ------------------------------------------------------------------------------------
 	reg        vB, lastB, okB0, okB1;
@@ -381,7 +429,8 @@ module ps1_raster #(
 	reg [1:0]    fwho;
 	reg [28:0]   faddr;
 	wire         f_ack;
-	wire         own_fill   = (fs == 2'd1) && f_ack && (fwho == 2'd0);
+	wire         is_texf    = (fwho == 2'd0);                     // a texel line, on demand (C's miss)
+	wire         own_fill   = (fs == 2'd1) && f_ack && is_texf;
 	// The cache is direct mapped and a pixel PAIR needs both its texels in hand
 	// before it may move on. When the two land in the same line index with
 	// different tags -- which they do whenever dv/dx is 16, or du/dx is 128, as
@@ -394,9 +443,14 @@ module ps1_raster #(
 	wire         fill_hold  = own_fill && collide && (faddr[28:4] == taC1[28:4]);
 	// (the spare lines of a destination run are framebuffer, not texture: kept out)
 	reg          dst_run;
-	wire         tfill_go   = (own_fill && !fill_hold) || (tx_valid && !no_trun && !dst_run);
-	wire [28:0]  tfill_addr = own_fill ? faddr  : {tx_addr, 4'd0};
-	wire [127:0] tfill_line = own_fill ? v_line : tx_line;
+	// (a prefetched line, from the buffer below, when neither of the other two wants the port)
+	wire         pf_fill;
+	wire [24:0]  pf_fa;
+	wire [127:0] pf_fd;
+	wire         offer_go   = tx_valid && !no_trun && !dst_run;
+	wire         tfill_go   = (own_fill && !fill_hold) || offer_go || pf_fill;
+	wire [28:0]  tfill_addr = own_fill ? faddr  : offer_go ? {tx_addr, 4'd0} : {pf_fa, 4'd0};
+	wire [127:0] tfill_line = own_fill ? v_line : offer_go ? tx_line : pf_fd;
 	always @(posedge clk)
 		if (tfill_go) begin
 			tdata[tidx(tfill_addr)] <= tfill_line;
@@ -436,6 +490,9 @@ module ps1_raster #(
 
 	wire hitB0 = tvalid[tidx(taB0)] && (ttagv[tidx(taB0)] == ttag(taB0));
 	wire hitB1 = tvalid[tidx(taB1)] && (ttagv[tidx(taB1)] == ttag(taB1));
+	assign hitA0 = tvalid[tidx(taA0)] && (ttagv[tidx(taA0)] == ttag(taA0));
+	assign hitA1 = tvalid[tidx(taA1)] && (ttagv[tidx(taA1)] == ttag(taA1));
+
 	reg  hitC0_r, hitC1_r;
 	wire [28:0] nC0 = advBC ? taB0 : taC0;          // what C holds next clock
 	wire [28:0] nC1 = advBC ? taB1 : taC1;
@@ -470,6 +527,129 @@ module ps1_raster #(
 	reg [7:0]  rC0, gC0, bC0, rC1, gC1, bC1;
 	reg [7:0]  uC0, uC1;
 	reg        oC0, oC1;                            // the texel is the odd pixel of its word
+
+	// The prefetch queue: texel lines the look-ahead found missing, oldest first. Four
+	// entries in registers (two can arrive in a clock: both texels of a pair), each kept once:
+	// not a line already queued, nor the one being fetched. A line that arrives by other means
+	// before its turn (a run's offer, C's own demand) is found in the cache then and skipped.
+	// A prefetch never evicts the line of a pair in B or C: that line would only be fetched
+	// again, and two lines sharing an index could chase each other for ever.
+	localparam PQN = 8;
+	reg  [24:0]  pq_a [0:PQN-1];
+	reg  [PQN-1:0] pq_v;
+	wire         pq_full = &pq_v;
+	wire         pf_busy = (fs != 2'd0) && is_texf;                // a texel fetch is out (2'd0: F_IDLE, declared below)
+	// ...and the tile that has just landed: its other lines are still being offered for a few
+	// clocks, during which the probe would see them missing and queue them again
+	reg  [24:0]  pf_last; reg [3:0] pf_cov;
+	always @(posedge clk) begin
+		if (rst) begin pf_last <= 25'd0; pf_cov <= 4'd0; end
+		else if (own_fill) begin pf_last <= faddr[28:4]; pf_cov <= 4'd12; end
+		else if (pf_fill)  begin pf_last <= pf_fa;        pf_cov <= 4'd12; end
+		else if (pf_cov != 4'd0) pf_cov <= pf_cov - 4'd1;
+	end
+	// A texel fetch brings a TILE: the aligned pair of lines its line is in, and the pair below
+	// (one VRAM row = 128 lines). A line that tile covers is on its way already -- asked for again
+	// it cost a whole round trip of the port for nothing (measured: 12% more fetches, slower).
+	function covers; input [24:0] f, l;                 // the tile fetched at line f brings line l
+		begin covers = (l[24:1] == f[24:1]) || (l[24:1] == f[24:1] + 24'd64); end
+	endfunction
+	function pq_has; input [24:0] l; integer qi;
+		begin pq_has = 1'b0; for (qi = 0; qi < PQN; qi = qi + 1) if (pq_v[qi] && covers(pq_a[qi], l)) pq_has = 1'b1; end
+	endfunction
+	wire [24:0]  pfA0 = taA0[28:4], pfA1 = taA1[28:4];
+	wire         pt_cov0, pt_cov1;                  // (below: a tile in flight on the prefetch port covers it)
+	wire         pq_w0 = q_push && is_tex && a_ok && !hitA0 && !pq_has(pfA0) && !(pf_busy && covers(faddr[28:4], pfA0))
+	                     && !(pf_cov != 4'd0 && covers(pf_last, pfA0)) && !pt_cov0;
+	wire         pq_w1 = q_push && is_tex && b_ok && !hitA1 && !(a_ok && covers(pfA0, pfA1)) && !pq_has(pfA1) && !(pf_busy && covers(faddr[28:4], pfA1))
+	                     && !(pf_cov != 4'd0 && covers(pf_last, pfA1)) && !pt_cov1;
+	// the head, and whether it is still worth fetching when its turn comes
+	wire [24:0]  pq_head = pq_a[0];
+	wire         pq_hit  = tvalid[tidx({pq_head, 4'd0})] && (ttagv[tidx({pq_head, 4'd0})] == ttag({pq_head, 4'd0}));
+	// a clash: the head would take the index of a texel a live pair in B or C still needs, and
+	// it is a different line (the same line is simply a hit, or B's / C's own demand)
+	function clash1; input [28:0] h, t; begin clash1 = (tidx(h) == tidx(t)) && (ttag(h) != ttag(t)); end endfunction
+	wire [28:0]  pq_hb = {pq_head, 4'd0};
+	wire         pq_clash = is_tex && ((vB && ((okB0 && clash1(pq_hb, taB0)) || (okB1 && clash1(pq_hb, taB1))))
+	                              || (vC && ((okC0 && clash1(pq_hb, taC0)) || (okC1 && clash1(pq_hb, taC1)))));
+	wire         pq_go   = pq_v[0] && !pq_hit && !pq_clash;        // fetch it now
+	wire         pq_drop = pq_v[0] && (pq_hit || pq_clash);        // no need, or not now: let it go
+	wire         pq_take;                                          // (below: the fetch machine took the head)
+	integer      pqi;
+	always @(posedge clk) begin
+		if (rst || (start && !busy)) pq_v <= {PQN{1'b0}};
+		else begin : pq_step
+			reg [PQN-1:0] v; reg [24:0] a [0:PQN-1]; integer n;
+			v = pq_v; for (pqi = 0; pqi < PQN; pqi = pqi + 1) a[pqi] = pq_a[pqi];
+			if (pq_take || pq_drop) begin                          // the head leaves: shift up
+				for (pqi = 0; pqi < PQN - 1; pqi = pqi + 1) begin a[pqi] = a[pqi + 1]; v[pqi] = v[pqi + 1]; end
+				v[PQN - 1] = 1'b0;
+			end
+			n = 0; for (pqi = 0; pqi < PQN; pqi = pqi + 1) if (v[pqi]) n = n + 1;
+			if (pq_w0 && n < PQN) begin a[n] = pfA0; v[n] = 1'b1; n = n + 1; end
+			if (pq_w1 && n < PQN) begin a[n] = pfA1; v[n] = 1'b1; n = n + 1; end
+			pq_v <= v; for (pqi = 0; pqi < PQN; pqi = pqi + 1) pq_a[pqi] <= a[pqi];
+		end
+	end
+
+	// --- the prefetch fetcher ------------------------------------------------------------------
+	// The head of PQ goes out as a TILE -- the aligned pair of lines its line is in and the pair
+	// below, the shape the video cache's runs have -- as four line reads on pf_m_*, a port of the
+	// arbiter's own, so they overlap the demand fetches and each other: PFT tiles in flight,
+	// answered in order. The lines land in a small buffer and go into the cache when its one
+	// write port is free (the demand fill first, then a run's offer, then these). A write that
+	// lands on a tile while it is out poisons it -- its lines are not kept -- and one that lands
+	// on a buffered line drops that line, so nothing stale ever enters the cache from here.
+	// Nothing here is reset at a primitive's start: reads out on the arbiter still come back.
+	localparam PFT = 2;
+	reg  [24:0]  pt_base [0:PFT-1];
+	reg  [PFT-1:0] pt_v, pt_poison, pt_done;        // holds a tile; a write hit it; all four lines issued
+	reg          pt_wi, pt_ii, pt_ri;               // the slot a new tile takes / being issued / being answered
+	reg  [1:0]   pt_iss, pt_got;                    // lines issued of the issuing tile, returned of the answering one
+	localparam PBN = 4;                             // buffered lines
+	reg  [24:0]  pb_a [0:PBN-1]; reg [127:0] pb_d [0:PBN-1]; reg [PBN-1:0] pb_v;
+	reg  [1:0]   pb_w, pb_r; reg [2:0] pb_n;
+	wire         pb_full = (pb_n == PBN);
+	function [24:0] tline; input [24:0] base; input [1:0] k;       // line k of the tile at base
+		begin tline = base + (k[1] ? 25'd128 : 25'd0) + (k[0] ? 25'd1 : 25'd0); end
+	endfunction
+	assign       pt_cov0 = (pt_v[0] && covers(pt_base[0], pfA0)) || (pt_v[1] && covers(pt_base[1], pfA0));
+	assign       pt_cov1 = (pt_v[0] && covers(pt_base[0], pfA1)) || (pt_v[1] && covers(pt_base[1], pfA1));
+	wire         pt_issuing = pt_v[pt_ii] && !pt_done[pt_ii];
+	assign       pq_take    = pq_go && !pt_v[pt_wi];
+	wire [24:0]  pt_line    = tline(pt_base[pt_ii], pt_iss);
+	always @(*) begin pf_m_req = pt_issuing; pf_m_addr = pt_line[23:0]; end
+	// the buffer's head into the cache; a poisoned (dropped) head is simply let go
+	assign       pf_fa   = pb_a[pb_r];
+	assign       pf_fd   = pb_d[pb_r];
+	assign       pf_fill = (pb_n != 0) && pb_v[pb_r] && !own_fill && !offer_go;
+	wire         pb_skip = (pb_n != 0) && !pb_v[pb_r];
+	wire         pb_pop  = pf_fill || pb_skip;
+	wire         pb_push = pf_m_valid && !pt_poison[pt_ri] && !pb_full;    // (a full buffer loses the line: fetched later on demand)
+	integer      pti;
+	always @(posedge clk) begin
+		if (rst) begin
+			pt_v <= {PFT{1'b0}}; pt_poison <= {PFT{1'b0}}; pt_done <= {PFT{1'b0}}; pt_wi <= 1'b0; pt_ii <= 1'b0; pt_ri <= 1'b0; pt_iss <= 2'd0; pt_got <= 2'd0;
+			pb_v <= {PBN{1'b0}}; pb_w <= 2'd0; pb_r <= 2'd0; pb_n <= 3'd0;
+		end else begin
+			if (pq_take) begin pt_base[pt_wi] <= {pq_head[24:1], 1'b0}; pt_v[pt_wi] <= 1'b1; pt_poison[pt_wi] <= 1'b0; pt_done[pt_wi] <= 1'b0; pt_wi <= ~pt_wi; end
+			if (pt_issuing && pf_m_ready) begin
+				pt_iss <= pt_iss + 2'd1;
+				if (pt_iss == 2'd3) begin pt_done[pt_ii] <= 1'b1; pt_ii <= ~pt_ii; end
+			end
+			if (pf_m_valid) begin
+				if (pb_push) begin pb_a[pb_w] <= tline(pt_base[pt_ri], pt_got); pb_d[pb_w] <= pf_m_rdata; pb_v[pb_w] <= 1'b1; pb_w <= pb_w + 2'd1; end
+				pt_got <= pt_got + 2'd1;
+				if (pt_got == 2'd3) begin pt_v[pt_ri] <= 1'b0; pt_ri <= ~pt_ri; end
+			end
+			if (pb_pop) begin pb_v[pb_r] <= 1'b0; pb_r <= pb_r + 2'd1; end
+			pb_n <= pb_n + (pb_push ? 3'd1 : 3'd0) - (pb_pop ? 3'd1 : 3'd0);
+			if (inv_go) begin
+				for (pti = 0; pti < PFT; pti = pti + 1) if (pt_v[pti] && covers(pt_base[pti], inv_a[28:4])) pt_poison[pti] <= 1'b1;
+				for (pti = 0; pti < PBN; pti = pti + 1) if (pb_v[pti] && pb_a[pti] == inv_a[28:4]) pb_v[pti] <= 1'b0;
+			end
+		end
+	end
 	wire       needC0 = vC && okC0 && is_tex;
 	wire       needC1 = vC && okC1 && is_tex;
 	wire       missC  = (needC0 && !hitC0) || (needC1 && !hitC1);
@@ -674,7 +854,7 @@ module ps1_raster #(
 			// transparent span reads each line before it writes it, and a line at a time from
 			// memory it ran at a quarter of the console's speed (ps1-tests gpu/bandwidth)
 			v_around = 1'b1;
-			v_lin    = (fwho != 2'd0);              // palette and destination runs are along one row
+			v_lin    = !is_texf;                    // palette and destination runs are along one row
 			v_one    = (fwho == 2'd1);              // ...and the destination uses only the line it asked for
 		end
 	end
@@ -766,7 +946,7 @@ module ps1_raster #(
 			if (inv_go && tvalid[tidx(inv_a)] && (ttagv[tidx(inv_a)] == ttag(inv_a))) begin
 				if (w_done) tf_inv_w <= tf_inv_w + 16'd1; else tf_inv_e <= tf_inv_e + 16'd1;
 			end
-			if (fs == F_REQ && fwho == 2'd0) begin
+			if (fs == F_REQ && is_texf) begin
 				if (f_ack) begin
 					tf_n <= tf_n + 32'd1; tf_lat <= tf_lat + {16'd0, tf_cur} + 32'd1;
 					if (tf_cur + 16'd1 > tf_max) tf_max <= tf_cur + 16'd1;
@@ -783,7 +963,8 @@ module ps1_raster #(
 	wire mvB = vB && cFree;
 	assign advBC = mvB;
 	wire bFree = !vB || mvB;
-	assign hold = !bFree;                           // the scanner stands still
+	assign q_pop = bFree && !q_empty;
+	assign hold = q_full;                           // the scanner stands still
 
 	// ------------------------------------------------------------------------------------
 	// the stages
@@ -850,18 +1031,11 @@ module ps1_raster #(
 				end
 			end
 
-			// --- B -------------------------------------------------------------------------
+			// --- B: the head of Q (a pair with nothing in it was never queued, except the
+			// last one, which carries the end of the primitive) ------------------------------
 			if (bFree) begin
-				// a pair with nothing in it is not sent down, except the last one,
-				// which carries the end of the primitive
-				vB    <= scanning && !hold && pace_ok && (a_ok || b_ok || last) && !skip8 && !skip32;
-				lastB <= last;
-				okB0  <= a_ok; okB1 <= b_ok;
-				xB    <= px[9:0]; yB <= py[8:0];
-				rB0 <= is_gour ? cr[23:16] : fr; gB0 <= is_gour ? cg[23:16] : fg; bB0 <= is_gour ? cb[23:16] : fb;
-				rB1 <= is_gour ? cr1[23:16] : fr; gB1 <= is_gour ? cg1[23:16] : fg; bB1 <= is_gour ? cb1[23:16] : fb;
-				uB0 <= twin(cu[23:16], tw_mx, tw_ox);  vB0 <= twin(cv[23:16], tw_my, tw_oy);
-				uB1 <= twin(cu1[23:16], tw_mx, tw_ox); vB1 <= twin(cv1[23:16], tw_my, tw_oy);
+				vB <= q_pop;
+				{lastB, okB0, okB1, xB, yB, rB0, gB0, bB0, rB1, gB1, bB1, uB0, vB0, uB1, vB1} <= q_out;
 			end
 
 			// --- C -------------------------------------------------------------------------
@@ -909,7 +1083,7 @@ module ps1_raster #(
 				end
 			end
 			// the primitive is over when its last pair has gone out (or was empty)
-			if (busy && !scanning && !vB && !vC && !vD && !vE && !wreq && fs == F_IDLE && !cl_loading)
+			if (busy && !scanning && q_empty && !vB && !vC && !vD && !vE && !wreq && fs == F_IDLE && !cl_loading)
 				busy <= 1'b0;
 
 			// --- the fetches -----------------------------------------------------------------

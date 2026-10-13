@@ -42,7 +42,7 @@ module tb_ps1_replay;
 
 	wire v_lin_w, v_one_w, g_lin_w;
 	wire vn_req, vn_ack; wire [24:0] vn_addr; wire [127:0] vn_line;   // the read-ahead, as on the board
-	ps1_gpu #(.READ_AHEAD(1)) gpu ( .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w), .vn_req(vn_req), .vn_addr(vn_addr), .vn_ack(vn_ack), .vn_line(vn_line), .dbg_tf_sel(3'd0), .dbg_tf(), .eng_busy(), .eng_f_empty(),
+	ps1_gpu #(.READ_AHEAD(1)) gpu ( .pfm_addr(pfm_addr), .pfm_req(pfm_req), .pfm_ready(pfm_ready), .pfm_rdata(pfm_rdata), .pfm_valid(pfm_valid), .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w), .vn_req(vn_req), .vn_addr(vn_addr), .vn_ack(vn_ack), .vn_line(vn_line), .dbg_tf_sel(3'd0), .dbg_tf(), .eng_busy(), .eng_f_empty(),
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .a4(a4), .dma_active(1'b0), .cap_every_vsync(1'b0), .gpu_fast(1'b1),
 		.no_tcache(no_tcache_r), .no_ccache(1'b0), .no_trun(1'b0), .wdata(wdata), .rdata(rdata),
@@ -102,6 +102,7 @@ module tb_ps1_replay;
 
 	// a megabyte of lines with some latency
 	reg [127:0] mem [0:65535];
+	`include "ps1_pfmem.vh"
 	localparam RD = 30;
 	reg [127:0] pd [0:RD-1];
 	reg         pv [0:RD-1];

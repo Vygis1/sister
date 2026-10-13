@@ -68,7 +68,7 @@ module tb_ps1_clut;
 	wire        vblank, hblank, dot_ce, irq;
 
 	wire v_lin_w, v_one_w, g_lin_w;
-	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
+	ps1_gpu gpu ( .pfm_addr(pfm_addr), .pfm_req(pfm_req), .pfm_ready(pfm_ready), .pfm_rdata(pfm_rdata), .pfm_valid(pfm_valid), .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .a4(a4), .dma_active(1'b0), .cap_every_vsync(1'b0), .gpu_fast(1'b1),
 		.no_tcache(no_tcache_r), .no_ccache(1'b0), .no_trun(1'b0), .wdata(wdata), .rdata(rdata),
@@ -128,13 +128,18 @@ module tb_ps1_clut;
 
 	// a megabyte of lines with some latency
 	reg [127:0] mem [0:65535];
-	localparam RD = 6;
+	`include "ps1_pfmem.vh"
+	// LAT=n (default 6): the memory's latency in clocks -- the board's DDR3 averages 41 (texstall.py)
+	localparam RD = 64;
+	integer LAT;
+	initial if (!$value$plusargs("LAT%d", LAT)) LAT = 6;
+	initial begin #1; pf_lat = LAT; end
 	reg [127:0] pd [0:RD-1];
 	reg         pv [0:RD-1];
 	integer pi;
 	always @(*) m_ready = m_req;
 	always @(posedge clk) begin
-		m_valid <= pv[RD-1]; m_rdata <= pd[RD-1];
+		m_valid <= pv[LAT-1]; m_rdata <= pd[LAT-1];
 		for (pi = RD - 1; pi > 0; pi = pi - 1) begin pv[pi] <= pv[pi-1]; pd[pi] <= pd[pi-1]; end
 		pv[0] <= 1'b0;
 		if (m_req && m_ready) begin
@@ -245,7 +250,14 @@ module tb_ps1_clut;
 	// This draws 160 small textured triangles at 1:1 and reports where the
 	// drawing time went. No checks: it is a yardstick, not a gate.
 	// ==================================================================================
-	localparam TEX_X = 512, TEX_Y = 0, TW = 64, TH = 64;
+	// COLD=1: a 256 x 256 texture and every triangle on a different part of it, so its lines
+	// are not in the cache when it starts -- what a game does, and what the board measures
+	// (MediEvil: 0.07 fetches a textured pair, 41 clocks each, 13% of all clocks waiting)
+	integer COLD;
+	initial if (!$value$plusargs("COLD%d", COLD)) COLD = 0;
+	localparam TEX_X = 512, TEX_Y = 0;
+	integer TW = 64, TH = 64;
+	initial begin #1; if (COLD) begin TW = 128; TH = 256; end end
 	localparam CLUT_X = 512, CLUT_Y = 400, NPAL = 8;
 	function [15:0] texel_g;
 		input [9:0] tu; input [9:0] tv; input [2:0] tg;
@@ -266,6 +278,28 @@ module tb_ps1_clut;
 	initial if (!$value$plusargs("BIG%d", BIG)) BIG = 1;
 
 	integer busy_clk = 0, tex_stall = 0, own_fills = 0, run_fills = 0, px_pairs = 0;
+	// the look-ahead (ps1_raster Q / PQ): prefetches sent, queue heads dropped (present / clashing),
+	// demand fetches, and how many pairs were queued ahead when a demand fetch went out
+	integer pf_lines = 0, pf_ret = 0, pf_pushed = 0, pf_filled = 0, pf_skipped = 0;
+	integer pf_sent = 0, pf_drop_hit = 0, pf_drop_clash = 0, dem_sent = 0, dem_qsum = 0, dem_qmax = 0, pq_wrote = 0, pf_full = 0;
+	always @(posedge clk) begin
+		if (gpu.u_raster.fs == 1 && gpu.u_raster.f_ack) begin
+			if (gpu.u_raster.fwho == 0) begin dem_sent = dem_sent + 1; dem_qsum = dem_qsum + gpu.u_raster.q_n; if (gpu.u_raster.q_n > dem_qmax) dem_qmax = gpu.u_raster.q_n; end
+		end
+		if (gpu.u_raster.pq_take) pf_sent = pf_sent + 1;
+		if (gpu.u_raster.pf_m_req && gpu.u_raster.pf_m_ready) pf_lines = pf_lines + 1;
+		if (gpu.u_raster.pf_m_valid) pf_ret = pf_ret + 1;
+		if (gpu.u_raster.pf_m_valid && pf_ret < 6)
+			$display("  [%0t] prefetch answer %0d: pt_ri %b pt_v %b pt_poison %b pt_done %b pb_n %0d pb_full %b pt_base0 %h pt_base1 %h", $time, pf_ret,
+			         gpu.u_raster.pt_ri, gpu.u_raster.pt_v, gpu.u_raster.pt_poison, gpu.u_raster.pt_done, gpu.u_raster.pb_n, gpu.u_raster.pb_full, gpu.u_raster.pt_base[0], gpu.u_raster.pt_base[1]);
+		if (gpu.u_raster.pb_push) pf_pushed = pf_pushed + 1;
+		if (gpu.u_raster.pf_fill) pf_filled = pf_filled + 1;
+		if (gpu.u_raster.pb_skip) pf_skipped = pf_skipped + 1;
+		if (gpu.u_raster.pq_drop && gpu.u_raster.pq_hit) pf_drop_hit = pf_drop_hit + 1;
+		if (gpu.u_raster.pq_drop && !gpu.u_raster.pq_hit) pf_drop_clash = pf_drop_clash + 1;
+		if (gpu.u_raster.pq_w0 || gpu.u_raster.pq_w1) pq_wrote = pq_wrote + 1;
+		if ((gpu.u_raster.pq_w0 || gpu.u_raster.pq_w1) && gpu.u_raster.pq_full) pf_full = pf_full + 1;
+	end
 	integer mem_tex = 0, mem_wr = 0, mem_other = 0;
 	integer clut_stall = 0, clut_reads = 0, clut_offered = 0, clut_while_loading = 0;
 	integer w_dem = 0, w_off = 0, w_hld = 0;
@@ -394,11 +428,15 @@ module tb_ps1_clut;
 			seed = nxt(seed); sy = 8 + (seed[8:0] % 200);
 			cl = ((CLUT_Y + (i % NPAL)) << 6) | (CLUT_X / 16);
 			gp0(32'h3480_8080);                                        // gouraud + texture
-			gp0(((sy) << 16) | sx);                 gp0((cl << 16) | (0 << 8) | 0);
-			gp0(32'h0080_8080);
-			gp0(((sy + 6*BIG) << 16) | (sx + 28));  gp0((16'h0088 << 16) | ((6*BIG) << 8) | 28);
-			gp0(32'h0080_8080);
-			gp0(((sy + 26*BIG) << 16) | (sx + 4));  gp0(((26*BIG) << 8) | 4);
+			begin : one_tri
+				integer u0, v0;                                  // where on the texture this one is
+				u0 = COLD ? (i * 37) % 220 : 0; v0 = COLD ? (i * 53) % 220 : 0;
+				gp0(((sy) << 16) | sx);                 gp0((cl << 16) | (v0 << 8) | u0);
+				gp0(32'h0080_8080);
+				gp0(((sy + 6*BIG) << 16) | (sx + 28));  gp0((16'h0088 << 16) | ((v0 + 6*BIG) << 8) | (u0 + 28));
+				gp0(32'h0080_8080);
+				gp0(((sy + 26*BIG) << 16) | (sx + 4));  gp0(((v0 + 26*BIG) << 8) | (u0 + 4));
+			end
 			if (i % 40 == 0) $display("  [%0t] triangle %0d", $time, i);
 		end
 		idle();
@@ -417,6 +455,9 @@ module tb_ps1_clut;
 		$display("   palette writes: demand %0d, straight from the run %0d, held over %0d",
 		         w_dem, w_off, w_hld);
 		$display("   fetches %0d, lines offered %0d", own_fills, run_fills);
+		$display("   look-ahead: %0d prefetches sent, %0d demand fetches (queue held %0d pairs on average, %0d at most); %0d queued, dropped %0d present / %0d clashing, %0d lost to a full queue",
+		         pf_sent, dem_sent, dem_qsum / (dem_sent == 0 ? 1 : dem_sent), dem_qmax, pq_wrote, pf_drop_hit, pf_drop_clash, pf_full);
+		$display("   prefetch port: %0d line reads issued, %0d answered, %0d buffered, %0d filled into the cache, %0d poisoned", pf_lines, pf_ret, pf_pushed, pf_filled, pf_skipped);
 		$display("   memory: %0d texture reads, %0d writes, %0d other reads (%0d total)",
 		         mem_tex, mem_wr, mem_other, mem_tex + mem_wr + mem_other);
 		$finish;

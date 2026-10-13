@@ -107,6 +107,11 @@ module ps1_gpu #(
 	output wire [24:0]  vn_addr,
 	input  wire         vn_ack,
 	input  wire [127:0] vn_line,
+	output wire [23:0]  pfm_addr,   // the raster's prefetch port (ps1_raster pf_m_*): texel tiles as line reads
+	output wire         pfm_req,
+	input  wire         pfm_ready,
+	input  wire [127:0] pfm_rdata,
+	input  wire         pfm_valid,
 	input  wire        v_ack,
 
 	// --- and display ------------------------------------------------------------------------
@@ -1634,6 +1639,7 @@ module ps1_gpu #(
 	// ==================================================================================
 	ps1_raster #(.CLK_HZ(CLK_HZ), .READ_AHEAD(READ_AHEAD)) u_raster (
 		.n_req(vn_req), .n_addr(vn_addr), .n_ack(vn_ack), .n_line(vn_line),
+		.pf_m_addr(pfm_addr), .pf_m_req(pfm_req), .pf_m_ready(pfm_ready), .pf_m_rdata(pfm_rdata), .pf_m_valid(pfm_valid),
 		.clk(clk), .rst(rst),
 		.start(r_start), .busy(r_busy), .always_in(r_rect),
 		.bx0(r_bx0), .bx1(r_bx1), .by0(r_by0), .by1(r_by1),

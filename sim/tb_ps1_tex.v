@@ -51,7 +51,7 @@ module tb_ps1_tex;
 	wire        vblank, hblank, dot_ce, irq;
 
 	wire v_lin_w, v_one_w, g_lin_w;
-	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
+	ps1_gpu gpu ( .pfm_addr(pfm_addr), .pfm_req(pfm_req), .pfm_ready(pfm_ready), .pfm_rdata(pfm_rdata), .pfm_valid(pfm_valid), .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),
 		.clk(clk), .rst(rst),
 		.sel(sel), .we(we), .a4(a4), .dma_active(1'b0), .cap_every_vsync(1'b0), .gpu_fast(1'b1),
 		.no_tcache(no_tcache_r), .no_ccache(1'b0), .no_trun(1'b0), .wdata(wdata), .rdata(rdata),
@@ -111,6 +111,7 @@ module tb_ps1_tex;
 
 	// a megabyte of lines with some latency
 	reg [127:0] mem [0:65535];
+	`include "ps1_pfmem.vh"
 	localparam RD = 6;
 	reg [127:0] pd [0:RD-1];
 	reg         pv [0:RD-1];

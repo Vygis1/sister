@@ -9,7 +9,7 @@ module tb_ps1_fill;
 	wire [127:0] v_line;
 	wire px_valid; wire [8:0] px_x,px_y; wire [7:0] px_rgb; wire vblank,hblank,dot_ce,irq;
 	wire v_lin_w, v_one_w, g_lin_w;
-	ps1_gpu gpu ( .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),.clk(clk),.rst(rst),.sel(sel),.we(we),.a4(a4),.dma_active(1'b0),.cap_every_vsync(1'b0), .gpu_fast(1'b1),.wdata(wdata),.rdata(rdata),
+	ps1_gpu gpu ( .pfm_addr(pfm_addr), .pfm_req(pfm_req), .pfm_ready(pfm_ready), .pfm_rdata(pfm_rdata), .pfm_valid(pfm_valid), .every_flip(1'b0), .v_lin(v_lin_w), .v_one(v_one_w),.clk(clk),.rst(rst),.sel(sel),.we(we),.a4(a4),.dma_active(1'b0),.cap_every_vsync(1'b0), .gpu_fast(1'b1),.wdata(wdata),.rdata(rdata),
 		.dma_wr(1'b0),.dma_data(32'd0),.dma_ready(),.dma_rd(1'b0),.dma_rdata(),.dma_rvalid(),
 		.v_addr(v_addr),.v_req(v_req),.v_we(v_we),.v_be(v_be),.v_wdata(v_wdata),.v_rdata(v_rdata),.v_line(v_line),.v_ack(v_ack),
 		.v_lwe(v_lwe),.v_wdata128(v_wdata128),
@@ -46,6 +46,7 @@ module tb_ps1_fill;
 		.m_addr(vc_addr),.m_req(vc_req),.m_we(vc_we),.m_wdata(vc_wdata),.m_wmask(vc_wmask),.m_ready(vc_ready),.m_rdata(vc_rdata),.m_valid(vc_valid),
 		.dbg_hits(hits),.dbg_misses(misses));
 	reg [127:0] mem [0:65535];
+	`include "ps1_pfmem.vh"
 	localparam RD=4; reg [127:0] pd[0:RD-1]; reg pv[0:RD-1]; integer pi;
 	always @(*) m_ready=m_req;
 	always @(posedge clk) begin
