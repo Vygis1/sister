@@ -38,11 +38,21 @@ module cpu6502 #(
 	// sets and clears and is still pushed and pulled, but ADC and SBC are always
 	// binary. Default to that, since this core exists for a NES; set DECIMAL=1
 	// for a real 6502, which is what Klaus Dormann's test expects.
-	parameter DECIMAL = 0
+	parameter DECIMAL = 0,
+	// The 2600's 6507 is halted by the TIA (WSYNC pulls RDY low) and the NES's
+	// 2A03 never is. RDY is behind a parameter rather than always live so that
+	// the NES, which leaves the pin unconnected, is unchanged: with HAS_RDY=0
+	// the input is ignored and the sequencer is exactly what it was.
+	parameter HAS_RDY = 0
 )(
 	input  wire        clk,
 	input  wire        rst,
 	input  wire        ce,
+	// Ready. Low holds the processor in its current READ cycle -- the address
+	// stays on the bus and nothing advances until it rises. Write cycles are
+	// never held: the NMOS 6502 ignores RDY while writing, and the TIA relies
+	// on that (the STA WSYNC that drops RDY must itself complete).
+	input  wire        rdy,
 
 	output reg  [15:0] addr,
 	input  wire [7:0]  din,
@@ -109,6 +119,7 @@ module cpu6502 #(
 	reg        nmi_prev, nmi_pending, brk_is_irq;
 
 	assign sync   = (t == S_FETCH);
+	wire rdy_i = (HAS_RDY != 0) ? rdy : 1'b1;
 	assign dbg_a  = A;  assign dbg_x = X;  assign dbg_y = Y;
 	assign dbg_s  = S;  assign dbg_p = P;  assign dbg_pc = PC;
 
@@ -494,7 +505,7 @@ module cpu6502 #(
 			nmi_pending <= 1'b0;
 			brk_is_irq  <= 1'b0;
 			page_cross  <= 1'b0;
-		end else if (ce) begin
+		end else if (ce && (rdy_i || we)) begin
 			we       <= 1'b0;
 			nmi_prev <= nmi;
 			if (nmi && !nmi_prev) nmi_pending <= 1'b1;   // edge triggered
