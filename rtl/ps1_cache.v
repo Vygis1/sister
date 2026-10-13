@@ -71,7 +71,28 @@ module ps1_cache #(
 	// line is read back out of the array in S_LOOK, one more clock per miss.
 	// Invalidation (inv_v) is not supported in this mode: its tag read would
 	// need a second port.
-	parameter BRAM = 0
+	parameter BRAM = 0,
+	// --- a store that misses does not fetch the line first (BRAM mode only) -----------
+	// Each line carries four word-valid bits beside its tag. A whole-word store that misses
+	// claims the line with just that word valid -- no DDR3 read: the game is writing it, and
+	// what memory held there is about to be overwritten. Measured on Syphon Filter's code
+	// (tools/ps1/memtrace.py + cachemodel.py): a store that misses fetched a line it then wrote
+	// over, 68,000 times in 20 frames, and dropping those fetches is a fifth of all the time the
+	// processor waits on memory. A read wants the whole line (the L1s and the DMA take all of
+	// it), so a line that is not wholly valid is fetched on a read and merged under its valid
+	// words; a write-back sends only the valid words (the byte mask).
+	parameter WVALID = 0,
+	// --- a stream buffer beside the cache, for port A's reads (BRAM mode) -------------
+	// A read that misses starts a stream: the next lines after it are fetched into four
+	// slots beside the cache -- not into it, so nothing is evicted for a line nobody wants --
+	// while the processor works on the one it asked for. A later miss that finds its line in a
+	// slot takes it from there instead of from DDR3, and the stream runs on ahead of it.
+	// Measured on Syphon Filter's code (tools/ps1/cachemodel.py): a quarter of what the
+	// processor waits on memory, on top of the WVALID claims. Coherence: a slot holds what
+	// memory held when it was read; the only way memory changes under it is this cache writing
+	// a line back (nothing else writes RAM: the DMA comes through port B), and a write-back
+	// kills any slot holding that line, even one whose read is still out.
+	parameter SBUF = 0
 )(
 	input  wire        flush,        // a pulse: write every dirty line back
 	output wire        flush_busy,
@@ -201,7 +222,10 @@ module ps1_cache #(
 	           S_FLOOK = 4'd8, S_FANS = 4'd9, S_FWB = 4'd10, S_FNEXT = 4'd11,   // the flush walk
 	           S_PF = 4'd12, S_PFWAIT = 4'd13, S_PFANS = 4'd14,
 	           S_WA = 4'd15;                 // port B's run-ahead
-	reg [3:0] st;
+	localparam S_WALLOC = 5'd16;     // a whole-word store claims a missing line (WVALID)
+	localparam S_SBREQ  = 5'd17;     // a stream-buffer slot's read goes out (SBUF)
+	localparam S_SBFILL = 5'd18;     // a miss served from a slot (SBUF)
+	reg [4:0] st;
 
 	// --- who is being served -------------------------------------------------------------
 	reg         serving_b;
@@ -221,6 +245,10 @@ module ps1_cache #(
 	// a flush writes every dirty line back, so a reader of the memory behind
 	// the cache (the host's DDR3 port) sees what the machine sees
 	reg flushing, fl_serve;
+	// the request, held: a pulse that came while the machine was busy (filling, or sending a
+	// stream-buffer slot's read) was lost, and the dirty lines it was for never reached memory
+	reg fl_req;
+	wire fl_want = flush || fl_req;
 	reg [IDXBITS-1:0] fidx;
 	assign flush_busy = flushing;
 	wire [IDXBITS-1:0] idx = fl_serve ? fidx : addr[IDXBITS+3:4];
@@ -318,7 +346,50 @@ module ps1_cache #(
 	reg valid_q, dirty_q;
 	reg refilled;                   // this S_ANS follows a fill: not a hit
 
-	wire hit = valid_q && (tag_q == tg);
+	// the line's word-valid bits (WVALID): what of it the cache really holds
+	wire [3:0]  bq_wv;
+	wire [3:0]  wvq      = (WVALID != 0) ? bq_wv : 4'hF;
+	wire        tmatch   = valid_q && (tag_q == tg);
+	wire        line_w_m, line_w_full;                // (line_mode, and a whole-line write: below)
+	// A hit: the line is here, and so is what this access needs of it -- all of it for a read,
+	// the word for a partial store; a whole-word or whole-line store needs nothing.
+	wire hit = tmatch && ((WVALID == 0) || (wvq == 4'hF) || (we && !line_w_m && (be == 4'hF || wvq[wsel])) || (we && line_w_full));
+	wire part = tmatch && !hit;                       // here, but not enough of it: fetch and merge
+	reg         fm;                                   // this fill merges under the line's valid words
+	reg  [3:0]  fm_wv;
+	function [15:0] wvmask; input [3:0] v; wvmask = {{4{v[3]}}, {4{v[2]}}, {4{v[1]}}, {4{v[0]}}}; endfunction
+	function [127:0] wvmerge; input [127:0] have; input [3:0] v; input [127:0] mem;
+		wvmerge = {v[3] ? have[127:96] : mem[127:96], v[2] ? have[95:64] : mem[95:64],
+		           v[1] ? have[63:32]  : mem[63:32],  v[0] ? have[31:0]  : mem[31:0]};
+	endfunction
+	wire        walloc   = (WVALID != 0) && we && !line_w_m && (be == 4'hF);   // a miss claims the line
+	wire [127:0] fill_line = fm ? wvmerge(line_q, fm_wv, m_rdata) : m_rdata;
+
+	// --- the stream buffer (SBUF) ----------------------------------------------------------
+	localparam SBN = 4;
+	reg  [24:0]  sb_line [0:SBN-1];
+	reg  [127:0] sb_d    [0:SBN-1];
+	reg  [SBN-1:0] sb_vld, sb_pend, sb_kill;         // holds its line / its read is out / a write-back hit it
+	reg  [1:0]   sb_fifo [0:SBN-1];                   // the slots of the reads out, in the order sent
+	reg  [1:0]   sb_wp, sb_rp;
+	reg  [2:0]   sb_out;                              // reads out (their answers come before any later one's)
+	reg          sb_act;                              // a stream is running
+	reg  [24:0]  sb_next, sb_head;                    // the next line to ask for; the one after the last taken
+	reg          sbh;                                 // this miss is served from a slot
+	reg  [1:0]   sbs;                                 // ...that one
+	wire [24:0]  rq_ln   = addr[28:4];
+	wire [SBN-1:0] sb_m;                              // the slots holding the line asked for
+	wire [SBN-1:0] sb_free;                           // slots neither holding nor waiting
+	genvar sbg;
+	generate for (sbg = 0; sbg < SBN; sbg = sbg + 1) begin : g_sbm
+		assign sb_m[sbg]    = sb_vld[sbg] && (sb_line[sbg] == rq_ln);
+		assign sb_free[sbg] = !sb_vld[sbg] && !sb_pend[sbg];
+	end endgenerate
+	wire         sb_hit  = (SBUF != 0) && (|sb_m);
+	wire [1:0]   sb_hs   = sb_m[0] ? 2'd0 : sb_m[1] ? 2'd1 : sb_m[2] ? 2'd2 : 2'd3;
+	wire [1:0]   sb_fs   = sb_free[0] ? 2'd0 : sb_free[1] ? 2'd1 : sb_free[2] ? 2'd2 : 2'd3;
+	wire         sb_go   = (SBUF != 0) && sb_act && (|sb_free) && (sb_out != SBN) && ((sb_next - sb_head) < 25'd4);
+	wire [127:0] sb_line_q = sb_d[sbs];
 
 	// port A's answer, this cycle, when it is already known
 	wire fast_a = (FAST_ACK != 0) && (st == S_ANS) && hit && !serving_b;
@@ -398,6 +469,8 @@ module ps1_cache #(
 	wire line_mode = serving_b ? ((B_LINE != 0) && b_lwe) : a_lwe;
 	wire [15:0]  l_be16 = serving_b ? b_be16 : a_be16;           // the line write's mask and data
 	wire [127:0] l_wd   = serving_b ? b_wdata128 : a_wdata128;
+	assign line_w_m    = line_mode;
+	assign line_w_full = line_mode && (&l_be16);
 
 	function [127:0] merge;
 		input [127:0] l;
@@ -415,31 +488,39 @@ module ps1_cache #(
 	wire [IDXBITS-1:0] inv_idx = inv_line[IDXBITS-1:0];
 	wire [TAGW-1:0]    inv_tg  = inv_line[24:IDXBITS];
 	integer i;
+	reg         sb_out_inc, sb_take, sb_kill_go;          // (blocking: this clock's slot events)
+	reg  [24:0] sb_kill_line;
+	wire        sb_rd = (SBUF != 0) && !serving_b && !we && !line_mode && !part;   // a read port A misses on
+	integer     sbi;
 	always @(posedge clk) begin
 		va_we = 1'b0; vb_we = 1'b0;
+		sb_out_inc = 1'b0; sb_take = 1'b0; sb_kill_go = 1'b0; sb_kill_line = 25'd0;
 		if (!rst && inv_v) begin
 			if (BRAM == 0 && !clr && `CV(inv_idx) && tag[(BRAM != 0) ? {IDXBITS{1'b0}} : inv_idx] == inv_tg) vb_we = 1'b1;
 			if (in_run(inv_d)) pf_lv[run_ix(inv_d)] <= 1'b0;
 		end
 		if (rst) begin
-			st <= S_IDLE; flushing <= 1'b0; fl_serve <= 1'b0; fidx <= {IDXBITS{1'b0}}; ar_q <= 1'b0;
+			st <= S_IDLE; flushing <= 1'b0; fl_serve <= 1'b0; fl_req <= 1'b0; fidx <= {IDXBITS{1'b0}}; ar_q <= 1'b0;
 			a_ack_r <= 1'b0; b_ack <= 1'b0; a_line_r <= 128'd0; b_line <= 128'd0;
 			m_req <= 1'b0; m_we <= 1'b0; m_wmask <= 16'hFFFF;
 			serving_b <= 1'b0; refilled <= 1'b0;
 			pf_valid <= 1'b0; pf_lv <= {PFL{1'b0}}; pf_i <= 0; pf_n <= 0; pf_busy <= 1'b0;
 			xs_on <= 1'b0; xs_i <= 0; x_valid <= 1'b0; x_addr <= 25'd0; x_line <= 128'd0; pf_lin <= 1'b0;
-			pf_want <= 0; pf_base <= 25'd0; pf_early <= 1'b0;
+			pf_want <= 0; pf_base <= 25'd0; pf_early <= 1'b0; fm <= 1'b0; fm_wv <= 4'hF;
+			sb_vld <= {SBN{1'b0}}; sb_pend <= {SBN{1'b0}}; sb_kill <= {SBN{1'b0}}; sb_wp <= 2'd0; sb_rp <= 2'd0; sb_out <= 3'd0;
+			sb_act <= 1'b0; sb_next <= 25'd0; sb_head <= 25'd0; sbh <= 1'b0; sbs <= 2'd0;
 			dbg_hits <= 32'd0; dbg_misses <= 32'd0;
 			clr <= 1'b1; clr_i <= {IDXBITS{1'b0}};   // every line invalid (dirty: see its declaration)
 		end else begin
 			a_ack_r <= 1'b0;
 			b_ack <= 1'b0;
+			if (flush) fl_req <= 1'b1;
 
 			// Lines of a run are taken wherever the machine happens to be, not
 			// only in the state that waits for them, because the first of them
 			// can arrive before the last has been asked for. They come back in
 			// the order they went out.
-			if (pf_busy && m_valid && (pf_n != PFL)) begin
+			if (pf_busy && m_valid && (pf_n != PFL) && (sb_out == 0)) begin
 				pf_data[pf_n[PFLB-1:0]] <= m_rdata;
 				pf_n <= pf_n + 1'b1;
 			end
@@ -467,8 +548,12 @@ module ps1_cache #(
 			// landed on whatever the port asked for next. A port being acked
 			// this cycle has nothing new to say.
 			S_IDLE: if (clr) ;   // the reset sweep: hold every port off until it is done
-				else if (flush) begin flushing <= 1'b1; fidx <= {IDXBITS{1'b0}}; end
+				else if (fl_want) begin flushing <= 1'b1; fidx <= {IDXBITS{1'b0}}; fl_req <= 1'b0; end
 				else if (flushing) begin fl_serve <= 1'b1; st <= S_FLOOK; end
+				else if (!(a_go || b_go) && sb_go) begin
+					m_addr <= sb_next[23:0]; m_we <= 1'b0; m_req <= 1'b1;
+					st <= S_SBREQ;
+				end
 				else if (a_go || b_go) begin
 					// Take turns. Port B of the VRAM cache is the frame capture's
 					// scanout; giving it the cache whenever it asked starved the
@@ -510,7 +595,7 @@ module ps1_cache #(
 					if (serving_b) begin b_rdata <= pick(line_q, wsel); b_line <= line_q; b_ack <= 1'b1; end
 					else           begin a_rdata_r <= pick(line_q, wsel); a_line_r <= line_q; a_ack_r <= !fast_a; end
 					st <= S_IDLE;
-				end else if (b_around) begin
+				end else if (b_around && !part) begin
 					dbg_misses <= dbg_misses + 32'd1;
 					if (pf_hit) begin
 						// the run this walked into is already here
@@ -551,7 +636,7 @@ module ps1_cache #(
 						m_req    <= 1'b1;
 						st <= S_PF;
 					end
-				end else if (!serving_b && line_mode && we) begin
+				end else if (!serving_b && line_mode && we && !part) begin
 					// --- a whole line that misses goes round the cache -------------
 					// Measured on the board: the drawing engine's framebuffer writes
 					// missed this 8 KB cache on nearly every line (a frame's working
@@ -578,25 +663,75 @@ module ps1_cache #(
 					st <= S_WA;
 				end else begin
 					dbg_misses <= dbg_misses + 32'd1;
+					// The line is here but not all of what is wanted (WVALID): fetch it and
+					// merge it under the words the cache holds -- no write-back, it is this line.
+					sbh <= sb_rd && sb_hit; sbs <= sb_hs;
+					if (sb_rd) begin
+						if (sb_hit) begin
+							// taken from the slot: the stream runs on from here, and slots
+							// behind the line taken are of no more use
+							sb_head <= rq_ln + 25'd1;
+							if (sb_next < rq_ln + 25'd1) sb_next <= rq_ln + 25'd1;
+						end else begin
+							// a new stream from this line
+							sb_act  <= 1'b1;
+							sb_head <= rq_ln + 25'd1;
+							sb_next <= rq_ln + 25'd1;
+						end
+					end
+					if (part) begin
+						fm <= 1'b1; fm_wv <= wvq;
+						st <= S_FILL;
 					// The line here is somebody else's. Write it back if it is
 					// dirty, then fetch the one wanted.
-					if (valid_q && dirty_q) begin
+					end else if (valid_q && dirty_q) begin
 						if (in_run(evicted - pf_base)) pf_lv[run_ix(evicted - pf_base)] <= 1'b0;
+						sb_kill_line = evicted; sb_kill_go = 1'b1;
 						m_addr  <= {tag_q, idx};
 						m_wdata <= line_q;
 						m_we    <= 1'b1;
-						m_wmask <= 16'hFFFF;
+						m_wmask <= wvmask(wvq);           // (only the words it holds: WVALID)
 						m_req   <= 1'b1;
 						st <= S_WB;
 					end else
 						// a whole line arriving needs nothing from memory: allocate it
-						st <= (line_mode && we && (&l_be16)) ? S_ALLOC : S_FILL;
+						st <= (line_mode && we && (&l_be16)) ? S_ALLOC : walloc ? S_WALLOC : (sb_rd && sb_hit) ? S_SBFILL : S_FILL;
 				end
 
 			S_WB: if (m_ready) begin
 					m_req <= 1'b0;
 					m_we  <= 1'b0;
-					st <= (line_mode && we && (&l_be16)) ? S_ALLOC : S_FILL;
+					st <= (line_mode && we && (&l_be16)) ? S_ALLOC : walloc ? S_WALLOC : sbh ? S_SBFILL : S_FILL;
+				end
+
+			// a slot's read goes out
+			S_SBREQ: if (m_ready) begin
+					m_req <= 1'b0;
+					sb_line[sb_fs] <= sb_next; sb_pend[sb_fs] <= 1'b1; sb_kill[sb_fs] <= 1'b0;
+					sb_fifo[sb_wp] <= sb_fs; sb_wp <= sb_wp + 2'd1;
+					sb_out_inc = 1'b1;
+					sb_next <= sb_next + 25'd1;
+					st <= S_IDLE;
+				end
+
+			// the line is in a slot: into the cache from there, and answered
+			S_SBFILL: begin
+					if (BRAM == 0) begin data[didx] <= sb_line_q; tag[didx] <= tg; end
+					va_we = 1'b1;
+					dirty[idx] <= 1'b0;
+					a_rdata_r <= pick(sb_line_q, wsel); a_line_r <= sb_line_q; a_ack_r <= 1'b1;
+					sb_take = 1'b1;
+					sbh <= 1'b0;
+					st <= S_IDLE;
+				end
+
+			// a whole-word store claims the line with only that word valid (WVALID)
+			S_WALLOC: begin
+					if (pf_hit) pf_lv[pf_sel] <= 1'b0;
+					va_we = 1'b1;
+					dirty[idx] <= 1'b1;
+					if (serving_b) b_ack <= 1'b1; else a_ack_r <= 1'b1;
+					st <= S_IDLE;
 				end
 
 			// the write-around is taken by memory: that is the whole of it
@@ -625,22 +760,23 @@ module ps1_cache #(
 
 			S_FILLWAIT: begin
 					if (m_req && m_ready) m_req <= 1'b0;
-					if (m_valid) begin
+					if (m_valid && (sb_out == 0)) begin
 						if (BRAM == 0) begin data[didx] <= m_rdata; tag[didx] <= tg; end
 						va_we = 1'b1;
-						dirty[idx] <= 1'b0;
-						line_r  <= m_rdata;
+						dirty[idx] <= fm && dirty_q;      // (a merge keeps the words it held, and their dirt)
+						line_r  <= fill_line;
 						tag_r   <= tg;
 						valid_q <= 1'b1;
-						dirty_q <= 1'b0;
+						dirty_q <= fm && dirty_q;
+						fm      <= 1'b0;
 						refilled <= 1'b1;
 						// A read is answered from the line as it arrives: going back through the
 						// block RAM (S_LOOK, S_ANS) cost two clocks a miss, and the processor waits
 						// on every one (GT2: half a million misses a second). A store goes round to
 						// be merged in. (The line is written into the RAM this same clock.)
 						if (!we && !line_mode) begin
-							if (serving_b) begin b_rdata <= pick(m_rdata, wsel); b_line <= m_rdata; b_ack <= 1'b1; end
-							else           begin a_rdata_r <= pick(m_rdata, wsel); a_line_r <= m_rdata; a_ack_r <= 1'b1; end
+							if (serving_b) begin b_rdata <= pick(fill_line, wsel); b_line <= fill_line; b_ack <= 1'b1; end
+							else           begin a_rdata_r <= pick(fill_line, wsel); a_line_r <= fill_line; a_ack_r <= 1'b1; end
 							refilled <= 1'b0;
 							st <= S_IDLE;
 						end else
@@ -712,7 +848,8 @@ module ps1_cache #(
 				end
 			S_FANS: if (valid_q && dirty_q) begin
 					if (in_run(evicted - pf_base)) pf_lv[run_ix(evicted - pf_base)] <= 1'b0;
-					m_addr <= {tag_q, idx}; m_wdata <= line_q; m_we <= 1'b1; m_req <= 1'b1;
+					sb_kill_line = evicted; sb_kill_go = 1'b1;
+					m_addr <= {tag_q, idx}; m_wdata <= line_q; m_we <= 1'b1; m_req <= 1'b1; m_wmask <= wvmask(wvq);
 					dirty[idx] <= 1'b0;
 					st <= S_FWB;
 				end else st <= S_FNEXT;
@@ -729,6 +866,32 @@ module ps1_cache #(
 			if (clr) begin
 				clr_i <= clr_i + 1'b1;
 				if (&clr_i) clr <= 1'b0;
+			end
+
+			// --- the stream buffer's slots ----------------------------------------------
+			if (SBUF != 0) begin
+				// an answer for a slot (they come in the order the reads went out, before any
+				// read sent after them)
+				if (m_valid && (sb_out != 0)) begin
+					sb_d[sb_fifo[sb_rp]]    <= m_rdata;
+					sb_pend[sb_fifo[sb_rp]] <= 1'b0;
+					sb_vld[sb_fifo[sb_rp]]  <= !sb_kill[sb_fifo[sb_rp]] && !(sb_kill_go && sb_line[sb_fifo[sb_rp]] == sb_kill_line);
+					sb_rp <= sb_rp + 2'd1;
+				end
+				sb_out <= sb_out + (sb_out_inc ? 3'd1 : 3'd0) - ((m_valid && (sb_out != 0)) ? 3'd1 : 3'd0);
+				if (sb_out_inc) sb_vld[sb_fs] <= 1'b0;
+				// taken: the slot is free, and so is any holding a line behind it
+				if (sb_take)
+					for (sbi = 0; sbi < SBN; sbi = sbi + 1)
+						if (sbi == sbs || (sb_vld[sbi] && sb_line[sbi] < rq_ln)) sb_vld[sbi] <= 1'b0;
+				// a new stream: what the slots hold is the old one's (their reads out finish)
+				if (st == S_ANS && !hit && sb_rd && !sb_hit) sb_vld <= {SBN{1'b0}};
+				// a line written back to memory: no slot may keep, or receive, the old copy
+				if (sb_kill_go)
+					for (sbi = 0; sbi < SBN; sbi = sbi + 1)
+						if (sb_line[sbi] == sb_kill_line && (sb_vld[sbi] || sb_pend[sbi])) begin
+							sb_vld[sbi] <= 1'b0; sb_kill[sbi] <= 1'b1;
+						end
 			end
 		end
 
@@ -750,31 +913,41 @@ module ps1_cache #(
 	// they are read; the two never fall on the same clock.
 	generate if (BRAM != 0) begin : g_bram
 		(* ram_style = "block" *) reg [127:0]    bdata [0:LINES-1];
-		(* ram_style = "block" *) reg [TAGW-1:0] btag  [0:LINES-1];
+		(* ram_style = "block" *) reg [TAGW+3:0] btag  [0:LINES-1];   // {word-valid, tag}
 		reg [127:0]    q_line;
-		reg [TAGW-1:0] q_tag;
-		wire br  = !rst && (((st == S_IDLE) && !clr && !flush && !flushing && (a_go || b_go))
+		reg [TAGW+3:0] q_tag;
+		wire br  = !rst && (((st == S_IDLE) && !clr && !fl_want && !flushing && (a_go || b_go))
 		                    || (st == S_LOOK) || (st == S_FLOOK));
-		wire bwn = !rst && ((st == S_ALLOC) || ((st == S_FILLWAIT) && m_valid));  // a new line: data and tag
+		wire bwn = !rst && ((st == S_ALLOC) || ((st == S_FILLWAIT) && m_valid && (sb_out == 0)) || (st == S_WALLOC) || (st == S_SBFILL));  // a new line: data and tag
 		wire bw  = bwn || (!rst && (st == S_ANS) && hit && we);                  // or a store into one
 		wire [127:0] bwd = (st == S_ALLOC)    ? l_wd
-		                 : (st == S_FILLWAIT) ? m_rdata
+		                 : (st == S_FILLWAIT) ? fill_line
+		                 : (st == S_WALLOC)   ? merge(128'd0, wsel, be, wdata)
+		                 : (st == S_SBFILL)   ? sb_line_q
 		                 : line_mode ? merge16(line_q, l_be16, l_wd) : merge(line_q, wsel, be, wdata);
+		// the word-valid bits: all four for a fetched or whole line, the one word for a claim, and
+		// a store into a line adds the word it wrote whole (WVALID; otherwise always all four)
+		wire [3:0] wv_new = ((WVALID == 0) || (st == S_ALLOC) || (st == S_FILLWAIT) || (st == S_SBFILL) || line_w_full) ? 4'hF
+		                  : (st == S_WALLOC) ? (4'b0001 << wsel)
+		                  : (wvq | ((be == 4'hF) ? (4'b0001 << wsel) : 4'b0000));
+		wire bwt = bwn || ((WVALID != 0) && !rst && (st == S_ANS) && hit && we);
 		integer bi;
-		initial for (bi = 0; bi < LINES; bi = bi + 1) begin bdata[bi] = 128'd0; btag[bi] = {TAGW{1'b0}}; end
+		initial for (bi = 0; bi < LINES; bi = bi + 1) begin bdata[bi] = 128'd0; btag[bi] = {(TAGW+4){1'b0}}; end
 		always @(posedge clk) begin
 			if (bw)  bdata[idx] <= bwd;
 			if (br)  q_line <= bdata[idx];
 		end
 		always @(posedge clk) begin
-			if (bwn) btag[idx] <= tg;
+			if (bwt) btag[idx] <= {wv_new, tg};
 			if (br)  q_tag <= btag[idx];
 		end
 		assign bq_line = q_line;
-		assign bq_tag  = q_tag;
+		assign bq_tag  = q_tag[TAGW-1:0];
+		assign bq_wv   = q_tag[TAGW+3:TAGW];
 	end else begin : g_nobram
 		assign bq_line = 128'd0;
 		assign bq_tag  = {TAGW{1'b0}};
+		assign bq_wv   = 4'hF;
 	end endgenerate
 `undef CV
 endmodule
