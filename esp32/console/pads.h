@@ -116,14 +116,29 @@ static const CBtn L_SNES[] = {
   { "Select", 13, { PB_SELECT, PB_NONE } }, { "Start", 12, { PB_START, PB_NONE } },
   { "Up", 11, { PB_UP, PB_LS_UP } }, { "Down", 10, { PB_DOWN, PB_LS_DOWN } },
   { "Left", 9, { PB_LEFT, PB_LS_LEFT } }, { "Right", 8, { PB_RIGHT, PB_LS_RIGHT } } };
+// the Game Boy, in gb_top's order: right, left, up, down, A, B, select, start
+static const CBtn L_GB[] = {
+  { "A", 4, { PB_CROSS, PB_SQUARE } }, { "B", 5, { PB_CIRCLE, PB_TRIANGLE } },
+  { "Select", 6, { PB_SELECT, PB_NONE } }, { "Start", 7, { PB_START, PB_NONE } },
+  { "Up", 2, { PB_UP, PB_LS_UP } }, { "Down", 3, { PB_DOWN, PB_LS_DOWN } },
+  { "Left", 1, { PB_LEFT, PB_LS_LEFT } }, { "Right", 0, { PB_RIGHT, PB_LS_RIGHT } } };
+// the Atari 2600, in a26_top's order (up, down, left, right, fire); the console's GAME SELECT and
+// GAME RESET switches on bits 6 and 7 (console_top wires them from either player's pad)
+static const CBtn L_A26[] = {
+  { "Fire", 4, { PB_CROSS, PB_SQUARE } },
+  { "Game Select", 6, { PB_SELECT, PB_NONE } }, { "Game Reset", 7, { PB_START, PB_NONE } },
+  { "Up", 0, { PB_UP, PB_LS_UP } }, { "Down", 1, { PB_DOWN, PB_LS_DOWN } },
+  { "Left", 2, { PB_LEFT, PB_LS_LEFT } }, { "Right", 3, { PB_RIGHT, PB_LS_RIGHT } } };
 #define NB(x) (uint8_t)(sizeof(x) / sizeof(x[0]))
-// by the board's console number (NES+0x20): 0 NES, 1 SMS, 2 MD, 3 PS1, 4 N64, 5 SNES, 6 GG
-static const Layout LAYOUTS[7] = {
+// by the board's console number (NES+0x20): 0 NES, 1 SMS, 2 MD, 3 PS1, 4 N64, 5 SNES, 6 GG,
+// 7 Game Boy, 8 Atari 2600
+static const Layout LAYOUTS[9] = {
   { "nes", "NES", L_NES, NB(L_NES) }, { "sms", "Master System", L_SMS, NB(L_SMS) },
   { "md", "Mega Drive", L_MD, NB(L_MD) }, { "ps1", "PlayStation", L_PS1, NB(L_PS1) },
   { "n64", "Nintendo 64", L_N64, NB(L_N64) }, { "snes", "Super NES", L_SNES, NB(L_SNES) },
-  { "gg", "Game Gear", L_GG, NB(L_GG) } };
-static const int NLAYOUTS = 7;
+  { "gg", "Game Gear", L_GG, NB(L_GG) }, { "gb", "Game Boy", L_GB, NB(L_GB) },
+  { "a26", "Atari 2600", L_A26, NB(L_A26) } };
+static const int NLAYOUTS = 9;
 static const int MAXB = 16;
 static uint8_t bind[NLAYOUTS][MAXB][2];
 
