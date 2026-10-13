@@ -214,7 +214,7 @@ module frame_hdmi #(
 		wire [4:0] r = q[4:0], g = q[9:5], b = q[14:10];
 		assign c = {r, r[4:2], g, g[4:2], b, b[4:2]};
 	end else if (FMT == 4) begin : g_gg
-		assign c = {q[11:8], q[11:8], q[7:4], q[7:4], q[3:0], q[3:0]};
+		assign c = {q[3:0], q[3:0], q[7:4], q[7:4], q[11:8], q[11:8]};   // (the word is BBBBGGGGRRRR: red is the low nibble)
 	end else if (FMT == 5) begin : g_gb
 		// the four shades in greens, light to dark, the way a DMG's screen tints them
 		assign c = (q[1:0] == 2'd0) ? 24'hE0F8D0 : (q[1:0] == 2'd1) ? 24'h88C070
