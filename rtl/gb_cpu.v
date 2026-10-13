@@ -70,6 +70,7 @@ module gb_cpu (
 	output reg         we,          // this M-cycle writes dout to addr
 	output wire        wr_strobe,   // one clock pulse at the end of a write cycle: commit it now
 	output wire        m_end,       // one clock pulse at the end of every M-cycle
+	output wire [1:0]  tcyc,        // which T-cycle of the M-cycle this is
 	output reg         m1,          // this M-cycle is an opcode fetch
 
 	// interrupts
@@ -108,8 +109,13 @@ module gb_cpu (
 		else if (ce) t <= t + 2'd1;
 	end
 	wire step = ce && (t == 2'd3);
+	assign tcyc      = t;
 	assign m_end     = step;
-	assign wr_strobe = step && we;
+	// A write lands in the third T-cycle, not the last: the real one writes in the
+	// middle of the cycle too, and it matters -- a write to IF that requests an
+	// interrupt has to be visible when the instruction boundary checks for one.
+	// blargg's 02-interrupts runs the handler before the next instruction.
+	assign wr_strobe = ce && (t == 2'd2) && we;
 
 	// --- states --------------------------------------------------------------------------
 	localparam [4:0]
