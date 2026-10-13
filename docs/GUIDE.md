@@ -4,7 +4,7 @@ This is the stand-alone console: a TV over HDMI, a menu on the screen, games and
 cores on an SD card, PlayStation 4 / 5 (or Xbox, Switch) pads over Bluetooth. No PC
 is needed once it is set up.
 
-It plays **NES, Master System, Mega Drive, Super NES, Nintendo 64 and PlayStation**, one at a
+It plays **NES, Master System, Game Gear, Game Boy, Atari 2600, Mega Drive, Super NES, Nintendo 64 and PlayStation**, one at a
 time: each console is its own FPGA image, and the board becomes whichever one you
 pick from the menu.
 
@@ -86,9 +86,12 @@ commands are in [esp32/README.md](../esp32/README.md)).
 
 ## The SD card
 
-    /cores/nes.bin  sms.bin  md.bin  snes.bin  n64.bin  ps1.bin     the consoles
+    /cores/nes.bin  sms.bin  gg.bin  gb.bin  a26.bin  md.bin  snes.bin  n64.bin  ps1.bin     the consoles
     /roms/nes/      *.nes
     /roms/sms/      *.sms
+    /roms/gg/       *.gg
+    /roms/gb/       *.gb
+    /roms/a26/      *.a26 *.bin      (a bank scheme in the name wins: "Game (F8SC).a26")
     /roms/md/       *.md *.gen
     /roms/snes/     *.sfc *.smc
     /roms/n64/      *.z64 *.n64 *.v64
@@ -98,6 +101,12 @@ commands are in [esp32/README.md](../esp32/README.md)).
 
 Games dropped loose into `/roms` are sorted into their console's folder the first
 time the card is read. You supply the games and the BIOS: none come with this.
+
+The card can also be written without taking it out: with the board on USB and
+`pc/pad.py` running, `python tools/sdput.py FILE /roms/gg/Game.gg` copies a file
+onto it through the ESP32 (about 7 kB/s -- fine for cartridges and cores, not for
+discs). Do not update the ESP32's firmware while a PlayStation disc is being read:
+the card can be left unreadable until the board is switched off and on.
 
 ## Playing
 
@@ -144,6 +153,9 @@ the picture's take effect at once, in the game behind the menu):
 |---|---|
 | NES | Full speed, sound right. Mappers 0-4 and 7 (NROM, MMC1, UxROM, CNROM, MMC3, AxROM). |
 | Master System | Full speed. |
+| Game Gear | New; checked in simulation, first board run pending. |
+| Game Boy | New; passes the standard CPU and picture tests in simulation, first board run pending. No battery saves yet. |
+| Atari 2600 | New; checked in simulation, first board run pending. Select / Reset are on the pad's Select / Start. |
 | Mega Drive | Full speed, stereo. Cartridges up to 4 MB. |
 | Super NES | New. Passes the CPU and sound-CPU test ROMs on the board. LoROM and HiROM cartridges up to 6 MB; no add-on chips (Super FX, SA-1, DSP-1...). Save RAM is 8 kB and is not yet written to the card. Hi-res screens are shown 256 wide. No commercial game tried yet. |
 | Super NES | Plays Super Mario World; save RAM kept on the SD card. No enhancement chips (Super FX, SA-1) yet. |

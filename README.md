@@ -2,7 +2,7 @@
 
 ### Six classic game consoles, rebuilt as hardware, on one inexpensive FPGA board.
 
-NES · Master System · Mega Drive · Super NES · PlayStation · Nintendo 64
+NES · Master System · Game Gear · Game Boy · Atari 2600 · Mega Drive · Super NES · PlayStation · Nintendo 64
 
 Plug it into a TV over HDMI, pick a console and a game from the menu, play with a
 Bluetooth pad. No PC, no emulator software, no operating system underneath.
@@ -32,6 +32,9 @@ behaviour reproduced cycle by cycle where it matters.
 |---|---|
 | **NES** | Full speed. Mappers NROM, MMC1, UxROM and MMC3 -- most of the library. |
 | **Master System** | Full speed. |
+| **Game Gear** | New. The Master System core with the Gear's 12-bit palette, START and stereo; the LCD's 160 x 144 tripled on the TV. Checked in simulation with homebrew; not yet on the board. |
+| **Game Boy** | New. The SM83 passes all 500,000 SingleStepTests cases, blargg's cpu_instrs and instr_timing, and dmg-acid2 pixel for pixel, in simulation. MBC1/3/5. Not yet on the board; no battery saves yet. |
+| **Atari 2600** | New. TIA, RIOT and the 6507 (the NES's 6502 with RDY); bank switching 2K-32K incl. F8/F6/F4, Super Chip, FE, E0, 3F, FA. Checked in simulation; not yet on the board. |
 | **Mega Drive** | Full speed, stereo FM and PSG; cartridges up to 4 MB. |
 | **Super NES** | New. Super Mario World plays; save RAM kept on the SD card. The 65816 and SPC700 are bus-cycle exact against over 750,000 recorded test cases. No enhancement chips (Super FX, SA-1) yet. |
 | **PlayStation** | Boots the real BIOS from your own dump and plays commercial games from disc images on the SD card -- Crash Bandicoot, Syphon Filter, Gran Turismo 2, Resident Evil 2 -- at the console's own frame rates (Crash 30 fps, Syphon Filter 20, as on a real PlayStation). Memory cards, CD audio, XA streaming audio and FMV movies. |
@@ -106,7 +109,8 @@ docs/       the guide, and design notes for each console
 
 ## Building from source
 
-    ./tools/core.sh nes | sms | md | snes | ps1 | n64 | shell   # an FPGA image (Vivado 2026.1)
+    ./tools/core.sh nes | sms | gg | gb | a26 | md | snes | ps1 | n64 | shell   # an FPGA image (Vivado 2026.1)
+    RELEASE=1 ./tools/core.sh ...                     # the shipping image: no debug hardware
     ./tools/sim.sh tb_ps1_tekseq                               # a testbench
 
 The PlayStation and N64 fill the chip: they build with `EFFORT=1` and `AREA=1`. The
