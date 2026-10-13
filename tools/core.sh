@@ -35,6 +35,10 @@ NOMIG="-xdc2 boards/qmtech_a100t/ddr3_unused.xdc"
 case "${1:-nes}" in
   nes)   NAME=nes;   GEN="-gen CORE_NES:1 -gen CORE_SMS:0"; EXTRA="$NOMIG" ;;
   sms)   NAME=sms;   GEN="-gen CORE_NES:0 -gen CORE_SMS:1 -gen CORE_MD:0"; EXTRA="$NOMIG" ;;
+  gg|gamegear)
+         # the Master System core with GG set (sms.v): 12-bit colour, START, stereo, the LCD's
+         # 160 x 144 window tripled; its cartridge in block RAM like the Master System's (256 kB)
+         NAME=gg;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_GG:1 -gen CORE_MD:0"; EXTRA="$NOMIG" ;;
   md|genesis|megadrive)
          NAME=md;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:1 -gen MD_DDR3:1"
          # The Mega Drive keeps its cartridge in DDR3, so it needs the memory
@@ -63,8 +67,18 @@ case "${1:-nes}" in
          EXTRA="-ip $MIG_XCI" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;
   shell) NAME=shell; TOP=shell_top; XDC=boards/qmtech_a100t/shell_top.xdc ;;
-  *) echo "usage: tools/core.sh [nes|sms|md|ps1|n64|snes|dev|shell]" >&2; exit 1 ;;
+  *) echo "usage: tools/core.sh [nes|sms|gg|md|ps1|n64|snes|dev|shell]" >&2; exit 1 ;;
 esac
+# RELEASE=1: the shipping image. Everything a developer or a PC on the network read is left
+# out -- the logic analyser, the PC sound ring, the frame reader, the bare-CPU test slot, the
+# PlayStation's and the N64's debug hardware, the JTAG bus (eth_top RELEASE, PS1_DBG=0,
+# N64_DBG=0, JTAG=0). Its reports go to build/rel_<name>/ so the debug build's stay for
+# comparison; the image still lands in cores/<name>.bin, which is what goes on the card.
+if [ "${RELEASE:-0}" = 1 ]; then
+  GEN="$GEN -gen RELEASE:1"
+  GEN="$(echo "$GEN" | sed -E "s/-gen PS1_DBG:[0-9]+/-gen PS1_DBG:0/; s/-gen N64_DBG:[0-9]+/-gen N64_DBG:0/; s/-gen JTAG_DBG:[0-9]+/-gen JTAG_DBG:0/")"
+  JTAG=0
+fi
 # JTAG=1: the register bus over the JTAG cable (eth_top JTAG_DBG, tools/jtag.py) -- the
 # jtag_axi core generated once by tools/jtagaxi.tcl
 if [ "${JTAG:-0}" = 1 ]; then
@@ -76,6 +90,7 @@ fi
 LOG="build/core_$NAME.log"
 # each core in a folder of its own, so two can build at once
 OUT="build/core_$NAME"
+if [ "${RELEASE:-0}" = 1 ]; then LOG="build/rel_$NAME.log"; OUT="build/rel_$NAME"; fi
 # A marker older than anything this run produces, so the check below can tell
 # a fresh image from the one the previous run left behind.
 STAMP="build/.core_$NAME.start"

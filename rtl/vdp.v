@@ -39,7 +39,9 @@
 
 `default_nettype none
 
-module vdp (
+module vdp #(
+	parameter GG = 0                  // a Game Gear's VDP: the 12-bit palette (color12)
+) (
 	input  wire        clk,
 	input  wire        rst,
 	input  wire        ce,           // one pixel
@@ -58,6 +60,7 @@ module vdp (
 	output wire [8:0]  py,
 	output wire        pixel_en,
 	output wire [5:0]  color,        // 6-bit RGB, --BBGGRR
+	output wire [11:0] color12,      // (GG) 12-bit RGB, BBBBGGGGRRRR, from the Game Gear's palette
 	output wire        frame_start
 );
 
@@ -128,10 +131,16 @@ module vdp (
 	// --- memory ----------------------------------------------------------------
 	reg [7:0] vram [0:16383];
 	reg [5:0] cram [0:31];
+	// The Game Gear's palette: 32 entries of 12 bits (BBBBGGGGRRRR), each written as two bytes --
+	// the even address latches the low byte (GGGGRRRR), the odd one commits {----BBBB, latch}.
+	reg [11:0] cram12 [0:31];
+	reg [7:0]  cram_lo;
 	integer mi;
 	initial begin
 		for (mi = 0; mi < 16384; mi = mi + 1) vram[mi] = 8'd0;
 		for (mi = 0; mi < 32; mi = mi + 1)    cram[mi] = 6'd0;
+		for (mi = 0; mi < 32; mi = mi + 1)    cram12[mi] = 12'd0;
+		cram_lo = 8'd0;
 	end
 
 	// --- the control port's two-byte dance ---------------------------------------
@@ -248,7 +257,12 @@ module vdp (
 					// The data port. Any access to it also drops the latch.
 					latched <= 1'b0;
 					if (cpu_wr) begin
-						if (vcode == 2'b11) cram[vaddr[4:0]] <= cpu_din[5:0];
+						if (vcode == 2'b11) begin
+							if (GG) begin
+								if (vaddr[0]) cram12[vaddr[5:1]] <= {cpu_din[3:0], cram_lo};
+								else          cram_lo <= cpu_din;
+							end else cram[vaddr[4:0]] <= cpu_din[5:0];
+						end
 						else begin
 							cpu_vram_wr   <= 1'b1;
 							cpu_vram_addr <= vaddr;
@@ -576,7 +590,8 @@ module vdp (
 	                   : bg_opaque ? {c_attr[2], bg_pix}
 	                               : {1'b1, backdrop};
 
-	assign color = visible ? cram[pal_idx] : 6'd0;
+	assign color   = visible ? cram[pal_idx]   : 6'd0;
+	assign color12 = visible ? cram12[pal_idx] : 12'd0;
 
 endmodule
 

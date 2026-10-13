@@ -82,6 +82,12 @@ static const CBtn L_SMS[] = {
   { "Pause", 3, { PB_START, PB_NONE } },
   { "Up", 4, { PB_UP, PB_LS_UP } }, { "Down", 5, { PB_DOWN, PB_LS_DOWN } },
   { "Left", 6, { PB_LEFT, PB_LS_LEFT } }, { "Right", 7, { PB_RIGHT, PB_LS_RIGHT } } };
+// the Game Gear, in sms.v's own order (port DCh: up, down, left, right, button 1, button 2), START on bit 6
+static const CBtn L_GG[] = {
+  { "Button 1", 4, { PB_CROSS, PB_SQUARE } }, { "Button 2", 5, { PB_CIRCLE, PB_TRIANGLE } },
+  { "Start", 6, { PB_START, PB_NONE } },
+  { "Up", 0, { PB_UP, PB_LS_UP } }, { "Down", 1, { PB_DOWN, PB_LS_DOWN } },
+  { "Left", 2, { PB_LEFT, PB_LS_LEFT } }, { "Right", 3, { PB_RIGHT, PB_LS_RIGHT } } };
 static const CBtn L_MD[] = {
   { "A", 6, { PB_SQUARE, PB_NONE } }, { "B", 4, { PB_CROSS, PB_NONE } }, { "C", 5, { PB_CIRCLE, PB_NONE } },
   { "Start", 7, { PB_START, PB_NONE } },
@@ -109,12 +115,13 @@ static const CBtn L_SNES[] = {
   { "Up", 11, { PB_UP, PB_LS_UP } }, { "Down", 10, { PB_DOWN, PB_LS_DOWN } },
   { "Left", 9, { PB_LEFT, PB_LS_LEFT } }, { "Right", 8, { PB_RIGHT, PB_LS_RIGHT } } };
 #define NB(x) (uint8_t)(sizeof(x) / sizeof(x[0]))
-// by the board's console number (NES+0x20): 0 NES, 1 SMS, 2 MD, 3 PS1, 4 N64, 5 SNES
-static const Layout LAYOUTS[6] = {
+// by the board's console number (NES+0x20): 0 NES, 1 SMS, 2 MD, 3 PS1, 4 N64, 5 SNES, 6 GG
+static const Layout LAYOUTS[7] = {
   { "nes", "NES", L_NES, NB(L_NES) }, { "sms", "Master System", L_SMS, NB(L_SMS) },
   { "md", "Mega Drive", L_MD, NB(L_MD) }, { "ps1", "PlayStation", L_PS1, NB(L_PS1) },
-  { "n64", "Nintendo 64", L_N64, NB(L_N64) }, { "snes", "Super NES", L_SNES, NB(L_SNES) } };
-static const int NLAYOUTS = 6;
+  { "n64", "Nintendo 64", L_N64, NB(L_N64) }, { "snes", "Super NES", L_SNES, NB(L_SNES) },
+  { "gg", "Game Gear", L_GG, NB(L_GG) } };
+static const int NLAYOUTS = 7;
 static const int MAXB = 16;
 static uint8_t bind[NLAYOUTS][MAXB][2];
 

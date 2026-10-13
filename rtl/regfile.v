@@ -42,6 +42,7 @@ module regfile #(
 	// get the entire chip rather than share it.
 	parameter        CORE_NES = 1,
 	parameter        CORE_SMS = 1,
+	parameter        CORE_GG  = 0,
 	parameter        CORE_MD  = 0,
 	parameter        MD_DDR3  = 0,
 	parameter        CORE_PS1 = 0,
@@ -51,6 +52,7 @@ module regfile #(
 	parameter        N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
 	parameter        N64_ISV  = 0,    // the N64's ISViewer text capture (n64_top ISV)
 	parameter        PS1_DBG  = 1,    // the PlayStation's debug hardware (ps1_top DBG)
+	parameter        RELEASE  = 0,    // a shipping image: no analyser, sound ring, frame reader or test slot (eth_top)
 	parameter        CLK_HZ   = 50_000_000   // the console's clock (eth_top's cclk)
 )(
 	input  wire        clk,
@@ -202,7 +204,8 @@ module regfile #(
 	// run the console (and the N64 needs the room: its picture's filters). The
 	// page reads back as unmapped, which the server's analyser panel reports
 	// cleanly; nothing else looks here.
-	generate if (CORE_PS1 == 0 && CORE_N64 == 0 && CORE_SNES == 0) begin : g_la
+	// (and a shipping image carries none either: the PC that read it is gone)
+	generate if (!RELEASE && CORE_PS1 == 0 && CORE_N64 == 0 && CORE_SNES == 0) begin : g_la
 	logic_analyzer #(.DEPTH_MAX(LA_DEPTH), .AW(LA_AW)) u_la (
 		.clk(clk), .rst(rst),
 		.probe(la_probe),
@@ -242,7 +245,7 @@ module regfile #(
 	// stereo too but its FM chip time-multiplexes its channels on its output: its two
 	// channels are filtered and averaged here like any other chip's.
 	localparam READY = (CORE_PS1 != 0) || (CORE_N64 != 0);
-	localparam MDST  = !READY && (CORE_MD != 0 || CORE_SNES != 0) && CORE_NES == 0 && CORE_SMS == 0;
+	localparam MDST  = !READY && (CORE_MD != 0 || CORE_SNES != 0 || CORE_GG != 0) && CORE_NES == 0 && CORE_SMS == 0;
 	wire [15:0] f_l, f_r;
 	aud_filter u_afl (.clk(clk), .x(MDST ? ps1_audio_lr[15:0] ^ 16'h8000 : console_audio), .tick(a_tick), .y(f_l));
 	generate if (MDST) begin : g_afr
@@ -261,7 +264,9 @@ module regfile #(
 	// NOT IN A PLAYSTATION OR N64 IMAGE: the PlayStation has its own SPU (ps1_spu.v),
 	// which is stereo at 44.1 kHz and gets its own ring (ps1_aring.v) at the same
 	// addresses. Every other image keeps the synthesiser exactly as it was.
-	generate if (!CORE_PS1 && !CORE_N64 && !CORE_SNES) begin : g_syn
+	// A shipping image has no PC-side ring at all: HDMI takes the console's sound through
+	// aud_filter above, and the ring's block RAMs go back to the chip.
+	generate if (!RELEASE && !CORE_PS1 && !CORE_N64 && !CORE_SNES) begin : g_syn
 		synth u_synth (
 			.clk(clk), .rst(rst),
 			.off(off), .we(syn_we), .wdata(bus_wdata),
@@ -270,7 +275,7 @@ module regfile #(
 			.buf_addr(sel_addr[14:2]),
 			.buf_rdata(abuf_rdata)
 		);
-	end else if (CORE_SNES || CORE_PS1) begin : g_nosyn
+	end else if (RELEASE || CORE_SNES || CORE_PS1) begin : g_nosyn
 		// (the SNES and the PlayStation: no PC-side sound ring -- HDMI takes aud_s directly, and
 		// the PC that polled it over the network is gone -- and its block RAMs go to the console:
 		// the PlayStation's sixteen double its processor's cache)
@@ -295,7 +300,7 @@ module regfile #(
 	// System and Mega Drive (24 of them, and 5k LUTs), or the PlayStation's slow
 	// read of its DDR3 frame. HDMI has its own; without WEBVID only the latter stays
 	// (a few dozen LUTs, and the one way left to read a picture over the network).
-	generate if (WEBVID || FB_DDR) begin : g_video
+	generate if (!RELEASE && (WEBVID || FB_DDR)) begin : g_video
 	video #(.FB_DDR(FB_DDR)) u_video (
 		.clk(clk), .rst(rst),
 		.off(off), .we(vid_we), .wdata(bus_wdata),
@@ -367,8 +372,8 @@ module regfile #(
 	// on a memory nothing in the image can address.
 	localparam MD_ONLY = ((CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS);
 
-	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
-	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG), .CLK_HZ(CLK_HZ),
+	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD),
+	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG), .RELEASE(RELEASE), .CLK_HZ(CLK_HZ),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),

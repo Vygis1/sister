@@ -57,6 +57,7 @@ module console_top #(
 	// costs nothing except the space it obviously costs.
 	parameter CORE_NES = 1,
 	parameter CORE_SMS = 1,
+	parameter CORE_GG  = 0,     // the Game Gear: the Master System core with GG set (sms.v)
 	// The Mega Drive. Its cartridge does not live in cart_mem with the other
 	// two -- it is behind cart_cache, which wants 128-bit lines because it was
 	// written against DDR3. md_cart answers that shape out of block RAM until
@@ -84,6 +85,9 @@ module console_top #(
 	// flip-flops and their logic on a chip at 99.9% of its slices. 0 for a shipping image: each
 	// one's write is gated off, never written it is a constant, and synthesis removes it.
 	parameter PS1_DBG  = 1,
+	// A shipping image (eth_top RELEASE): no bare-CPU test slot (the Z80 that ran ZEXALL),
+	// and test_mode cannot be set.
+	parameter RELEASE  = 0,
 	// The Super Nintendo (snes_top.v). Its own image; the cartridge in DDR3.
 	parameter CORE_SNES = 0,
 	parameter WEBVID   = 0,    // the picture to the web page as well (see eth_top); without it the stream registers read 0
@@ -185,6 +189,7 @@ module console_top #(
 	localparam [3:0] CONSOLE_PS1 = 4'd3;
 	localparam [3:0] CONSOLE_N64 = 4'd4;
 	localparam [3:0] CONSOLE_SNES = 4'd5;
+	localparam [3:0] CONSOLE_GG  = 4'd6;
 	// Read by the host rather than assumed, so a build without a given core
 	// reports that honestly instead of selecting it and showing a black screen.
 	localparam [7:0] CORES_BUILT = (CORE_NES ? 8'b0000_0001 : 8'd0)
@@ -192,7 +197,8 @@ module console_top #(
 	                             | (CORE_MD  ? 8'b0000_0100 : 8'd0)
 	                             | (CORE_PS1 ? 8'b0000_1000 : 8'd0)
 	                             | (CORE_N64 ? 8'b0001_0000 : 8'd0)
-	                             | (CORE_SNES ? 8'b0010_0000 : 8'd0);
+	                             | (CORE_SNES ? 8'b0010_0000 : 8'd0)
+	                             | (CORE_GG  ? 8'b0100_0000 : 8'd0);
 
 	// Which core is selected out of reset: the first one this image actually
 	// contains.
@@ -211,6 +217,7 @@ module console_top #(
 	                               : CORE_PS1 ? CONSOLE_PS1
 	                               : CORE_N64 ? CONSOLE_N64
 	                               : CORE_SNES ? CONSOLE_SNES
+	                               : CORE_GG  ? CONSOLE_GG
 	                                          : CONSOLE_NES;
 
 	wire [15:0] dbg_pc;
@@ -564,6 +571,8 @@ module console_top #(
 	wire ps1_sel  = (console_sel == CONSOLE_PS1);
 	wire n64_sel  = (console_sel == CONSOLE_N64);
 	wire snes_sel = (console_sel == CONSOLE_SNES);
+	wire gg_sel   = (console_sel == CONSOLE_GG);
+	wire smsgg_sel = sms_sel || gg_sel;        // the Z80 machine, either way
 	wire core_rst = rst || !run;
 	wire snes_rst = core_rst || !snes_sel;
 	// the SNES cartridge's shape, from the loader (it reads the header): [0] HiROM,
@@ -610,10 +619,10 @@ module console_top #(
 	wire        snes_frame_st;
 	wire [23:0] snes_vid_rgb;
 	wire nes_rst  = core_rst || !nes_sel;
-	wire z80_rst  = core_rst || !sms_sel;
+	wire z80_rst  = core_rst || !smsgg_sel;
 	wire md_rst   = core_rst || !md_sel;
-	wire z80_mem_we = z80_we && !z80_io && sms_sel;
-	wire z80_io_we  = z80_we &&  z80_io && sms_sel;
+	wire z80_mem_we = z80_we && !z80_io && smsgg_sel;
+	wire z80_io_we  = z80_we &&  z80_io && smsgg_sel;
 
 	always @(posedge clk) begin
 		if (rst) begin
@@ -666,7 +675,7 @@ module console_top #(
 			// the host what actually happened.
 			16'h0020: begin
 				if (wdata[3:0] < 4'd8 && CORES_BUILT[wdata[2:0]]) console_sel <= wdata[3:0];
-				test_mode <= wdata[8];
+				test_mode <= !RELEASE && wdata[8];
 			end
 			default: ;
 			endcase
@@ -842,7 +851,7 @@ module console_top #(
 	// yet it was instantiated regardless: 96 of the chip's 135 block RAM tiles,
 	// holding nothing, in every PS1 image (found 2026-09-22 by a hierarchical
 	// utilisation report; the PS1 core itself uses 19).
-	generate if (CORE_NES || CORE_SMS) begin : g_cart
+	generate if (CORE_NES || CORE_SMS || CORE_GG) begin : g_cart
 	cart_mem #(.PROG_AW(PROG_AW), .CHAR_AW(CHAR_AW),
 	           .PROG_CORE_WRITES(CORE_SMS),   // only the bare Z80 writes it
 	           .CHAR_CORE_WRITES(CORE_NES))   // only the NES has tile RAM
@@ -864,7 +873,7 @@ module console_top #(
 
 	// --- the picture for HDMI: the running core's ----------------------------------------
 	wire [23:0] n64_vid_rgb, nes_vid_rgb, sms_vid_rgb, md_vid_rgb, ps1_vid_rgb;
-	assign vid_rgb = snes_sel ? snes_vid_rgb : n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : sms_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : ps1_sel ? ps1_vid_rgb : 24'd0;
+	assign vid_rgb = snes_sel ? snes_vid_rgb : n64_sel ? n64_vid_rgb : nes_sel ? nes_vid_rgb : smsgg_sel ? sms_vid_rgb : md_sel ? md_vid_rgb : ps1_sel ? ps1_vid_rgb : 24'd0;
 
 	// --- the NES ---------------------------------------------------------------
 	wire [8:0] nes_px, nes_py;
@@ -912,7 +921,7 @@ module console_top #(
 	// need 64 kB of RAM and no video chip, which is the opposite of what a game
 	// needs. Bit 8 of the CONSOLE register chooses, so verifying the CPU stays a
 	// register write rather than a different bitstream.
-	wire raw_z80 = test_mode && (CORE_SMS != 0);
+	wire raw_z80 = !RELEASE && test_mode && (CORE_SMS != 0);
 
 	wire [15:0] bare_addr;
 	wire [7:0]  bare_dout;
@@ -926,23 +935,29 @@ module console_top #(
 	wire [15:0] sms_pc;
 	wire [15:0] sms_audio;
 
-	generate if (CORE_SMS) begin : g_sms
-		z80 u_z80 (
-			.clk(clk), .rst(z80_rst || !raw_z80), .ce(1'b1),
-			.addr(bare_addr), .din(prog_din), .dout(bare_dout),
-			.we(bare_we), .io(bare_io), .m1(),
-			.int_n(1'b1), .nmi_n(1'b1),
-			.dbg_pc(bare_pc), .dbg_sp(), .dbg_af(), .dbg_bc(), .dbg_de(),
-			.dbg_hl(), .dbg_m1()
-		);
+	wire [11:0] gg_color12; wire signed [15:0] gg_audio_l, gg_audio_r;
+	generate if (CORE_SMS || CORE_GG) begin : g_sms
+		if (!RELEASE) begin : g_bare
+			z80 u_z80 (
+				.clk(clk), .rst(z80_rst || !raw_z80), .ce(1'b1),
+				.addr(bare_addr), .din(prog_din), .dout(bare_dout),
+				.we(bare_we), .io(bare_io), .m1(),
+				.int_n(1'b1), .nmi_n(1'b1),
+				.dbg_pc(bare_pc), .dbg_sp(), .dbg_af(), .dbg_bc(), .dbg_de(),
+				.dbg_hl(), .dbg_m1()
+			);
+		end else begin : g_nobare
+			assign bare_addr = 16'd0; assign bare_dout = 8'd0;
+			assign bare_we = 1'b0;    assign bare_io = 1'b0; assign bare_pc = 16'd0;
+		end
 
-		sms #(.ROM_AW(PROG_AW)) u_sms (
+		sms #(.ROM_AW(PROG_AW), .GG(CORE_GG != 0 ? 1 : 0)) u_sms (
 			.clk(clk), .rst(z80_rst || raw_z80), .ce(ce && !cpu_halt),
 			.rom_addr(sms_rom_addr), .rom_data(prog_din),
 			.joy1(joy1[7:0]), .joy2(joy2[7:0]),
 			.px(sms_px), .py(sms_py), .pixel_en(sms_pixel_en),
-			.color(sms_color), .frame_start(sms_frame_start),
-			.audio(sms_audio),
+			.color(sms_color), .color12(gg_color12), .frame_start(sms_frame_start),
+			.audio(sms_audio), .audio_l(gg_audio_l), .audio_r(gg_audio_r),
 			.dbg_pc(sms_pc)
 		);
 		// HDMI: the picture at its own 6-bit colour, 256 across and as many lines as the
@@ -951,9 +966,19 @@ module console_top #(
 		always @(posedge clk)
 			if (sms_frame_start) begin sms_h <= (sms_hmax >= 9'd192 && sms_hmax <= 9'd240) ? sms_hmax : 9'd192; sms_hmax <= 9'd0; end
 			else if (sms_pixel_en && ce && sms_py + 9'd1 > sms_hmax && sms_py < 9'd240) sms_hmax <= sms_py + 9'd1;
-		frame_hdmi #(.FMT(1), .DW(6)) u_hdmi (.clk(clk), .we(sms_pixel_en && ce && !raw_z80), .wx(sms_px), .wy(sms_py), .wd(sms_color),
-			.w(9'd256), .h(sms_h),
-			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(sms_vid_rgb));
+		if (CORE_GG) begin : g_ggfb
+			// the Game Gear's LCD: 160 x 144 of the picture, from column 48 and the row that centres it
+			// (24 of 192 lines, 40 of 224, 48 of 240), each pixel tripled to 480 x 432 on the TV
+			wire [8:0] gg_y0 = (sms_h - 9'd144) >> 1;
+			wire       gg_in = sms_px >= 9'd48 && sms_px < 9'd208 && sms_py >= gg_y0 && sms_py < gg_y0 + 9'd144;
+			frame_hdmi #(.FMT(4), .DW(12), .SCALE(3)) u_hdmi (.clk(clk), .we(sms_pixel_en && ce && gg_in && !raw_z80),
+				.wx(sms_px - 9'd48), .wy(sms_py - gg_y0), .wd(gg_color12), .w(9'd160), .h(9'd144),
+				.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(sms_vid_rgb));
+		end else begin : g_smsfb
+			frame_hdmi #(.FMT(1), .DW(6)) u_hdmi (.clk(clk), .we(sms_pixel_en && ce && !raw_z80), .wx(sms_px), .wy(sms_py), .wd(sms_color),
+				.w(9'd256), .h(sms_h),
+				.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(sms_vid_rgb));
+		end
 	end else begin : g_sms
 		assign sms_vid_rgb = 24'd0;
 		assign bare_addr = 16'd0; assign bare_dout = 8'd0;
@@ -964,6 +989,7 @@ module console_top #(
 		assign sms_pixel_en = 1'b0; assign sms_frame_start = 1'b0;
 		assign sms_color = 6'd0; assign sms_pc = 16'd0;
 		assign sms_audio = 16'h8000;
+		assign gg_color12 = 12'd0; assign gg_audio_l = 16'sd0; assign gg_audio_r = 16'sd0;
 	end endgenerate
 
 	// Only the bare CPU writes to the cartridge: the Master System's own RAM is
@@ -1315,15 +1341,15 @@ module console_top #(
 		assign gte_wt_pc = 32'd0; assign gte_wt_data = 32'd0; assign gte_wt_reg = 6'd0;
 		assign ps1_tty_word = 32'd0; assign ps1_tty_count = 32'd0; assign ps1_lost_cpu = 32'd0; assign ps1_lost_gpu = 32'd0; assign ps1_live = 32'd0; assign ps1_cc_miss = 32'd0; assign ps1_cpu_wait = 32'd0;
 		assign ps1_gtr_word = 32'd0; assign ps1_gtr_head = 2'd0; assign ps1_gtr_stat = 32'd0;
-		if (!CORE_N64 && (CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS) begin : g_md_lr
-			// the Mega Drive's (or the SNES's) two channels, for HDMI's stereo: 48000 times a
-			// second (the SNES's 32 kHz held)
+		if (!CORE_N64 && (CORE_MD || CORE_SNES || CORE_GG) && !CORE_NES && !CORE_SMS) begin : g_md_lr
+			// the Mega Drive's (or the SNES's, or the Game Gear's) two channels, for HDMI's stereo:
+			// 48000 times a second (the SNES's 32 kHz held)
 			reg [27:0] lr_div = 28'd0; reg lr_we = 1'b0;
 			always @(posedge clk) begin
 				lr_we <= lr_div + 28'd48_000 >= CLK_HZ;
 				lr_div <= (lr_div + 28'd48_000 >= CLK_HZ) ? lr_div + 28'd48_000 - CLK_HZ : lr_div + 28'd48_000;
 			end
-			assign audio_lr = snes_sel ? {snes_audio_r, snes_audio_l} : {md_audio_r, md_audio_l};
+			assign audio_lr = gg_sel ? {gg_audio_r, gg_audio_l} : snes_sel ? {snes_audio_r, snes_audio_l} : {md_audio_r, md_audio_l};
 			assign audio_lr_we = lr_we;
 		end else if (!CORE_N64) begin : g_no_lr      // the N64 drives it when it is the core
 			assign audio_lr = 32'd0; assign audio_lr_we = 1'b0;

@@ -43,7 +43,11 @@
 `default_nettype none
 
 module sms #(
-	parameter ROM_AW = 18                 // 256 kB of cartridge
+	parameter ROM_AW = 18,                // 256 kB of cartridge
+	// A Game Gear: the same machine with a 12-bit palette (color12), START on joy1[6] read at
+	// port 00h, the PSG's stereo at port 06h (audio_l / audio_r), ports 01h-05h as a Gear with
+	// nothing on its EXT port. The LCD's 160 x 144 window is cut out by the console (console_top).
+	parameter GG     = 0
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -62,9 +66,12 @@ module sms #(
 	output wire [8:0]  py,
 	output wire        pixel_en,
 	output wire [5:0]  color,
+	output wire [11:0] color12,           // (GG)
 	output wire        frame_start,
 
 	output wire [15:0] audio,
+	output wire signed [15:0] audio_l,   // (GG) the two sides
+	output wire signed [15:0] audio_r,
 
 	output wire [15:0] dbg_pc
 );
@@ -141,12 +148,12 @@ module sms #(
 	wire vdp_sel = cpu_ce && cpu_io && (cpu_addr[7:6] == 2'b10);
 	wire [7:0] vdp_dout;
 
-	vdp u_vdp (
+	vdp #(.GG(GG)) u_vdp (
 		.clk(clk), .rst(rst), .ce(ce),
 		.cpu_sel(vdp_sel), .cpu_ctrl(cpu_addr[0]), .cpu_wr(cpu_we),
 		.cpu_din(cpu_dout), .cpu_dout(vdp_dout),
 		.irq_n(vdp_irq_n),
-		.px(px), .py(py), .pixel_en(pixel_en), .color(color),
+		.px(px), .py(py), .pixel_en(pixel_en), .color(color), .color12(color12),
 		.frame_start(frame_start)
 	);
 
@@ -155,10 +162,17 @@ module sms #(
 	// video chip's line and pixel counters. Direction is part of the decode.
 	wire psg_we = cpu_ce && cpu_io && cpu_we && (cpu_addr[7:6] == 2'b01);
 
+	// (GG) port 06h: which channels go to which side; every channel to both at power-up
+	reg  [7:0] gg_stereo;
+	wire       gg_we = (GG != 0) && cpu_ce && cpu_io && cpu_we && (cpu_addr[7:0] == 8'h06);
+	always @(posedge clk)
+		if (rst) gg_stereo <= 8'hFF;
+		else if (gg_we) gg_stereo <= cpu_dout;
 	psg u_psg (
 		.clk(clk), .rst(rst), .ce(cpu_ce),
 		.din(cpu_dout), .we(psg_we),
-		.sample(audio)
+		.sample(audio),
+		.stereo(gg_stereo), .sample_l(audio_l), .sample_r(audio_r)
 	);
 
 	// --- reading -----------------------------------------------------------------------
@@ -198,6 +212,12 @@ module sms #(
 	always @* begin
 		if (io_rd) begin
 			casez (cpu_addr[7:0])
+			// (GG) 00h: START (bit 7, 0 = pressed), bit 6 = an export Gear, bit 5 = 60 Hz; 01h-05h the
+			// EXT port and its serial registers, as read with nothing plugged in
+			8'b0000_0000: cpu_din = (GG != 0) ? {~joy1[6], 1'b1, 6'b00_0000} : 8'hFF;
+			8'b0000_0001: cpu_din = (GG != 0) ? 8'h7F : 8'hFF;
+			8'b0000_0011: cpu_din = (GG != 0) ? 8'h00 : 8'hFF;
+			8'b0000_0101: cpu_din = (GG != 0) ? 8'h00 : 8'hFF;
 			8'b01??_???0: cpu_din = vcounter;          // $7E, the V counter
 			8'b01??_???1: cpu_din = px[8:1];           // $7F, the H counter
 			8'b10??_????: cpu_din = vdp_dout;          // $BE and $BF

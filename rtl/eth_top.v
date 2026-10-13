@@ -23,6 +23,7 @@ module eth_top #(
 	// itself. Both at once is for development over JTAG.
 	parameter CORE_NES = 1,
 	parameter CORE_SMS = 1,
+	parameter CORE_GG  = 0,     // the Game Gear (sms.v with GG): its own image, core id 'G'
 	parameter CORE_MD  = 0,
 	// The Mega Drive's cartridge in DDR3 rather than block RAM. Only meaningful
 	// with CORE_MD, and it brings the whole memory controller in with it.
@@ -42,6 +43,11 @@ module eth_top #(
 	parameter N64_ISV  = 0,      // the N64's ISViewer text capture, for n64-systemtest (n64_top ISV)
 	parameter PS1_DBG  = 1,      // the PlayStation's debug hardware: 0 for a shipping image (ps1_top DBG)
 	parameter JTAG_DBG = 0,      // the register bus over JTAG (jtag_axi + jtag_bus, tools/jtag.py): debug builds
+	// 1: a shipping image. Nothing in it that only a PC on the network or a developer at the
+	// JTAG port ever read: no logic analyser, no PC sound ring, no frame reader, no bare-CPU test
+	// slot (regfile, console_top). Built with PS1_DBG = 0, N64_DBG = 0, JTAG_DBG = 0 (tools/core.sh
+	// RELEASE=1). The parts that stay are the console, HDMI, the ESP32 link and the OSD.
+	parameter RELEASE  = 0,
 	// The console's clock: the MMCM's 1000 MHz VCO divided by this. 20 is 50 MHz,
 	// what every core was written for; a core that runs faster says so in its build.
 	parameter CLK_DIV  = 20
@@ -383,7 +389,7 @@ module eth_top #(
 	// take every frame, and the command byte says which one answers (0x3x the drive,
 	// everything else this). Byte 0 out is the signature from both alike.
 	wire rf_esp_miso, e_miso; wire [7:0] e_cmd;
-	esp_bus #(.CORE_ID(CORE_SNES ? 8'h46 : CORE_PS1 ? 8'h50 : CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
+	esp_bus #(.CORE_ID(CORE_GG ? 8'h47 : CORE_SNES ? 8'h46 : CORE_PS1 ? 8'h50 : CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
 		.clk(cclk), .rst(rst),
 		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(e_miso), .spi_cs_n(esp_cs_n),
 		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
@@ -401,8 +407,9 @@ module eth_top #(
 	icap_reboot u_reboot (.clk(cclk), .rst(rst),
 		.go(bus_we && bus_ack && bus_addr == 32'h0000_0014 && bus_wdata == 32'hB007_0000));
 
-	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_MD(CORE_MD),
+	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD),
 	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG),
+	          .RELEASE(RELEASE),
 	          .CLK_HZ(1_000_000_000 / CLK_DIV)) u_regs (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wdata_wmask),
 		.d_ready(d_ready), .d_rdata(d_rdata), .d_valid(d_valid),

@@ -42,8 +42,9 @@ static const Machine MACHINES[] = {
   { "Nintendo 64",   "n64", '6', 16 * 1024 * 1024 },
   { "PlayStation",   "ps1", 'P', 0xFFFFFFFF },          // a disc image: any size
   { "Super NES",     "snes", 'F', 6 * 1024 * 1024 + 512 },   // (+ a copier header, sometimes)
+  { "Game Gear",     "gg",  'G', 256 * 1024 },               // (its cartridge is block RAM, as the Master System's)
 };
-static const int NMACH = 6;
+static const int NMACH = 7;
 static const uint32_t SNES_CFG = NES + 0x180;      // [0] HiROM, [15:8] log2 ROM size, [23:16] log2 save RAM
 static const uint32_t CARD_CTL = NES + 0x134;
 
@@ -54,6 +55,7 @@ static int machineOfName(const String &n) {
   if (l.endsWith(".md") || l.endsWith(".gen") || l.endsWith(".smd")) return 2;
   if (l.endsWith(".z64") || l.endsWith(".n64") || l.endsWith(".v64")) return 3;
   if (l.endsWith(".sfc") || l.endsWith(".smc")) return 5;
+  if (l.endsWith(".gg")) return 6;
   return -1;
 }
 static int machineOfCore(uint8_t id) {
@@ -152,6 +154,7 @@ static int machineOfFolder(String n) {
   if (n == "n64") return 3;
   if (n == "ps1" || n == "psx" || n == "playstation" || n == "discs") return 4;
   if (n == "snes" || n == "sfc" || n == "superfamicom" || n == "super nes") return 5;
+  if (n == "gg" || n == "gamegear" || n == "game gear") return 6;
   return -1;
 }
 static String baseName(File &e) {
@@ -589,9 +592,9 @@ static String load(const Game &g) {
         if (!err.length()) fpga.busWrite(NES_CTRL, 1 | (mirrorV ? 2 : 0));
       }
     }
-  } else if (g.m == 1) {                             // Master System: the ROM, nothing else
+  } else if (g.m == 1 || g.m == 6) {                 // Master System, Game Gear: the ROM, nothing else
     if (!stream(f, NES_PRG, size)) err = "the file ended early";
-    fpga.busWrite(NES_CONSOLE, 1);
+    fpga.busWrite(NES_CONSOLE, g.m == 6 ? 6 : 1);
     fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);
   } else if (g.m == 2) {                             // Mega Drive: into DDR3, bank by bank

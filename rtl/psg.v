@@ -41,7 +41,12 @@ module psg (
 	input  wire        ce,           // one CPU clock, nominally 3.58 MHz
 	input  wire [7:0]  din,
 	input  wire        we,
-	output wire [15:0] sample        // unsigned, centred on $8000
+	output wire [15:0] sample,       // unsigned, centred on $8000
+	// the Game Gear's stereo (port 06h): bits 7-4 let channels 3-0 out on the LEFT, bits 3-0 on
+	// the RIGHT. The two sides, SIGNED.
+	input  wire [7:0]  stereo,
+	output wire signed [15:0] sample_l,
+	output wire signed [15:0] sample_r
 );
 
 	// --- the registers, as the chip sees them -----------------------------------
@@ -153,6 +158,10 @@ module psg (
 	// The ring buffer downstream reads samples as unsigned centred on half
 	// scale, the same convention the NES's APU uses.
 	assign sample = mix + 16'sd32768;
+	assign sample_l = (stereo[4] ? {{2{c0[13]}}, c0} : 16'sd0) + (stereo[5] ? {{2{c1[13]}}, c1} : 16'sd0)
+	                + (stereo[6] ? {{2{c2[13]}}, c2} : 16'sd0) + (stereo[7] ? {{2{c3[13]}}, c3} : 16'sd0);
+	assign sample_r = (stereo[0] ? {{2{c0[13]}}, c0} : 16'sd0) + (stereo[1] ? {{2{c1[13]}}, c1} : 16'sd0)
+	                + (stereo[2] ? {{2{c2[13]}}, c2} : 16'sd0) + (stereo[3] ? {{2{c3[13]}}, c3} : 16'sd0);
 
 endmodule
 
