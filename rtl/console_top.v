@@ -88,6 +88,7 @@ module console_top #(
 	// A shipping image (eth_top RELEASE): no bare-CPU test slot (the Z80 that ran ZEXALL),
 	// and test_mode cannot be set.
 	parameter RELEASE  = 0,
+	parameter PS1_DCIDX = 8,   // the PlayStation's data cache: 2^n lines of 16 bytes (ps1_top DCIDX)
 	// The Super Nintendo (snes_top.v). Its own image; the cartridge in DDR3.
 	parameter CORE_SNES = 0,
 	parameter WEBVID   = 0,    // the picture to the web page as well (see eth_top); without it the stream registers read 0
@@ -776,8 +777,8 @@ module console_top #(
 		16'h01B4: ctrl_rdata = PS1_DBG ? ps1_lost_cpu : 32'd0;   // console time the processor lost (system clocks)
 		16'h01B8: ctrl_rdata = PS1_DBG ? ps1_lost_gpu : 32'd0;   // our clocks the GPU ran behind the console
 		16'h01BC: ctrl_rdata = PS1_DBG ? ps1_live : 32'd0;       // why the processor waits, what the GPU does (ps1_top dbg_live)
-		16'h01C0: ctrl_rdata = PS1_DBG ? ps1_cc_miss : 32'd0;    // the processor's RAM cache: misses
-		16'h01C4: ctrl_rdata = PS1_DBG ? ps1_cpu_wait : 32'd0;   // clocks the processor waited on memory
+		16'h01C0: ctrl_rdata = ps1_cc_miss;                      // the processor's RAM cache: misses (in every image)
+		16'h01C4: ctrl_rdata = ps1_cpu_wait;                     // clocks the processor waited on memory (in every image)
 		16'h0184: ctrl_rdata = {31'd0, snes_dirty};
 		16'h0188: ctrl_rdata = snes_hword;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
@@ -967,9 +968,10 @@ module console_top #(
 			if (sms_frame_start) begin sms_h <= (sms_hmax >= 9'd192 && sms_hmax <= 9'd240) ? sms_hmax : 9'd192; sms_hmax <= 9'd0; end
 			else if (sms_pixel_en && ce && sms_py + 9'd1 > sms_hmax && sms_py < 9'd240) sms_hmax <= sms_py + 9'd1;
 		if (CORE_GG) begin : g_ggfb
-			// the Game Gear's LCD: 160 x 144 of the picture, from column 48 and the row that centres it
-			// (24 of 192 lines, 40 of 224, 48 of 240), each pixel tripled to 480 x 432 on the TV
-			wire [8:0] gg_y0 = (sms_h - 9'd144) >> 1;
+			// the Game Gear's LCD: 160 x 144 of the picture, from column 48 and row 24 -- the VDP's
+			// 192 active lines (it emits 240, the rest border: sms_h is not the active height), each
+			// pixel tripled to 480 x 432 on the TV
+			wire [8:0] gg_y0 = 9'd24;
 			wire       gg_in = sms_px >= 9'd48 && sms_px < 9'd208 && sms_py >= gg_y0 && sms_py < gg_y0 + 9'd144;
 			frame_hdmi #(.FMT(4), .DW(12), .SCALE(3)) u_hdmi (.clk(clk), .we(sms_pixel_en && ce && gg_in && !raw_z80),
 				.wx(sms_px - 9'd48), .wy(sms_py - gg_y0), .wd(gg_color12), .w(9'd160), .h(9'd144),
@@ -1282,7 +1284,7 @@ module console_top #(
 	// --- the PlayStation ----------------------------------------------------------
 	generate if (CORE_PS1) begin : g_ps1
 		wire ps1_lf_we; wire [8:0] ps1_lf_addr; wire [127:0] ps1_lf_data; wire [8:0] ps1_lf_want;
-		ps1_top #(.CLK_HZ(CLK_HZ), .DBG(PS1_DBG)) u_ps1 (
+		ps1_top #(.CLK_HZ(CLK_HZ), .DBG(PS1_DBG), .DCIDX(PS1_DCIDX)) u_ps1 (
 			.clk(clk), .rst(rst),
 			// The CPU runs when the PlayStation is selected AND the host has
 			// released it (run=1), which the host sets after the BIOS is loaded.

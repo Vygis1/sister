@@ -53,6 +53,7 @@ module regfile #(
 	parameter        N64_ISV  = 0,    // the N64's ISViewer text capture (n64_top ISV)
 	parameter        PS1_DBG  = 1,    // the PlayStation's debug hardware (ps1_top DBG)
 	parameter        RELEASE  = 0,    // a shipping image: no analyser, sound ring, frame reader or test slot (eth_top)
+	parameter        PS1_DCIDX = 8,   // the PlayStation's data cache lines, log2 (eth_top)
 	parameter        CLK_HZ   = 50_000_000   // the console's clock (eth_top's cclk)
 )(
 	input  wire        clk,
@@ -373,7 +374,7 @@ module regfile #(
 	localparam MD_ONLY = ((CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS);
 
 	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD),
-	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG), .RELEASE(RELEASE), .CLK_HZ(CLK_HZ),
+	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG), .RELEASE(RELEASE), .PS1_DCIDX(PS1_DCIDX), .CLK_HZ(CLK_HZ),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (
 		.d_addr(d_addr), .d_req(d_req), .d_we(d_we), .d_wdata(d_wdata), .d_wmask(d_wmask),

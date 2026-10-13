@@ -413,6 +413,9 @@ module ps1_gpu #(
 	// wait, as it does on the chip.
 	assign rd_stall = rd_pending && !rd_have;
 	wire        c2v_phase;          // a CPU->VRAM transfer is taking its data (assigned below)
+	// (the raster's handshake, here because GPUSTAT below reads it)
+	reg         r_start, r_rect;           // (r_start is held until the raster takes it)
+	wire        r_busy, r_taken;
 	wire [31:0] gpustat = {
 		// 31: the line being drawn is odd (0 in vblank); in 480i it is the FIELD,
 		// which toggles every frame -- the BIOS's VSync in that mode waits for it
@@ -438,7 +441,7 @@ module ps1_gpu #(
 		// it with the DMA request, and the BIOS relies on that -- it writes a
 		// VRAM read-back by CPU as soon as this bit is set, and a display list
 		// still being fed by DMA would interleave with those words.
-		(!busy || rd_pending) && f_empty && !dma_active,
+		(!(busy || r_busy || r_start) || rd_pending) && f_empty && !dma_active,   // (the raster may still be drawing after the engine moved on)
 		// 25 DMA request, by GP1(04h) direction (psx-spx): 1 = FIFO not full,
 		// 2 = same as bit 28 (ready for a DMA block), 3 = same as bit 27
 		(dma_dir == 2'd1) ? !f_full : (dma_dir == 2'd2) ? (!busy || rd_pending) : (dma_dir == 2'd3) ? rd_have : 1'b0,
@@ -635,8 +638,9 @@ module ps1_gpu #(
 
 	// --- the raster, and the engine's own side of the VRAM port ---------------------
 	reg  [28:0] e_addr; reg e_req, e_we; reg [3:0] e_be; reg [31:0] e_wdata;
-	reg         r_start, r_rect;
-	wire        r_busy;
+	// A command that touches VRAM some other way than through the raster -- a fill, a copy, a
+	// transfer either way, a line (drawn here) -- waits for the raster to finish what it has.
+	wire        r_wait = (r_busy || r_start) && (cmd == 8'h02 || cmd[7:5] == 3'b010 || (cmd[7] && cmd[7:5] != 3'b111));
 	reg signed [11:0] r_bx0, r_bx1, r_by0, r_by1;
 	reg signed [23:0] r_e0, r_e1, r_e2;
 	wire [28:0] r_v_addr; wire r_v_req, r_v_we, r_v_around, r_v_lin, r_v_one; wire [3:0] r_v_be; wire [31:0] r_v_wdata;
@@ -938,7 +942,7 @@ module ps1_gpu #(
 				end
 
 			// dispatch
-			D_HEAD: begin
+			D_HEAD: if (r_wait) ; else begin
 					casez (cmd)
 					8'h02: begin                                  // fill
 						// psx-spx: X start AND 3F0h, width ((n AND 3FFh) + 0Fh) AND NOT 0Fh -- which
@@ -1238,8 +1242,16 @@ module ps1_gpu #(
 
 			// the raster has the primitive: wait for it
 			D_RAST: begin
-					if (r_start) r_start <= 1'b0;
-					else if (!r_busy) begin
+					// The raster takes the start when it is free (r_taken) and keeps its own copy of
+					// the parameters, so in gpu_fast mode the engine goes on at once: the next
+					// command's parse and gradients -- a quad's second triangle first of all --
+					// overlap this one's drawing. Measured on MediEvil's lists (tb_ps1_replay) the
+					// engine spent 14% of the raster's time setting up between primitives. The pace
+					// model charges per primitive and wants them one after the other.
+					if (r_taken) r_start <= 1'b0;
+					if (r_start && !r_taken) ;
+					else if (!gpu_fast && (r_busy || r_start)) ;
+					else begin
 						if (r_rect) begin busy <= 1'b0; ds <= D_IDLE; end
 						else ds <= D_NEXT;
 					end
@@ -1496,6 +1508,7 @@ module ps1_gpu #(
 			if (gp1_abort) begin
 				ds     <= D_IDLE;
 				busy   <= 1'b0;
+				r_start <= 1'b0;             // (a start the raster had not taken yet: dropped with the command)
 				argc   <= 0;
 				need   <= 0;
 				second <= 1'b0;
@@ -1641,20 +1654,20 @@ module ps1_gpu #(
 		.n_req(vn_req), .n_addr(vn_addr), .n_ack(vn_ack), .n_line(vn_line),
 		.pf_m_addr(pfm_addr), .pf_m_req(pfm_req), .pf_m_ready(pfm_ready), .pf_m_rdata(pfm_rdata), .pf_m_valid(pfm_valid),
 		.clk(clk), .rst(rst),
-		.start(r_start), .busy(r_busy), .always_in(r_rect),
-		.bx0(r_bx0), .bx1(r_bx1), .by0(r_by0), .by1(r_by1),
-		.e0_0(r_e0), .e1_0(r_e1), .e2_0(r_e2), .sx0(sx0), .sx1(sx1), .sx2(sx2), .sy0(sy0), .sy1(sy1), .sy2(sy2),
-		.apos(area > 0),
+		.start(r_start), .busy(r_busy), .taken(r_taken), .i_always_in(r_rect),
+		.i_bx0(r_bx0), .i_bx1(r_bx1), .i_by0(r_by0), .i_by1(r_by1),
+		.e0_0(r_e0), .e1_0(r_e1), .e2_0(r_e2), .i_sx0(sx0), .i_sx1(sx1), .i_sx2(sx2), .i_sy0(sy0), .i_sy1(sy1), .i_sy2(sy2),
+		.i_apos(area > 0),
 		.cr_0(cr), .cg_0(cg), .cb_0(cb), .cu_0(cu), .cv_0(cv),
-		.dr_dx(dr_dx), .dg_dx(dg_dx), .db_dx(db_dx), .du_dx(du_dx), .dv_dx(dv_dx),
-		.dr_dy(dr_dy), .dg_dy(dg_dy), .db_dy(db_dy), .du_dy(du_dy), .dv_dy(dv_dy),
-		.is_gour(is_gour), .is_tex(is_tex), .is_semi(is_semi), .is_raw(is_raw), .dither(dither),
-		.fr(vr[0]), .fg(vg[0]), .fb(vb[0]),
-		.tp_x(tp_x), .tp_y(tp_y), .tp_abr(tp_abr), .tp_depth(tp_depth), .clut(clut),
-		.tw_mx(tw_mx), .tw_my(tw_my), .tw_ox(tw_ox), .tw_oy(tw_oy),
+		.i_dr_dx(dr_dx), .i_dg_dx(dg_dx), .i_db_dx(db_dx), .i_du_dx(du_dx), .i_dv_dx(dv_dx),
+		.i_dr_dy(dr_dy), .i_dg_dy(dg_dy), .i_db_dy(db_dy), .i_du_dy(du_dy), .i_dv_dy(dv_dy),
+		.i_is_gour(is_gour), .i_is_tex(is_tex), .i_is_semi(is_semi), .i_is_raw(is_raw), .i_dither(dither),
+		.i_fr(vr[0]), .i_fg(vg[0]), .i_fb(vb[0]),
+		.i_tp_x(tp_x), .i_tp_y(tp_y), .i_tp_abr(tp_abr), .i_tp_depth(tp_depth), .i_clut(clut),
+		.i_tw_mx(tw_mx), .i_tw_my(tw_my), .i_tw_ox(tw_ox), .i_tw_oy(tw_oy),
 		.no_tcache(no_tcache), .no_ccache(no_ccache), .no_trun(no_trun),
-		.da_x0(da_x0), .da_x1(da_x1), .da_y0(da_y0), .da_y1(da_y1), .mask_set(mask_set), .mask_chk(mask_chk),
-		.il_skip(il_skip), .il_field(field), .pace(!gpu_fast), .clut_flush(clut_flush), .pace_clr(p_clr), .pace_setup(p_setup), .pace_behind(r_behind),
+		.i_da_x0(da_x0), .i_da_x1(da_x1), .i_da_y0(da_y0), .i_da_y1(da_y1), .i_mask_set(mask_set), .i_mask_chk(mask_chk),
+		.i_il_skip(il_skip), .il_field(field), .pace(!gpu_fast), .clut_flush(clut_flush), .pace_clr(p_clr), .pace_setup(p_setup), .pace_behind(r_behind),
 		.v_addr(r_v_addr), .v_req(r_v_req), .v_we(r_v_we), .v_be(r_v_be), .v_wdata(r_v_wdata), .v_around(r_v_around), .v_lin(r_v_lin), .v_one(r_v_one),
 		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack && r_busy),
 		.tx_valid(tx_valid), .tx_addr(tx_addr), .tx_line(tx_line),
@@ -2042,7 +2055,7 @@ module ps1_gpu #(
 	assign dbg_gpu  = {disp_on, busy, ds[5:0], cmd[7:0], argc[3:0], f_count[11:0]};   // fits 32 bits: the count is capped for display
 	assign dbg_gpu2 = cmd_hist;
 	assign dbg_behind = (ds != D_IDLE) && r_behind;
-	assign eng_busy = busy;
+	assign eng_busy = busy || r_busy || r_start;
 	assign eng_f_empty = f_empty;
 	assign dbg_live   = {dbg_behind, r_busy, r_st_tex, r_st_dst, r_st_full, r_st_clut, ds[5:0]};
 	assign dbg_pop = f_pop; assign dbg_popword = f_head; assign dbg_pophead = f_pop && (ds == D_IDLE);

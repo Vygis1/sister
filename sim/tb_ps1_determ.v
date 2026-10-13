@@ -70,7 +70,7 @@ module tb_ps1_determ;
 		.clk(clk), .rst(rst),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata),
 		.v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around),
-		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack), .eng_idle(!gpu.busy),
+		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack), .eng_idle(!gpu.eng_busy),
 		.host_flush(1'b0), .busy(bk_busy),
 		.g_addr(gp_addr), .g_req(gp_req), .g_around(gp_around), .g_rdata(gp_rdata),
 		.g_line(gp_line), .g_ack(gp_ack),
@@ -152,7 +152,7 @@ module tb_ps1_determ;
 	end endtask
 	task drain; begin
 		@(negedge clk);
-		while (!(gpu.f_empty && !gpu.busy && !bk_busy)) @(negedge clk);
+		while (!(gpu.f_empty && !gpu.eng_busy && !bk_busy)) @(negedge clk);
 		repeat (8) @(negedge clk);
 	end endtask
 

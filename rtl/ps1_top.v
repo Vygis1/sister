@@ -44,6 +44,8 @@ module ps1_top #(
 	parameter CLK_HZ = 50_000_000,
 	// the debug hardware (performance counters, event ring, GTE write trace): 0 for a shipping image
 	parameter DBG    = 1,
+	parameter DCIDX  = 8,            // the data cache: 2^DCIDX lines of 16 bytes (8 = 4 KB; the chip has no data cache at all,
+	                                 // ours stands in for RAM that answers in 5 clocks where DDR3 takes 25)
 	// the older debug hardware -- 64 performance counters, the event ring, the GTE write
 	// trace -- off unless asked for: the JTAG traces replaced them, and the debug image
 	// no longer fits with them
@@ -592,7 +594,7 @@ module ps1_top #(
 	// on the board: identical speed, 29.8 MIPS either way, and it took the
 	// timing margin from 0.43 ns down to 0.12. The loads that miss are not
 	// missing for want of room.
-	ps1_icache #(.IDXBITS(8), .WR_PATCH(1)) u_dcache (
+	ps1_icache #(.IDXBITS(DCIDX), .WR_PATCH(1)) u_dcache (
 		.clk(clk), .rst(core_rst),
 		.fa(cpu_pa), .fa_ok(cached && !c_we && !cpu_fetching),
 		.hit(d_hit), .word(d_word), .fa2(29'd0), .fa2_ok(1'b0), .hit2(), .line2(),
@@ -968,7 +970,9 @@ module ps1_top #(
 	end
 
 	// ================================================================================
-	// the arbiter: VRAM port 0, CPU port 1, host-fill (and the sweep) port 2
+	// the arbiter: CPU cache port 0 (its misses are what the processor waits on), VRAM port 1, block
+	// writer 2, the display frame 3, host-fill (and the sweep, the host read, the memory card) 4,
+	// the SPU 5, the texture prefetch 6
 	// ================================================================================
 	wire [6:0]   p_ready;
 	wire [895:0] p_rdata;

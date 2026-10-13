@@ -50,7 +50,7 @@ case "${1:-nes}" in
          # unroutable. It cost a build to find out.
          EXTRA="-ip $MIG_XCI" ;;
   ps1|playstation)
-         NAME=ps1;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:1 -gen CLK_DIV:${PS1_DIV:-20} -gen PS1_DBG:${PS1_DBG:-1} -gen JTAG_DBG:${JTAG:-0}"
+         NAME=ps1;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PS1:1 -gen CLK_DIV:${PS1_DIV:-20} -gen PS1_DBG:${PS1_DBG:-1} -gen JTAG_DBG:${JTAG:-0} -gen PS1_DCIDX:${PS1_DCIDX:-8}"
          # The PlayStation keeps 1 MB of VRAM in DDR3, so like the Mega Drive it
          # needs the memory controller. Its boot program is baked into the core.
          EXTRA="-ip $MIG_XCI" ;;
@@ -71,13 +71,14 @@ case "${1:-nes}" in
 esac
 # RELEASE=1: the shipping image. Everything a developer or a PC on the network read is left
 # out -- the logic analyser, the PC sound ring, the frame reader, the bare-CPU test slot, the
-# PlayStation's and the N64's debug hardware, the JTAG bus (eth_top RELEASE, PS1_DBG=0,
-# N64_DBG=0, JTAG=0). Its reports go to build/rel_<name>/ so the debug build's stay for
+# PlayStation's and the N64's debug hardware (eth_top RELEASE, PS1_DBG=0, N64_DBG=0; JTAG=0
+# unless asked for). Its reports go to build/rel_<name>/ so the debug build's stay for
 # comparison; the image still lands in cores/<name>.bin, which is what goes on the card.
 if [ "${RELEASE:-0}" = 1 ]; then
   GEN="$GEN -gen RELEASE:1"
-  GEN="$(echo "$GEN" | sed -E "s/-gen PS1_DBG:[0-9]+/-gen PS1_DBG:0/; s/-gen N64_DBG:[0-9]+/-gen N64_DBG:0/; s/-gen JTAG_DBG:[0-9]+/-gen JTAG_DBG:0/")"
-  JTAG=0
+  GEN="$(echo "$GEN" | sed -E "s/-gen PS1_DBG:[0-9]+/-gen PS1_DBG:0/; s/-gen N64_DBG:[0-9]+/-gen N64_DBG:0/")"
+  # (JTAG stays as asked: RELEASE=1 JTAG=1 is the release image with the register bus kept, for
+  # measuring a shipping-shaped core -- the frame counter and the memory counters are in every image)
 fi
 # JTAG=1: the register bus over the JTAG cable (eth_top JTAG_DBG, tools/jtag.py) -- the
 # jtag_axi core generated once by tools/jtagaxi.tcl

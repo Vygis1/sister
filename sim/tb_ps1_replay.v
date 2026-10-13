@@ -73,7 +73,7 @@ module tb_ps1_replay;
 	ps1_vram_port vp ( .n_req(vn_req), .n_addr(vn_addr), .n_ack(vn_ack), .n_line(vn_line), .v_lin(v_lin_w), .v_one(v_one_w), .g_lin(g_lin_w),
 		.clk(clk), .rst(rst),
 		.v_addr(v_addr), .v_req(v_req), .v_we(v_we), .v_be(v_be), .v_wdata(v_wdata), .v_lwe(v_lwe), .v_wdata128(v_wdata128), .v_around(v_around),
-		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack), .eng_idle(!gpu.busy), .host_flush(1'b0), .busy(bk_busy),
+		.v_rdata(v_rdata), .v_line(v_line), .v_ack(v_ack), .eng_idle(!gpu.eng_busy), .host_flush(1'b0), .busy(bk_busy),
 		.g_addr(gp_addr), .g_req(gp_req), .g_around(gp_around), .g_rdata(gp_rdata), .g_line(gp_line), .g_ack(gp_ack),
 		.m_addr(bk_addr), .m_req(bk_req), .m_we(bk_we), .m_wdata(bk_wdata), .m_wmask(bk_wmask), .m_ready(bk_ready),
 		.inv_v(inv_v), .inv_line(inv_line));
@@ -148,7 +148,7 @@ module tb_ps1_replay;
 	task idle;      // wait for the engine to finish everything queued
 		begin
 			@(negedge clk);
-			while (!(gpu.f_empty && !gpu.busy && !bk_busy)) @(negedge clk);
+			while (!(gpu.f_empty && !gpu.eng_busy && !bk_busy)) @(negedge clk);
 			repeat (4) @(negedge clk);
 		end
 	endtask
@@ -243,7 +243,7 @@ module tb_ps1_replay;
 	always @(posedge clk) if (!rst) begin
 		if (gpu.busy && !gpu.u_raster.busy) dsh[gpu.ds] = dsh[gpu.ds] + 1;
 		if (gpu.u_raster.busy) rb_clk = rb_clk + 1;
-		if (gpu.u_raster.start) prims = prims + 1;
+		if (gpu.u_raster.taken) prims = prims + 1;
 		if (gpu.u_raster.busy) begin
 			if (!gpu.u_raster.scanning)                 sc_drain = sc_drain + 1;
 			else if (gpu.u_raster.hold)                 sc_hold = sc_hold + 1;
@@ -267,6 +267,7 @@ module tb_ps1_replay;
 	integer i, nw;
 	initial begin
 		for (k = 0; k < 65536; k = k + 1) mem[k] = 128'd0;
+		for (k = 0; k < 320 * 240; k = k + 1) frame[k] = 8'd0;   // (unwritten pixels would make the hash X)
 		for (k = 0; k < RD; k = k + 1) begin pv[k] = 0; pd[k] = 0; end
 		$readmemh("../../sim/roms/ps1/replay.hex", rw);
 		nw = rw[0];
@@ -286,6 +287,18 @@ module tb_ps1_replay;
 		         sc_use, sc_empty, sc_hold, sc_pace, sc_drain);
 		$display("   empty pairs: row outside the drawing area %0d, clipped left/right %0d, outside the shape %0d", e_row, e_x, e_tri);
 		for (k = 0; k < 64; k = k + 1) if (dsh[k] > 1000) $display("      ds %0d: %0d clocks", k, dsh[k]);
+		// the picture, as one number: a change to the engine that is meant to be faster and nothing
+		// else must leave it exactly as it was (compare with the run before the change)
+		begin : fsum
+			reg [31:0] h; integer q;
+			h = 32'd0;
+			for (q = 0; q < 320 * 240; q = q + 1) h = {h[26:0], h[31:27]} ^ {24'd0, frame[q]} ^ q[31:0];
+			$display("   frame hash %08x", h);
+			// and VRAM itself (the picture the display reads is only 320 x 240 of it, 8 bits a pixel)
+			h = 32'd0;
+			for (q = 0; q < 65536; q = q + 1) h = {h[26:0], h[31:27]} ^ mem[q][31:0] ^ mem[q][63:32] ^ mem[q][95:64] ^ mem[q][127:96] ^ q[31:0];
+			$display("   vram hash %08x", h);
+		end
 		$display("tb_ps1_replay: done");
 		$finish;
 	end

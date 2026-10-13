@@ -211,8 +211,12 @@ if {$incr && [file exists $incr_dcp]} {
 # on 2026-10-05 that left the PlayStation at -0.907 ns after two hours, where
 # Explore, from the same netlist, passed at +0.248 in twenty minutes.)
 if {$effort} {
-    puts " (Explore directives)"
-    place_design     -directive Explore
+    # PLACE_DIR (the environment) picks another placer directive for a re-roll of a design
+    # that missed by a few hundred picoseconds: the big images are a placement lottery
+    # (the PlayStation's release image missed by 0.385 ns where its debug image passed).
+    set pdir [expr {[info exists ::env(PLACE_DIR)] && $::env(PLACE_DIR) ne "" ? $::env(PLACE_DIR) : "Explore"}]
+    puts " (Explore directives; placer $pdir)"
+    place_design     -directive $pdir
     phys_opt_design  -directive Explore
     route_design     -directive Explore
 } else {
@@ -228,6 +232,15 @@ set wns_try [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup 
 if {$wns_try ne "" && $wns_try < 0} {
     puts [format " post-route slack %.3f ns - trying physical optimisation" $wns_try]
     phys_opt_design -directive AggressiveExplore
+}
+# ...and if that was not enough, a timing clean-up of the routing and one more go: these
+# two passes are what stands between a near miss and a flashable image, and cost ten minutes.
+set wns_try2 [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup -quiet]]
+if {$wns_try2 ne "" && $wns_try2 < 0} {
+    puts [format " still %.3f ns - routing clean-up and physical optimisation once more" $wns_try2]
+    route_design -tns_cleanup
+    phys_opt_design -directive AggressiveExplore
+    route_design -tns_cleanup
 }
 
 write_checkpoint -force $outdir/post_route.dcp

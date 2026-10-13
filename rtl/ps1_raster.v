@@ -52,39 +52,40 @@ module ps1_raster #(
 	// --- a primitive, set up by the engine ---------------------------------------
 	input  wire        start,            // a pulse; everything below is held until done
 	output reg         busy,
-	input  wire        always_in,        // a rectangle: the bounding box is the shape
-	input  wire signed [11:0] bx0, bx1, by0, by1,
+	output wire        taken,            // the start is accepted this clock (busy from the next)
+	input  wire        i_always_in,        // a rectangle: the bounding box is the shape
+	input  wire signed [11:0] i_bx0, i_bx1, i_by0, i_by1,
 	input  wire signed [23:0] e0_0, e1_0, e2_0,     // edge functions at (bx0, by0)
-	input  wire signed [23:0] sx0, sx1, sx2,        // ...one pixel right
-	input  wire signed [23:0] sy0, sy1, sy2,        // ...one row down
-	input  wire        apos,             // area > 0: inside is all >= 0, else all <= 0
+	input  wire signed [23:0] i_sx0, i_sx1, i_sx2,        // ...one pixel right
+	input  wire signed [23:0] i_sy0, i_sy1, i_sy2,        // ...one row down
+	input  wire        i_apos,             // area > 0: inside is all >= 0, else all <= 0
 	input  wire signed [31:0] cr_0, cg_0, cb_0, cu_0, cv_0,   // 16.16 at (bx0, by0)
-	input  wire signed [31:0] dr_dx, dg_dx, db_dx, du_dx, dv_dx,
-	input  wire signed [31:0] dr_dy, dg_dy, db_dy, du_dy, dv_dy,
-	input  wire        is_gour, is_tex, is_semi, is_raw,
-	input  wire        dither,           // E1 bit 9: the chip's 4x4 dither on shaded and modulated pixels
-	input  wire [7:0]  fr, fg, fb,       // the flat colour
-	input  wire [3:0]  tp_x,
-	input  wire        tp_y,
-	input  wire [1:0]  tp_abr,
-	input  wire [1:0]  tp_depth,
-	input  wire [15:0] clut,
-	input  wire [4:0]  tw_mx, tw_my, tw_ox, tw_oy,
+	input  wire signed [31:0] i_dr_dx, i_dg_dx, i_db_dx, i_du_dx, i_dv_dx,
+	input  wire signed [31:0] i_dr_dy, i_dg_dy, i_db_dy, i_du_dy, i_dv_dy,
+	input  wire        i_is_gour, i_is_tex, i_is_semi, i_is_raw,
+	input  wire        i_dither,           // E1 bit 9: the chip's 4x4 dither on shaded and modulated pixels
+	input  wire [7:0]  i_fr, i_fg, i_fb,       // the flat colour
+	input  wire [3:0]  i_tp_x,
+	input  wire        i_tp_y,
+	input  wire [1:0]  i_tp_abr,
+	input  wire [1:0]  i_tp_depth,
+	input  wire [15:0] i_clut,
+	input  wire [4:0]  i_tw_mx, i_tw_my, i_tw_ox, i_tw_oy,
 	// Two switches for finding where a wrong texel comes from, on the board,
 	// without a build in between: never reuse a cached texture line, and
 	// reload the palette for every primitive.
 	input  wire        no_tcache,
 	input  wire        no_ccache,
 	input  wire        no_trun,     // ignore texture lines the video cache offers from its runs
-	input  wire [9:0]  da_x0, da_x1,
-	input  wire [8:0]  da_y0, da_y1,
-	input  wire        mask_set, mask_chk,
+	input  wire [9:0]  i_da_x0, i_da_x1,
+	input  wire [8:0]  i_da_y0, i_da_y1,
+	input  wire        i_mask_set, i_mask_chk,
 	// 480i with drawing to the display area prohibited: the chip draws only
 	// the lines of the field that is NOT being shown. That is how a 480-line
 	// picture is double buffered in a VRAM that cannot hold two of them, and
 	// the BIOS menu depends on it: drawing every line put each frame over the
 	// field on screen, and the capture saw the half that was drawn so far.
-	input  wire        il_skip,
+	input  wire        i_il_skip,
 	input  wire        il_field,          // the field on screen: its parity of line is skipped
 	// The console's pace or ours. With `pace` set a primitive takes no less time than the
 	// console's GPU would give it: two ticks a 33.8688 MHz system clock, a pixel one tick
@@ -150,6 +151,45 @@ module ps1_raster #(
 	input  wire [2:0]  dbg_tf_sel,
 	output reg  [31:0] dbg_tf
 );
+
+	// The primitive's parameters, copied in when the start is accepted. The engine is free to set
+	// up the NEXT primitive while this one draws (ps1_gpu D_RAST in gpu_fast mode: the parse and
+	// the gradients of a quad's second triangle, or of the next command, overlap the drawing), so
+	// nothing below reads a port the engine owns; it reads these. The start values (e0_0.., cr_0..)
+	// are read once, in the clock after (go): the engine holds them that long by construction --
+	// it leaves D_RAST only when the start is taken, and rewrites them many clocks later.
+	assign taken = start && !busy;
+	reg               go;                            // the clock after taken: the primitive begins
+	reg               always_in;
+	reg signed [11:0] bx0, bx1, by0, by1;
+	reg signed [23:0] sx0, sx1, sx2, sy0, sy1, sy2;
+	reg               apos;
+	reg signed [31:0] dr_dx, dg_dx, db_dx, du_dx, dv_dx, dr_dy, dg_dy, db_dy, du_dy, dv_dy;
+	reg               is_gour, is_tex, is_semi, is_raw, dither;
+	reg [7:0]         fr, fg, fb;
+	reg [3:0]         tp_x;
+	reg               tp_y;
+	reg [1:0]         tp_abr, tp_depth;
+	reg [15:0]        clut;
+	reg [4:0]         tw_mx, tw_my, tw_ox, tw_oy;
+	reg [9:0]         da_x0, da_x1;
+	reg [8:0]         da_y0, da_y1;
+	reg               mask_set, mask_chk, il_skip;
+	always @(posedge clk) begin
+		go <= taken && !rst;
+		if (taken) begin
+			always_in <= i_always_in; bx0 <= i_bx0; bx1 <= i_bx1; by0 <= i_by0; by1 <= i_by1;
+			sx0 <= i_sx0; sx1 <= i_sx1; sx2 <= i_sx2; sy0 <= i_sy0; sy1 <= i_sy1; sy2 <= i_sy2; apos <= i_apos;
+			dr_dx <= i_dr_dx; dg_dx <= i_dg_dx; db_dx <= i_db_dx; du_dx <= i_du_dx; dv_dx <= i_dv_dx;
+			dr_dy <= i_dr_dy; dg_dy <= i_dg_dy; db_dy <= i_db_dy; du_dy <= i_du_dy; dv_dy <= i_dv_dy;
+			is_gour <= i_is_gour; is_tex <= i_is_tex; is_semi <= i_is_semi; is_raw <= i_is_raw; dither <= i_dither;
+			fr <= i_fr; fg <= i_fg; fb <= i_fb;
+			tp_x <= i_tp_x; tp_y <= i_tp_y; tp_abr <= i_tp_abr; tp_depth <= i_tp_depth; clut <= i_clut;
+			tw_mx <= i_tw_mx; tw_my <= i_tw_my; tw_ox <= i_tw_ox; tw_oy <= i_tw_oy;
+			da_x0 <= i_da_x0; da_x1 <= i_da_x1; da_y0 <= i_da_y0; da_y1 <= i_da_y1;
+			mask_set <= i_mask_set; mask_chk <= i_mask_chk; il_skip <= i_il_skip;
+		end
+	end
 	// ------------------------------------------------------------------------------------
 	// helpers, as in ps1_gpu.v
 	// ------------------------------------------------------------------------------------
@@ -280,7 +320,31 @@ module ps1_raster #(
 	wire xb_ok  = (px1 >= $signed({2'b0, da_x0})) && (px1 <= $signed({2'b0, da_x1})) && px1 >= 0 && px1 < 1024 && px1 >= bx0 && px1 <= bx1;
 	wire a_ok = scanning && row_ok && xa_ok && in_a;
 	wire b_ok = scanning && row_ok && xb_ok && in_b;
-	wire        pace_take = scanning && !hold && pace_ok;   // a pair leaves the scanner this clock
+	// The row start. A convex shape's left boundary moves a bounded amount a row, so the next row
+	// starts a few pixels LEFT of where this row's first inside pair was -- not at the box's left
+	// edge, from where the walk to the shape cost MediEvil 16% of the raster's clocks (its lists
+	// in sim/tb_ps1_replay: 447k of 2.75M raster clocks on pairs outside the shape). The edges and
+	// interpolants at the first inside pair are kept (fi_*); the next row's start is them minus M
+	// pixels plus one row -- shifts and adds, no multiply. It is exact: the pair jumped to must be
+	// OUTSIDE by an edge whose inside lies to its RIGHT, and then nothing left of it is inside
+	// either. If it is not -- inside, or outside only by an edge facing the other way, the
+	// boundary having moved left by more than M -- the row starts over at the box's left in the
+	// next clock (fb_now), and the margin widens for the rest of the primitive.
+	reg               fi_v;                         // this row has had its first inside pair
+	reg signed [11:0] fi_x;
+	reg signed [23:0] fi_e0, fi_e1, fi_e2;
+	reg signed [31:0] fi_r, fi_g, fi_b, fi_u, fi_vv;
+	reg               jumped;                       // the pair at px came from a jump: check it
+	reg               wide;                         // a check failed on this primitive: M = 16, not 4
+	wire signed [11:0] fi_s   = fi_x - (wide ? 12'sd16 : 12'sd4);
+	wire               fi_can = fi_v && !always_in && (fi_s > $signed({bx0[11:1], 1'b0}));
+	wire rf0 = apos ? (sx0 > 0) : (sx0 < 0);        // edge 0 grows towards the inside with x
+	wire rf1 = apos ? (sx1 > 0) : (sx1 < 0);
+	wire rf2 = apos ? (sx2 > 0) : (sx2 < 0);
+	wire jump_ok = (!edge_in(ea0, apos, etl0) && rf0) || (!edge_in(ea1, apos, etl1) && rf1)
+	            || (!edge_in(ea2, apos, etl2) && rf2);
+	wire fb_now  = jumped && !jump_ok && row_ok;   // (a row outside the area ends anyway)
+	wire        pace_take = scanning && !hold && pace_ok && !fb_now;   // a pair leaves the scanner this clock
 	wire [5:0]  pace_cost = (a_ok ? {1'b0, c_px} : 6'd0) + (b_ok ? {1'b0, c_px} : 6'd0);
 	always @(posedge clk) begin
 		if (rst) begin pace_acc <= 21'd0; pace_cr <= 20'sd0; end
@@ -342,13 +406,13 @@ module ps1_raster #(
 	wire [7:0]  uA1 = twin(cu1[23:16], tw_mx, tw_ox), vA1 = twin(cv1[23:16], tw_my, tw_oy);
 	wire [7:0]  rA0 = is_gour ? cr[23:16]  : fr, gA0 = is_gour ? cg[23:16]  : fg, bA0 = is_gour ? cb[23:16]  : fb;
 	wire [7:0]  rA1 = is_gour ? cr1[23:16] : fr, gA1 = is_gour ? cg1[23:16] : fg, bA1 = is_gour ? cb1[23:16] : fb;
-	wire        q_push = scanning && !hold && pace_ok && (a_ok || b_ok || last) && !skip8 && !skip32;
+	wire        q_push = scanning && !hold && pace_ok && !fb_now && (a_ok || b_ok || last) && !skip8 && !skip32;
 	wire [101:0] q_in  = {last, a_ok, b_ok, px[9:0], py[8:0], rA0, gA0, bA0, rA1, gA1, bA1, uA0, vA0, uA1, vA1};
 	wire [101:0] q_out = qmem[q_rp];
 	always @(posedge clk) if (q_push) qmem[q_wp] <= q_in;
 	wire        q_pop;                              // (below: B takes the head)
 	always @(posedge clk) begin
-		if (rst || (start && !busy)) begin q_wp <= 0; q_rp <= 0; q_n <= 0; end
+		if (rst || (go)) begin q_wp <= 0; q_rp <= 0; q_n <= 0; end
 		else begin
 			if (q_push) q_wp <= q_wp + 1'b1;
 			if (q_pop)  q_rp <= q_rp + 1'b1;
@@ -577,7 +641,7 @@ module ps1_raster #(
 	wire         pq_take;                                          // (below: the fetch machine took the head)
 	integer      pqi;
 	always @(posedge clk) begin
-		if (rst || (start && !busy)) pq_v <= {PQN{1'b0}};
+		if (rst || (go)) pq_v <= {PQN{1'b0}};
 		else begin : pq_step
 			reg [PQN-1:0] v; reg [24:0] a [0:PQN-1]; integer n;
 			v = pq_v; for (pqi = 0; pqi < PQN; pqi = pqi + 1) a[pqi] = pq_a[pqi];
@@ -982,9 +1046,10 @@ module ps1_raster #(
 			taC0 <= 0; taC1 <= 0; waddr <= 0; wbe <= 0; wdata <= 0;
 		end else begin
 			// --- start: the scanner at the box's top-left, the palette if needed ------
-			if (start && !busy) begin
+			if (taken) busy <= 1'b1;                   // (the parameters are being copied: see the top)
+			if (go) begin
 				busy <= 1'b1; scanning <= (by0 <= by1);   // an empty box draws nothing
-				row_in <= 1'b0;
+				row_in <= 1'b0; fi_v <= 1'b0; jumped <= 1'b0; wide <= 1'b0;
 				px <= {bx0[11:1], 1'b0}; py <= by0;
 				// the pair starts one left of the box when bx0 is odd: the edge
 				// functions and interpolants are asked for at px, so step back
@@ -1005,14 +1070,43 @@ module ps1_raster #(
 
 			// --- A: the scanner ------------------------------------------------------------
 			if (scanning && !hold && pace_ok) begin
+				jumped <= 1'b0;
+				if (fb_now) begin
+					// the jump landed inside, or outside by the wrong edge: this row from the box's left
+					px <= {bx0[11:1], 1'b0};
+					ea0 <= er0; ea1 <= er1; ea2 <= er2;
+					cr <= rr; cg <= rg; cb <= rb; cu <= ru; cv <= rv;
+					wide <= 1'b1;
+				end else begin
 				if (last) scanning <= 1'b0;
 				row_in <= row_end ? 1'b0 : (row_in || in_a || in_b);
+				if ((a_ok || b_ok) && !fi_v) begin
+					fi_v <= 1'b1; fi_x <= px;
+					fi_e0 <= ea0; fi_e1 <= ea1; fi_e2 <= ea2;
+					fi_r <= cr; fi_g <= cg; fi_b <= cb; fi_u <= cu; fi_vv <= cv;
+				end
 				if (row_end) begin
-					px <= {bx0[11:1], 1'b0}; py <= py + 12'd1;
+					fi_v <= 1'b0;
+					py <= py + 12'd1;
 					er0 <= er0 + sy0; er1 <= er1 + sy1; er2 <= er2 + sy2;
-					ea0 <= er0 + sy0; ea1 <= er1 + sy1; ea2 <= er2 + sy2;
 					rr <= rr + dr_dy; rg <= rg + dg_dy; rb <= rb + db_dy; ru <= ru + du_dy; rv <= rv + dv_dy;
-					cr <= rr + dr_dy; cg <= rg + dg_dy; cb <= rb + db_dy; cu <= ru + du_dy; cv <= rv + dv_dy;
+					if (fi_can) begin
+						// M left of this row's first inside pair, one row down
+						jumped <= 1'b1;
+						px  <= fi_s;
+						ea0 <= fi_e0 - (wide ? (sx0 <<< 4) : (sx0 <<< 2)) + sy0;
+						ea1 <= fi_e1 - (wide ? (sx1 <<< 4) : (sx1 <<< 2)) + sy1;
+						ea2 <= fi_e2 - (wide ? (sx2 <<< 4) : (sx2 <<< 2)) + sy2;
+						cr <= fi_r  - (wide ? (dr_dx <<< 4) : (dr_dx <<< 2)) + dr_dy;
+						cg <= fi_g  - (wide ? (dg_dx <<< 4) : (dg_dx <<< 2)) + dg_dy;
+						cb <= fi_b  - (wide ? (db_dx <<< 4) : (db_dx <<< 2)) + db_dy;
+						cu <= fi_u  - (wide ? (du_dx <<< 4) : (du_dx <<< 2)) + du_dy;
+						cv <= fi_vv - (wide ? (dv_dx <<< 4) : (dv_dx <<< 2)) + dv_dy;
+					end else begin
+						px <= {bx0[11:1], 1'b0};
+						ea0 <= er0 + sy0; ea1 <= er1 + sy1; ea2 <= er2 + sy2;
+						cr <= rr + dr_dy; cg <= rg + dg_dy; cb <= rb + db_dy; cu <= ru + du_dy; cv <= rv + dv_dy;
+					end
 				end else if (skip32) begin
 					px <= px + 12'd32;
 					ea0 <= e32_0; ea1 <= e32_1; ea2 <= e32_2;
@@ -1029,6 +1123,7 @@ module ps1_raster #(
 					cr <= cr + (dr_dx <<< 1); cg <= cg + (dg_dx <<< 1); cb <= cb + (db_dx <<< 1);
 					cu <= cu + (du_dx <<< 1); cv <= cv + (dv_dx <<< 1);
 				end
+				end                                     // (fb_now)
 			end
 
 			// --- B: the head of Q (a pair with nothing in it was never queued, except the
@@ -1083,7 +1178,7 @@ module ps1_raster #(
 				end
 			end
 			// the primitive is over when its last pair has gone out (or was empty)
-			if (busy && !scanning && q_empty && !vB && !vC && !vD && !vE && !wreq && fs == F_IDLE && !cl_loading)
+			if (busy && !go && !scanning && q_empty && !vB && !vC && !vD && !vE && !wreq && fs == F_IDLE && !cl_loading)
 				busy <= 1'b0;
 
 			// --- the fetches -----------------------------------------------------------------
