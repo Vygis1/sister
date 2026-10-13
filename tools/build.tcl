@@ -174,6 +174,15 @@ puts [format "   BRAM36 equiv %6.1f  of    135  (%.1f%%)" \
       [expr {$b36 + $b18/2.0}] [expr {100.0*($b36+$b18/2.0)/135}]]
 puts [format "   DSP48        %6d  of    240  (%.1f%%)" $dsp [expr {100.0*$dsp/240}]]
 
+# A combinational loop is caught by the bitstream's DRC -- after an hour of place and route.
+# It is already there in the synthesised netlist: look for it now and stop.
+set lpr [report_drc -checks {LUTLP-1} -return_string]
+if {[string match "*Combinatorial Loop Alert*" $lpr]} {
+    set fh [open $outdir/loops.rpt w]; puts $fh $lpr; close $fh
+    puts ""
+    puts "ERROR: a combinational loop in the synthesised design -- see $outdir/loops.rpt"
+    exit 1
+}
 if {$synth_only} {
     puts ""
     puts " synthesis only - stopping here."

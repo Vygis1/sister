@@ -356,9 +356,11 @@ module ps1_cache #(
 	// (The access's kind -- write, byte enables, line write -- as latched when its look-up began:
 	// port A's are the processor's live outputs, which wait on this cache's own fast answer, and
 	// reading them here closed a combinational loop through a_ack: the build's DRC LUTLP-1.)
+	// The word's position too: the processor's load address can wait on this answer's data.
 	reg         we_l, lm_l, lfull_l;
 	reg  [3:0]  be_l;
-	wire hit = tmatch && ((WVALID == 0) || (wvq == 4'hF) || (we_l && !lm_l && (be_l == 4'hF || wvq[wsel])) || (we_l && lm_l && lfull_l));
+	reg  [1:0]  ws_l;
+	wire hit = tmatch && ((WVALID == 0) || (wvq == 4'hF) || (we_l && !lm_l && (be_l == 4'hF || wvq[ws_l])) || (we_l && lm_l && lfull_l));
 	wire part = tmatch && !hit;                       // here, but not enough of it: fetch and merge
 	reg         fm;                                   // this fill merges under the line's valid words
 	reg  [3:0]  fm_wv;
@@ -505,7 +507,7 @@ module ps1_cache #(
 			if (in_run(inv_d)) pf_lv[run_ix(inv_d)] <= 1'b0;
 		end
 		if (rst) begin
-			st <= S_IDLE; flushing <= 1'b0; fl_serve <= 1'b0; fl_req <= 1'b0; we_l <= 1'b0; be_l <= 4'h0; lm_l <= 1'b0; lfull_l <= 1'b0; fidx <= {IDXBITS{1'b0}}; ar_q <= 1'b0;
+			st <= S_IDLE; flushing <= 1'b0; fl_serve <= 1'b0; fl_req <= 1'b0; we_l <= 1'b0; be_l <= 4'h0; lm_l <= 1'b0; lfull_l <= 1'b0; ws_l <= 2'd0; fidx <= {IDXBITS{1'b0}}; ar_q <= 1'b0;
 			a_ack_r <= 1'b0; b_ack <= 1'b0; a_line_r <= 128'd0; b_line <= 128'd0;
 			m_req <= 1'b0; m_we <= 1'b0; m_wmask <= 16'hFFFF;
 			serving_b <= 1'b0; refilled <= 1'b0;
@@ -575,6 +577,7 @@ module ps1_cache #(
 					be_l      <= nxt_b ? b_be : a_be;
 					lm_l      <= nxt_b ? ((B_LINE != 0) && b_lwe) : a_lwe;
 					lfull_l   <= nxt_b ? ((B_LINE != 0) && b_lwe && (&b_be16)) : (a_lwe && (&a_be16));
+					ws_l      <= nxt_b ? b_addr[3:2] : a_addr[3:2];
 					line_r  <= data[didx];
 					tag_r   <= tag[didx];
 					valid_q <= `CV(idx);
