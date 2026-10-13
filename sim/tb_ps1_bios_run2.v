@@ -314,7 +314,7 @@ module tb_ps1_bios_run2;
 		$display("  STATE: dma st=%0d cur=%0d words=%0d next=%06h chcr2=%08h chcr6=%08h | gpu ds=%0d busy=%b f_wr=%0d f_rd=%0d cmd=%02h rd_have=%b | wc st=%0d acc_v=%b c_req=%b | vcache st=%0d srvB=%b | ccache st=%0d | irq_src=%b I_STAT=%08h I_MASK=%08h cpu_irq=%b SR=%08h",
 		  dut.u_dma.st, dut.u_dma.cur, dut.u_dma.words, dut.u_dma.next, dut.u_dma.chcr[2], dut.u_dma.chcr[6],
 		  dut.gpu.ds, dut.gpu.busy, dut.gpu.f_wr, dut.gpu.f_rd, dut.gpu.cmd, dut.gpu.rd_have,
-		  dut.u_wc.st, dut.u_wc.acc_v, dut.u_wc.c_req, dut.vcache.st, dut.vcache.serving_b, dut.ccache.st,
+		  3'd0, 1'b0, dut.c_req, dut.vcache.st, dut.vcache.serving_b, dut.ccache.st,
 		  dut.irq_src, dut.u_irq.stat, dut.u_irq.mask, dut.cpu_irq, dut.cpu.SR);
 		// what is it doing at the end? sample a window of PCs and I/O hits
 		$display("  --- final 24 distinct PCs ---");

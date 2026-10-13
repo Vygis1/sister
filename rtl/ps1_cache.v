@@ -250,7 +250,7 @@ module ps1_cache #(
 	reg fl_req;
 	wire fl_want = flush || fl_req;
 	reg [IDXBITS-1:0] fidx;
-	assign flush_busy = flushing;
+	assign flush_busy = flushing || fl_req || flush;   // (a flush asked for and not yet started is busy too)
 	wire [IDXBITS-1:0] idx = fl_serve ? fidx : addr[IDXBITS+3:4];
 	assign didx = (BRAM != 0) ? {IDXBITS{1'b0}} : idx;
 	wire [TAGW-1:0]    tg  = addr[28:IDXBITS+4];
@@ -353,7 +353,12 @@ module ps1_cache #(
 	wire        line_w_m, line_w_full;                // (line_mode, and a whole-line write: below)
 	// A hit: the line is here, and so is what this access needs of it -- all of it for a read,
 	// the word for a partial store; a whole-word or whole-line store needs nothing.
-	wire hit = tmatch && ((WVALID == 0) || (wvq == 4'hF) || (we && !line_w_m && (be == 4'hF || wvq[wsel])) || (we && line_w_full));
+	// (The access's kind -- write, byte enables, line write -- as latched when its look-up began:
+	// port A's are the processor's live outputs, which wait on this cache's own fast answer, and
+	// reading them here closed a combinational loop through a_ack: the build's DRC LUTLP-1.)
+	reg         we_l, lm_l, lfull_l;
+	reg  [3:0]  be_l;
+	wire hit = tmatch && ((WVALID == 0) || (wvq == 4'hF) || (we_l && !lm_l && (be_l == 4'hF || wvq[wsel])) || (we_l && lm_l && lfull_l));
 	wire part = tmatch && !hit;                       // here, but not enough of it: fetch and merge
 	reg         fm;                                   // this fill merges under the line's valid words
 	reg  [3:0]  fm_wv;
@@ -362,7 +367,7 @@ module ps1_cache #(
 		wvmerge = {v[3] ? have[127:96] : mem[127:96], v[2] ? have[95:64] : mem[95:64],
 		           v[1] ? have[63:32]  : mem[63:32],  v[0] ? have[31:0]  : mem[31:0]};
 	endfunction
-	wire        walloc   = (WVALID != 0) && we && !line_w_m && (be == 4'hF);   // a miss claims the line
+	wire        walloc   = (WVALID != 0) && we_l && !lm_l && (be_l == 4'hF);   // a miss claims the line
 	wire [127:0] fill_line = fm ? wvmerge(line_q, fm_wv, m_rdata) : m_rdata;
 
 	// --- the stream buffer (SBUF) ----------------------------------------------------------
@@ -490,7 +495,7 @@ module ps1_cache #(
 	integer i;
 	reg         sb_out_inc, sb_take, sb_kill_go;          // (blocking: this clock's slot events)
 	reg  [24:0] sb_kill_line;
-	wire        sb_rd = (SBUF != 0) && !serving_b && !we && !line_mode && !part;   // a read port A misses on
+	wire        sb_rd = (SBUF != 0) && !serving_b && !we_l && !lm_l && !part;   // a read port A misses on
 	integer     sbi;
 	always @(posedge clk) begin
 		va_we = 1'b0; vb_we = 1'b0;
@@ -500,7 +505,7 @@ module ps1_cache #(
 			if (in_run(inv_d)) pf_lv[run_ix(inv_d)] <= 1'b0;
 		end
 		if (rst) begin
-			st <= S_IDLE; flushing <= 1'b0; fl_serve <= 1'b0; fl_req <= 1'b0; fidx <= {IDXBITS{1'b0}}; ar_q <= 1'b0;
+			st <= S_IDLE; flushing <= 1'b0; fl_serve <= 1'b0; fl_req <= 1'b0; we_l <= 1'b0; be_l <= 4'h0; lm_l <= 1'b0; lfull_l <= 1'b0; fidx <= {IDXBITS{1'b0}}; ar_q <= 1'b0;
 			a_ack_r <= 1'b0; b_ack <= 1'b0; a_line_r <= 128'd0; b_line <= 128'd0;
 			m_req <= 1'b0; m_we <= 1'b0; m_wmask <= 16'hFFFF;
 			serving_b <= 1'b0; refilled <= 1'b0;
@@ -566,6 +571,10 @@ module ps1_cache #(
 					// the frame writer holds it back anyway.
 					serving_b <= nxt_b;
 					ar_q      <= nxt_b ? (B_NOALLOC != 0) : ((A_AROUND != 0) && a_around);
+					we_l      <= nxt_b ? b_we : a_we;
+					be_l      <= nxt_b ? b_be : a_be;
+					lm_l      <= nxt_b ? ((B_LINE != 0) && b_lwe) : a_lwe;
+					lfull_l   <= nxt_b ? ((B_LINE != 0) && b_lwe && (&b_be16)) : (a_lwe && (&a_be16));
 					line_r  <= data[didx];
 					tag_r   <= tag[didx];
 					valid_q <= `CV(idx);
