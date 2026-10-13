@@ -48,6 +48,8 @@ module regfile #(
 	parameter        CORE_PS1 = 0,
 	parameter        CORE_N64 = 0,
 	parameter        CORE_SNES = 0,
+	parameter        CORE_GB  = 0,    // the Game Boy (gb_top): its cartridge in DDR3
+	parameter        CORE_A26 = 0,    // the Atari 2600 (a26_top): its cartridge in its own block RAM
 	parameter        WEBVID   = 0,    // the picture to the web page as well (see eth_top)
 	parameter        N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
 	parameter        N64_ISV  = 0,    // the N64's ISViewer text capture (n64_top ISV)
@@ -246,7 +248,7 @@ module regfile #(
 	// stereo too but its FM chip time-multiplexes its channels on its output: its two
 	// channels are filtered and averaged here like any other chip's.
 	localparam READY = (CORE_PS1 != 0) || (CORE_N64 != 0);
-	localparam MDST  = !READY && (CORE_MD != 0 || CORE_SNES != 0 || CORE_GG != 0) && CORE_NES == 0 && CORE_SMS == 0;
+	localparam MDST  = !READY && (CORE_MD != 0 || CORE_SNES != 0 || CORE_GG != 0 || CORE_GB != 0 || CORE_A26 != 0) && CORE_NES == 0 && CORE_SMS == 0;
 	wire [15:0] f_l, f_r;
 	aud_filter u_afl (.clk(clk), .x(MDST ? ps1_audio_lr[15:0] ^ 16'h8000 : console_audio), .tick(a_tick), .y(f_l));
 	generate if (MDST) begin : g_afr
@@ -371,9 +373,10 @@ module regfile #(
 	// machines' cartridge, which would otherwise sit there fully sized and
 	// entirely unread. 384 kB of block RAM is not something this part can spend
 	// on a memory nothing in the image can address.
-	localparam MD_ONLY = ((CORE_MD || CORE_SNES) && !CORE_NES && !CORE_SMS);
+	// (the Game Boy's is in DDR3 too, and the Atari's in its own core: neither uses cart_mem)
+	localparam MD_ONLY = ((CORE_MD || CORE_SNES || CORE_GB || CORE_A26) && !CORE_NES && !CORE_SMS);
 
-	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD),
+	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD), .CORE_GB(CORE_GB), .CORE_A26(CORE_A26),
 	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG), .RELEASE(RELEASE), .PS1_DCIDX(PS1_DCIDX), .CLK_HZ(CLK_HZ),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (

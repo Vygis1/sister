@@ -81,6 +81,9 @@ module gb_top #(
 ) (
 	input  wire        clk,
 	input  wire        rst,
+	// the menu's pause (console_top's cpu_halt): every T-cycle withheld, so the whole machine
+	// stops where it stands and resumes as if nothing happened
+	input  wire        pause,
 
 	// the cartridge ROM, with latency
 	output reg  [22:0] rom_addr,
@@ -130,7 +133,7 @@ module gb_top #(
 	wire        rom_busy;
 	wire [1:0]  tcyc;
 	wire        stall = rom_busy && (tcyc == 2'd3);
-	wire        ce = ce_raw && !stall && boot_done;
+	wire        ce = ce_raw && !stall && boot_done && !pause;
 
 	// --- the CPU ---------------------------------------------------------------------------------------
 	wire [15:0] a;

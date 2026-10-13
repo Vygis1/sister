@@ -45,7 +45,9 @@ def used_files(log):
     files = set()
     for m in re.finditer(r"synthesizing module '[^']+' \[(.+?):\d+\]", text):
         p = m.group(1).replace('\\', '/')
-        if p.lower().startswith(root) and '/rtl/' in p.lower():
+        # (the project's own rtl/ only: a memory controller generated under build/ has an rtl
+        # folder of its own, is not in the snapshot, and is rebuilt from its .xci anyway)
+        if p.lower().startswith(root) and p[len(root):].lower().startswith('rtl/'):
             files.add(p[len(root):])
     for m in re.finditer(r"[A-Za-z]:/[^\s\]\[']+\.xdc", text):
         p = m.group(0)

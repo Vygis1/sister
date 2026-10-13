@@ -49,6 +49,9 @@ module a26_top #(
 )(
 	input  wire        clk,
 	input  wire        rst,
+	// the menu's pause (console_top's cpu_halt): no colour clocks, so the processor, the TIA
+	// and the RIOT all stop together and pick up where they were
+	input  wire        pause,
 
 	// cartridge load port and description
 	input  wire        rom_wr,
@@ -94,7 +97,7 @@ module a26_top #(
 	reg        ce;
 	always @(posedge clk) begin
 		if (rst) begin acc <= 32'd0; ce <= 1'b0; end
-		else if (acc + PIX_HZ >= CLK_HZ) begin acc <= acc + PIX_HZ - CLK_HZ; ce <= 1'b1; end
+		else if (acc + PIX_HZ >= CLK_HZ) begin acc <= acc + PIX_HZ - CLK_HZ; ce <= !pause; end
 		else begin acc <= acc + PIX_HZ; ce <= 1'b0; end
 	end
 	assign pix_ce = ce;
