@@ -108,14 +108,14 @@ def tools_server():
                 with cmd_lock:                # prints comes out here, as everything else does
                     write(q[2:] + '\n')
                 f.write(b'ok\n'); f.flush(); continue
-            if not q or q[0] not in 'RWD':
+            if not q or q[0] not in 'RWDU':
                 continue
             with cmd_lock:
                 while not replies.empty():
                     replies.get_nowait()
                 try:
                     write(q + '\n')
-                    ans = replies.get(timeout=30.0 if q[0] == 'D' else 2.0)
+                    ans = replies.get(timeout=30.0 if q[0] in 'DU' else 2.0)
                 except Exception:
                     ans = 'timeout'
             f.write((ans + '\n').encode()); f.flush()

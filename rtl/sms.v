@@ -96,7 +96,9 @@ module sms #(
 		.clk(clk), .rst(rst), .ce(cpu_ce),
 		.addr(cpu_addr), .din(cpu_din), .dout(cpu_dout),
 		.we(cpu_we), .io(cpu_io), .m1(),
-		.int_n(vdp_irq_n), .nmi_n(1'b1),
+		// PAUSE (joy1[7]) is the NMI: the Z80 takes its falling edge. (A Game Gear has no PAUSE;
+		// its START is a button, port 00h.)
+		.int_n(vdp_irq_n), .nmi_n(GG != 0 ? 1'b1 : ~joy1[7]),
 		.dbg_pc(dbg_pc), .dbg_sp(), .dbg_af(), .dbg_bc(), .dbg_de(),
 		.dbg_hl(), .dbg_m1()
 	);

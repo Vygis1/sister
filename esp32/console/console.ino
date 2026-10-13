@@ -23,6 +23,7 @@
 #include "xa.h"
 #include <esp_rom_crc.h>
 #include <esp_heap_caps.h>
+#include <mbedtls/base64.h>
 
 // --- wiring ------------------------------------------------------------------
 // ESP32-S3. The bus names differ from the classic ESP32 -- FSPI and HSPI rather
@@ -869,8 +870,54 @@ void setup() {
 //   cores              the core library on the card
 //   install <name>     write a core from the card into the flash slot
 //   boot / shell       start the installed core / go back to the shell
+// --- a file onto the card from the PC ----------------------------------------------------
+// "U open <path> <size>", then "U <base64>" lines (up to 189 bytes each), then "U close"; each is
+// answered "= ok", "= done" (the size reached) or "= error ...". pc/pad.py passes U lines through
+// and waits for the answer (tools/sdput.py). A homebrew ROM, a core: the card stays in the board.
+static File     putFile;
+static uint32_t putLeft = 0;
+static String   putDisc;                 // the disc that was in, to put back
+static void putLine(String a) {
+  if (a.startsWith("open ")) {
+    int sp = a.lastIndexOf(' ');
+    if (sp < 6) { Serial.println("= error usage: U open <path> <size>"); return; }
+    String path = a.substring(5, sp); path.trim();
+    uint32_t size = strtoul(a.c_str() + sp + 1, nullptr, 10);
+    if (!haveCard) { Serial.println("= error no card"); return; }
+    if (putFile) putFile.close();
+    if (discIn) { putDisc = discPath; readerPause(); }      // (the drive's reader off the card meanwhile)
+    int slash = path.lastIndexOf('/');
+    if (slash > 0) SD.mkdir(path.substring(0, slash));
+    putFile = SD.open(path, FILE_WRITE);
+    if (!putFile) { Serial.println("= error cannot create " + path); return; }
+    putLeft = size;
+    Serial.println("= ok");
+    return;
+  }
+  if (a == "close") {
+    if (putFile) putFile.close();
+    putLeft = 0; listsStale = true;
+    if (putDisc.length()) { discInsert(putDisc); putDisc = ""; }
+    Serial.println("= ok");
+    return;
+  }
+  if (!putFile) { Serial.println("= error no file open"); return; }
+  uint8_t buf[192]; size_t n = 0;
+  if (mbedtls_base64_decode(buf, sizeof(buf), &n, (const uint8_t *)a.c_str(), a.length()) != 0) {
+    Serial.println("= error bad base64"); return;
+  }
+  if (putFile.write(buf, n) != n) { Serial.println("= error write failed"); return; }
+  putLeft = putLeft > n ? putLeft - n : 0;
+  if (putLeft == 0) {
+    putFile.close(); listsStale = true;
+    if (putDisc.length()) { discInsert(putDisc); putDisc = ""; }
+    Serial.println("= done");
+  } else Serial.println("= ok");
+}
+
 static void serialCommand(String c) {
   c.trim();
+  if (c.length() > 2 && c[0] == 'U' && c[1] == ' ') { putLine(c.substring(2)); return; }
   if (c.length() && c[0] == 'P') { pads::usbLine(c); return; }   // the PC's pad (pc/pad.py): quietly
   // a board register, for the PC's tools (pc/pad.py passes these through): "R addr" -> "= value",
   // "W addr value" -> "= ok" (hex)
@@ -1095,7 +1142,7 @@ static void serviceSerial(bool inUpload) {
         else if (heldN < 4) heldCmd[heldN++] = serLine;               // (the rest: after it)
         serLine = "";
       }
-    } else if (serLine.length() < 64) {
+    } else if (serLine.length() < 256) {        // (a U line: 252 characters of base64)
       serLine += ch;
     }
   }

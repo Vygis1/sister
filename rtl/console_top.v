@@ -853,7 +853,7 @@ module console_top #(
 	// utilisation report; the PS1 core itself uses 19).
 	generate if (CORE_NES || CORE_SMS || CORE_GG) begin : g_cart
 	cart_mem #(.PROG_AW(PROG_AW), .CHAR_AW(CHAR_AW),
-	           .PROG_CORE_WRITES(CORE_SMS),   // only the bare Z80 writes it
+	           .PROG_CORE_WRITES(CORE_SMS && !RELEASE),   // only the bare Z80 writes it (none in a RELEASE image: a write port that is never used stops Vivado inferring the RAM)
 	           .CHAR_CORE_WRITES(CORE_NES))   // only the NES has tile RAM
 	  u_cart (
 		.clk(clk),

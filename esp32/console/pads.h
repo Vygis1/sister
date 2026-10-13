@@ -77,11 +77,13 @@ static const CBtn L_NES[] = {
   { "Select", 2, { PB_SELECT, PB_NONE } }, { "Start", 3, { PB_START, PB_NONE } },
   { "Up", 4, { PB_UP, PB_LS_UP } }, { "Down", 5, { PB_DOWN, PB_LS_DOWN } },
   { "Left", 6, { PB_LEFT, PB_LS_LEFT } }, { "Right", 7, { PB_RIGHT, PB_LS_RIGHT } } };
+// the Master System, in sms.v's order -- port DCh's: up, down, left, right, button 1, button 2;
+// PAUSE on bit 7 (the NMI). (It was listed in the NES's order, which put Up on Button 1.)
 static const CBtn L_SMS[] = {
-  { "Button 1", 0, { PB_CROSS, PB_SQUARE } }, { "Button 2", 1, { PB_CIRCLE, PB_TRIANGLE } },
-  { "Pause", 3, { PB_START, PB_NONE } },
-  { "Up", 4, { PB_UP, PB_LS_UP } }, { "Down", 5, { PB_DOWN, PB_LS_DOWN } },
-  { "Left", 6, { PB_LEFT, PB_LS_LEFT } }, { "Right", 7, { PB_RIGHT, PB_LS_RIGHT } } };
+  { "Button 1", 4, { PB_CROSS, PB_SQUARE } }, { "Button 2", 5, { PB_CIRCLE, PB_TRIANGLE } },
+  { "Pause", 7, { PB_START, PB_NONE } },
+  { "Up", 0, { PB_UP, PB_LS_UP } }, { "Down", 1, { PB_DOWN, PB_LS_DOWN } },
+  { "Left", 2, { PB_LEFT, PB_LS_LEFT } }, { "Right", 3, { PB_RIGHT, PB_LS_RIGHT } } };
 // the Game Gear, in sms.v's own order (port DCh: up, down, left, right, button 1, button 2), START on bit 6
 static const CBtn L_GG[] = {
   { "Button 1", 4, { PB_CROSS, PB_SQUARE } }, { "Button 2", 5, { PB_CIRCLE, PB_TRIANGLE } },
