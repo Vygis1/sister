@@ -43,7 +43,15 @@ module cpu6502 #(
 	// 2A03 never is. RDY is behind a parameter rather than always live so that
 	// the NES, which leaves the pin unconnected, is unchanged: with HAS_RDY=0
 	// the input is ignored and the sequencer is exactly what it was.
-	parameter HAS_RDY = 0
+	parameter HAS_RDY = 0,
+	// The stable undocumented immediate-mode ALU instructions:
+	//   SBX #imm ($CB)        X = (A AND X) - imm, flags as CMP
+	//   ALR #imm ($4B)        A = (A AND imm) >> 1, C from bit 0
+	//   ANC #imm ($0B, $2B)   A = A AND imm, C = N
+	// The batari Basic kernel that most 2600 homebrew is built on uses SBX in its
+	// playfield loop and ALR in its random number routine. Off by default so the
+	// NES's CPU decodes exactly what it always has.
+	parameter UNDOC_IMM = 0
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -84,7 +92,7 @@ module cpu6502 #(
 		O_TXA=28, O_TYA=29, O_TSX=30, O_TXS=31, O_CLC=32, O_SEC=33, O_CLI=34,
 		O_SEI=35, O_CLV=36, O_CLD=37, O_SED=38, O_JMP=39, O_JSR=40, O_RTS=41,
 		O_RTI=42, O_BRK=43, O_PHA=44, O_PHP=45, O_PLA=46, O_PLP=47, O_BRANCH=48,
-		O_LAX=49, O_SAX=50;
+		O_LAX=49, O_SAX=50, O_SBX=51, O_ALR=52, O_ANC=53;
 
 	// --- states --------------------------------------------------------------
 	localparam [5:0]
@@ -292,6 +300,9 @@ module cpu6502 #(
 		8'h0C: begin mode=M_ABS; acc=A_READ; op=O_NOP; end
 		8'h1C, 8'h3C, 8'h5C, 8'h7C, 8'hDC, 8'hFC: begin mode=M_ABX; acc=A_READ; op=O_NOP; end
 		// LAX: load A and X together.
+		8'hCB: if (UNDOC_IMM != 0) begin mode=M_IMM; acc=A_READ; op=O_SBX; end
+		8'h4B: if (UNDOC_IMM != 0) begin mode=M_IMM; acc=A_READ; op=O_ALR; end
+		8'h0B, 8'h2B: if (UNDOC_IMM != 0) begin mode=M_IMM; acc=A_READ; op=O_ANC; end
 		8'hA3: begin mode=M_IZX; acc=A_READ; op=O_LAX; end
 		8'hA7: begin mode=M_ZP;  acc=A_READ; op=O_LAX; end
 		8'hAF: begin mode=M_ABS; acc=A_READ; op=O_LAX; end
@@ -416,7 +427,7 @@ module cpu6502 #(
 	wire [7:0] r_eor = A ^ M;
 	wire [7:0] r_bit = A & M;
 
-	wire [7:0] cmp_l = (op == O_CPX) ? X : (op == O_CPY) ? Y : A;
+	wire [7:0] cmp_l = (op == O_CPX) ? X : (op == O_CPY) ? Y : (op == O_SBX) ? (A & X) : A;
 	wire [8:0] cmp_r = {1'b0, cmp_l} - {1'b0, M};
 
 	wire [7:0] inx_r = X + 8'd1, iny_r = Y + 8'd1;
@@ -483,8 +494,21 @@ module cpu6502 #(
 				fN <= cmp_r[7];
 				fZ <= (cmp_r[7:0] == 8'd0);
 			end
+			O_ALR: begin
+				A  <= {1'b0, r_and[7:1]};
+				fC <= r_and[0];
+				fN <= 1'b0;
+				fZ <= (r_and[7:1] == 7'd0);
+			end
+			O_ANC: begin A <= r_and; fN <= r_and[7]; fC <= r_and[7]; fZ <= (r_and == 8'd0); end
 			O_BIT: begin fN <= M[7]; fV <= M[6]; fZ <= (r_bit == 8'd0); end
 			O_LAX: begin A <= M; X <= M; fN <= M[7]; fZ <= (M == 8'd0); end
+			O_SBX: begin
+				X  <= cmp_r[7:0];
+				fC <= ~cmp_r[8];
+				fN <= cmp_r[7];
+				fZ <= (cmp_r[7:0] == 8'd0);
+			end
 			default: ;
 			endcase
 		end

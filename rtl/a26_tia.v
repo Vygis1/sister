@@ -501,8 +501,11 @@ endmodule
 //   2 div 15 -> 4-bit   6 div 31 (pure)       A div 31               E div 93
 //   3 5-bit -> 4-bit    7 5-bit -> div 2      B set last 4 bits to 1 F 5-bit -> div 6
 //
-// The polynomial counters are shift registers with the documented taps; the
-// div-31 and div-93 tones carry the real chip's 18-high/13-low duty.
+// The polynomial counters are maximal-length shift registers: x^4+x^3+1 (period
+// 15), x^5+x^3+1 (31) and x^9+x^5+1 (511). The guide names the div-31 and div-93
+// modes only by their period; the waveform's shape inside the period is not
+// given there, and the 18-high/13-low split used for div 31 (div 93 is that
+// /3) is an assumption to check against a recording of real hardware.
 //////////////////////////////////////////////////////////////////////////////////
 module a26_tia_audio (
 	input  wire       clk,

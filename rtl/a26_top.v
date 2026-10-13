@@ -23,11 +23,14 @@
 //   3  F6    16K, four banks, $1FF6-$1FF9
 //   4  F4    32K, eight banks, $1FF4-$1FFB
 //   5  FE    8K (Activision): the bank follows bit 5 of the byte on the bus in the
-//            cycle after any access to $01FE -- the high byte of a JSR/RTS address
+//            cycle after an access to $01FE -- with the stack pointer at $FF, as
+//            these games keep it, that is the new high byte of a JSR or RTS, so
+//            $Dxxx code runs from the image's first 4K and $Fxxx from its second
 //   6  E0    8K (Parker Brothers): three 1K slices from eight, $1FE0-$1FF7; the
 //            top slice fixed to the last bank
-//   7  3F    (Tigervision) writes to $003F pick the 2K bank at $1000; $1800 is the
-//            last 2K
+//   7  3F    (Tigervision) a write anywhere in $00-$3F picks the 2K bank at $1000
+//            (games write $3F, which the TIA does not implement, and reach the TIA
+//            through its $40-$7F mirrors); $1800 is fixed to the last 2K
 //   8  FA    12K + 256 B RAM (CBS RAM Plus): $1FF8-$1FFA; RAM write $1000, read $1100
 //   9  F8SC  F8 with the 128 B "Super Chip" RAM: write $1000-$107F, read $1080-$10FF
 //  10  F6SC  F6 with the Super Chip
@@ -112,7 +115,7 @@ module a26_top #(
 	wire        cpu_we;
 	wire        rdy;
 
-	cpu6502 #(.DECIMAL(1), .HAS_RDY(1)) u_cpu (
+	cpu6502 #(.DECIMAL(1), .HAS_RDY(1), .UNDOC_IMM(1)) u_cpu (
 		.clk(clk), .rst(rst), .ce(cpu_ce), .rdy(rdy),
 		.addr(cpu_addr16), .din(cpu_din), .dout(cpu_dout), .we(cpu_we),
 		.irq(1'b0), .nmi(1'b0),
@@ -168,6 +171,10 @@ module a26_top #(
 		else                           sch = 4'd4;
 	end
 
+	// 2K banks in the image, minus one: 3F's mask and its fixed upper bank
+	wire [4:0] n_2k    = rom_len[15:11];
+	wire [3:0] last_2k = n_2k[3:0] - 4'd1;
+
 	reg [3:0] bank;               // F8/F6/F4/FE/FA/3F
 	reg [2:0] slice0, slice1, slice2;   // E0
 	reg       fe_arm;             // FE: the $01FE access was this cycle
@@ -203,15 +210,13 @@ module a26_top #(
 				default: slice2 <= ca[2:0];
 				endcase
 			end
-			4'd7: if (cpu_we && sel_tia && cpu_addr[5:0] == 6'h3F) bank <= cpu_dout[3:0];
+			4'd7: if (cpu_we && sel_tia && !cpu_addr[6]) bank <= cpu_dout[3:0];
 			default: ;
 			endcase
 		end
 	end
 
 	// the physical ROM address
-	wire [3:0] last_4k = rom_len[15:12] - 4'd1;          // banks of 4K in the image, minus one
-	wire [3:0] last_2k = rom_len[15:11] - 5'd1;
 	reg  [14:0] phys;
 	always @* begin
 		case (sch)
@@ -229,7 +234,7 @@ module a26_top #(
 			default: phys = {2'd0, 3'd7, ca[9:0]};
 			endcase
 		end
-		4'd7:    phys = ca[11] ? {last_2k, ca[10:0]} : {bank, ca[10:0]};
+		4'd7:    phys = ca[11] ? {last_2k, ca[10:0]} : {bank & last_2k, ca[10:0]};
 		default: phys = {3'd0, ca};
 		endcase
 	end

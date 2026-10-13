@@ -97,6 +97,51 @@ module tb_a26;
 		end
 	end
 
+	// --- audio: output changes per frame, and the swing --------------------------------------
+	integer aud_cnt = 0, aud_last = -1, aud_min = 32767, aud_max = -32768;
+	reg signed [15:0] aud_prev = 0;
+	always @(posedge clk) begin
+		if (!rst) begin
+			if (frame_start) begin aud_last = aud_cnt; aud_cnt = 0; end
+			else if (audio_l != aud_prev) aud_cnt = aud_cnt + 1;
+			aud_prev <= audio_l;
+			if (frames >= 1) begin
+				if (audio_l < aud_min) aud_min = audio_l;
+				if (audio_l > aud_max) aud_max = audio_l;
+			end
+		end
+	end
+
+	// --- TRACEn (e.g. TRACE5): VSYNC / VBLANK / WSYNC-free timer writes and reads in frame n ------------
+	integer trace_frame = -1;
+	always @(posedge clk) begin
+		if (!rst && frames == trace_frame && dut.cpu_ce && dut.rdy) begin
+			if (dut.cpu_we && dut.sel_tia && dut.cpu_addr[5:0] <= 6'h01)
+				$display("  TRACE line %3d clk %3d PC %04X  %s <- %02X", line, dut.u_tia.hcount, dbg_pc,
+				         dut.cpu_addr[0] ? "VBLANK" : "VSYNC ", dut.cpu_dout);
+			if (dut.cpu_we && dut.sel_io && dut.cpu_addr[2] && dut.cpu_addr[4])
+				$display("  TRACE line %3d clk %3d PC %04X  TIM%0dT <- %0d", line, dut.u_tia.hcount, dbg_pc,
+				         dut.cpu_addr[1:0] == 0 ? 1 : dut.cpu_addr[1:0] == 1 ? 8 : dut.cpu_addr[1:0] == 2 ? 64 : 1024,
+				         dut.cpu_dout);
+		end
+	end
+
+	// --- opcodes the CPU does not decode ----------------------------------------------------
+	// Anything other than $EA that decodes to the CPU's do-nothing default is an
+	// instruction this console runs as a 1-byte NOP -- an undocumented opcode a
+	// cartridge relies on. Named here because the symptom is otherwise a kernel
+	// that silently loses sync.
+	integer undecoded = 0;
+	always @(posedge clk) begin
+		if (!rst && dut.cpu_ce && dut.rdy && dut.u_cpu.t == 6'd3 && dut.u_cpu.IR != 8'hEA
+		    && dut.u_cpu.op == 6'd0 && dut.u_cpu.mode == 4'd0) begin
+			if (undecoded < 8)
+				$display("  WARNING opcode 0x%02X at 0x%04X is not decoded (ran as a NOP)",
+				         dut.u_cpu.IR, dut.u_cpu.PC - 16'd1);
+			undecoded = undecoded + 1;
+		end
+	end
+
 	// --- the palette: see tools/a26/ntsc_palette.py -------------------------------------
 	function [23:0] palette;
 		input [6:0] c;
@@ -302,10 +347,11 @@ module tb_a26;
 					checkpix(y, x, want);
 				end
 			end
-			// RAM: the timer, the inputs, the collisions
-			check8("$80 INTIM 4 cycles after TIM8T=5",  dut.u_riot.ram[7'h00], 8'h05);
-			check8("$81 INTIM 17 cycles after",         dut.u_riot.ram[7'h01], 8'h03);
-			check8("$82 polls until the flag",          dut.u_riot.ram[7'h02], 8'h04);
+			// RAM: the timer (values from the 6532 datasheet's rule, worked in
+			// test.asm), the inputs, the collisions
+			check8("$80 INTIM 4 cycles after TIM8T=5",  dut.u_riot.ram[7'h00], 8'h04);
+			check8("$81 INTIM 17 cycles after",         dut.u_riot.ram[7'h01], 8'h02);
+			check8("$82 polls until the flag",          dut.u_riot.ram[7'h02], 8'h03);
 			check8("$83 INTIM after underflow",         dut.u_riot.ram[7'h03], 8'hF0);
 			check8("$84 TIMINT after the INTIM read",   dut.u_riot.ram[7'h04], 8'h00);
 			check8("$90 CXP0FB: player 0 on playfield", dut.u_riot.ram[7'h10], 8'h82);
@@ -315,6 +361,16 @@ module tb_a26;
 			check8("$94 SWCHA with P0 up held",         dut.u_riot.ram[7'h14], 8'hEF);
 			check8("$95 INPT4 with fire held",          dut.u_riot.ram[7'h15], 8'h0C);
 			check8("$96 SWCHB colour, nothing pressed", dut.u_riot.ram[7'h16], 8'h0B);
+			if (aud_last != 131) begin
+				$display("  FAIL audio: %0d output changes in the last frame, want 131", aud_last); fails = fails + 1;
+			end
+			if (aud_min != -15360 || aud_max != 0) begin
+				$display("  FAIL audio swing %0d..%0d, want -15360..0 (one channel at volume 15)", aud_min, aud_max);
+				fails = fails + 1;
+			end
+			if (audio_r != audio_l) begin
+				$display("  FAIL audio: left and right differ"); fails = fails + 1;
+			end
 			check8("$97 frames the kernel counted",     dut.u_riot.ram[7'h17], target_frames[7:0]);
 		end
 	endtask
@@ -349,7 +405,8 @@ module tb_a26;
 			if ($fscanf(cfg, "%d", tmp) == 1) target_frames = tmp;
 			$fclose(cfg);
 		end
-		if ($value$plusargs("FRAMES=%d", plus)) target_frames = plus;
+		if ($value$plusargs("FRAMES%d", plus)) target_frames = plus;
+		if ($value$plusargs("TRACE%d", plus)) trace_frame = plus;
 
 		$display("tb_a26");
 		$display("  cartridge %0d bytes, scheme %0d, gate %0d, %0d frames", rom_len, scheme, gate, target_frames);
@@ -377,6 +434,8 @@ module tb_a26;
 				end
 				$display("  lines per frame: %0d (expect 262)", lines_last);
 				$display("  WSYNC count: %0d", wsyncs);
+				if (undecoded) $display("  undecoded opcodes executed: %0d", undecoded);
+				$display("  audio: %0d output changes in the last frame, swing %0d..%0d", aud_last, aud_min, aud_max);
 				if (vis_last >= vis_first) write_ppm;
 				else $display("  no visible pixels were produced");
 				if (gate) gate_checks;

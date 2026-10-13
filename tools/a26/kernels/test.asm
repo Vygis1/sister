@@ -15,6 +15,9 @@
 ;
 ; Assemble: python tools/a26/asm.py tools/a26/kernels/test.asm test.bin
 
+AUDC0   = $15
+AUDF0   = $17
+AUDV0   = $19
 VSYNC   = $00
 VBLANK  = $01
 WSYNC   = $02
@@ -61,11 +64,14 @@ clear:
     bne clear
 
 ; --- the RIOT timer -----------------------------------------------------------
-; Cycle counts from the write edge W (the fourth cycle of STA TIM8T):
-;   lda INTIM reads at W+4   -> 5          (one step every 8 cycles)
-;   lda INTIM reads at W+17  -> 3
-;   the flag is up for reads from W+49; the loop's reads are at W+28,37,46,55 -> X=4
-;   lda INTIM reads at W+64  -> $FF - 15 = $F0 (one step a cycle after underflow)
+;   The 6532 datasheet's rule: a read p cycles after the write of N reads
+;   N - 1 - floor(p / interval) until the count passes zero; that read (p = 8N)
+;   gives $FF and sets the flag, and from then on the count drops one a cycle.
+; Cycle counts from the write cycle W (the fourth cycle of STA TIM8T):
+;   lda INTIM reads at W+4   -> 5 - 1 - 0 = 4
+;   lda INTIM reads at W+17  -> 5 - 1 - 2 = 2
+;   the flag is up for reads from W+40; the loop's reads are at W+28,37,46 -> X=3
+;   lda INTIM reads at W+55  -> $FF - (55 - 40) = $F0
 ;   lda TIMINT after that    -> 0 (the INTIM read cleared the flag)
     lda #5
     sta TIM8T
@@ -87,6 +93,16 @@ tloop:
     lda TIMINT
     sta $84
 
+; --- a tone: channel 0 pure (AUDC 4: divide by 2) at AUDF 3, full volume. The
+; audio clock is two pulses a line, so a 262-line frame holds 524 of them; /4 by
+; AUDF, the output toggles 131 times a frame. Channel 1 stays silent (cleared).
+    lda #4
+    sta AUDC0
+    lda #3
+    sta AUDF0
+    lda #15
+    sta AUDV0
+
 ; --- the frame ----------------------------------------------------------------------
 frame:
     lda #2
@@ -96,8 +112,8 @@ frame:
     sta WSYNC
     lda #0
     sta VSYNC
-    lda #43
-    sta TIM64T          ; 2752 cycles of the 37-line vertical blank
+    lda #44             ; reads 0 from 64 x 43 = 2752 cycles on (36.2 lines), so the
+    sta TIM64T          ; WSYNC after the wait ends line 39: 37 lines of vertical blank
 
     lda #$46
     sta COLUP0
@@ -209,7 +225,7 @@ ploop:
     sta RESP0,x
     rts
 
-; --- expected RAM ($80..): 05 03 04 F0 00; $90..: 82 06 07 02; $94: SWCHA $95: INPT4 $96: SWCHB $97: frames
+; --- expected RAM ($80..): 04 02 03 F0 00; $90..: 82 06 07 02; $94: SWCHA $95: INPT4 $96: SWCHB $97: frames
     .org $FFFC
     .word start
     .word start

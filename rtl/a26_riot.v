@@ -12,11 +12,15 @@
 // control, A1:A0 the interval and A3 whether the timer may interrupt (it cannot
 // reach anything here -- the 6507 has no IRQ pin).
 //
-// The timer: writing N starts a countdown from N at the chosen interval (1, 8, 64
-// or 1024 cycles a step); INTIM reads the count. When the count steps below zero
-// the interrupt flag (TIMINT bit 7) sets and the timer carries on down from $FF
-// one step a cycle, so a late reader can still tell how late it is. Reading INTIM
-// clears the flag.
+// The timer, as the datasheet's worked example has it (52 written at /8: the
+// count reads 51 on the next cycle, "52-26-1 = 25" 213 cycles on, 0 at 415, and
+// the interrupt at 416 -- "(52 x 8) + 1 = 417T" including the write): the count
+// steps once on the cycle after the write and then once an interval, so a read p
+// cycles after the write sees N - 1 - floor(p / interval). Stepping through zero
+// reads $FF and sets the flag (TIMINT bit 7); from then on the count drops one a
+// cycle, so a late reader can tell how late it is. Reading or writing the timer
+// clears the flag -- except a read in the very cycle the flag sets, which the
+// datasheet says does not.
 //////////////////////////////////////////////////////////////////////////////////
 
 `default_nettype none
@@ -76,7 +80,7 @@ module a26_riot (
 		default: period_m1 = 10'd1023;
 		endcase
 	end
-	wire step = underflowed || (prescale == period_m1);
+	wire step = underflowed || (interval == 2'd0) || (prescale == period_m1);
 
 	wire io_wr = cpu_ce && io_sel && we;
 	wire io_rd = cpu_ce && io_sel && !we;
@@ -88,6 +92,13 @@ module a26_riot (
 			tim_flag <= 1'b0; underflowed <= 1'b1; irq_en <= 1'b0;
 			pa7_flag <= 1'b0; pa7_pos <= 1'b0; pa7_prev <= 1'b0;
 		end else begin
+			// a read clears the flag; written first so that the flag setting in the
+			// same cycle, below, wins
+			if (io_rd && addr[2]) begin
+				if (!addr[0]) tim_flag <= 1'b0;   // INTIM
+				else          pa7_flag <= 1'b0;   // TIMINT
+			end
+
 			if (cpu_ce) begin
 				// the countdown
 				if (step) begin
@@ -114,12 +125,13 @@ module a26_riot (
 					default: ddrb <= din;
 					endcase
 				end else if (addr[4]) begin
-					// a timer write: the count, the interval, a fresh prescaler, and
-					// the flag goes down
-					intim       <= din;
+					// A timer write. The count goes in already stepped once (N - 1 is
+					// what the next cycle reads), and the prescaler starts at 1 so the
+					// next step lands `interval` cycles after that first one.
+					intim       <= din - 8'd1;
 					interval    <= addr[1:0];
 					irq_en      <= addr[3];
-					prescale    <= 10'd0;
+					prescale    <= 10'd1;
 					tim_flag    <= 1'b0;
 					underflowed <= 1'b0;
 				end else begin
@@ -128,10 +140,6 @@ module a26_riot (
 				end
 			end
 
-			if (io_rd && addr[2]) begin
-				if (!addr[0]) tim_flag <= 1'b0;   // INTIM
-				else          pa7_flag <= 1'b0;   // TIMINT
-			end
 		end
 	end
 
