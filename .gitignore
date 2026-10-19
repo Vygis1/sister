@@ -11,7 +11,8 @@ xsim.dir/
 FinalUnmatchedCellsToUnplace.txt
 clockInfo.txt
 tight_setup_hold_pins.txt
---list
+psipCongestionLevel.txt
+/--list
 
 # --- bitstreams -----------------------------------------------------------
 # Each is a few megabytes and every one is reproducible from the sources here.
@@ -62,3 +63,20 @@ sim/n64r/
 sim/n64d/
 tools/menu_preview/cut.h
 sim/vid/
+
+# PC-core simulation output (Verilator), generated bench data
+sim/pc/obj*/
+sim/pc/frames/
+sim/pc/cdtest
+sim/pc/*.mem
+sim/hdmi_syms.txt
+sim/n64r*/
+sim/ps1mdec/
+
+# z486 ROM images: recovered Intel 80386 data, not licensed for redistribution
+# (docs/THIRD_PARTY.md); tools/pc/fetch_z486.sh downloads them from upstream
+rtl/pc/z486/*.mem
+
+# private notes, agent worktrees
+outreach/
+.claude/
