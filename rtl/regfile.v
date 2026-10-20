@@ -50,6 +50,9 @@ module regfile #(
 	parameter        CORE_SNES = 0,
 	parameter        CORE_GB  = 0,    // the Game Boy (gb_top): its cartridge in DDR3
 	parameter        CORE_A26 = 0,    // the Atari 2600 (a26_top): its cartridge in its own block RAM
+	parameter        CORE_PCE = 0,    // the PC Engine (pce_top): its HuCard in DDR3
+	parameter        CORE_GBA = 0,    // the Game Boy Advance (gba_top): cartridge and work RAM in DDR3
+	parameter        CORE_PC  = 0,    // the PC (pc_top): memory and picture in DDR3, its disk on the ESP32
 	parameter        WEBVID   = 0,    // the picture to the web page as well (see eth_top)
 	parameter        N64_DBG  = 1,    // the N64's debug window (n64_top DBG)
 	parameter        N64_ISV  = 0,    // the N64's ISViewer text capture (n64_top ISV)
@@ -208,7 +211,8 @@ module regfile #(
 	// page reads back as unmapped, which the server's analyser panel reports
 	// cleanly; nothing else looks here.
 	// (and a shipping image carries none either: the PC that read it is gone)
-	generate if (!RELEASE && CORE_PS1 == 0 && CORE_N64 == 0 && CORE_SNES == 0) begin : g_la
+	// (not in the PC either: its chip is full with the z486, and nothing reads the analyser any more)
+	generate if (!RELEASE && CORE_PS1 == 0 && CORE_N64 == 0 && CORE_SNES == 0 && CORE_PC == 0) begin : g_la
 	logic_analyzer #(.DEPTH_MAX(LA_DEPTH), .AW(LA_AW)) u_la (
 		.clk(clk), .rst(rst),
 		.probe(la_probe),
@@ -248,7 +252,7 @@ module regfile #(
 	// stereo too but its FM chip time-multiplexes its channels on its output: its two
 	// channels are filtered and averaged here like any other chip's.
 	localparam READY = (CORE_PS1 != 0) || (CORE_N64 != 0);
-	localparam MDST  = !READY && (CORE_MD != 0 || CORE_SNES != 0 || CORE_GG != 0 || CORE_GB != 0 || CORE_A26 != 0) && CORE_NES == 0 && CORE_SMS == 0;
+	localparam MDST  = !READY && (CORE_MD != 0 || CORE_SNES != 0 || CORE_GG != 0 || CORE_GB != 0 || CORE_A26 != 0 || CORE_PCE != 0 || CORE_GBA != 0 || CORE_PC != 0) && CORE_NES == 0 && CORE_SMS == 0;
 	wire [15:0] f_l, f_r;
 	aud_filter u_afl (.clk(clk), .x(MDST ? ps1_audio_lr[15:0] ^ 16'h8000 : console_audio), .tick(a_tick), .y(f_l));
 	generate if (MDST) begin : g_afr
@@ -269,7 +273,7 @@ module regfile #(
 	// addresses. Every other image keeps the synthesiser exactly as it was.
 	// A shipping image has no PC-side ring at all: HDMI takes the console's sound through
 	// aud_filter above, and the ring's block RAMs go back to the chip.
-	generate if (!RELEASE && !CORE_PS1 && !CORE_N64 && !CORE_SNES) begin : g_syn
+	generate if (!RELEASE && !CORE_PS1 && !CORE_N64 && !CORE_SNES && !CORE_PC) begin : g_syn
 		synth u_synth (
 			.clk(clk), .rst(rst),
 			.off(off), .we(syn_we), .wdata(bus_wdata),
@@ -278,7 +282,7 @@ module regfile #(
 			.buf_addr(sel_addr[14:2]),
 			.buf_rdata(abuf_rdata)
 		);
-	end else if (RELEASE || CORE_SNES || CORE_PS1) begin : g_nosyn
+	end else if (RELEASE || CORE_SNES || CORE_PS1 || CORE_PC) begin : g_nosyn
 		// (the SNES and the PlayStation: no PC-side sound ring -- HDMI takes aud_s directly, and
 		// the PC that polled it over the network is gone -- and its block RAMs go to the console:
 		// the PlayStation's sixteen double its processor's cache)
@@ -374,9 +378,9 @@ module regfile #(
 	// entirely unread. 384 kB of block RAM is not something this part can spend
 	// on a memory nothing in the image can address.
 	// (the Game Boy's is in DDR3 too, and the Atari's in its own core: neither uses cart_mem)
-	localparam MD_ONLY = ((CORE_MD || CORE_SNES || CORE_GB || CORE_A26) && !CORE_NES && !CORE_SMS);
+	localparam MD_ONLY = ((CORE_MD || CORE_SNES || CORE_GB || CORE_A26 || CORE_PCE || CORE_GBA || CORE_PC) && !CORE_NES && !CORE_SMS);
 
-	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD), .CORE_GB(CORE_GB), .CORE_A26(CORE_A26),
+	console_top #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD), .CORE_GB(CORE_GB), .CORE_A26(CORE_A26), .CORE_PCE(CORE_PCE), .CORE_GBA(CORE_GBA), .CORE_PC(CORE_PC),
 	              .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG), .RELEASE(RELEASE), .PS1_DCIDX(PS1_DCIDX), .CLK_HZ(CLK_HZ),
 	              .PROG_AW(MD_ONLY ? 12 : 18),
 	              .CHAR_AW(MD_ONLY ? 12 : 17)) u_console (

@@ -82,7 +82,10 @@
 module shell_top #(
 	// 1: the PC's door, net_core on the LAN8720 module's REF_CLK through net_bridge.
 	// 0 (as built): the ESP32 is the only door -- the board has no LAN module.
-	parameter NET = 0
+	parameter NET = 0,
+	// the checksum's block: 2^SUM_LOG pages (8: 64 kB, one erase sector; benches use fewer)
+	parameter SUM_LOG = 8,
+	parameter LA = 0
 ) (
 	input  wire       sys_clk,        // 50 MHz board oscillator, heartbeat only
 	output wire       led0,           // heartbeat
@@ -100,7 +103,9 @@ module shell_top #(
 	// --- the ESP32, on header U2 pins 7-10 --------------------------------
 	input  wire       esp_sclk,
 	input  wire       esp_mosi,
-	output wire       esp_miso,
+	inout  wire       esp_miso,          // (let go in a quad write's data: the ESP32 drives it then)
+	input  wire       esp_d2,            // quad's third and fourth data wires: the ESP32's WP (GPIO 22) and
+	input  wire       esp_d3,            // HD (GPIO 21), on U2 pins 12 and 11
 	input  wire       esp_cs_n,
 
 	// --- the configuration flash -------------------------------------------
@@ -123,18 +128,25 @@ module shell_top #(
 	// module's REF_CLK only with NET, for net_core.)
 	wire clk, clk_raw;
 	BUFG bufg_con (.I(clk_raw), .O(clk));
-	wire hfb, hp_raw, hp5_raw, hpclk, hpclk5, hlocked;
+	wire hfb, hp_raw, hp5_raw, hpclk, hpclk5, hlocked, clocked;   // (the picture's MMCM locked; the shell's own)
 
 	reg [15:0] rst_cnt = 16'd0;
 	reg        rst = 1'b1;
 	always @(posedge clk) begin
-		if (!hlocked)                 begin rst_cnt <= 16'd0; rst <= 1'b1; end
+		if (!hlocked || !clocked)     begin rst_cnt <= 16'd0; rst <= 1'b1; end
 		else if (rst_cnt == 16'hFFFF) rst <= 1'b0;
 		else                          rst_cnt <= rst_cnt + 16'd1;
 	end
 
 	// 2: the menu can draw (osd.v on the ESP32's register bus, the pad register)
-	localparam [7:0] VERSION = 8'd2;
+	// 3: and a picture under it (shell_fb, page 0x0009): the graphical menu
+	// 4: the picture composed here from a list (shell_ui, pages 0x0009-0x000F)
+	// 5: quad writes (esp_bus 0x43: the data four bits a clock, two more wires)
+	// 6: the flash door's page write quad (0x19), a 64 kB block's checksum (0x16, 0x17), the
+	//    flash's clock four times what it was
+	// 7: a 16 kB block buffer filled quad (0x1A) and programmed page after page by the board itself
+	//    (0x1B: no round trip a page); two core slots, booted by CMD_BOOT's byte (1: 2 MB, 2: 5 MB)
+	localparam [7:0] VERSION = 8'd7;
 	localparam [7:0] CORE_ID = 8'd0;          // 0 is the shell itself
 
 	// --- the flash engine, shared by both doors ------------------------------
@@ -151,7 +163,7 @@ module shell_top #(
 	wire        miso_ever_low;
 	wire [4:0]  fl_state;
 
-	shell_flash #(.DIV(16)) u_flash (
+	shell_flash #(.DIV(4)) u_flash (   // (80 ns half bits: the N25Q takes 50 MHz; STARTUPE2's delay is a few ns)
 		.clk(clk), .rst(rst),
 		.op(fl_op), .offset(fl_offset),
 		.start(fl_start), .busy(busy),
@@ -229,12 +241,17 @@ module shell_top #(
 	// in the NES's order). Everything else is shell_regs'. Answered the clock after.
 	wire        pg_osd = bus_addr[31:16] == 16'h0007;
 	wire        pg_pad = bus_addr[31:16] == 16'h0008;
-	wire        pg_ui  = pg_osd || pg_pad;
+	wire        pg_fb  = bus_addr[31:20] == 12'h000 && bus_addr[19:16] >= 4'h9;   // (shell_ui: 9-F)
+	wire        pg_ui  = pg_osd || pg_pad || pg_fb;
 	reg         ui_ack;
 	reg  [31:0] ui_rdata;
 	reg  [15:0] joy1, joy2;
 	wire [31:0] osd_rdata;
 	wire        osd_we = bus_we && pg_osd && !ui_ack;
+	wire        fb_we  = bus_we && pg_fb && !ui_ack;
+	wire [31:0] fb_rdata;
+	wire [23:0] fb_rgb;                       // (shell_ui's picture, at the bottom)
+	wire [9:0]  ui_prog_w; wire ui_prog_on, ui_gfx;   // (the built-in picture's bar; the ESP32 has drawn)
 	always @(posedge clk) begin
 		ui_ack <= !rst && (bus_we || bus_re) && pg_ui && !ui_ack;
 		if (rst) begin joy1 <= 16'd0; joy2 <= 16'd0; end
@@ -242,7 +259,7 @@ module shell_top #(
 			if (bus_addr[15:0] == 16'h0008) joy1 <= bus_wdata[15:0];
 			if (bus_addr[15:0] == 16'h000C) joy2 <= bus_wdata[15:0];
 		end
-		ui_rdata <= pg_osd ? osd_rdata
+		ui_rdata <= pg_fb ? fb_rdata : pg_osd ? osd_rdata
 		          : (bus_addr[15:0] == 16'h0008) ? {16'd0, joy1}
 		          : (bus_addr[15:0] == 16'h000C) ? {16'd0, joy2} : 32'd0;
 	end
@@ -305,6 +322,9 @@ module shell_top #(
 	wire [11:0] la_buf_addr;
 	wire [31:0] la_buf_rdata;
 
+	// (the logic analyzer: a debugging aid, out of the image since version 7 -- the 2 MB the menu
+	// image has in the flash ran out; LA=1 puts it back)
+	generate if (LA) begin : g_la
 	logic_analyzer #(.DEPTH_MAX(4096), .AW(12)) u_la (
 		.clk(clk), .rst(rst),
 		.probe(la_probe),
@@ -312,6 +332,9 @@ module shell_top #(
 		.rdata(la_rdata), .err(),
 		.buf_addr(la_buf_addr), .buf_rdata(la_buf_rdata)
 	);
+	end else begin : g_nola
+		assign la_rdata = 32'd0; assign la_buf_rdata = 32'd0;
+	end endgenerate
 
 	// --- door two: the ESP32 -------------------------------------------------
 	wire        frame_start, frame_end, rx_stb;
@@ -323,10 +346,10 @@ module shell_top #(
 	// door's, as the console images share the wires with the PlayStation's disc feed)
 	wire        sh_miso, eb_miso;
 	wire [7:0]  e_cmd;
-	// (its writes reach the menu's pages and nothing else: shell_regs can start the flash
+	// (its writes reach the menu's pages -- the text, the pads, the picture -- and nothing else: shell_regs can start the flash
 	// engine, and that is the unlocked door's alone. Any other write is acknowledged and
 	// dropped.)
-	wire        e_pg_ok = e_addr[31:16] == 16'h0007 || e_addr[31:16] == 16'h0008;
+	wire        e_pg_ok = e_addr[31:20] == 12'h000 && e_addr[19:16] >= 4'h7;   // (the text, the pads, the picture's pages 9-F)
 	reg         e_drop_ack;
 	always @(posedge clk) e_drop_ack <= !rst && e_we_raw && !e_pg_ok && !e_drop_ack;
 	assign      e_we  = e_we_raw && e_pg_ok;
@@ -334,13 +357,16 @@ module shell_top #(
 	esp_bus #(.VERSION(VERSION), .CORE_ID(CORE_ID)) u_ebus (
 		.clk(clk), .rst(rst),
 		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(eb_miso), .spi_cs_n(esp_cs_n),
+		.spi_d1(esp_miso), .spi_d2(esp_d2), .spi_d3(esp_d3), .spi_miso_t(eb_miso_t),
 		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we_raw), .bus_re(e_re),
 		.bus_rdata(bus_rdata), .bus_ack(e_ack), .cmd(e_cmd));
-	assign esp_miso = (e_cmd[7:4] == 4'h4) ? eb_miso : sh_miso;
-	esp_link u_link (
+	wire        eb_miso_t, sh_miso_t;
+	assign esp_miso = (eb_miso_t || sh_miso_t) ? 1'bz : (e_cmd[7:4] == 4'h4) ? eb_miso : sh_miso;
+	esp_link #(.QCMD_A(8'h19), .QHDR_A(5'd4), .QCMD_B(8'h1A), .QHDR_B(5'd4)) u_link (
 		.clk(clk), .rst(rst),
 		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi),
 		.spi_miso(sh_miso), .spi_cs_n(esp_cs_n),
+		.spi_d1(esp_miso), .spi_d2(esp_d2), .spi_d3(esp_d3), .spi_miso_t(sh_miso_t),
 		.frame_start(frame_start), .frame_end(frame_end),
 		.rx_byte(rx_byte), .rx_stb(rx_stb), .rx_index(rx_index),
 		.tx_byte(tx_byte)
@@ -353,6 +379,11 @@ module shell_top #(
 	                 CMD_UNLOCK      = 8'h15,
 	                 CMD_FLASH_READ  = 8'h12,
 	                 CMD_FLASH_PAGE  = 8'h13,
+	                 CMD_FLASH_SUM   = 8'h16,   // a 64 kB block read and folded into a checksum (poll busy)
+	                 CMD_FLASH_SUMRD = 8'h17,   // ...the checksum: 8 bytes after the signature
+	                 CMD_FLASH_WRITEQ = 8'h19,  // CMD_FLASH_WRITE with its page four bits a clock
+	                 CMD_FLASH_BUFQ  = 8'h1A,   // 3 bytes: the block buffer's first word; then words, quad
+	                 CMD_FLASH_PROGN = 8'h1B,   // 3 bytes: a slot offset; 1: pages (1-64) from the buffer
 	                 CMD_BOOT        = 8'h20;
 
 	reg [7:0]  cmd;
@@ -375,11 +406,26 @@ module shell_top #(
 	reg  [5:0]  sp_windex;
 	reg         sp_we;
 	reg  [31:0] sp_wdata;
-	reg         sp_boot_core;
+	reg  [1:0]  sp_boot_core;       // 0 the shell, 1 the slot at 2 MB, 2 the slot at 5 MB
 	reg         sp_boot_go;
+	// the block buffer: 16 kB, filled by 0x1A, programmed by 0x1B
+	reg  [31:0] pbuf [0:4095];
+	reg  [11:0] pb_wa, pb_ra; reg pb_we; reg [31:0] pb_wd, pb_q;
+	always @(posedge clk) begin
+		if (pb_we) pbuf[pb_wa] <= pb_wd;
+		pb_q <= pbuf[pb_ra];
+	end
+	reg  [11:0] bufq_base;
+	reg         pr_go, pr_busy, pr_we, pr_start; reg [22:0] pr_addr; reg [6:0] pr_n, pr_p; reg [5:0] pr_w, pr_windex;
+	reg  [31:0] pr_wdata; reg [2:0] pr_st; reg [22:0] pr_offset;
 
 	reg [23:0] arg_addr;
 	reg [31:0] byte_sh;
+	// a 64 kB block's checksum, read here (the ESP32 used to read every page back over the link):
+	// {sum of the words, the words rotated and XORed}
+	reg         sum_go, sum_busy; reg [22:0] sum_addr; reg [8:0] sum_pg; reg [5:0] sum_w; reg [2:0] sum_st;
+	reg  [31:0] sum_x, sum_s; reg [63:0] sum_q;
+	reg  [1:0]  su_op; reg [22:0] su_offset; reg su_start;
 	// A page frame is three address bytes then 256 of data, so data starts at
 	// index 4 and (index - 4) / 4 is the word. One byte earlier than it was when
 	// a slot number came first.
@@ -387,7 +433,7 @@ module shell_top #(
 
 	// Reading a page back and writing one in never happen at the same time, so
 	// one index serves both -- as a wire, so the buffer keeps a single driver.
-	wire [5:0] sp_idx = (cmd == CMD_FLASH_PAGE) ? page_i[7:2] : sp_windex;
+	wire [5:0] sp_idx = (cmd == CMD_FLASH_PAGE) ? page_i[7:2] : sum_busy ? sum_w : sp_windex;
 
 	wire [7:0] page_byte = (page_i[1:0] == 2'd0) ? fl_rdata[7:0]
 	                     : (page_i[1:0] == 2'd1) ? fl_rdata[15:8]
@@ -403,12 +449,13 @@ module shell_top #(
 			case (rn)
 			10'd1:   tx_byte = VERSION;
 			10'd2:   tx_byte = CORE_ID;
-			default: tx_byte = {7'd0, busy};
+			default: tx_byte = {7'd0, busy | sum_busy | pr_busy};
 			endcase
 		CMD_FLASH_PAGE: tx_byte = (rn < 10'd2) ? {7'd0, busy} : page_byte;
+		CMD_FLASH_SUMRD: tx_byte = (rn >= 10'd1 && rn <= 10'd8) ? sum_q[8 * (rn - 10'd1) +: 8] : {7'd0, busy};
 		// Busy answers everything else, so a master that only wants "are you
 		// finished" can send any command and read byte 1.
-		default:        tx_byte = {7'd0, busy};
+		default:        tx_byte = {7'd0, busy | sum_busy | pr_busy};
 		endcase
 	end
 
@@ -430,9 +477,11 @@ module shell_top #(
 			cmd <= 8'd0; arg_addr <= 24'd0; byte_sh <= 32'd0;
 			sp_op <= 2'd0; sp_offset <= 23'd0; sp_start <= 1'b0;
 			sp_windex <= 6'd0; sp_we <= 1'b0; sp_wdata <= 32'd0;
-			sp_boot_core <= 1'b0; sp_boot_go <= 1'b0;
+			sp_boot_core <= 2'd0; sp_boot_go <= 1'b0;
+			sum_go <= 1'b0; pr_go <= 1'b0; pb_we <= 1'b0;
 		end else begin
 			sp_start <= 1'b0;
+			sum_go <= 1'b0; pr_go <= 1'b0; pb_we <= 1'b0;
 			sp_we    <= 1'b0;
 			if (armed) begin
 				arm_t <= arm_t + 22'd1;
@@ -448,10 +497,10 @@ module shell_top #(
 				// Erase takes an address like the others: it clears the one
 				// 64 kB sector that address falls in, so a caller erases what it
 				// is about to write and nothing else.
-				CMD_FLASH_ERASE, CMD_FLASH_WRITE, CMD_FLASH_READ: begin
+				CMD_FLASH_ERASE, CMD_FLASH_WRITE, CMD_FLASH_WRITEQ, CMD_FLASH_READ, CMD_FLASH_SUM: begin
 					if (rx_index >= 24'd1 && rx_index <= 24'd3)
 						arg_addr <= {arg_addr[15:0], rx_byte};
-					if (cmd == CMD_FLASH_WRITE &&
+					if ((cmd == CMD_FLASH_WRITE || cmd == CMD_FLASH_WRITEQ) &&
 					    rx_index >= 24'd4 && rx_index < 24'd260) begin
 						byte_sh <= {rx_byte, byte_sh[31:8]};
 						// Every fourth byte completes a word; index 7 is the
@@ -465,7 +514,24 @@ module shell_top #(
 				end
 
 				CMD_BOOT:
-					if (rx_index == 24'd1) sp_boot_core <= rx_byte[0];
+					if (rx_index == 24'd1) sp_boot_core <= rx_byte[1:0];
+
+				// the block buffer: its first word (bytes 1-3), then words little-endian, quad
+				CMD_FLASH_BUFQ: begin
+					if (rx_index >= 24'd1 && rx_index <= 24'd3) arg_addr <= {arg_addr[15:0], rx_byte};
+					if (rx_index == 24'd3) bufq_base <= {arg_addr[3:0], rx_byte};
+					if (rx_index >= 24'd4) begin
+						byte_sh <= {rx_byte, byte_sh[31:8]};
+						if (rx_index[1:0] == 2'd3) begin
+							pb_we <= 1'b1; pb_wd <= {rx_byte, byte_sh[31:8]};
+							pb_wa <= bufq_base + rx_index[13:2] - 12'd1;
+						end
+					end
+				end
+				CMD_FLASH_PROGN: begin
+					if (rx_index >= 24'd1 && rx_index <= 24'd3) arg_addr <= {arg_addr[15:0], rx_byte};
+					if (rx_index == 24'd4) pr_n <= (rx_byte == 8'd0 || rx_byte > 8'd64) ? 7'd64 : rx_byte[6:0];
+				end
 
 				CMD_UNLOCK:
 					if (rx_index <= 24'd4) ukey <= {ukey[23:0], rx_byte};
@@ -484,8 +550,13 @@ module shell_top #(
 				if (armed) begin sp_op <= 2'd1; sp_offset <= arg_addr[22:0]; sp_start <= 1'b1; end
 				armed <= 1'b0;
 			end
-			CMD_FLASH_WRITE: begin
+			CMD_FLASH_WRITE, CMD_FLASH_WRITEQ: begin
 				if (armed) begin sp_op <= 2'd2; sp_offset <= arg_addr[22:0]; sp_start <= 1'b1; end
+				armed <= 1'b0;
+			end
+			CMD_FLASH_SUM: begin sum_go <= 1'b1; sum_addr <= arg_addr[22:0]; end
+			CMD_FLASH_PROGN: begin
+				if (armed && rn == 10'd5) begin pr_go <= 1'b1; pr_addr <= arg_addr[22:0]; end
 				armed <= 1'b0;
 			end
 			CMD_FLASH_READ: begin
@@ -497,21 +568,66 @@ module shell_top #(
 		end
 	end
 
+	// --- the checksum's sequence: a page read (the engine), its 64 words, the next ---------------
+	always @(posedge clk) begin
+		su_start <= 1'b0;
+		if (rst) begin sum_busy <= 1'b0; sum_st <= 3'd0; end
+		else case (sum_st)
+		3'd0: if (sum_go) begin sum_busy <= 1'b1; sum_pg <= 9'd0; sum_x <= 32'd0; sum_s <= 32'd0; sum_st <= 3'd1; end
+		3'd1: if (!busy) begin su_op <= 2'd3; su_offset <= sum_addr + {6'd0, sum_pg[7:0], 8'd0}; su_start <= 1'b1; sum_st <= 3'd2; end
+		3'd2: sum_st <= 3'd3;                                       // (busy rises)
+		3'd3: if (!busy) begin sum_w <= 6'd0; sum_st <= 3'd4; end
+		3'd4: sum_st <= 3'd5;                                       // (the buffer word a clock after its index)
+		3'd5: begin
+			sum_x <= {sum_x[30:0], sum_x[31]} ^ fl_rdata; sum_s <= sum_s + fl_rdata;
+			if (sum_w == 6'd63) begin
+				if (sum_pg == (9'd1 << SUM_LOG) - 9'd1) begin sum_st <= 3'd6; end
+				else begin sum_pg <= sum_pg + 9'd1; sum_st <= 3'd1; end
+			end else begin sum_w <= sum_w + 6'd1; sum_st <= 3'd4; end
+		end
+		3'd6: begin sum_q <= {sum_s, sum_x}; sum_busy <= 1'b0; sum_st <= 3'd0; end
+		default: sum_st <= 3'd0;
+		endcase
+	end
+
+	// --- the block's pages: each copied from the block buffer into the engine's page buffer, then
+	// programmed (the engine waits out the flash's own busy), the next -- no ESP32 between them
+	always @(posedge clk) begin
+		pr_we <= 1'b0; pr_start <= 1'b0;
+		if (rst) begin pr_busy <= 1'b0; pr_st <= 3'd0; end
+		else case (pr_st)
+		3'd0: if (pr_go) begin pr_busy <= 1'b1; pr_p <= 7'd0; pr_w <= 6'd0; pr_st <= 3'd1; end
+		3'd1: begin pb_ra <= {pr_p[5:0], pr_w}; pr_st <= 3'd2; end
+		3'd2: pr_st <= 3'd3;                                         // (pb_q: the word, a clock on)
+		3'd3: begin
+			pr_we <= 1'b1; pr_windex <= pr_w; pr_wdata <= pb_q;
+			if (pr_w == 6'd63) pr_st <= 3'd4; else begin pr_w <= pr_w + 6'd1; pr_st <= 3'd1; end
+		end
+		3'd4: if (!busy) begin pr_offset <= pr_addr + {9'd0, pr_p[5:0], 8'd0}; pr_start <= 1'b1; pr_st <= 3'd5; end
+		3'd5: pr_st <= 3'd6;                                         // (busy rises)
+		3'd6: if (!busy) begin
+			if (pr_p + 7'd1 >= pr_n) begin pr_busy <= 1'b0; pr_st <= 3'd0; end
+			else begin pr_p <= pr_p + 7'd1; pr_w <= 6'd0; pr_st <= 3'd1; end
+		end
+		default: pr_st <= 3'd0;
+		endcase
+	end
+
 	// --- the two doors joined -------------------------------------------------
 	// Never both in use in practice: a person is at a phone or at a PC, not
 	// both. So this is an OR rather than an arbiter, and what makes that safe is
 	// that the flash engine ignores a start while it is busy -- the worst a
 	// collision can do is lose a command, and both callers poll.
-	assign fl_op     = rg_start ? rg_op     : sp_op;
-	assign fl_offset = rg_start ? rg_offset : sp_offset;
-	assign fl_start  = rg_start | sp_start;
+	assign fl_op     = rg_start ? rg_op     : su_start ? su_op : pr_start ? 2'd2 : sp_op;
+	assign fl_offset = rg_start ? rg_offset : su_start ? su_offset : pr_start ? pr_offset : sp_offset;
+	assign fl_start  = rg_start | sp_start | su_start | pr_start;
 
-	assign fl_we     = rg_we | sp_we;
-	assign fl_wdata  = rg_we ? rg_wdata  : sp_wdata;
+	assign fl_we     = rg_we | sp_we | pr_we;
+	assign fl_wdata  = rg_we ? rg_wdata  : pr_we ? pr_wdata : sp_wdata;
 	// Keyed on the bus ADDRESSING the buffer, not on it writing: a read has no
 	// write strobe, and keying on one made every word of a page read come back
 	// as word 0.
-	assign fl_windex = rg_sel ? rg_windex : sp_idx;
+	assign fl_windex = rg_sel ? rg_windex : pr_busy ? pr_windex : sp_idx;
 
 	// --- restarting configuration somewhere else -------------------------------
 	// The data going into ICAPE2 has its bits reversed within each byte. Not a
@@ -532,7 +648,7 @@ module shell_top #(
 	endfunction
 
 	wire boot_go   = rg_boot_go | sp_boot_go;
-	wire boot_core = rg_boot_go ? rg_boot_core : sp_boot_core;
+	wire [1:0] boot_sel = rg_boot_go ? {1'b0, rg_boot_core} : sp_boot_core;
 
 	reg        icap_run;
 	reg [3:0]  icap_step;
@@ -548,7 +664,7 @@ module shell_top #(
 		end else if (!icap_run) begin
 			if (boot_go) begin
 				// Two destinations and no others: the core, or back here.
-				boot_addr <= boot_core ? 24'h200000 : 24'h000000;
+				boot_addr <= (boot_sel == 2'd2) ? 24'h500000 : (boot_sel == 2'd1) ? 24'h200000 : 24'h000000;
 				icap_run  <= 1'b1;
 			end
 		end else begin
@@ -583,16 +699,18 @@ module shell_top #(
 	);
 
 	// --- the picture -------------------------------------------------------------
-	// 640 x 480 from the board oscillator (VCO 1000 MHz: /40 25 MHz, /8 125 MHz, as
-	// eth_top; /20 the shell's own 50 MHz), HDMI with silent sound; what the flash is doing,
-	// as text and a bar.
-	assign hdmi_lo = 11'd0;
+	// 640 x 480 from the board oscillator (hdmi_clk: 25.2 MHz and 126 MHz, as eth_top; this
+	// MMCM /20 the shell's own 50 MHz), HDMI with silent sound; what the flash is doing, as
+	// text and a bar. The connector's other pins as eth_top: held low but CEC, which floats.
+	assign hdmi_lo[3:0] = 4'd0; assign hdmi_lo[10:5] = 6'd0;
+	OBUFT u_cec (.I(1'b0), .T(1'b1), .O(hdmi_lo[4]));
 	assign hdmi_5v = 1'b1;
 	MMCME2_BASE #(.CLKIN1_PERIOD(20.0), .CLKFBOUT_MULT_F(20.0), .DIVCLK_DIVIDE(1),
-	              .CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8), .CLKOUT2_DIVIDE(20)) u_hmmcm (
-		.CLKIN1(sys_clk), .CLKFBIN(hfb), .CLKFBOUT(hfb), .CLKOUT0(hp_raw), .CLKOUT1(hp5_raw), .LOCKED(hlocked),
+	              .CLKOUT2_DIVIDE(20)) u_hmmcm (
+		.CLKIN1(sys_clk), .CLKFBIN(hfb), .CLKFBOUT(hfb), .CLKOUT0(), .CLKOUT1(), .LOCKED(clocked),
 		.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(clk_raw), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
 		.CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .CLKFBOUTB());
+	hdmi_clk u_hclk (.sys_clk(sys_clk), .pclk_raw(hp_raw), .pclk5_raw(hp5_raw), .locked(hlocked));
 	BUFG u_hb0 (.I(hp_raw), .O(hpclk));
 	BUFG u_hb1 (.I(hp5_raw), .O(hpclk5));
 	wire [9:0] hx, hy; wire [23:0] hrgb;
@@ -605,7 +723,12 @@ module shell_top #(
 	shell_screen u_screen (.clk(clk), .rst(rst),
 		.op_start(fl_start), .op(fl_op), .offset(fl_offset), .boot_go(boot_go),
 		.ext_we(osd_we), .ext_off(bus_addr[15:0]), .ext_wdata(bus_wdata), .ext_rdata(osd_rdata),
-		.pclk(hpclk), .x(hx), .y(hy), .rgb(hrgb));
+		.pclk(hpclk), .x(hx), .y(hy), .bg(fb_rgb), .rgb(hrgb),
+		.prog_w(ui_prog_w), .bar_shown(ui_prog_on), .gfx(ui_gfx));
+	// the graphical menu's picture, under the overlay
+	shell_ui u_ui (.clk(clk), .rst(rst), .we(fb_we), .addr(bus_addr[19:0]), .wdata(bus_wdata), .rdata(fb_rdata),
+		.pclk(hpclk), .pclk5(hpclk5), .x(hx), .y(hy), .rgb(fb_rgb),
+		.prog_w(ui_prog_w), .prog_on(ui_prog_on), .gfx(ui_gfx));
 
 	// --- lights ----------------------------------------------------------------
 	// The heartbeat runs on the board oscillator directly, so that it blinks

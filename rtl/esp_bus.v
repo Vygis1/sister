@@ -7,6 +7,7 @@
 //   CMD_PING / CMD_STATUS  01 / 02   reply: A5 VERSION CORE_ID busy -- as the shell's,
 //                                   so the sketch tells a core from the shell the
 //                                   same way
+//   CMD_BUS_WRITEQ 43   the same, its data four bits a clock (esp_link's quad: MOSI, MISO, D2, D3)
 //   CMD_BUS_WRITE  40   address (4 bytes, big-endian), then words of 4 bytes, each
 //                       little-endian; the address goes up by 4 a word. A word goes
 //                       onto the bus when its fourth byte is in (3.2 us a word at
@@ -24,7 +25,7 @@
 `default_nettype none
 
 module esp_bus #(
-	parameter [7:0] VERSION = 8'd1,
+	parameter [7:0] VERSION = 8'd2,      // 2: quad writes (0x43)
 	parameter [7:0] CORE_ID = 8'h43      // 'C': a console image
 )(
 	input  wire        clk,
@@ -33,6 +34,10 @@ module esp_bus #(
 	input  wire        spi_mosi,
 	output wire        spi_miso,
 	input  wire        spi_cs_n,
+	input  wire        spi_d1,             // (quad writes: MISO's pin as an input, and the two more)
+	input  wire        spi_d2,
+	input  wire        spi_d3,
+	output wire        spi_miso_t,         // 1: MISO let go (a quad write's data)
 	// the bus (a master)
 	output reg  [31:0] bus_addr,
 	output reg  [31:0] bus_wdata,
@@ -49,12 +54,14 @@ module esp_bus #(
 	esp_link u_link (
 		.clk(clk), .rst(rst),
 		.spi_sclk(spi_sclk), .spi_mosi(spi_mosi), .spi_miso(spi_miso), .spi_cs_n(spi_cs_n),
+		.spi_d1(spi_d1), .spi_d2(spi_d2), .spi_d3(spi_d3), .spi_miso_t(spi_miso_t),
 		.frame_start(frame_start), .frame_end(frame_end),
 		.rx_byte(rx_byte), .rx_stb(rx_stb), .rx_index(rx_index),
 		.tx_byte(tx_byte)
 	);
 	localparam [7:0] CMD_PING = 8'h01, CMD_STATUS = 8'h02, CMD_BUS_WRITE = 8'h40, CMD_BUS_READ = 8'h41,
-	                 CMD_BUS_RDBLK = 8'h42;
+	                 CMD_BUS_RDBLK = 8'h42, CMD_BUS_WRITEQ = 8'h43;
+	wire       wr_cmd = cmd == CMD_BUS_WRITE || cmd == CMD_BUS_WRITEQ;
 
 	reg [15:0] rn;                       // bytes received this frame (saturating)
 	reg [31:0] sh;                       // bytes gathering
@@ -108,9 +115,9 @@ module esp_bus #(
 				sh <= {sh[23:0], rx_byte};
 				if (rn == 16'd0) cmd <= rx_byte;
 				// the address: bytes 1..4, big-endian
-				if (rn == 16'd4 && (cmd == CMD_BUS_WRITE || cmd == CMD_BUS_READ || cmd == CMD_BUS_RDBLK)) begin
+				if (rn == 16'd4 && (wr_cmd || cmd == CMD_BUS_READ || cmd == CMD_BUS_RDBLK)) begin
 					bus_addr <= {sh[23:0], rx_byte};
-					if (cmd != CMD_BUS_WRITE) bus_re <= 1'b1;
+					if (!wr_cmd) bus_re <= 1'b1;
 				end
 				// a block read: at the end of each word's time the word read meanwhile goes out
 				// next, and the one after it is asked for
@@ -119,7 +126,7 @@ module esp_bus #(
 					bus_addr <= bus_addr + 32'd4; bus_re <= 1'b1;
 				end
 				// a word of a write: bytes 5.., little-endian, on the bus at its fourth
-				if (cmd == CMD_BUS_WRITE && rn >= 16'd5 && rn[1:0] == 2'd0) begin
+				if (wr_cmd && rn >= 16'd5 && rn[1:0] == 2'd0) begin
 					bus_wdata <= {rx_byte, sh[7:0], sh[15:8], sh[23:16]};
 					bus_we <= 1'b1;
 				end

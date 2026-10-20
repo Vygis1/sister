@@ -6,7 +6,9 @@
 // The bus page (regfile's PAGE_OSD):
 //   0x0000  "OSD2"                          read only (version 1 said "OSD1")
 //   0x0004  CTRL   [0] show  [1] the game's picture dimmed behind the text  [2] a black
-//                  background (else the plain one: a dark gradient)
+//                  background (else the plain one: a dark gradient)  [3] see-through: only the
+//                  letters (and highlighted / coloured cells) over the picture (the shell's own
+//                  screen over shell_ui's)
 //   0x0040 + 4 * i  the palette, i 0-7: 24-bit RGB (from power-up: white, yellow, grey,
 //                  green, pink, red, cyan, orange)
 //   0x2000 + 4 * (row * 40 + col)           a cell:
@@ -45,7 +47,7 @@ module osd (
 	input  wire [23:0] rgb_in,          // the console's pixel for the request a clock ago
 	output wire [23:0] rgb
 );
-	reg [2:0] ctrl;
+	reg [3:0] ctrl;
 	(* ram_style = "block" *) reg [16:0] cells [0:2047];
 	integer k; initial for (k = 0; k < 2048; k = k + 1) cells[k] = 17'h00020;   // spaces (the block RAM's initial contents)
 	reg [23:0] pal [0:7];
@@ -56,8 +58,8 @@ module osd (
 	wire [10:0] widx = off[12:2];
 	wire        pal_hit = off[15:5] == 11'h002;               // 0x0040-0x005F
 	always @(posedge clk) begin
-		if (rst) ctrl <= 3'd0;
-		else if (we && off == 16'h0004) ctrl <= wdata[2:0];
+		if (rst) ctrl <= 4'd0;
+		else if (we && off == 16'h0004) ctrl <= wdata[3:0];
 		if (we && off[15:13] == 3'd1 && widx < 11'd1200) cells[widx] <= wdata[16:0];
 		if (we && pal_hit) pal[off[4:2]] <= wdata[23:0];
 	end
@@ -66,13 +68,13 @@ module osd (
 		if (pal_hit) rdata = {8'd0, pal[off[4:2]]};
 		else case (off)
 		16'h0000: rdata = 32'h4F53_4432;      // "OSD2"
-		16'h0004: rdata = {29'd0, ctrl};
+		16'h0004: rdata = {28'd0, ctrl};
 		default:  if (off[15:13] != 3'd1 && off[15:13] != 3'd2) err = 1'b1;
 		endcase
 	end
 
 	// --- the pixel side ---------------------------------------------------------------
-	reg [2:0] c1, c2;
+	reg [3:0] c1, c2;
 	always @(posedge pclk) begin c1 <= ctrl; c2 <= c1; end
 
 	// the pixel two ahead
@@ -86,24 +88,41 @@ module osd (
 	wire        inside = xa < 10'd640 && ya < 10'd480;
 
 	// stage 1: the cell
-	reg [16:0] cel; reg [2:0] gr1, gb1; reg in1;
+	reg [16:0] cel; reg [2:0] gr1, gb1; reg sx1, sy1; reg in1;
 	always @(posedge pclk) begin
 		cel <= cells[cidx];
-		gr1 <= ya[3:1]; gb1 <= xa[3:1]; in1 <= inside;
+		gr1 <= ya[3:1]; gb1 <= xa[3:1]; sx1 <= xa[0]; sy1 <= ya[0]; in1 <= inside;
 	end
-	// stage 2: the glyph's row
-	wire [7:0] grow;
+	// stage 2: the glyph, all eight rows (row r in gw[8r+7:8r])
+	wire [63:0] gw;
 	osd_glyphs u_glyphs (.clk(clk), .we(we && off[15:13] == 3'd2), .wa(off[12:2]), .wd(wdata[7:0]),
-	                     .pclk(pclk), .ra({cel[7:0], gr1}), .q(grow));
-	reg [2:0] gb2; reg in2; reg hl2, bar2, sol2; reg [2:0] col2, bgc2;
+	                     .pclk(pclk), .ra(cel[7:0]), .q(gw));
+	reg [2:0] gb2, gr2; reg sx2, sy2, txt2; reg in2; reg hl2, bar2, sol2; reg [2:0] col2, bgc2;
 	always @(posedge pclk) begin
-		gb2 <= gb1; in2 <= in1; hl2 <= cel[8]; col2 <= {cel[12], cel[10:9]}; bar2 <= cel[11];
+		gb2 <= gb1; gr2 <= gr1; sx2 <= sx1; sy2 <= sy1; in2 <= in1; hl2 <= cel[8]; col2 <= {cel[12], cel[10:9]}; bar2 <= cel[11];
 		sol2 <= cel[13]; bgc2 <= cel[16:14];
+		txt2 <= cel[7:0] >= 8'h20 && cel[7:0] < 8'h80;      // (the font's letters; not the frame, not the menu's tiles)
 	end
+	// The letters are 8 x 8 drawn twice the size: Scale2x (A. Mazzoleni's EPX rule) picks each of a
+	// pixel's four quarters from its neighbours -- up A, right B, left C, down D -- so diagonals and
+	// curves come out stepped by one screen pixel, not two. And a shadow: the letter's pixel up and
+	// to the left, under this one, darkens the background (half).
+	wire P  = gw[{gr2, gb2}];
+	wire A  = (gr2 == 3'd0) ? 1'b0 : gw[{gr2 - 3'd1, gb2}];
+	wire D  = (gr2 == 3'd7) ? 1'b0 : gw[{gr2 + 3'd1, gb2}];
+	wire C  = (gb2 == 3'd0) ? 1'b0 : gw[{gr2, gb2 - 3'd1}];
+	wire B  = (gb2 == 3'd7) ? 1'b0 : gw[{gr2, gb2 + 3'd1}];
+	wire UL = (gr2 == 3'd0 || gb2 == 3'd0) ? 1'b0 : gw[{gr2 - 3'd1, gb2 - 3'd1}];
+	wire E0 = (C == A && C != D && A != B) ? A : P;
+	wire E1 = (A == B && A != C && B != D) ? B : P;
+	wire E2 = (D == C && D != B && C != A) ? C : P;
+	wire E3 = (B == D && B != A && D != C) ? D : P;
+	wire Es = sy2 ? (sx2 ? E3 : E2) : (sx2 ? E1 : E0);
 	// stage 3: the pixel, registered so it lines up with rgb_in
-	reg fg3, hl3, in3, bar3, sol3; reg [23:0] ink3, bgi3;
+	reg fg3, sh3, hl3, in3, bar3, sol3; reg [23:0] ink3, bgi3;
 	always @(posedge pclk) begin
-		fg3 <= grow[gb2]; hl3 <= hl2; in3 <= in2; bar3 <= bar2; sol3 <= sol2;
+		fg3 <= txt2 ? Es : P; sh3 <= txt2 && !Es && UL;
+		hl3 <= hl2; in3 <= in2; bar3 <= bar2; sol3 <= sol2;
 		ink3 <= pal[col2]; bgi3 <= pal[bgc2];
 	end
 	// the background: lighter at the top, 60 steps down the screen
@@ -111,8 +130,9 @@ module osd (
 	wire [23:0] grad = {8'd8 + {4'd0, gt[5:2]}, 8'd10 + {4'd0, gt[5:2]} + {6'd0, gt[5:4]}, 8'd24 + {3'd0, gt[5:1]}};
 
 	wire [23:0] dim = {2'b00, rgb_in[23:18], 2'b00, rgb_in[15:10], 2'b00, rgb_in[7:2]} + 24'h080818;
-	wire [23:0] bg  = hl3 ? 24'h2C58C8 : sol3 ? bgi3 : bar3 ? 24'h26325E : c2[1] ? dim : c2[2] ? 24'h000000 : grad;
-	assign rgb = (c2[0] && in3) ? (fg3 ? ink3 : bg) : rgb_in;
+	wire [23:0] bg  = hl3 ? 24'h2C58C8 : sol3 ? bgi3 : c2[3] ? rgb_in : bar3 ? 24'h26325E : c2[1] ? dim : c2[2] ? 24'h000000 : grad;
+	wire [23:0] shd = {1'b0, bg[23:17], 1'b0, bg[15:9], 1'b0, bg[7:1]};   // (the shadow: half)
+	assign rgb = (c2[0] && in3) ? (fg3 ? ink3 : sh3 ? shd : bg) : rgb_in;
 endmodule
 
 `default_nettype wire

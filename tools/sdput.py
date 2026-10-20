@@ -2,29 +2,28 @@
 port): the card stays in the board.
     python tools/sdput.py LOCALFILE /roms/gg/Game.gg
     python tools/sdput.py cores/gg.bin /cores/gg.bin
+pad.py's "X" sends it in 4 kB CRC-checked blocks at 2 Mbaud (it was base64 lines at 115200:
+6.5 kB/s). From Git Bash, MSYS_NO_PATHCONV=1, or /cores/... arrives as C:/Program Files/Git/cores.
 """
-import base64, socket, sys, time
+import socket, sys, time
 
 def main():
     src, dst = sys.argv[1], sys.argv[2]
     data = open(src, 'rb').read()
-    f = socket.create_connection(('127.0.0.1', 5557), timeout=40).makefile('rwb')
-    def ask(line):
-        f.write((line + '\n').encode()); f.flush()
-        return f.readline().decode().strip()
-    r = ask('U open %s %d' % (dst, len(data)))
-    if r != 'ok': sys.exit('open: ' + r)
-    t0 = time.time(); sent = 0
-    for i in range(0, len(data), 189):
-        chunk = data[i:i + 189]
-        r = ask('U ' + base64.b64encode(chunk).decode())
-        if r not in ('ok', 'done'): sys.exit('at %d: %s' % (i, r))
-        sent += len(chunk)
-        if sent % (189 * 200) == 0 or r == 'done':
-            print('\r  %d / %d bytes  %.1f kB/s' % (sent, len(data), sent / 1024.0 / max(0.001, time.time() - t0)), end='', flush=True)
+    f = socket.create_connection(('127.0.0.1', 5557), timeout=60).makefile('rwb')
+    t0 = time.time()
+    f.write(b'X %d %s\n' % (len(data), dst.encode())); f.write(data); f.flush()
+    while True:
+        r = f.readline().decode().strip()
+        if r.startswith('~ '):
+            n = int(r[2:])
+            print('\r  %d / %d bytes  %.1f kB/s' % (n, len(data), n / 1024.0 / max(0.001, time.time() - t0)), end='', flush=True)
+            continue
+        break
     print()
-    if r != 'done': print('close:', ask('U close'))
-    print('%s -> %s: %d bytes in %.1f s' % (src, dst, len(data), time.time() - t0))
+    if not r.startswith('ok'):
+        sys.exit('%s -> %s: %s' % (src, dst, r or 'no answer'))
+    print('%s -> %s: %d bytes in %.1f s (%s)' % (src, dst, len(data), time.time() - t0, r[3:]))
 
 if __name__ == '__main__':
     main()

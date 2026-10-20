@@ -11,6 +11,12 @@
 //
 //   START + SELECT, or PS / Home   open the menu (it is open at power-up, on the shell's
 //                                  own picture when the shell can draw it: version 2)
+//
+// The graphical menu (2026-10-17): with the menu image at version 3 (rtl/shell_fb.v: a picture
+// under the text) the home screen, the games and the settings are drawn as pictures (gfx.h,
+// gfxmenu.h) -- home is the game to carry on with and a tile for each console. Inside a game
+// the menu button opens the small text menu: back to the game, reset it, the settings, and
+// home (its save to the card, back to the menu image).
 //   UP / DOWN                      move; LEFT / RIGHT, L1 / R1 a page at a time
 //   CROSS (or START)               open / pick / change
 //   CIRCLE                         back (from the consoles: back to the game)
@@ -22,6 +28,7 @@
 #include <vector>
 #include <algorithm>
 #include "screens.h"
+#include "gfxmenu.h"
 namespace menu {
 
 // --- the board's registers (as pc/server.py) ------------------------------------
@@ -45,9 +52,14 @@ static const Machine MACHINES[] = {
   { "Game Gear",     "gg",  'G', 256 * 1024 },               // (its cartridge is block RAM, as the Master System's)
   { "Game Boy",      "gb",  'B', 8 * 1024 * 1024 },          // (the cartridge in DDR3, as the SNES's)
   { "Atari 2600",    "a26", 'A', 32 * 1024 },                // (the cartridge in the core's own block RAM)
+  { "PC Engine",     "pce", 'E', 1024 * 1024 + 512 },        // (the HuCard in DDR3, as the Game Boy's; + a copier header, sometimes)
+  { "GB Advance",    "gba", 'V', 16 * 1024 * 1024 },         // (the cartridge in DDR3; 16 MB is the cache's reach)
+  { "PC",            "pc",  'C', 0xFFFFFFFF },               // a hard-disk image (DOS): any size (pc.h)
 };
-static const int NMACH = 9;
+static const int NMACH = 12;
 static const uint32_t A26_CFG = NES + 0x1C8;       // [15:0] the image's size, [19:16] its bank scheme (0: by the size)
+static const uint32_t PCE_CFG = NES + 0x1CC;       // [19:0] the HuCard image's size in bytes
+static const uint32_t GBA_CFG = NES + 0x1D0;       // [24:0] the cartridge's size in bytes, [31] the fill goes to the BIOS memory
 static const uint32_t SNES_CFG = NES + 0x180;      // [0] HiROM, [15:8] log2 ROM size, [23:16] log2 save RAM
 static const uint32_t CARD_CTL = NES + 0x134;
 
@@ -59,11 +71,13 @@ static int machineOfName(const String &n) {
   if (l.endsWith(".z64") || l.endsWith(".n64") || l.endsWith(".v64")) return 3;
   if (l.endsWith(".sfc") || l.endsWith(".smc")) return 5;
   if (l.endsWith(".gg")) return 6;
-  // (a Game Boy Color game is .gbc: the core is a DMG, which runs the ones made for both but
-  // not the colour-only ones, so those are not moved in by their name -- put a .gbc in /roms/gb
-  // by hand to try it; an Atari's .bin is anybody's, so only .a26 says Atari)
-  if (l.endsWith(".gb")) return 7;
+  // (.gbc is a Game Boy Color game: the core is one of those too (gb_top, by the cartridge's
+  // header) -- both go to /roms/gb; an Atari's .bin is anybody's, so only .a26 says Atari)
+  if (l.endsWith(".gb") || l.endsWith(".gbc")) return 7;
   if (l.endsWith(".a26")) return 8;
+  if (l.endsWith(".pce")) return 9;
+  if (l.endsWith(".gba")) return 10;
+  if (l.endsWith(".img") || l.endsWith(".vhd")) return 11;
   return -1;
 }
 static int machineOfCore(uint8_t id) {
@@ -112,6 +126,26 @@ static bool shellMenu(const Status &s) { return s.alive && s.core == 0 && s.vers
 // version 1, get plain characters -- ui.h folds them)
 static const uint32_t OSD_ID = OSD + 0x00, OSD_GLYPHS = OSD + 0x4000;
 static scr::Chrome chrome();
+static bool gmode = false;                  // the menu image with a picture: the graphical menu
+static bool inCore = false;                 // the board is a console, not the menu image
+static void gW1(uint32_t a, uint32_t v) { fpga.busWrite(a, v); }
+static uint32_t gR1(uint32_t a) { return fpga.busRead(a); }
+// (the pixels in one SPI call, as the PlayStation's XA: a byte a call took seconds a screen)
+// (through a buffer in internal RAM: the SPI driver feeds its FIFO from PSRAM slowly)
+static bool quadOff = false;                 // "quad off" on the serial console: loads a bit at a time (testing)
+static bool quadOk = false;                  // the board takes quad writes (link.h; set by freshBoard)
+static bool shellV7 = false;                 // the menu image has two core slots (set by freshBoard)
+static void gWN(uint32_t a, const uint32_t *w, size_t n) {
+  static uint32_t chunk[512];
+  while (n) {
+    size_t k = n < 512 ? n : 512;
+    memcpy(chunk, w, k * 4);
+    if (quadOk) fpga.busWriteQuad(a, chunk, k); else fpga.busWriteFast(a, chunk, k);
+    a += 4 * k; w += k; n -= k;
+  }
+}
+// a rectangle of the screen drawn again (the painting called a strip at a time) and sent; the log says
+// how long it took
 static void hookUi() {
   ui::hal.cells = [](int first, const uint32_t *v, int n) { fpga.busWrite(OSD_CELLS + 4 * first, v, n); };
   ui::hal.reg = [](uint32_t off, uint32_t v) { fpga.busWrite(OSD + off, v); };
@@ -129,14 +163,90 @@ static void freshBoard() {
   ui::forget();
   if (!kept) { ui::loadGlyphs(); Log.println("menu: the board's glyphs loaded"); }
   ui::palette(art::MENU_PAL);
+  Status st = fpga.status();
+  inCore = st.alive && st.core != 0;
+  quadOk = !quadOff && fpga.quadWired() && st.alive && (st.core == 0 ? st.version >= 5 : st.version >= 2);
+  // (the image's clock, ctrl 0x1F8 -- 0 on images from before it: 50 MHz or more): bulk transfers at 5 MHz
+  // below 48 MHz, else 10
+  {
+    uint32_t hz = inCore ? fpga.busRead(NES + 0x1F8) : 0;
+    // (a PC image that does not say -- the first z486 ones at 40 MHz did not -- gets the safe clock too)
+    uint32_t want = ((hz > 1000000 && hz < 48000000) || (hz == 0 && inCore && st.core == 'C')) ? 5000000 : 10000000;
+    if (want != fpga.bulkHz()) { fpga.setBulkHz(want); Log.printf("menu: the image runs at %u Hz: bulk transfers at %u Hz" "\n", (unsigned)hz, (unsigned)want); }
+  }
+  shellV7 = st.alive && st.core == 0 && st.version >= 7;
+  // (on the menu image: 32 words through the highlight register, read back -- any wrong, no quad)
+  if (quadOk && st.core == 0)
+    for (int i = 0; i < 32 && quadOk; i++) {
+      uint32_t w = esp_random() & 0x03FF03FF;
+      fpga.busWriteQuad(0x00090020, &w, 1);
+      if (fpga.busRead(0x00090020) != w) quadOk = false;
+    }
+  Log.printf("menu: link writes %s\n", quadOk ? "quad (4 bits a clock)" : "a bit a clock");
+  bool was = gmode;
+  // (version 4: the board composes the picture from a list -- rtl/shell_ui.v; the fonts go to it now)
+  gfx::link(gW1, gWN, gR1);
+  gmode = st.alive && st.core == 0 && st.version >= 4 && gfx::begin();
+  if (!gmode && was) gfx::end();
+  if (gmode) {
+    gfx::hlForget();
+    ui::ctrl(0);
+  }
+  if (gmode != was) Log.printf("menu: the %s menu\n", gmode ? "graphical" : "text");
 }
-static void osd(uint32_t ctrl) { ui::ctrl(ctrl); }
+static void osd(uint32_t ctrl) { ui::ctrl(gmode ? 0 : ctrl); }
 static void show() { ui::flush(); }
+template <class P> static void grender(int x, int y, int w, int h, P paint) {
+  uint32_t t0 = millis();
+  int n = gfx::render(x, y, w, h, paint, gW1, gWN);
+  Log.printf("gfx: %dx%d drawn, %d kB sent, %u ms\n", w, h, n / 1024, (unsigned)(millis() - t0));
+}
+// the page's top line: the time and the date from the clock (the DS1302)
+static time_t clockNow();
+static gscr::Top gtop(const std::string &title, const std::string &crumbs = "") {
+  gscr::Top t; t.title = title; t.crumbs = crumbs;
+  time_t now = clockNow(); struct tm tm; gmtime_r(&now, &tm);
+  char a[16], b[24];
+  static const char *WD[7] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+  static const char *MO[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+  snprintf(a, sizeof(a), "%02d:%02d", tm.tm_hour, tm.tm_min);
+  snprintf(b, sizeof(b), "%s %d %s", WD[tm.tm_wday], tm.tm_mday, MO[tm.tm_mon]);
+  t.time = a; t.date = b;
+  return t;
+}
+// each console's colour (its tile, its pages' light)
+static const gfx::RGB MCOL[NMACH] = { { 215, 55, 60 }, { 210, 60, 70 }, { 50, 120, 220 }, { 40, 160, 90 }, { 150, 155, 180 },
+                                      { 125, 100, 210 }, { 90, 90, 110 }, { 130, 175, 50 }, { 200, 120, 60 }, { 235, 135, 35 }, { 80, 100, 235 }, { 120, 130, 150 } };
+static const gfx::RGB HOME_ACCENT = { 70, 60, 160 };
 
 // A message in a box (loading, switching, an error).
 static void message(const String &a, const String &b = "", int colour = ui::WHITE) {
+  if (gmode) {
+    gfx::highlightOff(gW1);
+    gscr::Top t = gtop("FPGA CONSOLE");
+    grender(0, 0, gfx::W, gfx::H, [&] { gscr::messageScreen(t, a.c_str(), b.c_str(), HOME_ACCENT); });
+    return;
+  }
   scr::message(chrome(), a.c_str(), b.c_str(), colour);
   show(); osd(1);
+}
+// ...with a console's logo over it (and a core's progress going in: installShow)
+static String gmA, gmB; static int gmM = -1;
+static void gmessage(const String &a, const String &b, int m, float progress = -1) {
+  gmA = a; gmB = b; gmM = m;
+  gfx::highlightOff(gW1);
+  gscr::Top t = gtop("FPGA CONSOLE");
+  grender(0, 0, gfx::W, gfx::H, [&] {
+    gscr::messageScreen(t, a.c_str(), b.c_str(), m >= 0 ? MCOL[m] : HOME_ACCENT, m, m >= 0 ? MACHINES[m].core : nullptr, progress);
+  });
+}
+// installCard's progress: the last message again, with its bar (four times a second at most). The
+// shell's own screen draws it only until the ESP32's first picture.
+static void gInstallShow(float f) {
+  static uint32_t last = 0;
+  if (!gmode || (millis() - last < 1000 && f < 1)) return;   // (each picture costs the install ~50 ms of the link)
+  last = millis();
+  gmessage(gmA.length() ? gmA : String("installing"), "writing the core", gmM, f);
 }
 
 // a game's name as shown: without the dump's tags -- "(USA, Europe)", "[!]", "(Rev-A)"
@@ -165,6 +275,9 @@ static int machineOfFolder(String n) {
   if (n == "gg" || n == "gamegear" || n == "game gear") return 6;
   if (n == "gb" || n == "gameboy" || n == "game boy") return 7;
   if (n == "a26" || n == "a2600" || n == "atari" || n == "atari2600" || n == "atari 2600") return 8;
+  if (n == "pce" || n == "pcengine" || n == "pc engine" || n == "tg16" || n == "turbografx") return 9;
+  if (n == "gba" || n == "gameboyadvance" || n == "game boy advance" || n == "advance") return 10;
+  if (n == "pc" || n == "dos" || n == "msdos") return 11;
   return -1;
 }
 static String baseName(File &e) {
@@ -257,6 +370,8 @@ static void scan() {
         String lo = n; lo.toLowerCase();
         // (a PlayStation's are its raw 2352-byte .bin images; its BIOS is not a game)
         bool ok = m != 4 || (lo.endsWith(".bin") && !lo.startsWith("scph"));
+        // (a PC game is its disk: <name>.img; its .cfg, .pad, .cue and the CD's .bin go with it unlisted)
+        if (m == 11) ok = lo.endsWith(".img") || lo.endsWith(".vhd");
         if (ok && m == 4) for (auto &cb : cueBins) if (cb == n) { ok = false; break; }   // (a cue's track)
         if (!f.isDirectory() && n.length() && n[0] != '.' && ok) {
           int dot = n.lastIndexOf('.');
@@ -318,10 +433,41 @@ static const size_t BUF = 16384;
 
 // Copy n bytes of the file from where it stands to the bus at addr (and up), padded
 // with fill to whole words; swap = the N64's byte orders.
+// The card read in a task of its own, a piece ahead of the sending: the two at once, not in turn
+// (the card on one SPI host or the SD bus, the FPGA on the other).
+struct RdJob { File *f; uint8_t *buf; size_t len; };
+static QueueHandle_t rdReq = nullptr, rdDone = nullptr;
+static uint8_t *buf2 = nullptr;
+static void rdLoop(void *) {
+  RdJob j;
+  for (;;) {
+    xQueueReceive(rdReq, &j, portMAX_DELAY);
+    size_t got = j.f->read(j.buf, j.len);
+    xQueueSend(rdDone, &got, portMAX_DELAY);
+  }
+}
+static bool readAhead() {
+  if (rdReq) return true;
+  buf2 = (uint8_t *)heap_caps_malloc(BUF, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!buf2) return false;
+  rdReq = xQueueCreate(1, sizeof(RdJob)); rdDone = xQueueCreate(1, sizeof(size_t));
+  if (xTaskCreatePinnedToCore(rdLoop, "cardread", 4096, nullptr, 2, nullptr, 0) != pdPASS) { rdReq = nullptr; return false; }
+  return true;
+}
 static bool stream(File &f, uint32_t addr, uint32_t n, int swap = 0) {
+  bool ahead = readAhead();
+  uint8_t *cur = buf, *next = buf2;
+  uint32_t t0 = millis(), total = n;
+  if (ahead) { RdJob j{ &f, cur, n > BUF ? BUF : n }; xQueueSend(rdReq, &j, portMAX_DELAY); }
   while (n) {
     size_t want = n > BUF ? BUF : n;
-    size_t got = f.read(buf, want);
+    size_t got;
+    if (ahead) {
+      xQueueReceive(rdDone, &got, portMAX_DELAY);
+      uint32_t after = n - want;
+      if (got == want && after) { RdJob j{ &f, next, after > BUF ? BUF : after }; xQueueSend(rdReq, &j, portMAX_DELAY); }
+    } else got = f.read(cur, want);
+    uint8_t *buf = cur;
     if (got != want) return false;
     size_t words = (want + 3) / 4;
     for (size_t k = want; k < words * 4; k++) buf[k] = 0;
@@ -338,12 +484,23 @@ static bool stream(File &f, uint32_t addr, uint32_t n, int swap = 0) {
     for (int tries = 0; tries < 4 && !same; tries++) {
       if (tries) loadFixes++;
       if (pchkOk) fpga.busWrite(SYS_PCHK, 0);
-      fpga.busWrite(addr, w32, words);
+      // (in pieces the board's write frame can count: 16 K bytes a frame at most)
+      for (size_t k = 0; k < words; k += 2048) {
+        size_t m = words - k < 2048 ? words - k : 2048;
+        if (quadOk && tries < 2) fpga.busWriteQuad(addr + 4 * k, w32 + k, m); else fpga.busWriteFast(addr + 4 * k, w32 + k, m);
+      }
       same = !pchkOk || fpga.busRead(SYS_PCHK) == want_c;
     }
-    if (!same) return false;
+    if (!same) {
+      // (a piece read ahead must land before its buffer goes away)
+      if (ahead && n - want) { size_t g; xQueueReceive(rdDone, &g, portMAX_DELAY); }
+      return false;
+    }
     addr += words * 4; n -= want;
+    std::swap(cur, next);
   }
+  uint32_t ms = millis() - t0;
+  if (total >= 65536) Log.printf("load: %u kB in %u ms, %u kB/s%s", (unsigned)(total / 1024), (unsigned)ms, (unsigned)(ms ? total / ms : 0), "\n");
   return true;
 }
 // A big cartridge through the 256 kB window: bank by bank, then the end strobe.
@@ -552,6 +709,167 @@ static void srmService(bool now_ = false) {
   if (f) { f.write(now, srmSize); f.close(); memcpy(srmLast, now, srmSize); Log.println("menu: saved " + srmPath); }
 }
 
+// --- the Game Boy Advance's save -----------------------------------------------------------
+// 128 kB in DDR3 behind the console (lines 0x204000 up: SRAM games use the first 32 or 64 kB,
+// flash games all of it); /saves/gba/<game>.sav holds it between sessions -- the layout every
+// emulator writes. In: a fill with GBA_CFG bit 30 set (the words land in the save, not the
+// cartridge), a blank save being 0xFF as an erased flash chip reads. Out: when the console says
+// the game has written to it (ctrl 0x1DC bit 0, cleared by a write), read back a slice of lines
+// per pass of the loop -- the pads keep being served -- and written to the file if changed.
+static const uint32_t GBA_DIRTY = NES + 0x1DC, GBA_SAVE_LINE = 0x204000, GBA_SAVE_BYTES = 128 * 1024;
+static String gsavPath; static uint8_t *gsavLast = nullptr, *gsavNow = nullptr;
+static bool gsavOn = false; static int32_t gsavPos = -1; static uint32_t gsavCheck = 0;
+
+static void gbaSaveBegin(const String &rom) {
+  String n = rom.substring(rom.lastIndexOf('/') + 1);
+  int dot = n.lastIndexOf('.');
+  if (dot > 0) n = n.substring(0, dot);
+  gsavPath = "/saves/gba/" + n + ".sav";
+  if (!gsavLast) gsavLast = bigBuf(GBA_SAVE_BYTES);
+  if (!gsavNow) gsavNow = bigBuf(GBA_SAVE_BYTES);
+  memset(gsavLast, 0xFF, GBA_SAVE_BYTES);           // (no save yet: erased)
+  File f = SD.open(gsavPath);
+  if (f) { f.read(gsavLast, min((uint32_t)f.size(), GBA_SAVE_BYTES)); f.close(); Log.println("menu: save " + gsavPath); }
+  // into the console's save memory, through the fill, in checked chunks as a cartridge goes
+  fpga.busWrite(NES_CART_BANK, 0);
+  for (uint32_t a = 0; a < GBA_SAVE_BYTES; a += 4096) {
+    const uint32_t *w32 = (const uint32_t *)(gsavLast + a);
+    uint32_t want_c = 0;
+    for (size_t k = 0; k < 1024; k++) want_c = ((want_c << 1) | (want_c >> 31)) ^ (NES_PRG + a + 4 * k) ^ w32[k];
+    for (int tries = 0; tries < 4; tries++) {
+      if (pchkOk) fpga.busWrite(SYS_PCHK, 0);
+      if (tries < 2) gWN(NES_PRG + a, w32, 1024); else fpga.busWrite(NES_PRG + a, w32, 1024);   // (quad; a bit a clock if it keeps failing)
+      if (!pchkOk || fpga.busRead(SYS_PCHK) == want_c) break;
+    }
+  }
+  fpga.busWrite(GBA_DIRTY, 1);                      // (the load is not the game's writing)
+  gsavOn = true; gsavPos = -1; gsavCheck = millis();
+}
+
+static void gbaSaveService(bool now_ = false) {
+  if (!gsavOn) return;
+  if (gsavPos < 0) {
+    if (!now_ && millis() - gsavCheck < 3000) return;
+    gsavCheck = millis();
+    if (!(fpga.busRead(GBA_DIRTY) & 1)) return;
+    fpga.busWrite(GBA_DIRTY, 1);                    // (cleared first: a write while this reads sets it again)
+    gsavPos = 0;
+  }
+  // a slice of lines a pass (all of them when it has to be now)
+  uint32_t lines = GBA_SAVE_BYTES / 16, slice = now_ ? lines : 256;
+  for (uint32_t k = 0; k < slice && (uint32_t)gsavPos < lines; k++, gsavPos++)
+    if (!cardLine(GBA_SAVE_LINE + gsavPos, gsavNow + 16 * gsavPos)) { gsavPos = -1; return; }
+  if ((uint32_t)gsavPos < lines) return;
+  gsavPos = -1;
+  if (!memcmp(gsavNow, gsavLast, GBA_SAVE_BYTES)) return;
+  SD.mkdir("/saves"); SD.mkdir("/saves/gba");
+  File f = SD.open(gsavPath, FILE_WRITE);
+  if (f) { f.write(gsavNow, GBA_SAVE_BYTES); f.close(); memcpy(gsavLast, gsavNow, GBA_SAVE_BYTES); Log.println("menu: saved " + gsavPath); }
+}
+
+// --- the clock -----------------------------------------------------------------------------------
+// Pokemon Ruby / Sapphire / Emerald and Boktai carry a clock on the cartridge; the core has one
+// (gba_rtc.v) that reads the time the menu writes it every second (ctrl 0x1E0 {year, month, day,
+// weekday}, 0x1E4 {hour, minute, second}, BCD). The time itself is the board's DS1302 module --
+// its coin cell keeps it while the power is off -- on GPIO 25 CLK, 26 DAT, 27 RST: read at the
+// first use and again every minute, millis() in between. Without the module the clock starts at
+// 2000-01-01 and runs only while the board does. "time <seconds since 1970, local>" on the serial
+// console sets it, the module too (pc/pad.py sends the PC's time when it connects).
+static const int DS_CLK = 25, DS_DAT = 26, DS_RST = 27;
+static const uint32_t GBA_RTC_DATE = NES + 0x1E0, GBA_RTC_TIME = NES + 0x1E4;
+static bool clkInit = false, clkModule = false, gclkOn = false;
+static time_t clkBase = 946684800;                  // 2000-01-01 00:00:00
+static uint32_t clkMs = 0, clkSync = 0, gclkLast = 0;
+
+static uint8_t bcd(int v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
+static int unbcd(uint8_t v) { return (v >> 4) * 10 + (v & 15); }
+// the DS1302's three wires: bits low first, taken on CLK rising, its own given after CLK falls
+static void dsOut(uint8_t v) {
+  pinMode(DS_DAT, OUTPUT);
+  for (int i = 0; i < 8; i++, v >>= 1) {
+    digitalWrite(DS_DAT, v & 1); delayMicroseconds(2);
+    digitalWrite(DS_CLK, HIGH); delayMicroseconds(2); digitalWrite(DS_CLK, LOW); delayMicroseconds(2);
+  }
+}
+static uint8_t dsIn() {
+  pinMode(DS_DAT, INPUT_PULLDOWN);                   // (no module: every byte 0, which is no date)
+  uint8_t v = 0;
+  for (int i = 0; i < 8; i++) {
+    delayMicroseconds(2); v |= (uint8_t)digitalRead(DS_DAT) << i;
+    digitalWrite(DS_CLK, HIGH); delayMicroseconds(2); digitalWrite(DS_CLK, LOW);
+  }
+  return v;
+}
+// the clock's burst: seconds, minutes, hours, date, month, weekday, year, write-protect
+static void dsRead(uint8_t r[8]) {
+  digitalWrite(DS_CLK, LOW); digitalWrite(DS_RST, HIGH); delayMicroseconds(4);
+  dsOut(0xBF);
+  for (int i = 0; i < 8; i++) r[i] = dsIn();
+  digitalWrite(DS_RST, LOW); delayMicroseconds(4);
+}
+static void dsWrite(const struct tm &t) {
+  digitalWrite(DS_CLK, LOW);
+  digitalWrite(DS_RST, HIGH); delayMicroseconds(4); dsOut(0x8E); dsOut(0x00); digitalWrite(DS_RST, LOW); delayMicroseconds(4);   // write-protect off
+  uint8_t w[8] = { bcd(t.tm_sec), bcd(t.tm_min), bcd(t.tm_hour), bcd(t.tm_mday), bcd(t.tm_mon + 1),
+                   (uint8_t)(t.tm_wday + 1), bcd(t.tm_year - 100), 0x80 };   // (seconds bit 7 clear: running; 24-hour; protected again)
+  digitalWrite(DS_RST, HIGH); delayMicroseconds(4); dsOut(0xBE);
+  for (int i = 0; i < 8; i++) dsOut(w[i]);
+  digitalWrite(DS_RST, LOW); delayMicroseconds(4);
+}
+// the module's time, if there is a module and it holds a date
+static bool dsGet(time_t &out) {
+  uint8_t r[8]; dsRead(r);
+  if (r[0] & 0x80) return false;                     // (halted: never set)
+  if ((r[2] & 0x80) || r[3] == 0 || r[3] > 0x31 || r[4] == 0 || r[4] > 0x12 || r[0] > 0x59 || r[1] > 0x59 || r[2] > 0x23) return false;
+  struct tm t = {};
+  t.tm_sec = unbcd(r[0]); t.tm_min = unbcd(r[1]); t.tm_hour = unbcd(r[2] & 0x3F);
+  t.tm_mday = unbcd(r[3]); t.tm_mon = unbcd(r[4]) - 1; t.tm_year = unbcd(r[6]) + 100;
+  setenv("TZ", "UTC0", 1); tzset();                 // (the times here are local already: no zone)
+  out = mktime(&t);
+  return true;
+}
+static time_t clockNow() {
+  if (!clkInit) {
+    clkInit = true;
+    pinMode(DS_CLK, OUTPUT); pinMode(DS_RST, OUTPUT); digitalWrite(DS_RST, LOW); digitalWrite(DS_CLK, LOW);
+    time_t t;
+    clkModule = dsGet(t);
+    if (clkModule) { clkBase = t; clkMs = millis(); }
+    Log.printf("menu: clock %s\n", clkModule ? "from the DS1302" : "-- no DS1302 answering (or never set): from 2000-01-01");
+    clkSync = millis();
+  }
+  if (clkModule && millis() - clkSync > 60000) {      // (the module keeps better time than millis)
+    time_t t; clkSync = millis();
+    if (dsGet(t)) { clkBase = t; clkMs = millis(); }
+  }
+  return clkBase + (time_t)((millis() - clkMs) / 1000);
+}
+static void clockSet(time_t t) {
+  clockNow();
+  clkBase = t; clkMs = millis(); clkSync = millis();
+  struct tm tm; gmtime_r(&t, &tm);
+  dsWrite(tm);
+  time_t back; clkModule = dsGet(back);
+  Log.printf("menu: clock set to %04d-%02d-%02d %02d:%02d:%02d%s\n", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, clkModule ? ", the DS1302 too" : " (no DS1302 answering)");
+}
+// the core's clock: the time now, if the game has a clock
+static void gbaClockService(bool now_ = false) {
+  if (!gclkOn || (!now_ && millis() - gclkLast < 1000)) return;
+  gclkLast = millis();
+  time_t t = clockNow(); struct tm tm; gmtime_r(&t, &tm);
+  fpga.busWrite(GBA_RTC_DATE, ((uint32_t)bcd(tm.tm_year - 100) << 24) | ((uint32_t)bcd(tm.tm_mon + 1) << 16) | ((uint32_t)bcd(tm.tm_mday) << 8) | (uint32_t)tm.tm_wday);
+  fpga.busWrite(GBA_RTC_TIME, ((uint32_t)bcd(tm.tm_hour) << 16) | ((uint32_t)bcd(tm.tm_min) << 8) | (uint32_t)bcd(tm.tm_sec));
+}
+// the cartridges with the clock, by the game code's first three letters (header 0xAC)
+static bool gbaHasClock(File &f) {
+  char code[5] = {0};
+  f.seek(0xAC); f.read((uint8_t *)code, 4); f.seek(0);
+  static const char *withClock[] = { "AXV", "AXP", "BPE", "U3I", "U32", "U33" };
+  for (const char *c : withClock) if (!strncmp(code, c, 3)) return true;
+  return false;
+}
+
 // The PlayStation's BIOS: SCPH*.BIN in /bios, /roms/ps1 or /roms.
 static String findBios() {
   const char *dirs[] = { "/bios", "/roms/ps1", "/roms" };
@@ -595,6 +913,10 @@ static uint32_t a26Scheme(const String &name, File &f, uint32_t size) {
 
 static String load(const Game &g) {
   if (g.m != 4) cardIn = false;
+  if (g.m == 11) {                                   // the PC: a hard-disk image, served from the card (pc.h)
+    message("starting the PC", g.name);
+    return pc::start(g.path, stream, NES_PRG, NES_CART_BANK);
+  }
   File f = SD.open(g.path);
   if (!f) return String("cannot open ") + g.path;
   uint32_t size = f.size();
@@ -616,7 +938,7 @@ static String load(const Game &g) {
       else {
         if (h[4] == 1) { f.seek(f.position() - prg); stream(f, NES_PRG + prg, prg); }   // 16 kB shows in both halves
         if (chr) { if (!stream(f, NES_CHR, chr)) err = "the file ended early"; }
-        else { memset(buf, 0, 8192); fpga.busWrite(NES_CHR, (uint32_t *)buf, 2048); }
+        else { memset(buf, 0, 8192); gWN(NES_CHR, (uint32_t *)buf, 2048); }
         uint32_t prgAll = h[4] == 1 ? 2 * prg : prg;
         uint32_t prgLast = prgAll / 8192 ? prgAll / 8192 - 1 : 0;
         fpga.busWrite(NES_MAPPER, (mapper & 0xF) | (prgLast << 8) | (chr ? 0 : 0x4000));
@@ -686,6 +1008,35 @@ static String load(const Game &g) {
     if (!streamBanks(f, size)) err = "the file ended early";
     fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);   // (the core reads the header itself)
+  } else if (g.m == 10) {                            // Game Boy Advance: the cartridge into DDR3; a BIOS file if the card has one
+    fpga.busWrite(NES_CONSOLE, 10);                  // first: the fill only reaches the selected core
+    fpga.busWrite(GBA_CFG, 0x40000000u | size);      // the save's fill
+    gbaSaveBegin(g.path);
+    String bios = SD.exists("/bios/gba_bios.bin") ? "/bios/gba_bios.bin" : SD.exists("/roms/gba/gba_bios.bin") ? "/roms/gba/gba_bios.bin" : "";
+    if (bios.length()) {
+      File b = SD.open(bios);
+      if (b && b.size() == 16384) {
+        fpga.busWrite(GBA_CFG, 0x80000000u | size);
+        fpga.busWrite(NES_CART_BANK, 0);
+        if (!stream(b, NES_PRG, 16384)) err = "the BIOS file ended early";
+      }
+      if (b) b.close();
+    }
+    gclkOn = gbaHasClock(f);
+    fpga.busWrite(GBA_CFG, size | (gclkOn ? 0x20000000u : 0));   // (bit 29: the cartridge's clock)
+    if (gclkOn) { gbaClockService(true); Log.println("menu: the cartridge has a clock"); }
+    if (!streamBanks(f, size)) err = "the file ended early";
+    fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
+    if (!err.length()) fpga.busWrite(NES_CTRL, 1);
+  } else if (g.m == 9) {                             // PC Engine: into DDR3 as the Game Boy, less a copier header
+    uint32_t base = (size % 8192 == 512) ? 512 : 0;
+    uint32_t rom = size - base;
+    fpga.busWrite(NES_CONSOLE, 9);                   // first: the fill only reaches the selected core
+    fpga.busWrite(PCE_CFG, rom > 0xFFFFF ? 0xFFFFF : rom);   // (the register is 20 bits: a 1 MB card as 0xFFFFF, which still masks to 1 MB)
+    f.seek(base);
+    if (!streamBanks(f, rom)) err = "the file ended early";
+    fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
+    if (!err.length()) fpga.busWrite(NES_CTRL, 1);
   } else if (g.m == 8) {                             // Atari 2600: the image, its size and scheme
     if (size < 2048) err = "too small for an Atari cartridge";
     uint32_t scheme = a26Scheme(g.name, f, size);
@@ -710,8 +1061,70 @@ static String load(const Game &g) {
   return err;
 }
 
+// --- the two core slots (the menu image from version 7) -------------------------------------------
+// The flash past the menu image holds two cores, 3 MB each: slot 0 at 2 MB, slot 1 at 5 MB (one
+// over 3 MB takes slot 0 and the space of both). Switching to a console in either is a reboot (two
+// seconds); else the slot used less recently is written. And while the menu is open on a console
+// in neither slot -- its tile, or its games -- that slot is erased in the background, a sector at a
+// time: erasing is the flash chip's own 0.66 s a 64 kB sector, most of an install's time.
+static const uint32_t SLOT1_OFF = 0x300000, SLOT_HALF = 0x300000, SLOT_SECTORS = SLOT_HALF / SECTOR;
+struct SlotRec { String core; uint32_t size = 0, erased = 0; };
+static SlotRec slotGet(int i) {
+  SlotRec r; char k[12];
+  prefs.begin("menu", true);
+  snprintf(k, sizeof k, "s%dcore", i); r.core = prefs.getString(k, "");
+  snprintf(k, sizeof k, "s%dsize", i); r.size = prefs.getUInt(k, 0);
+  snprintf(k, sizeof k, "s%derased", i); r.erased = prefs.getUInt(k, 0);
+  // (before version 7 there was one slot, "slot" / "size": it is slot 0)
+  if (i == 0 && !r.core.length() && !prefs.isKey("s0core")) { r.core = prefs.getString("slot", ""); r.size = prefs.getUInt("size", 0); }
+  prefs.end();
+  return r;
+}
+static void slotPut(int i, const SlotRec &r) {
+  char k[12];
+  prefs.begin("menu", false);
+  snprintf(k, sizeof k, "s%dcore", i); prefs.putString(k, r.core);
+  snprintf(k, sizeof k, "s%dsize", i); prefs.putUInt(k, r.size);
+  snprintf(k, sizeof k, "s%derased", i); prefs.putUInt(k, r.erased);
+  if (i == 0) { prefs.putString("slot", r.core); prefs.putUInt("size", r.size); }   // (the old keys follow slot 0)
+  prefs.end();
+}
+static int slotLast() { prefs.begin("menu", true); int l = prefs.getUChar("slotlast", 0); prefs.end(); return l; }
+static void slotSetLast(int i) { prefs.begin("menu", false); prefs.putUChar("slotlast", i); prefs.end(); }
+// which slot holds this image (-1: neither)
+static int slotOf(const char *core, uint32_t size) {
+  for (int i = 0; i < 2; i++) { SlotRec r = slotGet(i); if (r.core == core && r.size == size) return i; }
+  return -1;
+}
+static bool twoSlots() { Status st = fpga.status(); return st.alive && st.core == 0 && st.version >= 7; }
+
+// the background erase: one sector in flight at most
+static int bgSlot = -1; static bool bgBusy = false; static uint32_t bgT = 0;
+static void bgEraseStep(int victim) {
+  if (bgBusy) {
+    if (fpga.busy()) return;
+    bgBusy = false;
+    SlotRec r = slotGet(bgSlot); r.erased++; slotPut(bgSlot, r);
+    return;
+  }
+  if (victim < 0) return;
+  SlotRec r = slotGet(victim);
+  if (r.core.length()) { r.core = ""; r.size = 0; r.erased = 0; slotPut(victim, r); }   // (no longer a core: it is being cleared)
+  if (r.erased >= SLOT_SECTORS) return;
+  bgSlot = victim; bgBusy = true; bgT = millis();
+  fpga.eraseStart((victim ? SLOT1_OFF : 0) + r.erased * SECTOR);
+}
+// an install is about to use the flash: the erase in flight finished first, and counted
+static void bgEraseFinish() {
+  if (!bgBusy) return;
+  uint32_t t0 = millis();
+  while (fpga.busy() && millis() - t0 < 5000) delay(5);
+  bgEraseStep(-1);
+}
+
 // --- switching the board to another console ---------------------------------------
 static String switchTo(int m) {
+  pc::stop();                               // (the PC's disk task off before the board stops being the PC)
   const Machine &M = MACHINES[m];
   String path = String("/cores/") + M.core + ".bin";
   File f = SD.open(path);
@@ -729,28 +1142,40 @@ static String switchTo(int m) {
     while (millis() - t0 < 3000 && fpga.status().core != 0) delay(50);
   }
   if (fpga.status().core != 0) { f.close(); return "the board would not go back to the shell"; }
-  // Install (unless the slot holds this core already) and boot; and if it does not come
-  // up, once more with the install forced: the slot is not always what was last put
-  // there (one was found blank), and a dark screen is no answer.
+  // Install (unless a slot holds this core already) and boot; and if it does not come up, once
+  // more with the install forced: a slot is not always what was last put there (one was found
+  // blank), and a dark screen is no answer.
+  bool two = twoSlots();
+  uint32_t size = f.size();
   for (int round = 0; round < 2; round++) {
-    prefs.begin("menu", true); String inSlot = prefs.getString("slot", ""); uint32_t inSize = prefs.getUInt("size", 0); prefs.end();
-    if (round == 1 || inSlot != M.core || inSize != (uint32_t)f.size()) {
+    int use = two ? slotOf(M.core, size) : (slotGet(0).core == M.core && slotGet(0).size == size ? 0 : -1);
+    if (round == 1 || use < 0) {
       if (round == 1) message(String("the ") + M.name + " did not start", "installing it again");
-      // (twice if the read-back disagrees: the board is in the shell with no picture,
-      // and a second try beats leaving the screen dark)
+      bgEraseFinish();
+      // the slot: this one again (round 1), else the one used less recently; a core over 3 MB
+      // only in slot 0
+      int v = !two || size > SLOT_HALF ? 0 : use >= 0 ? use : 1 - slotLast();
+      SlotRec r = slotGet(v);
+      uint32_t pre = (round == 0 && !r.core.length()) ? r.erased : 0;
+      slotPut(v, SlotRec());                                     // (not a core while it is written)
+      if (size > SLOT_HALF) slotPut(1, SlotRec());              // (slot 1's space too)
       bool ok = false;
+      installShow = gInstallShow;
       for (int tries = 0; tries < 2 && !ok; tries++) {
         job.busy = true; job.error = "";
         f.seek(0);
-        ok = installCard(f);
+        ok = installCard(f, v ? SLOT1_OFF : 0, tries ? 0 : pre);
         job.busy = false;
       }
+      installShow = nullptr;
       if (!ok) { f.close(); return "install failed: " + job.error; }
-      prefs.begin("menu", false); prefs.putString("slot", M.core); prefs.putUInt("size", f.size()); prefs.end();
+      SlotRec n; n.core = M.core; n.size = size; slotPut(v, n);
+      use = v;
     }
     // (boot asked twice if the first did not take: once, it did not)
+    if (two) slotSetLast(use);
     for (int tries = 0; tries < 2; tries++) {
-      fpga.boot(true);
+      if (two) fpga.bootSlot(use + 1); else fpga.boot(true);
       t0 = millis();
       while (millis() - t0 < 5000) {
         delay(100);
@@ -759,11 +1184,11 @@ static String switchTo(int m) {
       }
     }
     // not up: back in the shell (the fallback takes it there; else PROGRAM_B) for the next round
-    Log.printf("menu: the %s did not come up (round %d)\n", M.name, round + 1);
+    Log.printf("menu: the %s did not come up (round %d)%s", M.name, round + 1, "\n");
     t0 = millis();
     while (millis() - t0 < 3000 && fpga.status().core != 0) delay(100);
     if (fpga.status().core != 0) { fpga.forceShell(); delay(3000); }
-    prefs.begin("menu", false); prefs.putString("slot", ""); prefs.end();
+    if (use >= 0) slotPut(use, SlotRec());
   }
   f.close();
   return String("the ") + M.name + " core did not come up";
@@ -793,7 +1218,10 @@ static scr::Chrome chrome() {
   scr::Chrome c;
   pads::Player p[2]; pads::view(p);
   c.pad1 = p[0].on; c.pad2 = p[1].on;
-  if (gameIn) c.running = gameName.c_str();
+  if (gameIn) c.running = shown(gameName).c_str();
+  // (the clock and the date as the graphical menu's top: gtop)
+  gscr::Top t = gtop("");
+  if (clockNow() > 1600000000) { c.time = t.time; c.date = t.date; }
   return c;
 }
 static std::string padText(const pads::Player &p) {
@@ -808,10 +1236,58 @@ using scr::Item;
 static Item item(const char *t, uint8_t icon = 0, int iconInk = ui::WHITE, const std::string &value = "", int valueInk = ui::GREY, bool gap = false) {
   Item x; x.text = t; x.icon = icon; x.iconInk = iconInk; x.value = value; x.valueInk = valueInk; x.gap = gap; return x;
 }
+// The game to carry on with (the last one started), if it is still on the card
+struct Last { int m = -1, i = -1; };
+static Last lastGame() {
+  static Last memo; static uint32_t memoT = 0;          // (a page is painted once a strip: asked 60 times)
+  if (memoT && millis() - memoT < 300) return memo;
+  Last l;
+  memoT = millis();
+  prefs.begin("menu", true); String last = prefs.getString("last", ""); prefs.end();
+  if (!last.length()) return l;
+  for (int m = 0; m < NMACH; m++)
+    for (int i = 0; i < (int)lists[m].size(); i++)
+      if (last.equals(lists[m][i].path)) { l.m = m; l.i = i; memo = l; return l; }
+  memo = l;
+  return l;
+}
+// What home's items do: the graphical home (the menu image) -- the game to carry on with,
+// then the consoles; inside a console, the game's own menu; the old text home (a menu image
+// without a picture) -- back to the game, the consoles, the settings.
+enum HomeAct { H_CONTINUE, H_CONSOLE, H_RESUME, H_RESET, H_SETTINGS, H_HOME };
+struct HomeItem { HomeAct act; int m; };
+static std::vector<HomeItem> homeItems() {
+  std::vector<HomeItem> v;
+  if (gmode) {
+    if (lastGame().m >= 0) v.push_back({ H_CONTINUE, -1 });
+    for (int m : consoles) v.push_back({ H_CONSOLE, m });
+  } else if (inCore) {
+    if (gameIn) { v.push_back({ H_RESUME, -1 }); v.push_back({ H_RESET, -1 }); }
+    v.push_back({ H_SETTINGS, -1 });
+    v.push_back({ H_HOME, -1 });
+  } else {
+    for (int m : consoles) v.push_back({ H_CONSOLE, m });
+    v.push_back({ H_SETTINGS, -1 });
+  }
+  return v;
+}
 static std::vector<Item> items() {
   std::vector<Item> v;
   switch (nav.page) {
   case P_HOME:
+    if (gmode || inCore) {
+      for (auto &h : homeItems()) {
+        switch (h.act) {
+        case H_CONTINUE: { Last l = lastGame(); v.push_back(item(("Continue " + std::string(shown(lists[l.m][l.i].name).c_str())).c_str())); break; }
+        case H_CONSOLE: { size_t n = lists[h.m].size(); v.push_back(item(MACHINES[h.m].name, art::G_PAD, ui::PINK, std::to_string(n) + (n == 1 ? " game" : " games"))); break; }
+        case H_RESUME: v.push_back(item(("Back to " + gameName).c_str(), art::G_RIGHT, ui::GREEN)); break;
+        case H_RESET: v.push_back(item("Reset the game", art::G_CIRCLE, ui::RED)); break;
+        case H_SETTINGS: v.push_back(item("Settings", art::G_GEAR, ui::YELLOW, "", ui::GREY, true)); break;
+        case H_HOME: v.push_back(item("Home", art::G_HEART, ui::PINK, gameIn ? "saves, quits the game" : "", ui::GREY)); break;
+        }
+      }
+      break;
+    }
     if (gameIn) v.push_back(item(("Back to " + gameName).c_str(), art::G_RIGHT, ui::GREEN));
     for (size_t i = 0; i < consoles.size(); i++) {
       int m = consoles[i];
@@ -901,7 +1377,7 @@ static std::vector<std::string> info() {
 }
 static const char *title() {
   switch (nav.page) {
-  case P_HOME: return "CONSOLES";
+  case P_HOME: return inCore ? "PAUSED" : "CONSOLES";
   case P_SETTINGS: return "SETTINGS";
   case P_PICTURE: return "PICTURE";
   case P_PADS: return "CONTROLLERS";
@@ -934,16 +1410,200 @@ static scr::PadView padView(const pads::Player &p) {
   v.lx = i.lx; v.ly = i.ly; v.rx = i.rx; v.ry = i.ry;
   return v;
 }
+// --- the graphical pages ---------------------------------------------------------------------
+// when the game to carry on with was last started: "today 18:42", "yesterday", "17 Oct"
+static std::string whenText() {
+  static uint32_t memo = 0, memoT = 0;
+  if (!memoT || millis() - memoT > 300) { prefs.begin("menu", true); memo = prefs.getUInt("lastT", 0); prefs.end(); memoT = millis(); }
+  uint32_t t = memo;
+  if (!t) return "";
+  time_t now = clockNow(), then = (time_t)t; struct tm a, b; gmtime_r(&now, &a); gmtime_r(&then, &b);
+  static const char *MO[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+  char s[24];
+  long days = (long)(now / 86400) - (long)(then / 86400);
+  if (days == 0) snprintf(s, sizeof(s), "today %02d:%02d", b.tm_hour, b.tm_min);
+  else if (days == 1) snprintf(s, sizeof(s), "yesterday");
+  else snprintf(s, sizeof(s), "%d %s", b.tm_mday, MO[b.tm_mon]);
+  return s;
+}
+// a save on the card for the game (the consoles whose saves are named after it)
+static bool hasSave(const Game &g) {
+  String n = g.path; n = n.substring(n.lastIndexOf('/') + 1);
+  int dot = n.lastIndexOf('.'); if (dot > 0) n = n.substring(0, dot);
+  if (g.m == 10) return SD.exists("/saves/gba/" + n + ".sav");
+  if (g.m == 5) return SD.exists("/saves/snes/" + n + ".srm");
+  return false;
+}
+static void draw();                       // (below)
+static int homeFirstRow = 0;
+// home's grid: the top row shown, kept so the selected tile is in one of the two rows
+static void homeFix(int hc) {
+  int t = nav.sel - hc;
+  if (t >= 0) { int row = t / 5; if (row < homeFirstRow) homeFirstRow = row; if (row > homeFirstRow + 1) homeFirstRow = row - 1; }
+  else homeFirstRow = 0;
+}
+// where a selection is drawn (with its glow), for redrawing only that
+struct GRect { int x, y, w, h; };
+static const GRect G_HINTS = { 0, 436, 640, 44 }, G_CLOCK = { 400, 0, 240, 72 };
+static GRect homeSelRect(int sel, int hc) {
+  if (hc && sel == 0) return { 12, 66, 616, 88 };
+  int t = sel - hc, gy = hc ? 156 : 82;
+  return { 24 + (t % 5) * 117 - 12, gy + (t / 5 - homeFirstRow) * 140 - 12, 132, 152 };
+}
+static GRect listRowRect(int i) { return { 12, gscr::LIST_Y + (i - nav.top) * gscr::LIST_ROW - 8, 616, 64 }; }
+// the list's page: how many rows show (the info lines take one)
+static int gListRows() {
+  bool info_ = nav.page == P_GAMES ? lists[cur].empty() : !info().empty();
+  return gscr::LIST_ROWS - (info_ ? 1 : 0);
+}
+// the games' saves, looked for once a list (the card is slow to ask)
+static std::vector<int8_t> saveSeen; static int saveSeenFor = -1;
+static void keepVisible(int rows) {
+  if (nav.sel < nav.top) nav.top = nav.sel;
+  if (nav.sel >= nav.top + rows) nav.top = nav.sel - rows + 1;
+  if (nav.top < 0) nav.top = 0;
+}
+// a page of plain lines (pairing, the pad test, waiting for a button, about)
+static void glines(const std::string &title, const std::vector<std::string> &lines, const std::vector<gscr::Hint> &h) {
+  gfx::background(HOME_ACCENT);
+  gscr::top(gtop(title, "Home  >  Settings"));
+  gfx::rrect(40, 86, 560, 344, 18, gscr::WHITE, 14);
+  int y = 110;
+  for (auto &l : lines) { gfx::text(gfxfont::F18, 64, y, l.c_str(), gscr::ROW); y += 32; }
+  gscr::hints(h, note.c_str());
+}
+static std::string padLine(const pads::Player &p) {
+  if (!p.on) return "not connected";
+  const pads::In &i = p.in;
+  std::string s;
+  struct { bool on; const char *n; } b[] = { { i.a, "cross" }, { i.b, "circle" }, { i.x, "square" }, { i.y, "triangle" },
+    { i.l1, "L1" }, { i.r1, "R1" }, { i.l2, "L2" }, { i.r2, "R2" }, { i.sel, "select" }, { i.start, "start" }, { i.home, "home" },
+    { i.du, "up" }, { i.dd, "down" }, { i.dl, "left" }, { i.dr, "right" } };
+  for (auto &x : b) if (x.on) { if (!s.empty()) s += " "; s += x.n; }
+  char st[48]; snprintf(st, sizeof(st), "  sticks %d,%d %d,%d", i.lx, i.ly, i.rx, i.ry);
+  return (s.empty() ? std::string("-") : s) + st;
+}
+static void gpaint() {
+  using namespace gscr;
+  switch (nav.page) {
+  case P_HOME: {
+    HomeView v; v.top = gtop("FPGA CONSOLE"); v.top.gear = true;
+    std::vector<HomeItem> h = homeItems();
+    int hc = (!h.empty() && h[0].act == H_CONTINUE) ? 1 : 0;
+    if (hc) {
+      Last l = lastGame();
+      v.cont.on = true; v.cont.m = l.m; v.cont.key = MACHINES[l.m].core; v.cont.console = MACHINES[l.m].name;
+      v.cont.game = shown(lists[l.m][l.i].name).c_str(); v.cont.when = whenText();
+    }
+    for (auto &x : h) if (x.act == H_CONSOLE) v.tiles.push_back({ x.m, MACHINES[x.m].name, MACHINES[x.m].core, MCOL[x.m], (int)lists[x.m].size() });
+    int t = nav.sel - hc;
+    v.sel = (hc && nav.sel == 0) ? -1 : t;
+    homeFix(hc);
+    v.firstRow = homeFirstRow;
+    if (v.tiles.empty()) { v.lines.push_back(haveCard ? "No games on the card yet" : "No SD card"); v.lines.push_back("Games go in /roms/<console> on the card"); }
+    pads::Player p[2]; pads::view(p);
+    v.note = (!p[0].on && !p[1].on) ? "No controller: PS4 / PS5 hold SHARE + PS" : note.c_str();
+    v.hints = { { S_CROSS, hc && nav.sel == 0 ? "Play" : "Open" }, { S_TRIANGLE, "Settings" } };
+    homeScreen(v, HOME_ACCENT);
+    break; }
+  case P_GAMES: {
+    ListView v; v.badges = true; v.accent = MCOL[cur];
+    v.top = gtop(MACHINES[cur].name, std::string("Home  >  ") + MACHINES[cur].name);
+    for (auto &g : lists[cur]) { Row r; r.text = shown(g.name).c_str(); v.rows.push_back(r); }
+    if (v.rows.empty()) v.info.push_back("No games for this console on the card");
+    keepVisible(listRows(v));
+    v.first = nav.top; v.sel = nav.sel;
+    if (saveSeenFor != cur || saveSeen.size() != lists[cur].size()) { saveSeen.assign(lists[cur].size(), -1); saveSeenFor = cur; }
+    for (int i = v.first; i < v.first + listRows(v) && i < (int)v.rows.size(); i++) {
+      if (saveSeen[i] < 0) saveSeen[i] = hasSave(lists[cur][i]) ? 1 : 0;
+      if (saveSeen[i]) v.rows[i].tag = "SAVE";
+    }
+    Last l = lastGame();
+    if (l.m == cur && l.i >= 0 && l.i < (int)v.rows.size()) v.rows[l.i].sub = "last played " + whenText();
+    v.hints = { { S_CROSS, "Play" }, { S_CIRCLE, "Back" }, { S_L1R1, "Page" } };
+    v.note = note.c_str();
+    listPage(v);
+    break; }
+  case P_PAIR: {
+    pads::Player p[2]; pads::view(p);
+    int left = 120 - (int)((millis() - pageT0) / 1000);
+    std::vector<std::string> l = { "Pairing: " + std::to_string(left < 0 ? 0 : left) + " seconds left", "",
+      "PS4 / PS5:  hold SHARE and PS", "Xbox:  hold the pair button", "Switch Pro:  hold sync", "" };
+    for (auto &q : p) if (q.on) l.push_back(std::string("connected: ") + q.name);
+    glines("Pair a controller", l, { { S_CIRCLE, "Back" } });
+    break; }
+  case P_TEST:
+    glines("Test the controllers", { "Player 1", padLine(testP[0]), "", "Player 2", padLine(testP[1]), "", "hold circle to leave" }, {});
+    break;
+  case P_WAITBTN: {
+    int left = 6 - (int)((millis() - pageT0) / 1000);
+    glines("Button mapping", { std::string(pads::LAYOUTS[mapL].name) + ": " + pads::LAYOUTS[mapL].b[mapB].name,
+      "", "Press the pad's button for it now", std::to_string(left < 0 ? 0 : left) + " seconds" }, {});
+    break; }
+  case P_ABOUT:
+    glines("About", { "BYBA GAMES", "the FPGA game console", "", "Text: Nunito (SIL Open Font License)",
+      "Console art: RetroPie's carbon theme (from the card)" }, { { S_CIRCLE, "Back" } });
+    break;
+  default: {
+    ListView v; v.accent = { 60, 120, 140 };
+    std::string t = title(), tc;
+    for (size_t i = 0; i < t.size(); i++) tc += (char)(i ? tolower((unsigned char)t[i]) : t[i]);
+    v.top = gtop(tc, nav.page == P_SETTINGS ? "Home  >  Settings" : "Home  >  Settings  >  " + tc);
+    for (auto &it : items()) { Row r; r.text = it.text; r.value = it.value; v.rows.push_back(r); }
+    for (auto &l : info()) v.info.push_back(l);
+    keepVisible(listRows(v));
+    v.first = nav.top; v.sel = nav.sel;
+    bool change = nav.page == P_PICTURE || nav.page == P_SYSTEM;
+    v.hints = { { S_CROSS, change ? "Change" : "Open" }, { S_CIRCLE, "Back" } };
+    if (nav.page == P_MAP) v.hints.insert(v.hints.begin() + 1, Hint{ S_SQUARE, "Second" });
+    v.note = note.c_str();
+    listPage(v);
+  }
+  }
+}
+// the selection: the board's highlight over it (off on the pages without one)
+static void ghl() {
+  if (!gmode) return;
+  if (nav.page == P_HOME) {
+    std::vector<HomeItem> h = homeItems();
+    int hc = (!h.empty() && h[0].act == H_CONTINUE) ? 1 : 0;
+    if (nav.sel >= (int)h.size()) { gfx::highlightOff(gW1); return; }
+    if (hc && nav.sel == 0) { gfx::highlight(gW1, 24, 78, 592, 64, 16, { 120, 140, 255 }, gfx::HL_TILE); return; }
+    int t = nav.sel - hc, gy = hc ? 156 : 82;
+    gfx::highlight(gW1, 24 + (t % 5) * 117, gy + (t / 5 - homeFirstRow) * 140, 108, 128, 14, MCOL[h[nav.sel].m], gfx::HL_TILE);
+    return;
+  }
+  bool list = nav.page == P_GAMES || nav.page == P_SETTINGS || nav.page == P_PICTURE || nav.page == P_PADS ||
+              nav.page == P_MAPS || nav.page == P_MAP || nav.page == P_SYSTEM;
+  int n = nav.page == P_GAMES ? (int)lists[cur].size() : (int)items().size();
+  if (!list || n == 0) { gfx::highlightOff(gW1); return; }
+  gfx::RGB acc = nav.page == P_GAMES ? MCOL[cur] : gfx::RGB{ 60, 120, 140 };
+  gfx::highlight(gW1, 24, gscr::LIST_Y + (nav.sel - nav.top) * gscr::LIST_ROW, 592, 48, 12, acc, gfx::HL_BAR);
+}
+static void gdraw() { grender(0, 0, gfx::W, gfx::H, [] { gpaint(); }); ghl(); }
+static void gparts(const std::vector<GRect> &rs) {
+  for (auto &r : rs) grender(r.x, r.y, r.w, r.h, [] { gpaint(); });
+  ghl();
+}
+// a list's selection moved: the two rows (and the hints) again, or the page if it scrolled
+static void listMoved(int oldSel, int oldTop) {
+  if (!gmode || !open_) { draw(); return; }
+  keepVisible(gListRows());
+  if (nav.top != oldTop) draw();
+  else ghl();                                     // (the board moves the highlight: nothing to draw)
+}
+
 static void draw() {
   // (a closed menu draws nothing: a page drawn after a game started would put the menu
   // back over it, closed -- deaf to everything but START + SELECT)
   if (!open_) return;
+  if (gmode) { gdraw(); return; }
   scr::Chrome ch = chrome();
   switch (nav.page) {
   case P_GAMES: {
     size_t n = lists[cur].size();
-    std::string t = std::string(MACHINES[cur].name) + "  " + std::to_string(n) + (n == 1 ? " game" : " games");
-    scr::list(ch, t, items(), nav.sel, nav.top, {}, note.c_str(), hintsFor(), 1);
+    ch.crumbs = "Home  >  " + std::to_string(n) + (n == 1 ? " game" : " games");
+    scr::list(ch, MACHINES[cur].name, items(), nav.sel, nav.top, {}, note.c_str(), hintsFor(), 1);
     break; }
   case P_PAIR: {
     pads::Player p[2]; pads::view(p);
@@ -973,6 +1633,12 @@ static void draw() {
   {
     std::string nt = note.c_str();
     if (nav.page == P_HOME && nt.empty() && !ch.pad1 && !ch.pad2) nt = "No controller yet: pair one now";
+    // (where the page is, as the graphical menu's crumbs; in a game, its name)
+    if (nav.page != P_HOME) {
+      std::string cr = gameIn ? ch.running + "  >  " : "Home  >  ";
+      if (nav.page != P_SETTINGS) cr += "Settings  >  ";
+      ch.crumbs = cr + scr::titleCase(title());
+    }
     scr::list(ch, title(), items(), nav.sel, nav.top, info(), nt, hintsFor(), nav.page == P_HOME ? 2 : 0);
   }
   }
@@ -1019,9 +1685,12 @@ static void splash() {
 
 // --- picking a game ---------------------------------------------------------------------------
 static void playGame(const Game &g) {
+  pc::stop();                               // (any game: the PC's disk closed first; pc::start opens it again)
   // the N64 game running now: its save to the card while the N64 is still there
   if (eepSize) { eepService(true); eepSize = 0; }
   if (srmSize) { srmService(true); srmSize = 0; }    // (the SNES's likewise)
+  if (gsavOn) { gbaSaveService(true); gsavOn = false; }   // (the Game Boy Advance's likewise)
+  gclkOn = false;
   Status st = fpga.status();
   // (and when it is, but the card holds another image of it than the one installed: a
   // console updated on the card was never installed while it ran -- the newer one is now)
@@ -1029,11 +1698,11 @@ static void playGame(const Game &g) {
   if (machineOfCore(st.core) == g.m) {
     File cf = SD.open(String("/cores/") + MACHINES[g.m].core + ".bin");
     if (cf) {
-      prefs.begin("menu", true); String inSlot = prefs.getString("slot", ""); uint32_t inSize = prefs.getUInt("size", 0); prefs.end();
-      stale = inSlot != MACHINES[g.m].core || inSize != (uint32_t)cf.size();
+      stale = slotOf(MACHINES[g.m].core, cf.size()) < 0;
       cf.close();
     }
   }
+  if (gmode) gmessage(String("starting ") + shown(g.name), MACHINES[g.m].name, g.m);
   pads::busBusy = true;
   if (machineOfCore(st.core) != g.m || stale) {
     String e = switchTo(g.m);
@@ -1050,15 +1719,35 @@ static void playGame(const Game &g) {
   gameName = shown(g.name);
   backStack.clear(); nav = { P_HOME, 0, 0 };
   osd(0);
-  prefs.begin("menu", false); prefs.putString("last", g.path); prefs.end();
+  prefs.begin("menu", false); prefs.putString("last", g.path); prefs.putUInt("lastT", (uint32_t)clockNow()); prefs.end();
   Log.println(String("menu: loaded ") + g.path + (loadFixes ? " (" + String(loadFixes) + " chunk(s) written again)" : ""));
 }
 
+static void goHome();                   // (below: back to the menu image)
 // --- what a button does on each page -----------------------------------------------------------
 static void pickItem(bool second = false) {
   int s = nav.sel;
   switch (nav.page) {
   case P_HOME: {
+    if (gmode || inCore) {
+      std::vector<HomeItem> h = homeItems();
+      if (s >= (int)h.size()) break;
+      switch (h[s].act) {
+      case H_CONTINUE: { Last l = lastGame(); if (l.m >= 0) { cur = l.m; playGame(lists[l.m][l.i]); } break; }
+      case H_CONSOLE: cur = h[s].m; rescanIfChanged(); go(P_GAMES); break;
+      case H_RESUME: closeMenu(); break;
+      case H_RESET: {
+        if (pc::on) { fpga.busWrite(pc::CTRL, 0); delay(50); fpga.busWrite(pc::CTRL, 1); open_ = false; osd(0); break; }   // (the PC: its CPU's reset)
+        // the console held in reset a moment (the run bit) and let go: the game from the start
+        uint32_t c = fpga.busRead(NES_CTRL);
+        fpga.busWrite(NES_CTRL, c & ~5u); delay(50); fpga.busWrite(NES_CTRL, (c | 1u) & ~4u);
+        open_ = false; osd(0);
+        break; }
+      case H_SETTINGS: go(P_SETTINGS); break;
+      case H_HOME: goHome(); break;
+      }
+      break;
+    }
     int k = s;
     if (gameIn) { if (k == 0) { closeMenu(); return; } k--; }
     if (k < (int)consoles.size()) { cur = consoles[k]; rescanIfChanged(); go(P_GAMES); }
@@ -1113,7 +1802,9 @@ static void rescanIfChanged() {
   Log.println("menu: the card changed -- its games read again");
 }
 static void openMenu() {
-  rescanIfChanged();
+  // (no rescan here: with a DOS game reading the card all the while, reading every console's games
+  // first held the menu back 20-30 s after files had been put on the card -- 2026-10-19; a console's
+  // list reads them again when it is opened)
   open_ = true;
   uint32_t c = fpga.busRead(NES_CTRL);
   if (c & 1) fpga.busWrite(NES_CTRL, c | 4);       // pause
@@ -1125,6 +1816,32 @@ static void closeMenu() {
   osd(0);
   uint32_t c = fpga.busRead(NES_CTRL);
   fpga.busWrite(NES_CTRL, c & ~4u);
+}
+// Home: the game's save to the card, then the board back to the menu image (its reboot
+// register; PROGRAM_B if that does not take), the graphical home on it. The console stays in
+// the flash's slot: a game of it again only boots it.
+static void goHome() {
+  pc::stop();
+  if (eepSize) { eepService(true); eepSize = 0; }
+  if (srmSize) { srmService(true); srmSize = 0; }
+  if (gsavOn) { gbaSaveService(true); gsavOn = false; }
+  gclkOn = false;
+  message("going home", "the game is saved");
+  pads::busBusy = true;
+  fpga.busWrite(0x00000014, 0xB0070000);
+  uint32_t t0 = millis();
+  while (millis() - t0 < 2000 && fpga.status().core != 0) delay(50);
+  if (fpga.status().core != 0) {
+    fpga.forceShell();
+    t0 = millis();
+    while (millis() - t0 < 3000 && fpga.status().core != 0) delay(50);
+  }
+  pads::busBusy = false;
+  gameIn = false;
+  freshBoard();
+  open_ = true; backStack.clear(); nav = { P_HOME, 0, 0 }; note = "";
+  draw();
+  Log.println("menu: home");
 }
 
 // --- the task -------------------------------------------------------------------
@@ -1146,7 +1863,7 @@ static void task(void *) {
         up = true;
         freshBoard();
         static bool first = true;
-        if (first && splashOn()) splash();
+        if (first && splashOn() && !gmode) splash();
         if (!scanned) { message("reading the card", "a few seconds"); while (!scanned) delay(100); }
         if (!gameIn) { open_ = true; backStack.clear(); nav = { P_HOME, 0, 0 }; draw(); }
         // (at power-up, in the shell: the last game, if the settings say so)
@@ -1162,7 +1879,29 @@ static void task(void *) {
     }
     static uint32_t lastCard = 0;
     if (cardIn && millis() - lastCard > 100) { lastCard = millis(); cardService(); }
-    if (gameIn) { eepService(); srmService(); }
+    if (gameIn) { eepService(); srmService(); gbaSaveService(); gbaClockService(); }
+    // the background erase (the menu image from version 7; the slots, above): the highlighted
+    // console -- its tile, or its games -- has no slot for a second and a half: the slot used less
+    // recently is cleared for it, a sector at a time
+    if (gmode && !inCore && shellV7 && open_) {
+      static int hovM = -2; static uint32_t hovT = 0; static bool hovCached = true;
+      int m = -1;
+      if (nav.page == P_GAMES) m = cur;
+      else if (nav.page == P_HOME) {
+        std::vector<HomeItem> h = homeItems();
+        if (nav.sel >= 0 && nav.sel < (int)h.size())
+          m = h[nav.sel].act == H_CONSOLE ? h[nav.sel].m : h[nav.sel].act == H_CONTINUE ? lastGame().m : -1;
+      }
+      if (m != hovM) {
+        hovM = m; hovT = millis(); hovCached = true;
+        if (m >= 0) {
+          File cf = SD.open(String("/cores/") + MACHINES[m].core + ".bin");
+          if (cf) { hovCached = slotOf(MACHINES[m].core, cf.size()) >= 0; cf.close(); }
+        }
+      }
+      bgEraseStep(m >= 0 && !hovCached && millis() - hovT > 1500 ? 1 - slotLast() : -1);
+    }
+    pc::focus = !open_;                            // (the controller types for the PC only with no menu up)
     bool sysMenu = menuButton && menuButton();
     uint16_t p = pads::menuButtons();
     uint16_t edge = p & ~was;
@@ -1221,12 +1960,44 @@ static void task(void *) {
       if (millis() - lastDraw > 500) { lastDraw = millis(); draw(); }
       continue;
     }
+    // the graphical pages show the time: drawn again when the minute turns
+    static int minuteWas = -1;
+    if (gmode && open_) {
+      time_t now = clockNow();
+      int mn = (int)((now / 60) % 60);
+      if (mn != minuteWas) { bool first = minuteWas < 0; minuteWas = mn; lastDraw = millis(); if (!first) gparts({ G_CLOCK }); }
+    }
+    // the graphical home: the card, then the consoles five across
+    if (gmode && nav.page == P_HOME) {
+      if (!press && !edge) continue;
+      std::vector<HomeItem> h = homeItems();
+      int hc = (!h.empty() && h[0].act == H_CONTINUE) ? 1 : 0, nt = (int)h.size() - hc, s = nav.sel;
+      if (press & pads::M_LEFT)  { if (s >= hc && (s - hc) % 5 > 0) s--; }
+      if (press & pads::M_RIGHT) { if (s >= hc && (s - hc) % 5 < 4 && s + 1 < hc + nt) s++; }
+      if (press & pads::M_UP)    { if (s >= hc) { if (s - hc >= 5) s -= 5; else if (hc) s = 0; } }
+      if (press & pads::M_DOWN)  {
+        if (hc && s == 0) { if (nt) s = hc; }
+        else if (s - hc + 5 < nt) s += 5;
+        else if ((s - hc) / 5 < (nt - 1) / 5) s = hc + nt - 1;
+      }
+      if (s != nav.sel) {
+        int old = nav.sel, oldFirst = homeFirstRow;
+        GRect a = homeSelRect(old, hc);
+        nav.sel = s; homeFix(hc);
+        if (homeFirstRow != oldFirst) draw();
+        else if ((hc && old == 0) != (hc && s == 0)) gparts({ G_HINTS });   // (Play / Open)
+        else ghl();
+      }
+      if ((edge & pads::M_A) || ((edge & pads::M_START) && !(p & pads::M_SEL))) pickItem();
+      else if (edge & pads::M_Y) go(P_SETTINGS);
+      continue;
+    }
     // a list
     int n = (int)items().size();
-    int pageRows = nav.page == P_GAMES ? 18 : 9;
+    int pageRows = gmode ? 5 : nav.page == P_GAMES ? 18 : 9;
     bool change = nav.page == P_PICTURE || nav.page == P_SYSTEM;
-    if (press & pads::M_UP)   { if (nav.sel > 0) nav.sel--; else if (n) nav.sel = n - 1; draw(); }
-    if (press & pads::M_DOWN) { if (nav.sel + 1 < n) nav.sel++; else nav.sel = 0; draw(); }
+    if (press & pads::M_UP)   { int o = nav.sel, ot = nav.top; if (nav.sel > 0) nav.sel--; else if (n) nav.sel = n - 1; listMoved(o, ot); }
+    if (press & pads::M_DOWN) { int o = nav.sel, ot = nav.top; if (nav.sel + 1 < n) nav.sel++; else nav.sel = 0; listMoved(o, ot); }
     if (change && (edge & (pads::M_LEFT | pads::M_RIGHT)) && nav.page == P_PICTURE) { pickItem(); }
     else if (change && (edge & (pads::M_LEFT | pads::M_RIGHT)) && nav.sel <= 1) { pickItem(); }
     else {
@@ -1238,7 +2009,7 @@ static void task(void *) {
     else if ((edge & pads::M_Y) && nav.page == P_HOME) go(P_SETTINGS);
     else if (edge & pads::M_B) back();
     // (the settings pages show live things -- the pads coming and going, Wi-Fi: now and then)
-    if (open_ && (nav.page == P_PADS || nav.page == P_SETTINGS || nav.page == P_HOME) && millis() - lastDraw > 1000) {
+    if (open_ && (nav.page == P_PADS || (!gmode && (nav.page == P_SETTINGS || nav.page == P_HOME))) && millis() - lastDraw > 1000) {
       lastDraw = millis(); draw();
     }
   }

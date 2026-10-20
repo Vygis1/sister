@@ -22,11 +22,9 @@ Legend: ✅ done · 🔧 in progress · ⬜ planned
 
 ### DOS PC
 - ✅ ao486 at 62.5 MHz: Doom, Rayman (CD), Transport Tycoon Deluxe, Fallout
-- ✅ z486 with x87 FPU at 40 MHz: Quake
 - ✅ SVGA, Sound Blaster 16 + OPL3, ATAPI CD-ROM with CD audio, mouse from the controller
 - ✅ A game is one command away: `tools/pc/addgame.py`
-- 🔧 z486 to 83 MHz (logic restructuring; the CPU on a clock of its own)
-- ⬜ Choosing the CPU per game (ao486 for speed, z486 where an FPU is needed)
+- ⬜ A faster CPU path to memory (Doom's demo3 runs at 15.6 fps today)
 
 ### Super Nintendo
 - ✅ LoROM and HiROM up to 6 MB, save RAM on the SD card

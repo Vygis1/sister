@@ -253,18 +253,25 @@ module n64_rsp #(
 	wire [31:0] b = (sr_we && sr_wa == rt && rt != 5'd0) ? sr_wd : (sr_we2 && sr_wa2 == rt && rt != 5'd0) ? sr_wd2 : sr[rt];
 	// R_EX's instruction's successor's successor: npc, or a taken branch's target (R_EX writes
 	// npc the same way; this is that, now, for going straight on to the next instruction)
-	reg  [11:0] npc_ex;
+	// ...and npc_ex4, its successor: each candidate's +4 made beside the others, so the choice (which
+	// waits on the branch's comparison) is the last thing before npc, not an adder after it -- the
+	// path from the instruction memory through the comparison to npc missed 62.5 MHz by 0.135 ns
+	reg  [11:0] npc_ex, npc_ex4;
+	wire [11:0] nb_t  = ipc + 12'd4 + {ir[9:0], 2'b00}, nb_t4 = ipc + 12'd8 + {ir[9:0], 2'b00};
+	wire [11:0] jr_t  = a[11:0] & 12'hFFC,              jr_t4 = (a[11:0] & 12'hFFC) + 12'd4;
+	wire [11:0] j_t   = {ir[9:0], 2'b00},              j_t4  = {ir[9:0], 2'b00} + 12'd4;
+	wire [11:0] np_4  = npc + 12'd4;
 	always @(*) begin
-		npc_ex = npc;
+		npc_ex = npc; npc_ex4 = np_4;
 		case (op)
-		6'h00: if (fn == 6'h08 || fn == 6'h09) npc_ex = a[11:0] & 12'hFFC;
+		6'h00: if (fn == 6'h08 || fn == 6'h09) begin npc_ex = jr_t; npc_ex4 = jr_t4; end
 		6'h01: if (((rt == 5'h00 || rt == 5'h10) && a[31]) || ((rt == 5'h01 || rt == 5'h11) && !a[31]))
-		           npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
-		6'h02, 6'h03: npc_ex = {ir[9:0], 2'b00};
-		6'h04: if (a == b) npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
-		6'h05: if (a != b) npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
-		6'h06: if ($signed(a) <= 0) npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
-		6'h07: if ($signed(a) > 0) npc_ex = ipc + 12'd4 + {ir[9:0], 2'b00};
+		           begin npc_ex = nb_t; npc_ex4 = nb_t4; end
+		6'h02, 6'h03: begin npc_ex = j_t; npc_ex4 = j_t4; end
+		6'h04: if (a == b) begin npc_ex = nb_t; npc_ex4 = nb_t4; end
+		6'h05: if (a != b) begin npc_ex = nb_t; npc_ex4 = nb_t4; end
+		6'h06: if ($signed(a) <= 0) begin npc_ex = nb_t; npc_ex4 = nb_t4; end
+		6'h07: if ($signed(a) > 0) begin npc_ex = nb_t; npc_ex4 = nb_t4; end
 		default: ;
 		endcase
 	end
@@ -1175,7 +1182,7 @@ module n64_rsp #(
 				default: ;                                                     // everything else does nothing
 				endcase
 				if (op == 6'h00 && fn == 6'h0D) st <= R_HALT;
-				else if (!ex_multi && !ex_stop) next_ins(npc_ex);
+				else if (!ex_multi && !ex_stop) next_ins2(npc_ex, npc_ex4);
 				// (the fast loads: the first read asked for this clock, the second next; the fast
 				// stores: the first doubleword written this clock)
 				// (a vector one: its doubleword(s) come next clock and are written beside the next
@@ -1378,6 +1385,11 @@ module n64_rsp #(
 	task next_ins; input [11:0] nn; begin
 		if (halted || frozen) st <= R_FETCH;
 		else begin pc_dw_lo <= pc[2]; ipc <= pc; pc <= nn; npc <= nn + 12'd4; st <= R_EX; end
+	end endtask
+	// (the same with nn + 4 made already: R_EX's own, the critical one)
+	task next_ins2; input [11:0] nn, nn4; begin
+		if (halted || frozen) st <= R_FETCH;
+		else begin pc_dw_lo <= pc[2]; ipc <= pc; pc <= nn; npc <= nn4; st <= R_EX; end
 	end endtask
 
 	// the bits of the flags in register order (bit n = element n)

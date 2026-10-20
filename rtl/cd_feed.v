@@ -59,6 +59,7 @@ module cd_feed #(
 	esp_link u_link (
 		.clk(clk), .rst(rst),
 		.spi_sclk(spi_sclk), .spi_mosi(spi_mosi), .spi_miso(spi_miso), .spi_cs_n(spi_cs_n),
+		.spi_d1(1'b0), .spi_d2(1'b0), .spi_d3(1'b0), .spi_miso_t(),
 		.frame_start(frame_start), .frame_end(frame_end),
 		.rx_byte(rx_byte), .rx_stb(rx_stb), .rx_index(rx_index),
 		.tx_byte(tx_byte)

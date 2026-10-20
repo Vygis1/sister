@@ -36,7 +36,13 @@ module shell_screen (
 	input  wire        pclk,
 	input  wire [9:0]  x,
 	input  wire [9:0]  y,
-	output wire [23:0] rgb
+	input  wire [23:0] bg,                // the picture under the text (shell_ui), a clock after x, y
+	output wire [23:0] rgb,
+	// the built-in picture (shell_ui's list until the ESP32 draws one): the progress bar's width of 420,
+	// 0 when there is none; gfx: the ESP32 has drawn -- this screen keeps out of its way
+	output reg  [9:0]  prog_w,
+	output wire        bar_shown,
+	input  wire        gfx
 );
 	// --- progress -------------------------------------------------------------------
 	// The installer (esp32/console/console.ino installCard) erases the whole image
@@ -106,13 +112,9 @@ module shell_screen (
 	always @* begin
 		c = " "; colour = 2'd0; hl = 1'b0;
 		bar = row <= 5'd2 || row >= 5'd27;
+		bar = 1'b0;                                                        // (no bars: see-through)
 		if (row == 5'd1) begin
-			colour = 2'd1;
-			c = (col == 6'd2) ? 8'h0F : at("FPGA CONSOLE", 5'd12, col, 6'd4);         // the diamond, the name
-		end else if (in_box && (box_top || box_bot || box_l || box_r)) begin
-			colour = 2'd2;
-			c = (box_top && box_l) ? 8'h01 : (box_top && box_r) ? 8'h02 : (box_bot && box_l) ? 8'h03
-			  : (box_bot && box_r) ? 8'h04 : (box_top || box_bot) ? 8'h05 : 8'h06;
+			c = at("FPGA CONSOLE", 5'd12, col, 6'd2);                       // the name, as the menu's
 		end else if (row == 5'd12) begin
 			c = (phase == 3'd0) ? ch("READY", 5'd5, col)
 			  : (phase == 3'd4) ? ch("STARTING THE CONSOLE", 5'd20, col)
@@ -122,20 +124,28 @@ module shell_screen (
 			c = (phase == 3'd1) ? ch("erasing the flash", 5'd17, col)
 			  : (phase == 3'd2) ? ch("writing the core", 5'd16, col)
 			  :                   " ";
-		end else if (row == 5'd16 && bar_on && col >= 6'd5 && col < 6'd35) begin
-			// 30 cells from column 5: lit (a highlighted space) up to the fraction done
-			hl = pos30 > acc;
-			c = hl ? " " : ".";
-			colour = 2'd2;
 		end
+	end
+	// the bar: pos of size, as 420 pixels
+	assign bar_shown = bar_on;
+	// (a bit a clock: the largest w with w * size <= pos * 420 -- no divider)
+	reg [9:0] pw_q; reg [3:0] pw_b;
+	initial begin pw_q = 10'd0; pw_b = 4'd0; prog_w = 10'd0; end
+	wire [9:0] pw_try = pw_q | (10'd1 << pw_b);
+	always @(posedge clk) begin
+		if (pw_b == 4'd0) begin
+			prog_w <= (pw_q > 10'd420) ? 10'd420 : pw_q;
+			pw_q <= 10'd0; pw_b <= 4'd9;
+		end else pw_b <= pw_b - 4'd1;
+		if (pw_b != 4'd0 && ({24'd0, pw_try} * {10'd0, size} <= {24'd0, pos} * 34'd420)) pw_q <= pw_try;
 	end
 	always @(posedge clk) begin
 		we <= 1'b0;
 		if (rst) begin row <= 5'd0; col <= 6'd0; acc <= 29'd0; wait_n <= 20'd0; ctrl_done <= 1'b0; ext_own <= 1'b0; end
-		else if (op_start || boot_go) begin ext_own <= 1'b0; ctrl_done <= 1'b0; end   // (shown again)
+		else if ((op_start || boot_go) && !gfx) begin ext_own <= 1'b0; ctrl_done <= 1'b0; end   // (shown again; not over the ESP32's own picture)
 		else if (ext_we) ext_own <= 1'b1;
 		else if (ext_own) ;
-		else if (!ctrl_done) begin we <= 1'b1; woff <= 16'h0004; wdata <= 32'd1; ctrl_done <= 1'b1; end
+		else if (!ctrl_done) begin we <= 1'b1; woff <= 16'h0004; wdata <= 32'd9; ctrl_done <= 1'b1; end   // (shown, see-through)
 		else if (wait_n != 20'd0) wait_n <= wait_n - 20'd1;
 		else begin
 			we <= 1'b1;
@@ -156,7 +166,7 @@ module shell_screen (
 	wire [15:0] o_off = (we && !ext_own && !ext_we) ? woff : ext_off;
 	wire [31:0] o_wd  = ext_we ? ext_wdata : wdata;
 	osd u_osd (.clk(clk), .rst(rst), .we(o_we), .off(o_off), .wdata(o_wd), .rdata(ext_rdata), .err(),
-		.pclk(pclk), .x(x), .y(y), .rgb_in(24'd0), .rgb(rgb));
+		.pclk(pclk), .x(x), .y(y), .rgb_in(bg), .rgb(rgb));
 endmodule
 
 `default_nettype wire

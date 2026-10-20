@@ -2,8 +2,9 @@
 // hdmi_tx.v - 640x480 at 60 Hz over TMDS (DVI signalling, which every HDMI display
 // takes): the timing, three TMDS encoders and the serialisers.
 //
-// Timing (VESA DMT, 25.175 MHz nominal; this takes what pclk is, 25.156 MHz from
-// the MMCM below is within a monitor's tolerance):
+// Timing (VESA DMT, 25.175 MHz nominal; this takes what pclk is: 25.2 MHz from hdmi_clk
+// -- 0.1% high, 60.000 Hz -- or the N64's 25.125; the audio constants below assume one
+// of those):
 //   horizontal: 640 active, 16 front porch, 96 sync, 48 back porch = 800
 //   vertical:   480 active, 10 front porch,  2 sync, 33 back porch = 525
 //   both syncs negative.
@@ -31,7 +32,7 @@
 // guard band in the line's last 10 clocks. Packet A carries the audio samples waiting
 // (48 kHz is ~1.5 a line; up to 4), or is a null packet; packet B is the AVI InfoFrame
 // on line 0 (640x480, VIC 1, RGB), the Audio InfoFrame on line 1 (2 channels), and
-// Audio Clock Regeneration otherwise (N 6144, CTS 25000: exact at a 25.000 MHz pixel
+// Audio Clock Regeneration otherwise (N 6144, CTS 25200: exact at a 25.2 MHz pixel
 // clock and 48 kHz). Data islands are TERC4 coded; channel 0 carries {1, header bit,
 // VSYNC, HSYNC}, channels 1 and 2 the four subpackets' even and odd bits, each packet
 // part protected by its BCH code (x^8 + x^7 + x^6 + 1, bit 0 first). From the HDMI 1.4
@@ -47,10 +48,10 @@ module hdmi_tx #(
 	parameter EXT_CLK = 0,               // 1: the clocks come in (ext_*), from an MMCM already there
 	parameter AUDIO = 1,                 // 1: HDMI with audio; 0: DVI
 	parameter NULLPK = 0,                // (bring-up) 1: every packet a null packet
-	parameter PX125 = 0,                 // 1: the pixel clock is 25.125 MHz (the N64's 59.82 Hz): audio paced and regenerated for it
+	parameter PX125 = 0,                 // 1: the pixel clock is 25.125 MHz (the N64's 59.82 Hz), else 25.2: audio paced and regenerated for it
 	parameter PKMASK = 4'b1111,          // (bring-up) packets sent: [0] audio, [1] ACR, [2] AVI, [3] Audio InfoFrame
 	parameter FS441 = 0,                 // 1: 44.1 kHz audio (the PlayStation's), else 48 kHz
-	// 0: 640 x 480 at 60 Hz (25 MHz pixels, VIC 1, 4:3); 1: 1280 x 720 at 60 Hz (74.25 MHz, VIC 4,
+	// 0: 640 x 480 at 60 Hz (25.2 MHz pixels, VIC 1, 4:3); 1: 1280 x 720 at 60 Hz (74.25 MHz, VIC 4,
 	// 16:9, positive syncs). The clocks come from outside for 720p (EXT_CLK).
 	parameter RES = 0
 )(
@@ -91,16 +92,8 @@ module hdmi_tx #(
 	end else if (EXT_CLK) begin : g_ext
 		assign pclk = ext_pclk; assign pclk5 = ext_pclk5; assign locked = ext_locked;
 	end else begin : g_mmcm
-		wire fb, c0, c1;
-		MMCME2_BASE #(
-			.CLKIN1_PERIOD(20.0), .DIVCLK_DIVIDE(1), .CLKFBOUT_MULT_F(20.125),
-			.CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8)
-		) u_mmcm (
-			.CLKIN1(clk50), .CLKFBIN(fb), .CLKFBOUT(fb), .CLKOUT0(c0), .CLKOUT1(c1),
-			.LOCKED(locked), .PWRDWN(1'b0), .RST(rst),
-			.CLKFBOUTB(), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
-			.CLKOUT4(), .CLKOUT5(), .CLKOUT6()
-		);
+		wire c0, c1;
+		hdmi_clk u_clk (.sys_clk(clk50), .pclk_raw(c0), .pclk5_raw(c1), .locked(locked));   // 25.2 MHz, 126 MHz
 		BUFG u_bp (.I(c0), .O(pclk));
 		BUFG u_b5 (.I(c1), .O(pclk5));
 	end endgenerate
@@ -153,17 +146,17 @@ module hdmi_tx #(
 
 	// --- audio in: a toggle per sample from the other clock; the latest sample is taken
 	// into an 8-deep queue 48000 times a second counted on THIS clock -- the rate the sink
-	// rebuilds from the ACR packets (25 MHz x 6144 / 25000 / 128). Pushing at the source's
+	// rebuilds from the ACR packets (25.2 MHz x 6144 / 25200 / 128). Pushing at the source's
 	// rate instead, on a clock that drifts against this one, over- or under-runs the queue
 	// every few seconds: a click each time.
 	reg [2:0] at;  reg [15:0] ql [0:7], qr [0:7];  reg [2:0] qw, qrd;  reg [3:0] qn;
-	// (44.1 kHz: 441 a time against 250000 -- 25 MHz / 44100 -- as the ACR says: N 7056,
-	// CTS 31250, exact at 25 MHz)
+	// (44.1 kHz: 441 a time against 252000 -- 25.2 MHz / 44100 -- as the ACR says: N 7056,
+	// CTS 31500, exact at 25.2 MHz)
 	// (720p: 74.25 MHz / 48000 = 74250 / 48, and 742500 / 441)
 	localparam [19:0] A_ADD = FS441 ? 20'd441 : 20'd48;
 	// (25.125 MHz: 251250 / 441 and 25125 / 48 -- with ACR N 9408 CTS 41875 and N 6144 CTS 25125)
 	localparam [19:0] A_TOP = RES ? (FS441 ? 20'd742500 : 20'd74250)
-	                        : PX125 ? (FS441 ? 20'd251250 : 20'd25125) : (FS441 ? 20'd250000 : 20'd25000);
+	                        : PX125 ? (FS441 ? 20'd251250 : 20'd25125) : (FS441 ? 20'd252000 : 20'd25200);
 	reg [15:0] hl, hr;  reg [19:0] a48;  reg a_new;
 	initial begin hl = 16'd0; hr = 16'd0; a48 = 20'd0; a_new = 1'b0; end
 	always @(posedge pclk) begin
@@ -238,8 +231,8 @@ module hdmi_tx #(
 	                               : {8'h00, 8'h18, 8'h00, 8'hCA, 8'h22, 8'h01, 8'h00})   // N 6144, CTS 74250
 	                      : PX125 ? (FS441 ? {8'hC0, 8'h24, 8'h00, 8'h93, 8'hA3, 8'h00, 8'h00}    // N 9408, CTS 41875
 	                                       : {8'h00, 8'h18, 8'h00, 8'h25, 8'h62, 8'h00, 8'h00})   // N 6144, CTS 25125
-	                      : (FS441 ? {8'h90, 8'h1B, 8'h00, 8'h12, 8'h7A, 8'h00, 8'h00}    // N 7056, CTS 31250
-	                               : {8'h00, 8'h18, 8'h00, 8'hA8, 8'h61, 8'h00, 8'h00});  // N 6144, CTS 25000
+	                      : (FS441 ? {8'h90, 8'h1B, 8'h00, 8'h0C, 8'h7B, 8'h00, 8'h00}    // N 7056, CTS 31500 (25.2 MHz)
+	                               : {8'h00, 8'h18, 8'h00, 8'h70, 8'h62, 8'h00, 8'h00});  // N 6144, CTS 25200
 	// (clock regeneration on every 32nd line, ~980 a second as hdl-util/hdmi sends it -- not
 	// every line; a null packet on the others)
 	wire        acr_line = vd[4:0] == 5'd2;

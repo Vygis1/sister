@@ -29,7 +29,10 @@ import queue
 import socket
 import sys
 import threading
+import calendar
 import time
+import zlib
+from collections import deque
 
 import serial
 
@@ -50,6 +53,7 @@ def _find_port():
 
 PORT = sys.argv[sys.argv.index('--port') + 1] if '--port' in sys.argv else _find_port()
 TOOLS = ('127.0.0.1', 5557)
+BAUD = 2000000              # the firmware's Serial.begin (115200 before 2026-10-15)
 TRIG = 12000                # a trigger past this is pressed (0..32767)
 
 ser = None
@@ -61,15 +65,22 @@ override = [None, 0.0]      # a tool's "P ..." line, and until when it stands in
 
 def open_port():
     s = serial.Serial()
-    s.port = PORT; s.baudrate = 115200; s.timeout = 0.05
+    s.port = PORT; s.baudrate = BAUD; s.timeout = 0.05
     s.dtr = False; s.rts = False             # (set before opening: toggling them resets the ESP32)
     s.open()
     return s
 
 
+port_dead = threading.Event()   # the port failed (the board's USB dropped): the main loop opens it again
+
+
 def write(line):
     with wlock:
-        ser.write(line.encode())
+        try:
+            ser.write(line.encode())
+        except Exception:
+            port_dead.set()
+            raise
 
 
 def reader():
@@ -82,7 +93,7 @@ def reader():
         try:
             buf += s.read(max(1, s.in_waiting))    # (as soon as anything is there)
         except Exception:
-            time.sleep(0.1); continue
+            port_dead.set(); time.sleep(0.1); continue
         while b'\n' in buf:
             line, buf = buf.split(b'\n', 1)
             t = line.decode(errors='replace').rstrip('\r')
@@ -90,6 +101,50 @@ def reader():
                 replies.put(t[2:])
             elif t:
                 print(t)
+
+
+def put_file(path, data, f):
+    """a file onto the card: "U open", then 4 kB "U blk" blocks, two in flight so the card writes
+    one while the next comes down the line; an "error at <end>" (a bad block, and everything sent
+    after it, dropped) sends again from there. Progress lines "~ <bytes>" to the tool."""
+    def ask(line, t=10.0):
+        write(line + '\n')
+        return replies.get(timeout=t)
+    while not replies.empty():
+        replies.get_nowait()
+    try:
+        r = ask('U open %s %d' % (path, len(data)))
+        if r != 'ok':
+            return 'error open: ' + r
+        BLK, pos, inflight, retries, shown = 4096, 0, deque(), 0, 0
+        while True:
+            while len(inflight) < 2 and pos < len(data):
+                b = data[pos:pos + BLK]
+                with wlock:                   # header and bytes in one write: no pad line between
+                    ser.write(b'U blk %x %x %x\n' % (pos, len(b), zlib.crc32(b)) + b)
+                inflight.append(pos + len(b)); pos += len(b)
+            if not inflight:
+                return 'error no answer at the end'
+            r = replies.get(timeout=30.0)   # (a card allocating space on a big FAT32 can stall for seconds)
+            if r.startswith('error at '):
+                retries += 1
+                if retries > 20:
+                    return 'error too many retries: ' + r
+                inflight.clear(); pos = int(r.split()[2], 16)
+                continue
+            if r not in ('ok', 'done'):
+                return 'error ' + r
+            end = inflight.popleft()
+            if end - shown >= 256 * 1024 or r == 'done':
+                f.write(b'~ %d\n' % end); f.flush(); shown = end
+            if r == 'done':
+                c = ask('U crc %s' % path, 60.0).split()   # read back off the card
+                want = '%08x %x' % (zlib.crc32(data), len(data))
+                if ' '.join(c) != want:
+                    return 'error the card holds %s, sent %s' % (' '.join(c), want)
+                return 'ok %d retries, read back crc32 %s' % (retries, c[0])
+    except queue.Empty:
+        return 'error timeout'
 
 
 def tools_server():
@@ -108,6 +163,12 @@ def tools_server():
                 with cmd_lock:                # prints comes out here, as everything else does
                     write(q[2:] + '\n')
                 f.write(b'ok\n'); f.flush(); continue
+            if q[:2] == 'X ':                 # "X <size> <path>" and the file's bytes: onto the card
+                size, path = q[2:].split(' ', 1)
+                data = f.read(int(size))
+                with cmd_lock:
+                    ans = put_file(path, data, f)
+                f.write((ans + '\n').encode()); f.flush(); continue
             if not q or q[0] not in 'RWDU':
                 continue
             with cmd_lock:
@@ -149,6 +210,38 @@ def state(pad):
     return bits, ax
 
 
+
+# --- the PC core's keyboard: this window's keys, as PS/2 set 2 scan codes ("kb <hex> ..." to the
+# ESP32, esp32/console/pc.h). SDL names keys by their USB HID usage; a key is its make code, and
+# F0 + it when let go; E0 in front of the extended ones. Only while the window has the focus --
+# a keyboard hook would take keys typed into everything else.
+HID_PS2 = {
+    4: '1c', 5: '32', 6: '21', 7: '23', 8: '24', 9: '2b', 10: '34', 11: '33', 12: '43', 13: '3b', 14: '42',
+    15: '4b', 16: '3a', 17: '31', 18: '44', 19: '4d', 20: '15', 21: '2d', 22: '1b', 23: '2c', 24: '3c',
+    25: '2a', 26: '1d', 27: '22', 28: '35', 29: '1a',
+    30: '16', 31: '1e', 32: '26', 33: '25', 34: '2e', 35: '36', 36: '3d', 37: '3e', 38: '46', 39: '45',
+    40: '5a', 41: '76', 42: '66', 43: '0d', 44: '29', 45: '4e', 46: '55', 47: '54', 48: '5b', 49: '5d',
+    51: '4c', 52: '52', 53: '0e', 54: '41', 55: '49', 56: '4a', 57: '58',
+    58: '05', 59: '06', 60: '04', 61: '0c', 62: '03', 63: '0b', 64: '83', 65: '0a', 66: '01', 67: '09',
+    68: '78', 69: '07', 71: '7e',
+    73: 'e0 70', 74: 'e0 6c', 75: 'e0 7d', 76: 'e0 71', 77: 'e0 69', 78: 'e0 7a',
+    79: 'e0 74', 80: 'e0 6b', 81: 'e0 72', 82: 'e0 75',
+    83: '77', 84: 'e0 4a', 85: '7c', 86: '7b', 87: '79', 88: 'e0 5a', 89: '69', 90: '72', 91: '7a',
+    92: '6b', 93: '73', 94: '74', 95: '6c', 96: '75', 97: '7d', 98: '70', 99: '71',
+    224: '14', 225: '12', 226: '11', 227: 'e0 1f', 228: 'e0 14', 229: '59', 230: 'e0 11', 231: 'e0 27',
+}
+
+
+def ps2(scancode, down):
+    c = HID_PS2.get(scancode)
+    if c is None:
+        return None
+    parts = c.split()
+    if not down:
+        parts.insert(len(parts) - 1, 'f0')
+    return 'kb ' + ' '.join(parts) + '\n'
+
+
 def main():
     global ser
     pygame.init()
@@ -158,6 +251,11 @@ def main():
     pad = None
     last, last_t = None, 0.0
     relay = '--relay' in sys.argv
+    kb = '--nokb' not in sys.argv
+    if kb:
+        win = pygame.display.set_mode((420, 70))
+        pygame.display.set_caption('PC keyboard - click here and type (FPGA PC core)')
+        win.fill((40, 40, 90)); pygame.display.flip()
     print('pad: tools on %s:%d%s' % (TOOLS[0], TOOLS[1], '; relaying a controller on this PC' if relay else '; no controller relayed (--relay for that)'))
     quiet = True                      # nothing sent since the last press ended
     while True:
@@ -167,10 +265,28 @@ def main():
                 print('pad: %s connected' % pad.name)
             elif ev.type == pygame.CONTROLLERDEVICEREMOVED and pad is not None:
                 print('pad: disconnected'); pad = None
+            elif kb and ev.type in (pygame.KEYDOWN, pygame.KEYUP) and ser is not None:
+                ln = ps2(ev.scancode, ev.type == pygame.KEYDOWN)
+                if ln:
+                    try: write(ln)
+                    except Exception: pass
+        if port_dead.is_set() and ser is not None:
+            # (a handle on a port that went away cannot be used again, and while it stays open Windows
+            # refuses a new one: "Access is denied" until pad.py was restarted -- 2026-10-19)
+            print('pad: %s went away: opening it again' % PORT)
+            old, ser = ser, None
+            try: old.close()
+            except Exception: pass
+            time.sleep(1)
         if ser is None:
             try:
                 ser = open_port()
+                port_dead.clear()
                 print('pad: talking to the ESP32 on %s' % PORT)
+                # the board's clock (its DS1302, the Game Boy Advance cartridges' clock): the PC's
+                # local time, as seconds since 1970 with no zone
+                write('time %d\n' % calendar.timegm(time.localtime()))
+                write('log on\n')                 # (the ESP32's log, into this one: it is off after every reset)
             except Exception as e:
                 print('pad: %s: %s (again in a second)' % (PORT, e)); time.sleep(1); continue
         bits, ax = state(pad) if pad is not None else (0, [0, 0, 0, 0])

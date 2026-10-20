@@ -33,6 +33,9 @@ module eth_top #(
 	parameter CORE_SNES = 0,
 	parameter CORE_GB  = 0,     // the Game Boy (gb_top): its own image, the cartridge in DDR3, core id 'B'
 	parameter CORE_A26 = 0,     // the Atari 2600 (a26_top): its own image, core id 'A'
+	parameter CORE_PCE = 0,     // the PC Engine (pce_top): its own image, the HuCard in DDR3, core id 'E'
+	parameter CORE_GBA = 0,     // the Game Boy Advance (gba_top): its own image, core id 'V'
+	parameter CORE_PC  = 0,     // the PC (pc_top): its own image, core id 'C'
 	// 1: the network (see the top). 0: none -- the ESP32 alone.
 	parameter NET      = 0,
 	// 1: the picture to the web page too, as a UDP stream (net_core's streamer, the
@@ -72,8 +75,10 @@ module eth_top #(
 	// --- the ESP32's SPI wires, on header U2 (see esp32/README.md) ----------------
 	input  wire       esp_sclk,
 	input  wire       esp_mosi,
-	output wire       esp_miso,
+	inout  wire       esp_miso,          // (let go in a quad write's data: the ESP32 drives it then)
 	input  wire       esp_cs_n,
+	input  wire       esp_d2,            // quad's third and fourth data wires: the ESP32's WP (GPIO 22) and
+	input  wire       esp_d3,            // HD (GPIO 21), on U2 pins 12 and 11
 
 	// --- HDMI, a bare connector breakout on header U4 pins 7-26 (boards/qmtech_a100t/
 	// HEADERS.md): TMDS single-ended (+ and - driven opposite), the shields, ground,
@@ -253,7 +258,7 @@ module eth_top #(
 	wire [15:0]  d_wdata_wmask;
 	wire         d_ready, d_valid, d_calibrated;
 
-	localparam HAS_DDR3 = MD_DDR3 || CORE_PS1 || CORE_N64 || CORE_SNES || CORE_GB;
+	localparam HAS_DDR3 = MD_DDR3 || CORE_PS1 || CORE_N64 || CORE_SNES || CORE_GB || CORE_PCE || CORE_GBA || CORE_PC;
 	// the HDMI clocks, from the memory's MMCM (below)
 	wire         vid_pclk, vid_pclk5, vid_locked;
 	wire         pclk_raw_w, pclk5_raw_w, hlocked_w;
@@ -261,29 +266,30 @@ module eth_top #(
 	wire [9:0]   vid_x, vid_y;
 	wire         vid_req;
 	wire [23:0]  vid_rgb;
-	assign hdmi_lo = 11'd0;
+	// The connector's other pins: shields, grounds, the reserved pin, DDC and hot-plug held low
+	// (a display's pull-ups then cannot lift a ball to 5 V); CEC (pin 13, hdmi_lo[4]) left
+	// alone -- a 3.3 V bus the display idles high, and one held low all the time is a jammed
+	// bus to a set that uses it; the +5V pin at 3.3 V, the most this chip has.
+	assign hdmi_lo[3:0] = 4'd0; assign hdmi_lo[10:5] = 6'd0;
+	OBUFT u_cec (.I(1'b0), .T(1'b1), .O(hdmi_lo[4]));
 	assign hdmi_5v = 1'b1;
 	generate if (HAS_DDR3) begin : g_ddr3
 		// MIG wants 200 MHz for both its system clock and its IDELAY reference,
-		// and the board has a 50 MHz oscillator. One MMCM: 50 x 16 = 800 MHz in
-		// the VCO, divided by four.
-		// (and HDMI's: VCO 50 x 20 = 1000 MHz; /5 = 200 MHz for MIG, /40 = 25.000 MHz
-		// pixel clock -- 640x480's is 25.175, monitors take this -- /8 = 125 MHz, five
-		// times it for the serialisers, which must be exactly five times, one MMCM)
-		wire mmcm_fb, clk200_raw, clk200, mmcm_locked, pclk_raw, pclk5_raw;
+		// and the board has a 50 MHz oscillator. One MMCM: 50 x 20 = 1000 MHz in
+		// the VCO, /5 = 200 MHz for MIG, /CLK_DIV the console. (The pixel clock came
+		// from here too, /40 = 25.000 MHz, until 2026-10-16: hdmi_clk now.)
+		wire mmcm_fb, clk200_raw, clk200, mmcm_locked;
 		MMCME2_BASE #(
 			.CLKIN1_PERIOD(20.0),          // 50 MHz
 			.CLKFBOUT_MULT_F(20.0),        // 1000 MHz VCO
 			.DIVCLK_DIVIDE(1),
 			.CLKOUT0_DIVIDE_F(5.0),        // 200 MHz
-			.CLKOUT1_DIVIDE(40),           // 25 MHz
-			.CLKOUT2_DIVIDE(8),            // 125 MHz
 			.CLKOUT3_DIVIDE(CLK_DIV)       // the console
 		) u_mmcm (
 			.CLKIN1(sys_clk), .CLKFBIN(mmcm_fb), .CLKFBOUT(mmcm_fb),
 			.CLKOUT0(clk200_raw), .LOCKED(mmcm_locked),
 			.RST(1'b0), .PWRDWN(1'b0),
-			.CLKOUT0B(), .CLKOUT1(pclk_raw), .CLKOUT1B(), .CLKOUT2(pclk5_raw), .CLKOUT2B(),
+			.CLKOUT0B(), .CLKOUT1(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(),
 			.CLKOUT3(cclk_raw), .CLKOUT3B(), .CLKOUT4(), .CLKOUT5(), .CLKOUT6(),
 			.CLKFBOUTB()
 		);
@@ -303,7 +309,8 @@ module eth_top #(
 				.CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .CLKFBOUTB());
 			assign pclk_raw_w = vp_raw; assign pclk5_raw_w = vp5_raw; assign hlocked_w = vlocked;
 		end else begin : g_pclk
-			assign pclk_raw_w = pclk_raw; assign pclk5_raw_w = pclk5_raw; assign hlocked_w = mmcm_locked;
+			// 25.2 MHz and its 5x (hdmi_clk: why not the memory MMCM's /40)
+			hdmi_clk u_hclk (.sys_clk(sys_clk), .pclk_raw(pclk_raw_w), .pclk5_raw(pclk5_raw_w), .locked(hlocked_w));
 		end
 
 		wire        ui_clk, ui_rst, calib_done;
@@ -361,15 +368,15 @@ module eth_top #(
 		assign ddr3_ck_p = 1'b0;  assign ddr3_ck_n = 1'b1;
 		assign ddr3_cke = 1'b0;
 		assign ddr3_dm = 2'd0;    assign ddr3_odt = 1'b0;
-		// (no memory: an MMCM for HDMI and the console -- VCO 1000 MHz, /40 25 MHz,
-		// /8 125 MHz, /CLK_DIV)
-		wire hfb, p_raw, p5_raw, hl;
+		// (no memory: an MMCM for the console -- VCO 1000 MHz, /CLK_DIV -- and hdmi_clk's
+		// for the picture)
+		wire hfb, hl;
 		MMCME2_BASE #(.CLKIN1_PERIOD(20.0), .CLKFBOUT_MULT_F(20.0), .DIVCLK_DIVIDE(1),
-		              .CLKOUT0_DIVIDE_F(40.0), .CLKOUT1_DIVIDE(8), .CLKOUT2_DIVIDE(CLK_DIV)) u_hmmcm (
-			.CLKIN1(sys_clk), .CLKFBIN(hfb), .CLKFBOUT(hfb), .CLKOUT0(p_raw), .CLKOUT1(p5_raw), .LOCKED(hl),
+		              .CLKOUT2_DIVIDE(CLK_DIV)) u_hmmcm (
+			.CLKIN1(sys_clk), .CLKFBIN(hfb), .CLKFBOUT(hfb), .CLKOUT0(), .CLKOUT1(), .LOCKED(hl),
 			.RST(1'b0), .PWRDWN(1'b0), .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2(cclk_raw), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
 			.CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .CLKFBOUTB());
-		assign pclk_raw_w = p_raw; assign pclk5_raw_w = p5_raw; assign hlocked_w = hl;
+		hdmi_clk u_hclk (.sys_clk(sys_clk), .pclk_raw(pclk_raw_w), .pclk5_raw(pclk5_raw_w), .locked(hlocked_w));
 		assign cclk_locked = hl;
 	end endgenerate
 	// HDMI, in every build: the clocks from whichever MMCM above
@@ -392,12 +399,14 @@ module eth_top #(
 	// take every frame, and the command byte says which one answers (0x3x the drive,
 	// everything else this). Byte 0 out is the signature from both alike.
 	wire rf_esp_miso, e_miso; wire [7:0] e_cmd;
-	esp_bus #(.CORE_ID(CORE_GB ? 8'h42 : CORE_A26 ? 8'h41 : CORE_GG ? 8'h47 : CORE_SNES ? 8'h46 : CORE_PS1 ? 8'h50 : CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
+	esp_bus #(.CORE_ID(CORE_PC ? 8'h43 : CORE_GBA ? 8'h56 : CORE_PCE ? 8'h45 : CORE_GB ? 8'h42 : CORE_A26 ? 8'h41 : CORE_GG ? 8'h47 : CORE_SNES ? 8'h46 : CORE_PS1 ? 8'h50 : CORE_N64 ? 8'h36 : CORE_MD ? 8'h4D : CORE_NES ? 8'h4E : 8'h53)) u_espbus (
 		.clk(cclk), .rst(rst),
 		.spi_sclk(esp_sclk), .spi_mosi(esp_mosi), .spi_miso(e_miso), .spi_cs_n(esp_cs_n),
+		.spi_d1(esp_miso), .spi_d2(esp_d2), .spi_d3(esp_d3), .spi_miso_t(e_miso_t),
 		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re),
 		.bus_rdata(bus_rdata), .bus_ack(e_ack), .cmd(e_cmd));
-	assign esp_miso = (CORE_PS1 && e_cmd[7:4] == 4'h3) ? rf_esp_miso : e_miso;
+	wire e_miso_t;
+	assign esp_miso = e_miso_t ? 1'bz : (CORE_PS1 && e_cmd[7:4] == 4'h3) ? rf_esp_miso : e_miso;
 	wire [31:0] bus_addr, bus_wdata;
 	wire        bus_we, bus_re;
 	bus_arb u_arb (.clk(cclk), .rst(rst),
@@ -410,7 +419,7 @@ module eth_top #(
 	icap_reboot u_reboot (.clk(cclk), .rst(rst),
 		.go(bus_we && bus_ack && bus_addr == 32'h0000_0014 && bus_wdata == 32'hB007_0000));
 
-	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD), .CORE_GB(CORE_GB), .CORE_A26(CORE_A26),
+	regfile #(.CORE_NES(CORE_NES), .CORE_SMS(CORE_SMS), .CORE_GG(CORE_GG), .CORE_MD(CORE_MD), .CORE_GB(CORE_GB), .CORE_A26(CORE_A26), .CORE_PCE(CORE_PCE), .CORE_GBA(CORE_GBA), .CORE_PC(CORE_PC),
 	          .MD_DDR3(MD_DDR3), .CORE_PS1(CORE_PS1), .CORE_N64(CORE_N64), .CORE_SNES(CORE_SNES), .WEBVID(WEBVID), .N64_DBG(N64_DBG), .N64_ISV(N64_ISV), .PS1_DBG(PS1_DBG),
 	          .RELEASE(RELEASE), .PS1_DCIDX(PS1_DCIDX),
 	          .CLK_HZ(1_000_000_000 / CLK_DIV)) u_regs (

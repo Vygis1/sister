@@ -80,12 +80,21 @@ static void fill(int c0, int r0, int c1, int r1, uint32_t attr) {
 static std::string fit(const std::string &s, int w) { return (int)s.size() <= w ? s : s.substr(0, w > 3 ? w - 3 : 0) + "..."; }
 static std::string num(long v) { char b[16]; snprintf(b, sizeof b, "%ld", v); return b; }
 
-// a frame (the font's thin lines) from (c0, r0) to (c1, r1), a title set into its top edge
+// A card, as the graphical menu's rows and panels: rounded, a colour of the palette (BLACK: the
+// cards' own). Its top is the lower half of row r0, its bottom the upper half of row r1, so a
+// card of three rows has its middle row's text centred in 32 pixels. What is written on it
+// afterwards keeps its background (glyph keeps the cell's).
+static void card(int c0, int r0, int c1, int r1, int colour = BLACK) {
+  for (int c = c0; c <= c1; c++) {
+    glyph(c, r0, c == c0 ? 0xC0 : c == c1 ? 0xC1 : 0x8C, colour, 0);
+    glyph(c, r1, c == c0 ? 0xC2 : c == c1 ? 0xC3 : 0x83, colour, 0);
+  }
+  fill(c0, r0 + 1, c1, r1 - 1, bgBits(colour));
+}
+// a panel (once the font's thin lines): a card, its title over it in the dim ink
 static void frame(int c0, int r0, int c1, int r1, const std::string &title = "", int ink = GREY) {
-  glyph(c0, r0, 0x01, ink); glyph(c1, r0, 0x02, ink); glyph(c0, r1, 0x03, ink); glyph(c1, r1, 0x04, ink);
-  for (int c = c0 + 1; c < c1; c++) { glyph(c, r0, 0x05, ink); glyph(c, r1, 0x05, ink); }
-  for (int r = r0 + 1; r < r1; r++) { glyph(c0, r, 0x06, ink); glyph(c1, r, 0x06, ink); }
-  if (!title.empty()) text(c0 + 2, r0, " " + title + " ", WHITE);
+  card(c0, r0, c1, r1);
+  if (!title.empty()) text(c0 + 1, r0 - 1, title, ink);
 }
 
 // --- big letters: 5 x 7, two letter pixels a cell each way (quadrant glyphs) --------------

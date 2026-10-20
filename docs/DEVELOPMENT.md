@@ -66,7 +66,7 @@ Vivado uses about 1.5 cores a run: independent builds go faster in parallel than
 ```
 
 - Benches are in `sim/`. Large systems have their own runners: `tools/simps1.sh`, the N64 model
-  in `tools/n64/`, and the DOS PC under Verilator in `sim/pc/` (`make`, or `make Z486=1`).
+  in `tools/n64/`, and the DOS PC under Verilator in `sim/pc/` (`make`).
 - Reference models (Python) sit beside each system's tools: the PlayStation's SPU
   (`tools/ps1/spu_ref.py`), the N64 (`tools/n64/n64model.py`), the GBA's picture unit
   (`tools/gba/ppuref.py`), the menu (`tools/menu/ui_model.cpp`).

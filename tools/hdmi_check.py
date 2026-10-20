@@ -66,7 +66,7 @@ def main():
                             samples.append((l, r))
                 elif hdr[0] == 0x01:                                # clock regeneration
                     cts = (sb[0][1] << 16) | (sb[0][2] << 8) | sb[0][3]; n = (sb[0][4] << 16) | (sb[0][5] << 8) | sb[0][6]
-                    if (cts, n) != (25000, 6144):
+                    if (cts, n) != (25200, 6144):
                         errs += 1; print('ACR: CTS %d N %d' % (cts, n))
                 elif hdr[0] in (0x82, 0x84):                        # InfoFrames
                     total = sum(hdr) + sum(sum(row) for row in sb)

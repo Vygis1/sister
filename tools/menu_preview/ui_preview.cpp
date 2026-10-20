@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
   ui::hal.glyphRows = [](int first, const uint32_t *rows, int n) { for (int i = 0; i < n; i++) { g_glyph[first + i] = rows[i]; g_glyphSet[first + i] = true; } };
   ui::loadGlyphs();
 
-  scr::Chrome ch; ch.wifiBars = 2; ch.pad1 = true; ch.pad2 = false; ch.running = "";
+  scr::Chrome ch; ch.wifiBars = 2; ch.pad1 = true; ch.pad2 = false; ch.running = ""; ch.time = "18:42"; ch.date = "Sat 17 Oct";
   int top = 0;
   bool splash = which == "splash";
   ui::palette(splash ? art::SPLASH_PAL : art::MENU_PAL);
@@ -31,7 +31,17 @@ int main(int argc, char **argv) {
   if (which == "homenopad") { ch.pad1 = false; which = "home"; }
   std::vector<std::string> homeInfo;
   if (!ch.pad1 && !ch.pad2) homeInfo = { "PS4 / PS5:  hold SHARE + PS", "Xbox:       hold the pair button", "Switch Pro: hold sync" };
-  if (which == "home") {
+  if (which == "ingame") {
+    ch.running = "Tony Hawk's Pro Skater";
+    std::vector<Item> it;
+    auto add = [&](const char *a, uint8_t ic, int ink, const char *v) { Item x; x.text = a; x.icon = ic; x.iconInk = ink; x.value = v; x.valueInk = ui::GREY; it.push_back(x); };
+    add("Back to Tony Hawk's Pro Skater", art::G_RIGHT, ui::GREEN, "");
+    add("Reset", 0, 0, "");
+    add("Settings", art::G_GEAR, ui::YELLOW, "");
+    add("Home", art::G_HEART, ui::PINK, "saves, quits the game");
+    scr::list(ch, "PAUSED", it, 0, top, {}, "", { { art::G_CROSS, "open" }, { art::G_CIRCLE, "back to the game" } }, 2);
+    ui::ctrl(3);
+  } else if (which == "home") {
     std::vector<Item> it;
     const char *n[] = { "NES", "Master System", "Mega Drive", "Super NES", "Nintendo 64", "PlayStation" };
     int g[] = { 3, 262, 3, 6, 1, 2 };

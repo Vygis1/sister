@@ -21,6 +21,9 @@ module tb_shell;
 
 	reg  sclk = 0, mosi = 0, cs_n = 1;
 	wire miso;
+	// a quad page write's other three data wires (MISO is one: the board lets go of it then)
+	reg  qd1 = 0, qd2 = 0, qd3 = 0, qdrive = 0;
+	assign miso = qdrive ? qd1 : 1'bz;
 	wire led0, led1;
 	wire flash_cs_n, flash_mosi, flash_wp_n, flash_hold_n;
 	wire flash_miso;
@@ -33,12 +36,12 @@ module tb_shell;
 	wire       eth_tx_en, eth_mdc;
 	wire       eth_mdio;
 
-	shell_top dut (
+	shell_top #(.SUM_LOG(2)) dut (   // (a 1 kB checksum block: 64 kB is 84 ms of simulation)
 		.sys_clk(clk), .led0(led0), .led1(led1),
 		.eth_refclk(clk), .eth_rxd(2'b00), .eth_crs_dv(1'b0),
 		.eth_txd(eth_txd), .eth_tx_en(eth_tx_en),
 		.eth_mdc(eth_mdc), .eth_mdio(eth_mdio),
-		.esp_sclk(sclk), .esp_mosi(mosi), .esp_miso(miso), .esp_cs_n(cs_n),
+		.esp_sclk(sclk), .esp_mosi(mosi), .esp_miso(miso), .esp_cs_n(cs_n), .esp_d2(qd2), .esp_d3(qd3),
 		.flash_cs_n(flash_cs_n), .flash_mosi(flash_mosi),
 		.flash_miso(flash_miso),
 		.flash_wp_n(flash_wp_n), .flash_hold_n(flash_hold_n)
@@ -145,6 +148,48 @@ module tb_shell;
 		end
 	endtask
 
+	task write_page_quad;           // the same, its 256 bytes four bits a clock (0x19)
+		input [23:0] off;
+		input [7:0]  seed;
+		integer i, h; reg [7:0] o;
+		begin
+			unlock;
+			frame_open;
+			send(8'h19);
+			send(off[23:16]); send(off[15:8]); send(off[7:0]);
+			#100 qdrive = 1;
+			for (i = 0; i < 256; i = i + 1) begin
+				o = seed + i[7:0];
+				for (h = 1; h >= 0; h = h - 1) begin
+					{qd3, qd2, qd1, mosi} = o[4 * h +: 4]; #50; sclk = 1; #50; sclk = 0;
+				end
+			end
+			qdrive = 0;
+			frame_close;
+			wait_idle;
+		end
+	endtask
+
+	task fill_buffer_quad;          // 0x1A: n words of a pattern into the block buffer from word w0
+		input [11:0] w0;
+		input integer nw;
+		input [7:0] seed;
+		integer i, h; reg [7:0] o;
+		begin
+			frame_open;
+			send(8'h1A); send(8'h00); send({4'd0, w0[11:8]}); send(w0[7:0]);
+			#100 qdrive = 1;
+			for (i = 0; i < nw * 4; i = i + 1) begin
+				o = seed + i[7:0];
+				for (h = 1; h >= 0; h = h - 1) begin
+					{qd3, qd2, qd1, mosi} = o[4 * h +: 4]; #50; sclk = 1; #50; sclk = 0;
+				end
+			end
+			qdrive = 0;
+			frame_close;
+		end
+	endtask
+
 	task erase_sector_raw;          // the same, without the unlock
 		input [23:0] off;
 		begin
@@ -222,7 +267,7 @@ module tb_shell;
 		frame_close;
 		$display("    PING -> %02x %02x %02x %02x", rx[0], rx[1], rx[2], rx[3]);
 		check(rx[0] == 8'hA5, "the first byte back is the signature");
-		check(rx[1] == 8'd2,  "then the protocol version (2: the menu)");
+		check(rx[1] == 8'd7,  "then the protocol version (7)");
 		check(rx[2] == 8'd0,  "and core 0, which is the shell");
 
 		// --- put a page in the core slot and read it back ----------------------
@@ -324,7 +369,15 @@ module tb_shell;
 		// --- the menu's door: esp_bus on the same wires --------------------------
 		$display(" the menu's bus:");
 		frame_open; send(CMD_STATUS); send(8'h00); send(8'h00); send(8'h00); frame_close;
-		check(rx[0] === 8'hA5 && rx[1] === 8'd2 && rx[2] === 8'd0, "status: the shell, version 2 (it can draw the menu)");
+		check(rx[0] === 8'hA5 && rx[1] === 8'd7 && rx[2] === 8'd0, "status: the shell, version 6");
+		// the picture's switch (0x00090004), and its signature back
+		frame_open; send(8'h40); send(8'h00); send(8'h09); send(8'h00); send(8'h04);
+		send(8'h01); send(8'h00); send(8'h00); send(8'h00); frame_close;
+		repeat (20) @(posedge clk);
+		check(dut.u_ui.on === 1'b1, "the menu's write lands in the picture's switch");
+		frame_open; send(8'h41); send(8'h00); send(8'h09); send(8'h00); send(8'h00);
+		repeat (8) send(8'h00); frame_close;
+		check({rx[12], rx[11], rx[10], rx[9]} === 32'h5549_3031, "the picture's page reads UI01");
 		// write pad 1 (0x00080008), then read it back
 		frame_open; send(8'h40); send(8'h00); send(8'h08); send(8'h00); send(8'h08);
 		send(8'h34); send(8'h12); send(8'h00); send(8'h00); frame_close;
@@ -353,13 +406,66 @@ module tb_shell;
 		erase_sector(24'h000000);
 		check(flash.mem[24'h200000] === 8'hFF, "with the unlock it erases");
 
+		// --- a page written four bits a clock -------------------------------------
+		$display(" a quad page write:");
+		erase_sector(24'h010000);
+		write_page_quad(24'h010000, 8'h37);
+		begin : qchk
+			integer bad; bad = 0;
+			for (i = 0; i < 256; i = i + 1)
+				if (flash.mem[24'h210000 + i] !== 8'h37 + i[7:0]) bad = bad + 1;
+			check(bad == 0, "a page sent quad (0x19) is in the flash byte for byte");
+			if (bad) $display("    %0d bytes wrong; first %02x want 37", bad, flash.mem[24'h210000]);
+		end
+		write_page(24'h010100, 8'h55);
+		check(flash.mem[24'h210100] === 8'h55 && flash.mem[24'h2101FF] === 8'h54,
+		      "then a page a bit a clock still goes in");
+
+		// --- pages from the block buffer, programmed by the board itself (0x1A, 0x1B) -------------
+		$display(" the block buffer:");
+		erase_sector(24'h020000);
+		fill_buffer_quad(12'd0, 3 * 64, 8'h21);          // three pages
+		unlock;
+		frame_open; send(8'h1B); send(8'h02); send(8'h00); send(8'h00); send(8'd3); frame_close;
+		wait_idle;
+		begin : pchk
+			integer bad; bad = 0;
+			for (i = 0; i < 768; i = i + 1)
+				if (flash.mem[24'h220000 + i] !== 8'h21 + i[7:0]) bad = bad + 1;
+			check(bad == 0, "three pages from the block buffer are in the flash byte for byte");
+			if (bad) $display("    %0d bytes wrong; first %02x %02x %02x", bad, flash.mem[24'h220000], flash.mem[24'h220100], flash.mem[24'h220200]);
+			check(flash.mem[24'h220300] === 8'hFF, "and the page after them is still blank");
+		end
+		// without an unlock it does nothing
+		fill_buffer_quad(12'd0, 64, 8'h00);
+		frame_open; send(8'h1B); send(8'h02); send(8'h03); send(8'h00); send(8'd1); frame_close;
+		wait_idle;
+		check(flash.mem[24'h220300] === 8'hFF, "0x1B without an unlock programs nothing");
+
+		// --- a 64 kB block's checksum, read by the board (0x16, then 0x17) -------------------
+		$display(" the checksum:");
+		begin : cks
+			reg [31:0] x, sm, w; reg [63:0] got;
+			x = 0; sm = 0;
+			for (i = 0; i < 1024; i = i + 4) begin
+				w = {flash.mem[24'h200000 + i + 3], flash.mem[24'h200000 + i + 2], flash.mem[24'h200000 + i + 1], flash.mem[24'h200000 + i]};
+				x = {x[30:0], x[31]} ^ w; sm = sm + w;
+			end
+			frame_open; send(8'h16); send(8'h20); send(8'h00); send(8'h00); frame_close;
+			wait_idle;
+			frame_open; send(8'h17); for (i = 0; i < 9; i = i + 1) send(8'h00); frame_close;
+			got = {rx[8], rx[7], rx[6], rx[5], rx[4], rx[3], rx[2], rx[1]};
+			check(got === {sm, x}, "the board's checksum of a block (1 kB here) is the bench's");
+			if (got !== {sm, x}) $display("    got %016x, want %016x", got, {sm, x});
+		end
+
 		// --- boot ---------------------------------------------------------------
 		// No reply is possible: on real silicon the chip stops being the thing
 		// that was listening. What can be checked is that the exact sequence
 		// went into the primitive, with the slot address in the right word.
 		$display(" boot:");
 		frame_open;
-		send(CMD_BOOT); send(8'h01);          // 1 = the core
+		send(CMD_BOOT); send(8'h02);          // 2 = the second slot
 		frame_close;
 		repeat (40) @(posedge clk);
 
@@ -367,8 +473,8 @@ module tb_shell;
 		check(icap_n >= 7, "the reconfiguration sequence was issued");
 		check(icap_seen[1] === bitswap(32'hAA995566), "word 1 is the sync word");
 		check(icap_seen[3] === bitswap(32'h30020001), "word 3 writes WBSTAR");
-		check(icap_seen[4] === bitswap(32'h00200000),
-		      "word 4 is $200000, which is where the core starts");
+		check(icap_seen[4] === bitswap(32'h00500000),
+		      "word 4 is $500000, where the second slot starts");
 		check(icap_seen[5] === bitswap(32'h30008001), "word 5 writes CMD");
 		check(icap_seen[6] === bitswap(32'h0000000F), "word 6 is IPROG");
 

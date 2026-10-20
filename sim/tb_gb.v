@@ -21,6 +21,8 @@
 //
 //   ./tools/sim.sh tb_gb ROM../../sim/roms/gb/06.hex
 //   ./tools/sim.sh tb_gb ROM../../sim/roms/gb/acid2.hex FRAMES12 REF../../sim/roms/gb/acid2_ref.hex
+//   ./tools/sim.sh tb_gb ROM../../sim/roms/gb/cgb_acid2.hex FRAMES12 REF15../../sim/roms/gb/cgb_acid2_ref.hex
+//                                            (cgb-acid2: a Color game; the frame compared in colour)
 //   ./tools/sim.sh tb_gb ROM... LAT9           ROM answers 9 clocks late (default 2)
 //   ./tools/sim.sh tb_gb ROM... LATRND1        ...or a random 1..24
 //   ./tools/sim.sh tb_gb ROM... MAXCLK60000000
@@ -51,6 +53,8 @@ module `GB_TB_NAME;
 	reg  [7:0]  rom_data = 8'hFF;
 	wire [7:0]  px_x, px_y;
 	wire [1:0]  px_shade;
+	wire [14:0] px_rgb;
+	wire        cgb_mode;
 	wire        pixel_en, frame_start;
 	wire signed [15:0] audio_l, audio_r;
 	wire [7:0]  sio_data;
@@ -65,7 +69,8 @@ module `GB_TB_NAME;
 		.clk(clk), .rst(rst), .pause(1'b0),
 		.rom_addr(rom_addr), .rom_req(rom_req), .rom_ack(rom_ack), .rom_data(rom_data),
 		.joy(joy),
-		.px_x(px_x), .px_y(px_y), .px_shade(px_shade), .pixel_en(pixel_en), .frame_start(frame_start),
+		.px_x(px_x), .px_y(px_y), .px_shade(px_shade), .px_rgb(px_rgb), .cgb_mode(cgb_mode),
+		.pixel_en(pixel_en), .frame_start(frame_start),
 		.audio_l(audio_l), .audio_r(audio_r),
 		.sav_addr(15'd0), .sav_q(sav_q), .cram_dirty(cram_dirty), .sav_clear(1'b0),
 		.sio_data(sio_data), .sio_start(sio_start),
@@ -91,13 +96,15 @@ module `GB_TB_NAME;
 	end
 
 	// --- the picture --------------------------------------------------------------------------
-	reg [1:0] frame [0:160*144-1];
-	reg [1:0] ref   [0:160*144-1];
+	reg [1:0]  frame [0:160*144-1];
+	reg [1:0]  ref   [0:160*144-1];
+	reg [14:0] frame15 [0:160*144-1];        // the Color's picture, BBBBBGGGGGRRRRR
+	reg [14:0] ref15   [0:160*144-1];
 	integer frames = 0, want_frames = 0, i, fh, mism, maxclk, clocks = 0;
 	reg [1023:0] romfile, reffile;
-	reg have_ref = 0;
+	reg have_ref = 0, have_ref15 = 0;
 	always @(posedge clk) begin
-		if (pixel_en) frame[px_y * 160 + px_x] <= px_shade;
+		if (pixel_en) begin frame[px_y * 160 + px_x] <= px_shade; frame15[px_y * 160 + px_x] <= px_rgb; end
 		if (frame_start) frames <= frames + 1;
 		clocks <= clocks + 1;
 	end
@@ -130,10 +137,10 @@ module `GB_TB_NAME;
 				         dut.u_ppu.bgp, dut.u_ppu.obp0, dut.u_ppu.obp1);
 			end
 			if (dut.u_ppu.obj_start)
-				$display("    dot %0d lx=%0d: object [%0d] starts, bg_cnt=%0d fifo=%04x", dut.u_ppu.dot, dut.u_ppu.lx, dut.u_ppu.sp_match_k, dut.u_ppu.bg_cnt, dut.u_ppu.bg_fifo);
+				$display("    dot %0d lx=%0d: object [%0d] starts, bg_cnt=%0d fifo=%012x", dut.u_ppu.dot, dut.u_ppu.lx, dut.u_ppu.sp_match_k, dut.u_ppu.bg_cnt, dut.u_ppu.bg_fifo[47:0]);
 			if (dut.u_ppu.sfetch && dut.u_ppu.sstep == 3'd5)
-				$display("    dot %0d: object [%0d] tile=%02x attr=%02x row=%0d lo=%02x hi=%02x cut=%0d ob_fifo %08x -> %08x",
-				         dut.u_ppu.dot, dut.u_ppu.sk, dut.u_ppu.stile, dut.u_ppu.sattr, dut.u_ppu.s_row, dut.u_ppu.sdat_lo, dut.u_ppu.fv_q,
+				$display("    dot %0d: object [%0d] tile=%02x attr=%02x row=%0d lo=%02x hi=%02x cut=%0d ob_fifo %024x -> %024x",
+				         dut.u_ppu.dot, dut.u_ppu.sk, dut.u_ppu.stile, dut.u_ppu.sattr, dut.u_ppu.s_row, dut.u_ppu.sdat_lo, dut.u_ppu.s_q,
 				         dut.u_ppu.s_cut, dut.u_ppu.ob_fifo, dut.u_ppu.ob_merged);
 			if (dut.u_ppu.win_start)
 				$display("    dot %0d lx=%0d: window starts", dut.u_ppu.dot, dut.u_ppu.lx);
@@ -146,9 +153,26 @@ module `GB_TB_NAME;
 		end
 	end
 
-	// every PPU register write, with where the raster was (REGTRACE<frame>)
-	integer regtrace = -1;
+	// every PPU register write, with where the raster was (REGTRACE<frame>); every I/O write
+	// and read of the Color's registers (IOTRACE1), to see a Color game's start
+	integer regtrace = -1, iotrace = 0;
 	always @(posedge clk) begin
+		if (iotrace && dut.m1 && dut.m_end && (dut.a == 16'h0100 || dut.a < 16'h0068))
+			$display("    [%0d] fetch at %04x: a restart, or an interrupt vector", clocks, dut.a);
+		if (iotrace && dut.rd && dut.sel_io && dut.m_end && (dut.a[7:0] >= 8'h4D || iotrace > 4) && !dut.hd_run)
+			$display("    [%0d] pc %04x: FF%02x reads %02x (line %0d dot %0d lcd_on %b mode %0d)", clocks, dbg_pc, dut.a[7:0], dut.cpu_din, dut.u_ppu.line, dut.u_ppu.dot, dut.u_ppu.lcd_on, dut.u_ppu.mode);
+		if (iotrace > 3 && dut.m1 && dut.m_end)
+			$display("    [%0d] op at %04x: %02x  A=%02x B=%02x C=%02x DE=%02x%02x HL=%02x%02x Z=%b", clocks, dut.a, dut.cpu_din,
+			         dut.u_cpu.A, dut.u_cpu.B, dut.u_cpu.C, dut.u_cpu.D, dut.u_cpu.E, dut.u_cpu.H, dut.u_cpu.L, dut.u_cpu.f_z);
+		if (iotrace > 2 && dut.rd && !dut.m1 && dut.a == 16'h8103 && dut.ce)
+			$display("    [%0d] 8103: t %0d vram_a %04x hd_running %b hd_hold %0d lcd_on %b mode %0d vbk %b q0 %02x din %02x", clocks, dut.tcyc, dut.vram_a, dut.hd_running, dut.hd_hold, dut.u_ppu.lcd_on, dut.u_ppu.mode, dut.u_ppu.vbk, dut.u_ppu.vram0_q_r, dut.cpu_din);
+		if (iotrace > 2 && dut.rd && dut.m_end && !dut.m1 && (dut.a[15:12] == 4'h8 || dut.a[15:12] == 4'h4))
+			$display("    [%0d] pc %04x: (%04x) reads %02x", clocks, dbg_pc, dut.a, dut.cpu_din);
+		if (iotrace > 1 && dut.hd_run && (dut.hd_wr || dut.hd_req))
+			$display("    [%0d] hdma st %0d byte %0d src %04x dst %04x req %b wr %b data %02x rom_q %02x rom_pend %b vram_we %b bank %b", clocks,
+			         dut.hd_st, dut.hd_byte, dut.hd_src, dut.hd_dst, dut.hd_req, dut.hd_wr, dut.hd_data, dut.rom_q, dut.rom_pend, dut.u_ppu.vram_we, dut.u_ppu.cpu_bank);
+		if (iotrace && dut.cpu_wr && dut.sel_io && (dut.a[7:0] >= 8'h40))
+			$display("    [%0d] pc %04x: FF%02x <= %02x (line %0d mode %0d)", clocks, dbg_pc, dut.a[7:0], dut.cpu_dout, dut.u_ppu.line, dut.u_ppu.mode);
 		if (frames == regtrace && dut.cpu_wr && dut.sel_ppu)
 			$display("    line %0d dot %0d mode %0d: FF4%x <= %02x", dut.u_ppu.line, dut.u_ppu.dot, dut.u_ppu.mode, dut.a[3:0], dut.cpu_dout);
 		if (frames == regtrace && dut.irq_stat)
@@ -160,7 +184,9 @@ module `GB_TB_NAME;
 			fh = $fopen("frame.ppm", "wb");
 			$fwrite(fh, "P6\n160 144\n255\n");
 			for (i = 0; i < 160 * 144; i = i + 1) begin
-				case (frame[i])
+				// (a Color's colours as cgb-acid2's README scales them: (c << 3) | (c >> 2))
+				if (cgb_mode) $fwrite(fh, "%c%c%c", {frame15[i][4:0], frame15[i][4:2]}, {frame15[i][9:5], frame15[i][9:7]}, {frame15[i][14:10], frame15[i][14:12]});
+				else case (frame[i])
 					2'd0: $fwrite(fh, "%c%c%c", 8'hFF, 8'hFF, 8'hFF);
 					2'd1: $fwrite(fh, "%c%c%c", 8'hAA, 8'hAA, 8'hAA);
 					2'd2: $fwrite(fh, "%c%c%c", 8'h55, 8'h55, 8'h55);
@@ -171,7 +197,7 @@ module `GB_TB_NAME;
 			$display("  frame.ppm written after %0d frames", frames);
 			// and the video memory, for tools/gb/gbrender.py to draw the same frame from
 			fh = $fopen("vram.hex", "w");
-			for (i = 0; i < 8192; i = i + 1) $fwrite(fh, "%02x\n", dut.u_ppu.vram[i]);
+			for (i = 0; i < 8192; i = i + 1) $fwrite(fh, "%02x\n", dut.u_ppu.vram0[i]);
 			for (i = 0; i < 160; i = i + 1) $fwrite(fh, "%02x\n", dut.u_ppu.oam[i]);
 			$fwrite(fh, "%02x\n%02x\n%02x\n%02x\n%02x\n%02x\n%02x\n%02x\n%02x\n",
 			        dut.u_ppu.lcdc, dut.u_ppu.scy, dut.u_ppu.scx, dut.u_ppu.bgp, dut.u_ppu.obp0, dut.u_ppu.obp1,
@@ -190,7 +216,11 @@ module `GB_TB_NAME;
 		if (!$value$plusargs("DBGLINE%d", dbgline)) dbgline = -1;
 		if (!$value$plusargs("DBGFRAME%d", dbgframe)) dbgframe = -1;
 		if (!$value$plusargs("REGTRACE%d", regtrace)) regtrace = -1;
-		if ($value$plusargs("REF%s", reffile)) begin
+		if (!$value$plusargs("IOTRACE%d", iotrace)) iotrace = 0;
+		if ($value$plusargs("REF15%s", reffile)) begin
+			have_ref15 = 1;
+			$readmemh(reffile, ref15);
+		end else if ($value$plusargs("REF%s", reffile)) begin
 			have_ref = 1;
 			$readmemh(reffile, ref);
 		end
@@ -220,6 +250,17 @@ module `GB_TB_NAME;
 					end
 				if (mism == 0) $display("  ok   the frame matches the reference");
 				else $display("  FAIL %0d pixels differ from the reference", mism);
+			end else if (have_ref15) begin
+				mism = 0;
+				if (!cgb_mode) $display("  FAIL the cartridge did not put the machine in Color mode");
+				for (i = 0; i < 160 * 144; i = i + 1)
+					if (frame15[i] !== ref15[i]) begin
+						if (mism < 10) $display("  FAIL pixel (%0d,%0d): got %04x want %04x", i % 160, i / 160, frame15[i], ref15[i]);
+						mism = mism + 1;
+					end
+				if (mism == 0 && cgb_mode) $display("  ok   the frame matches the reference");
+				else $display("  FAIL %0d pixels differ from the reference", mism);
+				if (!cgb_mode) mism = mism + 1;
 			end
 		end else begin
 			if (passed) $display("  ok   the cartridge printed Passed");
@@ -228,7 +269,7 @@ module `GB_TB_NAME;
 		end
 
 		if ((want_frames == 0 && passed) ||
-		    (want_frames != 0 && frames >= want_frames && (!have_ref || mism == 0)))
+		    (want_frames != 0 && frames >= want_frames && ((!have_ref && !have_ref15) || mism == 0)))
 			$display("%m: all checks passed");
 		else $display("%m: 1 FAIL(s)");
 		$finish;

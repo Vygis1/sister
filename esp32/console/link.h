@@ -11,6 +11,10 @@
 // the board having to understand anything.
 
 #pragma once
+#include <atomic>
+#include <soc/spi_struct.h>
+#include <driver/gpio.h>
+#include <soc/gpio_sig_map.h>
 #include <Arduino.h>
 #include <SPI.h>
 
@@ -28,6 +32,12 @@ enum : uint8_t {
   CMD_CD_SECTOR    = 0x31,   // 3 bytes of LBA, then the raw 2352-byte sector
   CMD_CD_DISC      = 0x32,   // 1 byte: 1 = a disc is in the drive, 0 = the tray is empty
   CMD_BUS_WRITE    = 0x40,   // a console image's register bus: address, then words
+  CMD_BUS_WRITEQ   = 0x43,   // ...the words four bits a clock (quad: board version 5 / esp_bus 2)
+  CMD_FLASH_SUM    = 0x16,   // the shell (version 6): a 64 kB block read and folded into a checksum
+  CMD_FLASH_SUMRD  = 0x17,   // ...the checksum, 8 bytes
+  CMD_FLASH_WRITEQ = 0x19,   // the shell (version 6): a page write, its 256 bytes four bits a clock
+  CMD_FLASH_BUFQ   = 0x1A,   // the shell (version 7): words into its 16 kB block buffer, quad
+  CMD_FLASH_PROGN  = 0x1B,   // ...and its first n pages programmed, page after page, by the board
   CMD_BUS_READ     = 0x41,   // address, 4 bytes while it reads, the word
   CMD_BUS_RDBLK    = 0x42,   // the same, word after word while chip select stays low
 };
@@ -152,7 +162,9 @@ public:
     uint32_t t0 = millis();
     while (millis() - t0 < ms) {
       if (!busy()) return true;
-      delayMicroseconds(200);
+      // (a page program is ~0.5 ms: polled closely. Past 2 ms -- an erase, a checksum -- the task
+      // sleeps between looks: spinning starved CPU 0's idle task and the watchdog reset the chip)
+      if (millis() - t0 < 2) delayMicroseconds(25); else vTaskDelay(1);
     }
     return false;
   }
@@ -221,6 +233,70 @@ public:
     return waitDone(100);
   }
 
+  // the same, its page four bits a clock (the shell from version 6)
+  bool writePageQuad(uint32_t offset, const uint8_t *data, size_t n) {
+    static uint8_t page[PAGE];
+    for (size_t i = 0; i < PAGE; i++) page[i] = i < n ? data[i] : 0xFF;
+    unlock();
+    takeBulk();
+    spi_.beginTransaction(sectorSettings_);
+    digitalWrite(cs_, LOW);
+    spi_.transfer(CMD_FLASH_WRITEQ);
+    spi_.transfer(offset >> 16); spi_.transfer(offset >> 8); spi_.transfer(offset);
+    quadData(page, PAGE);
+    digitalWrite(cs_, HIGH);
+    spi_.endTransaction();
+    xSemaphoreGive(lock_);
+    return waitDone(100);
+  }
+  // (version 7) bytes into the board's 16 kB block buffer from its word w0, four bits a clock
+  void bufWriteQuad(uint32_t w0, const uint8_t *d, size_t n) {
+    takeBulk();
+    spi_.beginTransaction(sectorSettings_);
+    digitalWrite(cs_, LOW);
+    spi_.transfer(CMD_FLASH_BUFQ);
+    spi_.transfer(w0 >> 16); spi_.transfer(w0 >> 8); spi_.transfer(w0);
+    quadData(d, n);
+    digitalWrite(cs_, HIGH);
+    spi_.endTransaction();
+    xSemaphoreGive(lock_);
+  }
+  // (version 7) the buffer's first n pages (1-64) programmed at a slot offset; waits for them
+  bool progPages(uint32_t offset, int n) {
+    uint8_t a[4] = { (uint8_t)(offset >> 16), (uint8_t)(offset >> 8), (uint8_t)offset, (uint8_t)n };
+    unlock();
+    frame(CMD_FLASH_PROGN, a, sizeof(a), nullptr, 0);
+    return waitDone(1000);
+  }
+  // (version 7) boot a slot: 1 the one at 2 MB, 2 the one at 5 MB
+  void bootSlot(uint8_t slot) { frame(CMD_BOOT, &slot, 1, nullptr, 0); }
+  // an erase started and not waited for (the menu's background erase): polled with busy()
+  void eraseStart(uint32_t offset) {
+    uint8_t a[3] = { (uint8_t)(offset >> 16), (uint8_t)(offset >> 8), (uint8_t)offset };
+    unlock();
+    frame(CMD_FLASH_ERASE, a, sizeof(a), nullptr, 0);
+  }
+  // A 64 kB block's checksum, read by the board itself (the shell from version 6): {sum of the
+  // little-endian words, the words rotated left a bit and XORed}. addr: absolute.
+  bool sumBlock(uint32_t addr, uint64_t &out) {
+    uint8_t a[3] = { (uint8_t)(addr >> 16), (uint8_t)(addr >> 8), (uint8_t)addr };
+    frame(CMD_FLASH_SUM, a, sizeof(a), nullptr, 0);
+    if (!waitDone(2000)) return false;
+    uint8_t z[9] = { 0 }, r[9];
+    frame(CMD_FLASH_SUMRD, z, sizeof(z), r, sizeof(r));
+    out = 0;
+    for (int k = 8; k >= 1; k--) out = (out << 8) | r[k];   // (r[0]: the signature)
+    return true;
+  }
+  static uint64_t sumOf(const uint8_t *d, size_t n) {
+    uint32_t x = 0, s = 0;
+    for (size_t i = 0; i + 3 < n; i += 4) {
+      uint32_t w = d[i] | (d[i + 1] << 8) | (d[i + 2] << 16) | ((uint32_t)d[i + 3] << 24);
+      x = ((x << 1) | (x >> 31)) ^ w; s += w;
+    }
+    return ((uint64_t)s << 32) | x;
+  }
+
   // Two commands, because the flash needs time between them and there is no way
   // to wait inside a frame: READ fetches the page into the board's buffer, PAGE
   // dumps it back. The address is absolute -- reads are not slot-relative,
@@ -251,7 +327,7 @@ public:
   // A write frame carries any number of words to consecutive addresses; a read is
   // one word, after four bytes in which the board fetches it.
   void busWrite(uint32_t addr, const uint32_t *w, size_t n) {
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeLock();
     spi_.beginTransaction(settings_);
     digitalWrite(cs_, LOW);
     spi_.transfer(CMD_BUS_WRITE);
@@ -291,9 +367,73 @@ public:
     xSemaphoreGive(lock_);
   }
 
+  // the same at a clock of the caller's (console.ino's linkbench: what the link carries)
+  void busWriteAt(uint32_t addr, const uint32_t *w, size_t n, uint32_t hz) {
+    takeBulk();
+    spi_.beginTransaction(SPISettings(hz, MSBFIRST, SPI_MODE0));
+    digitalWrite(cs_, LOW);
+    spi_.transfer(CMD_BUS_WRITE);
+    spi_.transfer(addr >> 24); spi_.transfer(addr >> 16); spi_.transfer(addr >> 8); spi_.transfer(addr);
+    spi_.writeBytes((const uint8_t *)w, n * 4);
+    digitalWrite(cs_, HIGH);
+    spi_.endTransaction();
+    xSemaphoreGive(lock_);
+  }
+
+  // --- quad writes (2026-10-17): the data of a bus write four bits a clock ---------------------------
+  // The command and address go as ever, a bit a clock (0x43: the board's esp_link takes the rest
+  // quad and lets go of MISO); then the SPI unit is switched to half duplex with its write data on
+  // D (MOSI), Q (MISO), WP and HD -- the two wires added for it, GPIO 22 and 21 on the T8 -- and
+  // back. MISO is the ESP32's output only for the data, so it never fights the board's reads.
+  // Boards that know it: the menu image from version 5, the consoles' esp_bus from version 2.
+  // (the data pins at a gentle drive: four wires switching together at full drive put a glitch on the
+  // clock wire -- 2026-10-17 quadtest: errors only when several wires switched at once)
+  gpio_drive_cap_t quadDrive_ = GPIO_DRIVE_CAP_0;
+  void quadDrive(int cap) {
+    quadDrive_ = (gpio_drive_cap_t)cap;
+    if (wp_ >= 0) gpio_set_drive_capability((gpio_num_t)wp_, quadDrive_);
+    if (hd_ >= 0) gpio_set_drive_capability((gpio_num_t)hd_, quadDrive_);
+    gpio_set_drive_capability((gpio_num_t)mosi_, quadDrive_);
+  }
+  void quadPins(int wp, int hd) {
+    wp_ = wp; hd_ = hd;
+    pinMatrixOutAttach(wp, VSPIWP_OUT_IDX, false, false);
+    pinMatrixOutAttach(hd, VSPIHD_OUT_IDX, false, false);
+    quadDrive(quadDrive_);
+  }
+  bool quadWired() const { return wp_ >= 0 && hd_ >= 0; }
+  // a frame's data four bits a clock (inside a transaction, chip select low)
+  void quadData(const uint8_t *d, size_t n) {
+    pinMatrixOutAttach(miso_, VSPIQ_OUT_IDX, false, false);
+    gpio_set_drive_capability((gpio_num_t)miso_, quadDrive_);
+    uint32_t user = SPI3.user.val;
+    SPI3.user.doutdin = 0; SPI3.user.usr_miso = 0; SPI3.user.fwrite_quad = 1;
+    spi_.writeBytes(d, n);
+    SPI3.user.val = user;
+    pinMatrixOutDetach(miso_, false, false);
+    pinMode(miso_, INPUT);
+    pinMatrixInAttach(miso_, VSPIQ_IN_IDX, false);
+  }
+  // The bulk transfers' clock (sectors, fills, quad writes): 10 MHz needs the board at 50 MHz or more --
+  // esp_link brings SCK into the board's clock and wants about four of its clocks a period; the z486 PC
+  // runs at 40 and garbled its BIOS at 10 (2026-10-19). menu.h sets it from the image's clock (ctrl 0x1F8).
+  void setBulkHz(uint32_t hz) { sectorSettings_ = SPISettings(hz, MSBFIRST, SPI_MODE0); bulkHz_ = hz; }
+  uint32_t bulkHz() const { return bulkHz_; }
+  void busWriteQuad(uint32_t addr, const uint32_t *w, size_t n, uint32_t hz = 0) {
+    takeBulk();
+    spi_.beginTransaction(hz ? SPISettings(hz, MSBFIRST, SPI_MODE0) : sectorSettings_);
+    digitalWrite(cs_, LOW);
+    spi_.transfer(CMD_BUS_WRITEQ);
+    spi_.transfer(addr >> 24); spi_.transfer(addr >> 16); spi_.transfer(addr >> 8); spi_.transfer(addr);
+    quadData((const uint8_t *)w, n * 4);
+    digitalWrite(cs_, HIGH);
+    spi_.endTransaction();
+    xSemaphoreGive(lock_);
+  }
+
   uint32_t busRead(uint32_t addr) {
     uint8_t r[4];
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeLock();
     spi_.beginTransaction(settings_);
     digitalWrite(cs_, LOW);
     spi_.transfer(CMD_BUS_READ);
@@ -333,11 +473,11 @@ private:
   // the lock for a long transfer: not while a pad's word is waiting (see padWrite)
   void takeBulk() {
     while (urgent_) vTaskDelay(1);
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeLock();
   }
   void frame(uint8_t cmd, const uint8_t *tx, size_t txn,
              uint8_t *rx, size_t rxn) {
-    xSemaphoreTake(lock_, portMAX_DELAY);
+    takeLock();
     spi_.beginTransaction(settings_);
     digitalWrite(cs_, LOW);
     uint8_t r = spi_.transfer(cmd);
@@ -356,8 +496,19 @@ private:
   SPISettings settings_, sectorSettings_;
 public:
   static const uint32_t CD_HZ = 10000000;     // the disc's sectors (see begin)
+  uint32_t bulkHz_ = CD_HZ;
 private:
   SemaphoreHandle_t lock_ = nullptr;   // one transfer at a time, from whichever task
   volatile bool urgent_ = false;       // a pad's write is waiting for the lock
+  // Everyone waiting for the link, counted: the PC's disk task runs request after request (a DOS game
+  // with no disk cache reads all the time -- Transport Tycoon's overlays) and took the link back each time
+  // before the menu, on the other CPU, woke to take it: a button pressed in the game opened the menu half
+  // a minute later (2026-10-19). The disk task steps aside (othersWaiting) before each request now.
+  std::atomic<int> waiters_{0};             // (atomic: both CPUs count in it)
+  void takeLock() { waiters_++; xSemaphoreTake(lock_, portMAX_DELAY); waiters_--; }
+ public:
+  bool othersWaiting() const { return waiters_ > 0; }
+ private:
   int sck_, miso_, mosi_, cs_, prog_, done_;
+  int wp_ = -1, hd_ = -1;                     // (quad writes' extra wires; -1 none)
 };

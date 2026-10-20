@@ -34,7 +34,7 @@ module tb_gb_cpu;
 	wire [15:0] dbg_pc;
 
 	gb_cpu dut (
-		.clk(clk), .rst(rst), .ce(1'b1),
+		.clk(clk), .rst(rst), .ce(1'b1), .cgb(1'b0), .wake(1'b0),
 		.addr(addr), .din(din), .dout(dout), .rd(rd), .we(we),
 		.wr_strobe(wr_strobe), .m_end(m_end), .m1(m1),
 		.irq(5'd0), .irq_ack(irq_ack), .irq_n(irq_n),

@@ -105,11 +105,6 @@ code and Sound Blaster, and Greg Taylor's OPL3. Every part's licence is listed i
   `.cue` / `.bin` image (`esp32/console/cdrom.h`, a port of MiSTer's CD-ROM code). CD audio
   plays through `pc_cdda.v`.
 - **Mouse and keyboard:** the pad, mapped per game (`esp32/console/pc.h`).
-- **z486** (`PC_Z486=1`, `pc_z486_mem.v`): nand2mario's 486 with an x87 FPU, which runs Quake.
-  It meets timing at 40 MHz today and is being restructured towards 83 MHz. The VGA's pixel
-  side has a 50 MHz clock of its own in this build (the VGA wants twice its pixel rate), its
-  pixels crossing to the PC's clock in a small FIFO. Its ROM images are fetched by
-  `tools/pc/fetch_z486.sh`.
 - **The BIOS load** (`pc_ddr64.v`): the ESP32's words gathered four to a DDR3 line behind a queue,
   so none is lost when DDR3 is slow; a lost word would raise ctrl `0x706C`.
 

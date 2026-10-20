@@ -1,14 +1,14 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// gb_top.v - a Nintendo Game Boy (DMG): the SM83, the PPU, the APU, and the
-// rest of the machine around them.
+// gb_top.v - a Nintendo Game Boy: the SM83, the PPU, the APU, and the rest of the
+// machine around them -- a DMG, or a Game Boy Color for a cartridge made for one.
 //
 // --- the memory map ----------------------------------------------------------------
 //
 //   $0000-$7FFF   cartridge ROM, through the mapper (MBC); writes go to the MBC
 //   $8000-$9FFF   8 kB video RAM (in the PPU)
 //   $A000-$BFFF   cartridge RAM, up to 32 kB banked (here; see "saves" below)
-//   $C000-$DFFF   8 kB work RAM, mirrored at $E000-$FDFF
+//   $C000-$DFFF   8 kB work RAM, mirrored at $E000-$FDFF (the Color: 32 kB, $D000 banked by SVBK)
 //   $FE00-$FE9F   OAM (in the PPU)
 //   $FEA0-$FEFF   nothing; reads 0
 //   $FF00-$FF7F   the I/O registers (joypad, serial, timer, IF, sound, video, DMA)
@@ -58,6 +58,19 @@
 // boot ROM, with two differences: the PPU starts at line 0 dot 0 (STAT reads $84
 // rather than $85 for the first dots), and the boot logo is not in VRAM.
 //
+// --- the Color ----------------------------------------------------------------------------------
+//
+// Header byte $0143 bit 7 says the cartridge is for a Game Boy Color, and then this is one
+// (Pan Docs' CGB chapters): the CPU starts with A = $11, the PPU has its second VRAM bank,
+// attributes and colour palettes (gb_ppu), work RAM is 32 kB banked by SVBK ($FF70), KEY1
+// ($FF4D) and STOP switch the CPU, timer and OAM DMA to double speed (the picture and sound
+// keep their clock; the CPU pauses 8200 T-cycles over the switch), and HDMA ($FF51-$FF55)
+// copies 16-byte blocks from ROM or RAM into VRAM -- all at once (GDMA, the CPU held until it
+// is done) or one block at the start of each horizontal blank (HDMA), a byte every two
+// T-cycles, the CPU held for each block. The infrared port ($FF56) is wired to nobody. A
+// cartridge without the flag gets the DMG as before, to the last register value: a Color
+// would run it through a boot ROM that picks it a palette; here it stays grey.
+//
 // --- the joypad ------------------------------------------------------------------------------
 //
 // joy[7:0] = {start, select, B, A, down, up, left, right}, active high, so bit 0
@@ -94,10 +107,13 @@ module gb_top #(
 	// the pad: bit 0 right, 1 left, 2 up, 3 down, 4 A, 5 B, 6 select, 7 start; 1 = pressed
 	input  wire [7:0]  joy,
 
-	// video: one pixel per dot, shade 0 lightest .. 3 darkest
+	// video: one pixel per dot, shade 0 lightest .. 3 darkest -- or, on a Color (cgb_mode),
+	// its 15-bit colour (BBBBBGGGGGRRRRR)
 	output wire [7:0]  px_x,
 	output wire [7:0]  px_y,
 	output wire [1:0]  px_shade,
+	output wire [14:0] px_rgb,
+	output wire        cgb_mode,
 	output wire        pixel_en,
 	output wire        frame_start,
 
@@ -120,20 +136,33 @@ module gb_top #(
 
 	// --- the T-cycle --------------------------------------------------------------------------------
 	localparam [31:0] GB_HZ = 32'd4194304;
-	reg  [31:0] acc;
-	reg         ce_raw;
+	reg  [31:0] acc, acc2;
+	reg         ce_raw, ce2_raw;
+	// (and the Color's double speed, 8.388608 MHz, from an accumulator of its own: the CPU's
+	// clock when `fast`; in a bench clocked at GB_HZ it can only be the same as ce_raw)
 	always @(posedge clk) begin
-		if (rst) begin acc <= 32'd0; ce_raw <= 1'b0; end
-		else if (acc + GB_HZ >= CLK_HZ) begin acc <= acc + GB_HZ - CLK_HZ; ce_raw <= 1'b1; end
-		else begin acc <= acc + GB_HZ; ce_raw <= 1'b0; end
+		if (rst) begin acc <= 32'd0; ce_raw <= 1'b0; acc2 <= 32'd0; ce2_raw <= 1'b0; end
+		else begin
+			if (acc + GB_HZ >= CLK_HZ) begin acc <= acc + GB_HZ - CLK_HZ; ce_raw <= 1'b1; end
+			else begin acc <= acc + GB_HZ; ce_raw <= 1'b0; end
+			if (acc2 + 2 * GB_HZ >= CLK_HZ) begin acc2 <= acc2 + 2 * GB_HZ - CLK_HZ; ce2_raw <= 1'b1; end
+			else begin acc2 <= acc2 + 2 * GB_HZ; ce2_raw <= 1'b0; end
+		end
 	end
 
 	// The whole machine waits while a cartridge byte is still on its way.
 	reg         boot_done;
+	reg         cgb;                  // the cartridge is for a Color: be one
+	reg         fast;                 // (cgb) double speed
 	wire        rom_busy;
 	wire [1:0]  tcyc;
 	wire        stall = rom_busy && (tcyc == 2'd3);
-	wire        ce = ce_raw && !stall && boot_done && !pause;
+	wire        ce  = ce_raw && !stall && boot_done && !pause;
+	wire        ce2 = ce2_raw && !stall && boot_done && !pause;
+	wire        ce_cpu = fast ? ce2 : ce;            // the CPU's, the timer's and OAM DMA's clock
+	wire        hd_run;                              // HDMA holds the CPU while it copies, and until its byte is back
+	wire        hd_running;                          // ...the copying itself
+	assign cgb_mode = cgb;
 
 	// --- the CPU ---------------------------------------------------------------------------------------
 	wire [15:0] a;
@@ -145,8 +174,9 @@ module gb_top #(
 	reg  [4:0]  if_r;
 	reg  [7:0]  ie_r;
 
+	reg         speed_wake;
 	gb_cpu u_cpu (
-		.clk(clk), .rst(rst || !boot_done), .ce(ce),
+		.clk(clk), .rst(rst || !boot_done), .ce(ce_cpu && !hd_run), .cgb(cgb), .wake(speed_wake),
 		.addr(a), .din(cpu_din), .dout(cpu_dout), .rd(rd), .we(we),
 		.wr_strobe(wr_strobe), .m_end(m_end), .tcyc(tcyc), .m1(m1),
 		.irq(if_r & ie_r[4:0]), .irq_ack(irq_ack), .irq_n(irq_n),
@@ -166,7 +196,8 @@ module gb_top #(
 	wire sel_hram = (a[15:8] == 8'hFF) && (a[7] == 1'b1) && (a[7:0] != 8'hFF);
 	wire sel_ie   = (a == 16'hFFFF);
 	wire sel_apu  = sel_io && (a[7:4] >= 4'h1) && (a[7:4] <= 4'h3);
-	wire sel_ppu  = sel_io && (a[7:4] == 4'h4) && (a[3:0] <= 4'hB);
+	wire sel_ppu  = sel_io && (((a[7:4] == 4'h4) && (a[3:0] <= 4'hB)) || a[7:0] == 8'h4F ||
+	                           (a[7:0] >= 8'h68 && a[7:0] <= 8'h6C));         // ($FF4F VBK, $FF68-6C the palettes, OPRI)
 
 	wire cpu_wr = wr_strobe;                    // the write commits at the end of its M-cycle
 
@@ -178,18 +209,24 @@ module gb_top #(
 	reg  [7:0]  dma_src;
 	reg  [7:0]  dma_cnt;
 	wire [15:0] dma_a = {dma_src, dma_cnt};
-	wire [15:0] ext_a = dma_active ? dma_a : a;    // the external bus address this M-cycle
+	reg  [15:0] hd_src;                            // HDMA's source address (below)
+	reg         hd_req, hd_done;                   // HDMA asks the cartridge port for a byte; has let the bus go
+	wire [15:0] ext_a = hd_running ? hd_src : dma_active ? dma_a : a;    // the external bus address this M-cycle
 	wire        ext_is_rom  = (ext_a[15] == 1'b0);
 	wire        ext_is_cram = (ext_a[15:13] == 3'b101);
 	wire        ext_is_vram = (ext_a[15:13] == 3'b100);
 	wire        ext_rd = dma_active || rd;         // somebody reads the external bus
 
 	// --- work RAM ------------------------------------------------------------------------------------------
-	reg [7:0] wram [0:8191];
+	// 32 kB: bank 0 at $C000, SVBK's (0 means 1) at $D000 on a Color; a DMG sees banks 0 and 1
+	reg [7:0] wram [0:32767];
 	reg [7:0] wram_q;
+	reg [2:0] svbk;
+	wire [2:0] wbank = !cgb ? 3'd1 : (svbk == 3'd0) ? 3'd1 : svbk;
+	wire [14:0] wram_a = {ext_a[12] ? wbank : 3'd0, ext_a[11:0]};
 	always @(posedge clk) begin
-		if (cpu_wr && sel_wram && !dma_active) wram[ext_a[12:0]] <= cpu_dout;
-		wram_q <= wram[ext_a[12:0]];
+		if (cpu_wr && sel_wram && !dma_active && !hd_run) wram[wram_a] <= cpu_dout;
+		wram_q <= wram[wram_a];
 	end
 
 	// --- high RAM ----------------------------------------------------------------------------------------------
@@ -202,7 +239,7 @@ module gb_top #(
 
 	// --- the cartridge: header, mapper, RAM ------------------------------------------------------------------
 	reg  [7:0]  cart_type, rom_size, ram_size;
-	reg  [1:0]  boot_st;
+	reg  [2:0]  boot_st;
 	reg         boot_busy;
 	// MBC state
 	reg         ram_en;
@@ -344,43 +381,61 @@ module gb_top #(
 	reg        rom_pend;
 	reg  [7:0] rom_q;
 	reg        arm;
+	// HDMA's reads come through the same port, so rom_q -- which the CPU may still be using a
+	// cycle after its read (a jr's displacement, say) -- is kept across a run and put back; the
+	// CPU stays held two clocks more, for the RAMs' outputs to settle on its address again.
+	reg  [1:0] hd_hold;
+	reg  [7:0] rom_q_cpu;
+	reg        rom_for_hd;           // the request out is HDMA's
 	assign rom_busy = rom_pend;
+	assign hd_run = hd_running || hd_done || (hd_hold != 2'd0);   // (hd_done: the clock before the hold counter is set)
 	always @(posedge clk) begin
 		rom_req <= 1'b0;
 		if (rst) begin
-			rom_pend <= 1'b0; rom_q <= 8'hFF; arm <= 1'b0;
-			boot_done <= 1'b0; boot_st <= 2'd0; boot_busy <= 1'b0;
+			rom_pend <= 1'b0; rom_q <= 8'hFF; arm <= 1'b0; hd_hold <= 2'd0; rom_q_cpu <= 8'hFF; rom_for_hd <= 1'b0;
+			boot_done <= 1'b0; boot_st <= 3'd0; boot_busy <= 1'b0; cgb <= 1'b0;
 			cart_type <= 8'd0; rom_size <= 8'd0; ram_size <= 8'd0; rom_addr <= 23'd0;
 		end else if (!boot_done) begin
-			// $0147, $0148, $0149
+			// $0143 (the Color flag), $0147, $0148, $0149
 			if (!boot_busy && !rom_pend) begin
-				rom_addr <= {14'd0, 9'h147} + {21'd0, boot_st};
+				rom_addr <= (boot_st == 3'd0) ? 23'h143 : {14'd0, 9'h146} + {20'd0, boot_st};
 				rom_req <= 1'b1; rom_pend <= 1'b1; boot_busy <= 1'b1;
 			end
 			if (rom_ack) begin
 				rom_pend <= 1'b0; boot_busy <= 1'b0;
 				case (boot_st)
-					2'd0: cart_type <= rom_data;
-					2'd1: rom_size <= rom_data;
+					3'd0: cgb <= rom_data[7];
+					3'd1: cart_type <= rom_data;
+					3'd2: rom_size <= rom_data;
 					default: ram_size <= rom_data;
 				endcase
-				if (boot_st == 2'd2) begin boot_done <= 1'b1; arm <= 1'b1; end
-				else boot_st <= boot_st + 2'd1;
+				if (boot_st == 3'd3) begin boot_done <= 1'b1; arm <= 1'b1; end
+				else boot_st <= boot_st + 3'd1;
 			end
 		end else begin
 			if (m_end) arm <= 1'b1;
-			if (arm) begin
+			if (arm && !hd_running) begin
 				arm <= 1'b0;
 				if (ext_rd && ext_is_rom) begin
 					rom_addr <= rom_phys;
 					rom_req  <= 1'b1;
 					rom_pend <= 1'b1;
+					rom_for_hd <= 1'b0;
 				end
+			end
+			if (hd_req) begin
+				rom_addr <= rom_phys;
+				rom_req  <= 1'b1;
+				rom_pend <= 1'b1;
+				rom_for_hd <= 1'b1;
 			end
 			if (rom_ack && rom_pend) begin
 				rom_q <= rom_data;
 				rom_pend <= 1'b0;
+				if (!rom_for_hd) rom_q_cpu <= rom_data;
 			end
+			if (hd_done) begin rom_q <= rom_q_cpu; hd_hold <= 2'd2; end
+			else if (hd_hold != 2'd0) hd_hold <= hd_hold - 2'd1;
 		end
 	end
 
@@ -389,22 +444,112 @@ module gb_top #(
 	wire        irq_vblank, irq_stat;
 	wire [1:0]  ppu_mode;
 	wire        lcd_on;
-	// the DMA takes the VRAM port when it reads from there
+	// the DMA takes the VRAM port when it reads from there; HDMA when it writes
 	wire        dma_from_vram = dma_active && ext_is_vram;
-	wire [12:0] vram_a = dma_from_vram ? dma_a[12:0] : a[12:0];
+	reg  [12:0] hd_dst;
+	reg         hd_wr;
+	reg  [7:0]  hd_data;
+	wire [12:0] vram_a = hd_running ? hd_dst : dma_from_vram ? dma_a[12:0] : a[12:0];
 	wire        dma_wr;
 	reg  [7:0]  dma_data;
+	wire        hblank_start;
 
 	gb_ppu u_ppu (
-		.clk(clk), .rst(rst), .ce(ce),
-		.reg_a(a[3:0]), .reg_we(cpu_wr && sel_ppu), .reg_d(cpu_dout), .reg_q(ppu_q),
-		.vram_a(vram_a), .vram_we(cpu_wr && sel_vram && !dma_from_vram), .vram_d(cpu_dout), .vram_q(vram_q),
+		.clk(clk), .rst(rst), .ce(ce), .cgb(cgb),
+		.reg_a(a[6:0]), .reg_we(cpu_wr && sel_ppu), .reg_d(cpu_dout), .reg_q(ppu_q),
+		.vram_a(vram_a), .vram_we(hd_running ? hd_wr : (cpu_wr && sel_vram && !dma_from_vram)), .vram_force(hd_running),
+		.vram_d(hd_running ? hd_data : cpu_dout), .vram_q(vram_q),
 		.oam_a(dma_active ? dma_cnt : a[7:0]), .oam_we(dma_active ? dma_wr : (cpu_wr && sel_oam)),
 		.oam_d(dma_active ? dma_data : cpu_dout), .oam_dma(dma_active), .oam_q(oam_q),
 		.irq_vblank(irq_vblank), .irq_stat(irq_stat),
-		.px_x(px_x), .px_y(px_y), .px_shade(px_shade), .pixel_en(pixel_en), .frame_start(frame_start),
-		.mode_out(ppu_mode), .lcd_on(lcd_on)
+		.px_x(px_x), .px_y(px_y), .px_shade(px_shade), .px_rgb(px_rgb), .pixel_en(pixel_en), .frame_start(frame_start),
+		.mode_out(ppu_mode), .lcd_on(lcd_on), .hblank_start(hblank_start)
 	);
+
+	// --- the Color's registers: KEY1, HDMA, RP, SVBK and the undocumented ones -------------------
+	reg        key1_arm;
+	reg [13:0] speed_cnt;             // T-cycles of the pause over a speed switch
+	reg [6:0]  hd_len;                // blocks still to copy, minus one; $7F when done
+	reg        hd_hbl;                // HDMA (a block each horizontal blank), not GDMA
+	reg        hd_active;             // HDMA armed, waiting for blanks
+	reg        hd_running_r;
+	reg [1:0]  hd_st;
+	reg [4:0]  hd_byte;
+	reg [1:0]  hd_pace;
+	reg [1:0]  rp;
+	reg [7:0]  u72, u73, u74;
+	reg [2:0]  u75;
+	assign hd_running = hd_running_r;
+	wire wr_cgb = cpu_wr && sel_io && cgb;
+	wire hd_src_rom = (hd_src[15] == 1'b0);
+	always @(posedge clk) begin
+		speed_wake <= 1'b0; hd_wr <= 1'b0; hd_req <= 1'b0; hd_done <= 1'b0;
+		if (rst) begin
+			fast <= 1'b0; key1_arm <= 1'b0; speed_cnt <= 14'd0; svbk <= 3'd0; rp <= 2'd0;
+			hd_src <= 16'hFFF0; hd_dst <= 13'h1FF0; hd_len <= 7'h7F; hd_hbl <= 1'b0; hd_active <= 1'b0;
+			hd_running_r <= 1'b0; hd_st <= 2'd0; hd_byte <= 5'd0; hd_pace <= 2'd0; hd_data <= 8'd0;
+			u72 <= 8'd0; u73 <= 8'd0; u74 <= 8'd0; u75 <= 3'd0;
+		end else begin
+			// the speed switch: STOP with KEY1 bit 0 set flips the speed; the CPU sits in its
+			// STOP (a HALT here) for 8200 T-cycles and is woken
+			if (wr_cgb && a[7:0] == 8'h4D) key1_arm <= cpu_dout[0];
+			if (cpu_stop && cgb && key1_arm) begin fast <= ~fast; key1_arm <= 1'b0; speed_cnt <= 14'd8200; end
+			if (speed_cnt != 14'd0 && ce) begin
+				speed_cnt <= speed_cnt - 14'd1;
+				if (speed_cnt == 14'd1) speed_wake <= 1'b1;
+			end
+			if (wr_cgb && a[7:0] == 8'h70) svbk <= cpu_dout[2:0];
+			if (wr_cgb && a[7:0] == 8'h56) rp <= {cpu_dout[7], cpu_dout[0]};
+			if (wr_cgb && a[7:0] == 8'h72) u72 <= cpu_dout;
+			if (wr_cgb && a[7:0] == 8'h73) u73 <= cpu_dout;
+			if (wr_cgb && a[7:0] == 8'h74) u74 <= cpu_dout;
+			if (wr_cgb && a[7:0] == 8'h75) u75 <= cpu_dout[6:4];
+			// HDMA's registers (the low four bits of the addresses are not kept)
+			if (wr_cgb && a[7:0] == 8'h51) hd_src[15:8] <= cpu_dout;
+			if (wr_cgb && a[7:0] == 8'h52) hd_src[7:0]  <= {cpu_dout[7:4], 4'd0};
+			if (wr_cgb && a[7:0] == 8'h53) hd_dst[12:8] <= cpu_dout[4:0];
+			if (wr_cgb && a[7:0] == 8'h54) hd_dst[7:0]  <= {cpu_dout[7:4], 4'd0};
+			if (wr_cgb && a[7:0] == 8'h55) begin
+				if (hd_active && !cpu_dout[7]) hd_active <= 1'b0;          // an HDMA stopped where it is
+				else begin
+					hd_len <= cpu_dout[6:0]; hd_hbl <= cpu_dout[7];
+					if (cpu_dout[7]) hd_active <= 1'b1;                     // ...blocks from the next blank on
+					else begin hd_running_r <= 1'b1; hd_st <= 2'd0; hd_byte <= 5'd0; hd_pace <= 2'd0; end   // GDMA: now
+				end
+			end
+			// a horizontal blank begins: HDMA's block
+			if (hblank_start && hd_active && !hd_running) begin hd_running_r <= 1'b1; hd_st <= 2'd0; hd_byte <= 5'd0; hd_pace <= 2'd0; end
+			// the copy: a byte every two T-cycles -- asked for (ROM through the cartridge port,
+			// RAM straight from its block RAM), taken, written to VRAM
+			if (hd_running) case (hd_st)
+				2'd0: if (!rom_pend) begin                                  // (the CPU's own fetch first)
+					if (hd_src_rom) hd_req <= 1'b1;
+					hd_st <= 2'd1;
+				end
+				2'd1: if (!hd_src_rom || (!rom_pend && !hd_req)) begin
+					hd_data <= hd_src_rom ? rom_q : ext_is_cram ? (cram_ok ? cram_q : 8'hFF) : wram_q;
+					hd_wr <= 1'b1; hd_st <= 2'd2;
+				end
+				2'd2: begin
+					hd_src <= hd_src + 16'd1; hd_dst <= hd_dst + 13'd1; hd_byte <= hd_byte + 5'd1;
+					hd_st <= 2'd3; hd_pace <= 2'd0;
+				end
+				default: if (ce) begin
+					hd_pace <= hd_pace + 2'd1;
+					if (hd_pace == 2'd1) begin
+						if (hd_byte == 5'd16) begin
+							hd_len <= hd_len - 7'd1;
+							hd_byte <= 5'd0;
+							if (hd_len == 7'd0 || hd_dst == 13'd0) begin  // all copied, or off the end of VRAM
+								hd_len <= 7'h7F; hd_active <= 1'b0; hd_running_r <= 1'b0; hd_done <= 1'b1;
+							end else if (hd_hbl) begin hd_running_r <= 1'b0; hd_done <= 1'b1; end
+							else hd_st <= 2'd0;
+						end else hd_st <= 2'd0;
+					end
+				end
+			endcase
+		end
+	end
 
 	// what the DMA is copying this M-cycle
 	always @(*) begin
@@ -416,7 +561,7 @@ module gb_top #(
 	assign dma_wr = m_end && dma_active;
 
 	always @(posedge clk) begin
-		if (rst) begin dma_active <= 1'b0; dma_pend <= 1'b0; dma_cnt <= 8'd0; dma_src <= 8'hFF; end
+		if (rst) begin dma_active <= 1'b0; dma_pend <= 1'b0; dma_cnt <= 8'd0; dma_src <= cgb ? 8'h00 : 8'hFF; end
 		else begin
 			if (cpu_wr && sel_io && a[7:0] == 8'h46) begin dma_src <= cpu_dout; dma_pend <= 1'b1; end
 			if (m_end) begin
@@ -436,7 +581,8 @@ module gb_top #(
 	wire [7:0] apu_q;
 	reg        div_bit4_q;
 	reg [15:0] sysc;
-	wire       fs_tick = div_bit4_q && !sysc[12];       // DIV bit 4 falling: 512 Hz
+	wire       div_bit4 = fast ? sysc[13] : sysc[12];    // DIV bit 4 (bit 5 at double speed): 512 Hz either way
+	wire       fs_tick = div_bit4_q && !div_bit4;        // ...its falling edge
 	gb_apu u_apu (
 		.clk(clk), .rst(rst), .ce(ce), .fs_tick(fs_tick),
 		.reg_a(a[5:0]), .reg_we(cpu_wr && sel_apu), .reg_d(cpu_dout), .reg_q(apu_q),
@@ -471,7 +617,7 @@ module gb_top #(
 			sysc <= 16'hAB00; div_hold <= 1'b0; tima <= 8'd0; tma <= 8'd0; tac <= 8'd0; tsel_q <= 1'b0; tima_ovf <= 3'd0; div_bit4_q <= 1'b0;
 		end else begin
 			tsel_q <= tsel_bit;
-			div_bit4_q <= sysc[12];
+			div_bit4_q <= div_bit4;
 			// A DIV write lands in the third T-cycle of its M-cycle (see gb_cpu); clear
 			// the counter there and also skip the increment of the fourth, so its low
 			// two bits stay in step with the M-cycle as they are on the console --
@@ -479,7 +625,7 @@ module gb_top #(
 			// STOP's pulse comes on the fourth T-cycle, which is already in step.
 			if (wr_div) begin sysc <= 16'd0; div_hold <= 1'b1; end
 			else if (cpu_stop) sysc <= 16'd0;
-			else if (ce) begin
+			else if (ce_cpu) begin
 				if (div_hold) div_hold <= 1'b0;
 				else sysc <= sysc + 16'd1;
 			end
@@ -487,7 +633,7 @@ module gb_top #(
 			if (wr_tac) tac <= cpu_dout;
 
 			// the overflow: TIMA reads 0 for one M-cycle, then TMA and the interrupt
-			if (tima_ovf != 3'd0 && ce) begin
+			if (tima_ovf != 3'd0 && ce_cpu) begin
 				if (tima_ovf == 3'd1) begin
 					tima <= wr_tma ? cpu_dout : tma;
 					irq_timer <= 1'b1;
@@ -501,7 +647,7 @@ module gb_top #(
 			if (wr_tima) begin
 				// a write in the cycle after the overflow cancels the reload; one in
 				// the reload cycle itself is lost to it
-				if (!(tima_ovf == 3'd1 && ce)) tima <= cpu_dout;
+				if (!(tima_ovf == 3'd1 && ce_cpu)) tima <= cpu_dout;
 				tima_ovf <= 3'd0;
 			end
 		end
@@ -575,6 +721,16 @@ module gb_top #(
 			8'h06: io_q = tma;
 			8'h07: io_q = {5'b11111, tac[2:0]};
 			8'h0F: io_q = {3'b111, if_r};
+			// the Color's
+			8'h4D: io_q = cgb ? {fast, 6'b111111, key1_arm} : 8'hFF;
+			8'h55: io_q = cgb ? {!(hd_active || hd_running), hd_len} : 8'hFF;
+			8'h56: io_q = cgb ? {rp[1], 5'b01111, 1'b1, rp[0]} : 8'hFF;     // (nobody shines at it: bit 1 reads 1)
+			8'h70: io_q = cgb ? {5'b11111, svbk} : 8'hFF;
+			8'h72: io_q = cgb ? u72 : 8'hFF;
+			8'h73: io_q = cgb ? u73 : 8'hFF;
+			8'h74: io_q = cgb ? u74 : 8'hFF;
+			8'h75: io_q = cgb ? {1'b1, u75, 4'b1111} : 8'hFF;
+			8'h76, 8'h77: io_q = cgb ? 8'h00 : 8'hFF;                       // (PCM12/34: the channels' samples; not kept)
 			default: io_q = 8'hFF;
 		endcase
 	end

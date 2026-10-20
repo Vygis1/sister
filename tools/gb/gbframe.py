@@ -10,6 +10,10 @@
     python tools/gb/gbframe.py png  build/sim-tb_gb/frame.ppm  build/frame.png
         the dumped frame as a PNG, to look at
 
+    python tools/gb/gbframe.py ref15  build/dl/cgb-acid2/reference.png  sim/roms/gb/cgb_acid2_ref.hex
+        a Color reference PNG as 160x144 15-bit colours (BBBBBGGGGGRRRRR, each 8-bit
+        component back to 5 bits: cgb-acid2 scales them (c << 3) | (c >> 2)), for REF15
+
 dmg-acid2 asks for the greys $FF, $AA, $55, $00 for shades 0..3; the bench's PPM
 uses the same so the two can be compared byte for byte.
 """
@@ -64,6 +68,14 @@ def main():
         im.putdata([GREYS[s] for s in got])
         im.save(sys.argv[3])
         print(sys.argv[3])
+    elif cmd == 'ref15':
+        im = Image.open(sys.argv[2]).convert('RGB')
+        if im.size != (160, 144):
+            sys.exit('%s is %dx%d, not 160x144' % (sys.argv[2], im.size[0], im.size[1]))
+        with open(sys.argv[3], 'w') as f:
+            for r, g, b in im.getdata():
+                f.write('%04x\n' % (((b >> 3) << 10) | ((g >> 3) << 5) | (r >> 3)))
+        print('%s: %d colours' % (sys.argv[3], 160 * 144))
     else:
         sys.exit(__doc__)
 

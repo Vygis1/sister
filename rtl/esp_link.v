@@ -40,7 +40,14 @@ module esp_link #(
 	// The first byte of every reply, sent before the master has said what it
 	// wants. A fixed value so "is the board alive and configured" is answerable
 	// by clocking one byte, with no command and no state on either side.
-	parameter [7:0] SIGNATURE = 8'hA5
+	parameter [7:0] SIGNATURE = 8'hA5,
+	// The frames whose data comes four bits a clock, and how many bytes come before it a bit a clock
+	// (the command and its address): esp_bus's bus write 0x43 (5); the shell's flash door gives its
+	// page write 0x19 (4); the disc feed its sector 0x39 (4). 0: none.
+	parameter [7:0] QCMD_A = 8'h43,
+	parameter [4:0] QHDR_A = 5'd5,
+	parameter [7:0] QCMD_B = 8'h00,
+	parameter [4:0] QHDR_B = 5'd0
 )(
 	input  wire        clk,
 	input  wire        rst,
@@ -50,6 +57,12 @@ module esp_link #(
 	input  wire        spi_mosi,
 	output wire        spi_miso,
 	input  wire        spi_cs_n,
+	// quad: the data of a 0x43 frame (a bus write) four bits a clock, high nibble first, on MOSI (0),
+	// MISO (1: let go meanwhile -- spi_miso_t), and two more wires (2, 3: the ESP32's WP and HD)
+	input  wire        spi_d1,
+	input  wire        spi_d2,
+	input  wire        spi_d3,
+	output wire        spi_miso_t,
 
 	// --- the byte stream ---------------------------------------------------
 	output reg         frame_start,  // chip select fell: a command is coming
@@ -64,26 +77,45 @@ module esp_link #(
 	// Three flops, not two. The first two remove metastability; the third is
 	// what the edge detector compares against, and without it the "previous"
 	// value would be a signal that is still settling.
-	reg [2:0] sclk_s, mosi_s, cs_s;
+	// SCLK and CS take an edge only when the level held two samples on each side: four wires
+	// switching together (a quad write's data) put single-sample glitches on the clock wire, each one
+	// an extra nibble (2026-10-17, quadtest: errors only with several wires switching at once). The
+	// data are taken at the edge's first sample (stage 2), as the clock's level there.
+	reg [4:0] sclk_s, cs_s;
+	reg [2:0] mosi_s, d1_s, d2_s, d3_s;
 	always @(posedge clk) begin
-		sclk_s <= {sclk_s[1:0], spi_sclk};
+		sclk_s <= {sclk_s[3:0], spi_sclk};
 		mosi_s <= {mosi_s[1:0], spi_mosi};
-		cs_s   <= {cs_s[1:0],   spi_cs_n};
+		cs_s   <= {cs_s[3:0],   spi_cs_n};
+		d1_s   <= {d1_s[1:0],   spi_d1};
+		d2_s   <= {d2_s[1:0],   spi_d2};
+		d3_s   <= {d3_s[1:0],   spi_d3};
 	end
 
+	// A bit a clock: the edges as ever (two flops and the one compared against) -- MISO's answer
+	// must be out by the master's next rising edge, and only MISO and MOSI switch then. A quad write's
+	// data: a rise is two samples low then two high (a one-sample spike either way is no edge), the
+	// data taken at its first high sample.
 	wire sclk_rise = (sclk_s[2:1] == 2'b01);
 	wire sclk_fall = (sclk_s[2:1] == 2'b10);
-	wire cs_active = ~cs_s[1];
-	wire cs_fell   = (cs_s[2:1] == 2'b10);
-	wire cs_rose   = (cs_s[2:1] == 2'b01);
+	wire qrise     = (sclk_s[4:1] == 4'b0011);
+	wire cs_active = ~cs_s[2];
+	wire cs_fell   = (cs_s[4:1] == 4'b1100);
+	wire cs_rose   = (cs_s[4:1] == 4'b0011);
 
 	// --- the shift registers -------------------------------------------------
 	reg [7:0] shin;
 	reg [7:0] shout;
 	reg [2:0] bitn;
 	reg       byte_done;      // the eighth bit is in; hand over on the next fall
+	reg       quad_cmd;       // the frame is a quad write (its command byte QCMD_A or QCMD_B)
+	reg [4:0] qhdr;           // ...and its header's length
+	reg       quad;           // ...and its data has begun: four bits a clock, MISO let go
+	reg       nib;            // (the second nibble of a byte is next)
+	reg [3:0] hi;
 
-	assign spi_miso = shout[7];
+	assign spi_miso   = shout[7];
+	assign spi_miso_t = quad;
 
 	always @(posedge clk) begin
 		if (rst) begin
@@ -102,13 +134,30 @@ module esp_link #(
 				// to be on tx_byte from the last frame.
 				bitn        <= 3'd0;
 				byte_done   <= 1'b0;
+				quad_cmd    <= 1'b0; quad <= 1'b0; nib <= 1'b0;
 				shout       <= SIGNATURE;
 				rx_index    <= 24'd0;
 				frame_start <= 1'b1;
 			end else if (cs_rose) begin
-				frame_end <= 1'b1;
+				frame_end <= 1'b1; quad <= 1'b0;
 			end else if (cs_active) begin
-				if (sclk_rise) begin
+				if (quad) begin
+					// (the byte's index moves on the clock after its strobe: the consumer reads it with it)
+					if (byte_done) begin rx_index <= rx_index + 24'd1; byte_done <= 1'b0; end
+					if (qrise) begin
+						if (!nib) hi <= {d3_s[2], d2_s[2], d1_s[2], mosi_s[2]};
+						else begin
+							rx_byte   <= {hi, d3_s[2], d2_s[2], d1_s[2], mosi_s[2]};
+							rx_stb    <= 1'b1;
+							byte_done <= 1'b1;
+						end
+						nib <= ~nib;
+					end
+				end else if (sclk_rise) begin
+					if (bitn == 3'd7 && rx_index == 24'd0) begin
+						quad_cmd <= ({shin[6:0], mosi_s[1]} == QCMD_A && QCMD_A != 8'h00) || ({shin[6:0], mosi_s[1]} == QCMD_B && QCMD_B != 8'h00);
+						qhdr     <= ({shin[6:0], mosi_s[1]} == QCMD_A) ? QHDR_A : QHDR_B;
+					end
 					shin <= {shin[6:0], mosi_s[1]};
 					if (bitn == 3'd7) begin
 						rx_byte   <= {shin[6:0], mosi_s[1]};
@@ -126,6 +175,7 @@ module esp_link #(
 						shout     <= tx_byte;
 						rx_index  <= rx_index + 24'd1;
 						byte_done <= 1'b0;
+						if (quad_cmd && rx_index == {19'd0, qhdr} - 24'd1) quad <= 1'b1;   // (the header is in: the data comes quad)
 					end else begin
 						shout <= {shout[6:0], 1'b0};
 					end

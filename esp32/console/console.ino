@@ -17,6 +17,11 @@
 #include <vector>
 #include <SPI.h>
 #include <SD.h>
+#include "card.h"
+#include <esp_task_wdt.h>
+#ifndef SD_BUS_TRY
+#define SD_BUS_TRY 0
+#endif
 #include "log.h"
 #include "link.h"
 #include "sdprobe.h"
@@ -609,27 +614,43 @@ static bool installFrom(Stream &src, uint32_t length) {
 // wrong (some 0 -> 1, which a program cannot do: the bytes arrived wrong). Either way
 // a whole install used to fail its CRC at the end and leave the board in the shell
 // with no picture; now the bad sector is simply written again.
-static bool installCard(File &f) {
+// (the menu's progress screen while a core goes in: set by menu.h; fraction 0..1)
+static void (*installShow)(float fraction) = nullptr;
+// A core into a slot: base, its offset in the 6 MB past the shell (0: the slot at 2 MB, 0x300000:
+// the one at 5 MB); erased, its first sectors the menu has erased already in the background.
+static bool installCard(File &f, uint32_t base = 0, uint32_t erased = 0) {
   static uint8_t want[PAGE], got[PAGE];
+  // the shell from version 6: pages four bits a clock, each 64 kB block checked by the board's own
+  // checksum (no page read back over the link); from version 7, a block's 16 kB pieces into the
+  // board's buffer and programmed by the board page after page (no round trip a page)
+  Status ist = fpga.status();
+  bool fast = ist.alive && ist.core == 0 && ist.version >= 6 && fpga.quadWired();
+  bool fast7 = fast && ist.version >= 7;
+  static uint8_t *blk = nullptr;
+  if (fast && !blk) blk = (uint8_t *)heap_caps_malloc(SECTOR, MALLOC_CAP_SPIRAM);
+  if (!blk) fast = fast7 = false;
+  uint32_t t0 = millis();
   uint32_t length = f.size();
-  if (length == 0 || length > SLOT_SIZE) {
-    job.error = "that image is " + String(length) + " bytes; the slot is 6 MB";
+  if (length == 0 || base + length > SLOT_SIZE) {
+    job.error = "that image is " + String(length) + " bytes; it does not fit the slot";
     return false;
   }
   uint32_t pages = (length + PAGE - 1) / PAGE;
   uint32_t sectors = (length + SECTOR - 1) / SECTOR, redone = 0;
   const uint32_t per = SECTOR / PAGE;
-  // every sector erased first, in order -- the shell's screen takes the image's
-  // size from these -- then each written and read back, and erased again and
-  // rewritten only if it came back wrong
+  // every sector erased first, in order (unless the menu has already) -- the shell's screen takes
+  // the image's size from these -- then each written and checked, and erased again and rewritten
+  // only if it came back wrong
   job.stage = "erasing"; job.total = sectors; job.done = 0;
-  for (uint32_t sec = 0; sec < sectors; sec++) {
-    if (!fpga.eraseSector(sec * SECTOR) && !fpga.eraseSector(sec * SECTOR)) {
+  for (uint32_t sec = erased; sec < sectors; sec++) {
+    if (!fpga.eraseSector(base + sec * SECTOR) && !fpga.eraseSector(base + sec * SECTOR)) {
       job.error = "the flash never finished erasing sector " + String(sec);
       return false;
     }
     job.done = sec + 1;
+    if (installShow && (sec & 3) == 3) installShow(0.3f * (sec + 1) / sectors);
   }
+  uint32_t t1 = millis();
   job.stage = "writing"; job.total = pages; job.done = 0;
   for (uint32_t sec = 0; sec < sectors; sec++) {
     uint32_t p0 = sec * per, p1 = min(pages, p0 + per);
@@ -637,23 +658,46 @@ static bool installCard(File &f) {
     for (int tries = 0; tries < 3 && !good; tries++) {
       if (tries) {
         redone++;
-        if (!fpga.eraseSector(sec * SECTOR) && !fpga.eraseSector(sec * SECTOR)) continue;
+        if (!fpga.eraseSector(base + sec * SECTOR) && !fpga.eraseSector(base + sec * SECTOR)) continue;
       }
       f.seek(p0 * PAGE);
+      if (fast) {
+        // the block from the card in one read; then onto the flash; the board's checksum of it
+        memset(blk, 0xFF, SECTOR);
+        f.read(blk, (p1 - p0) * PAGE);
+        if (fast7) {
+          bool ok = true;
+          for (uint32_t k = 0; k < 4 && ok; k++) {
+            uint32_t q0 = p0 + k * 64;
+            if (q0 >= p1) break;
+            int n = (int)min<uint32_t>(64, p1 - q0);
+            fpga.bufWriteQuad(0, blk + k * 16384, n * PAGE);
+            ok = fpga.progPages(base + q0 * PAGE, n);
+          }
+          if (!ok) { Log.printf("install: block %u never finished programming%s", sec, "\n"); continue; }
+        } else {
+          for (uint32_t i = p0; i < p1; i++) fpga.writePageQuad(base + i * PAGE, blk + (i - p0) * PAGE, PAGE);
+        }
+        vTaskDelay(1);   // (a block's pages are ~0.3 s of polling: let the idle task run)
+        uint64_t s = 0;
+        good = fpga.sumBlock(SLOT_BASE + base + sec * SECTOR, s) && s == FpgaLink::sumOf(blk, SECTOR);
+        if (!good) Log.printf("install: block %u checksum wrong, again%s", sec, "\n");
+        continue;
+      }
       for (uint32_t i = p0; i < p1; i++) {
         size_t r = f.read(want, PAGE);
         for (size_t k = r; k < PAGE; k++) want[k] = 0xFF;
-        fpga.writePage(i * PAGE, want, PAGE);
+        fpga.writePage(base + i * PAGE, want, PAGE);
       }
       f.seek(p0 * PAGE);
       good = true;
       for (uint32_t i = p0; i < p1 && good; i++) {
         size_t r = f.read(want, PAGE);
         for (size_t k = r; k < PAGE; k++) want[k] = 0xFF;
-        if (!fpga.readPage(SLOT_BASE + i * PAGE, got) && !fpga.readPage(SLOT_BASE + i * PAGE, got)) good = false;
+        if (!fpga.readPage(SLOT_BASE + base + i * PAGE, got) && !fpga.readPage(SLOT_BASE + base + i * PAGE, got)) good = false;
         else if (memcmp(want, got, PAGE)) {
           good = false;
-          Log.printf("install: page %u wrong, sector %u again\n", i, sec);
+          Log.printf("install: page %u wrong, sector %u again%s", i, sec, "\n");
         }
       }
     }
@@ -662,8 +706,12 @@ static bool installCard(File &f) {
       return false;
     }
     job.done = p1;
+    if (installShow) installShow(0.3f + 0.7f * p1 / pages);
   }
-  if (redone) Log.printf("install: %u sector(s) written again\n", redone);
+  if (redone) Log.printf("install: %u sector(s) written again%s", redone, "\n");
+  Log.printf("install: %u kB at +%u kB, erase %u ms (%u done before), write and check %u ms (%s)%s", (unsigned)(length / 1024),
+             (unsigned)(base / 1024), (unsigned)(t1 - t0), (unsigned)erased, (unsigned)(millis() - t1),
+             fast7 ? "the board programs each block" : fast ? "quad, checked by block" : "a bit a clock, read back", "\n");
   job.stage = "verified";
   return true;
 }
@@ -704,7 +752,8 @@ static void installTask(void *) {
     if (installCard(f)) {
       job.stage = "done";
       // (what the slot holds, for the menu: it installs only when this differs)
-      prefs.begin("menu", false); prefs.putString("slot", cardCore); prefs.putUInt("size", f.size()); prefs.end();
+      prefs.begin("menu", false); prefs.putString("slot", cardCore); prefs.putUInt("size", f.size());
+      prefs.putString("s0core", cardCore); prefs.putUInt("s0size", f.size()); prefs.putUInt("s0erased", 0); prefs.end();
     }
     f.close();
   }
@@ -714,6 +763,7 @@ static void installTask(void *) {
 
 static void serviceSerial(bool inUpload);
 
+#include "pc.h"
 #include "pads.h"
 #include "menu.h"
 
@@ -736,13 +786,42 @@ static String linkPins() {
   return out;
 }                      // what the pins saw at power-up (the "pins" command)
 
+// why the chip last reset, and what the PC's disk task was doing then (RTC memory survives a reset that is
+// not a power cut): "state" prints them -- a reboot with the log off left nothing to go on (2026-10-19)
+RTC_NOINIT_ATTR static char lastStep[40];
+RTC_NOINIT_ATTR static uint32_t lastStepMagic, lastStepArg, bootCount;
+static esp_reset_reason_t resetWhy;
+static const char *resetName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "power on"; case ESP_RST_EXT: return "reset pin"; case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "CRASH (panic)"; case ESP_RST_INT_WDT: return "interrupt watchdog"; case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "other watchdog"; case ESP_RST_DEEPSLEEP: return "deep sleep"; case ESP_RST_BROWNOUT: return "BROWNOUT (power dipped)";
+    case ESP_RST_SDIO: return "SDIO"; default: return "unknown";
+  }
+}
+static void noteStep() {                   // (the main loop: the disk task's step, kept for after a reset)
+  const char *s = (const char *)pc::step;
+  strncpy(lastStep, s ? s : "?", sizeof lastStep - 1); lastStep[sizeof lastStep - 1] = 0;
+  lastStepArg = pc::stepArg; lastStepMagic = 0x51E9u;
+}
+
 void setup() {
+  resetWhy = esp_reset_reason();
+  if (resetWhy == ESP_RST_POWERON || lastStepMagic != 0x51E9u) { bootCount = 0; lastStep[0] = 0; }
+  bootCount++;
+  // The task watchdog logs and carries on instead of resetting the chip: a reset in the middle of a
+  // game is what left the PC's disk image with a broken directory entry on the card (2026-10-18) --
+  // a stall is found from the log (and pc::watch's step), a damaged card is worse
+  esp_task_wdt_init(5, false);
   // Small allocations to PSRAM too. By default everything under 4 kB comes out of internal
   // RAM, and the menu's strings broke it into pieces: minutes after boot 9 kB was free with
   // nothing over 3 kB (2026-10-10, T8 with a DualShock 4 in). Bluetooth and task stacks still
   // take internal RAM: they ask for it by name.
   heap_caps_malloc_extmem_enable(64);
-  Serial.begin(115200);
+  // 2 Mbaud (the CH9102 and the UART both take it): files onto the card ran at 6.5 kB/s at
+  // 115200. Room for two 4 kB blocks of "U blk" while the card writes the one before.
+  Serial.setRxBufferSize(12288);
+  Serial.begin(2000000);
   delay(300);
 #if CONFIG_IDF_TARGET_ESP32S3
   Log.println("\nconsole: ESP32-S3 front door");
@@ -773,12 +852,25 @@ void setup() {
   // At 5 MHz there are five system clocks per half-period. The install takes a
   // few seconds longer and stops losing pages.
   fpga.begin(5000000);
+#if !CONFIG_IDF_TARGET_ESP32S3
+  fpga.quadPins(22, 21);                           // (the T8's WP and HD: quad writes' extra wires)
+#endif
 
+  SdDiagnosis sd{};
+#if !CONFIG_IDF_TARGET_ESP32S3
+  // The SD bus first (card.h), before any SPI command: one of those leaves the card in SPI mode
+  // until its power goes.
+  if (SD_BUS_TRY && SD.beginMMC()) {
+    haveCard = true; sdInfo.responded = true;
+    Log.printf("card: on the SD bus, one bit, %u kHz%s", (unsigned)SD.mmcKhz, "\n");
+  } else
+#endif
+  {
   sdBus.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
   // Ask the card what it is BEFORE asking the filesystem anything. A failed
   // mount and a disconnected card are the same bit out of SD.begin(), and they
   // are a reformat and a soldering iron respectively -- see sdprobe.h.
-  SdDiagnosis sd = sdDiagnose(sdBus, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+  sd = sdDiagnose(sdBus, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
   sdInfo = sd.probe;
   // 8 MHz, not 20: the card answers its init at 20 over these jumpers, and then
   // drops bytes on a sustained write -- a 632 MB disc image died at twelve and
@@ -792,6 +884,8 @@ void setup() {
   haveCard = sdInfo.responded && SD.begin(PIN_SD_CS, sdBus, 20000000);
   if (!haveCard && sdInfo.responded) haveCard = SD.begin(PIN_SD_CS, sdBus, 8000000);
 #endif
+  if (haveCard) Log.printf("card: over SPI (the SD bus did not take it: once the card has been in SPI mode it needs a power cycle)%s", "\n");
+  }
   // CORE 0, not 1: reading the card blocks inside the SPI driver, and on the
   // same core as loop() that starves the web server and the serial console
   // together -- the board goes completely deaf while the drive is being fed,
@@ -812,7 +906,7 @@ void setup() {
       Log.println("disc: putting " + was + " back in");
       if (!discInsert(was)) Log.println("disc: ...but it would not open");
     } }
-  sdWhy = sdProbeSummary(sdInfo, haveCard);
+  sdWhy = SD.mmc ? String("on the SD bus (one bit, ") + String(SD.mmcKhz / 1000) + " MHz) -- mounted" : sdProbeSummary(sdInfo, haveCard);
   if (haveCard) {
     // The filesystem's own view, which is NOT the same as the card's. The probe
     // reads the capacity out of the CSD -- what the silicon says it holds -- and
@@ -825,7 +919,7 @@ void setup() {
   }
   Log.println("SD: " + sdWhy);
   if (sd.verdict) Log.println("    " + String(sd.verdict));
-  Log.println(String("    MISO idles ") +
+  if (!SD.mmc) Log.println(String("    MISO idles ") +
                  (sd.misoHigh ? "HIGH (module has power)"
                               : "LOW (no power, or not connected)"));
   // Only when the CARD did not answer. Gating this on "did it mount" was wrong:
@@ -874,8 +968,15 @@ void setup() {
 // "U open <path> <size>", then "U <base64>" lines (up to 189 bytes each), then "U close"; each is
 // answered "= ok", "= done" (the size reached) or "= error ...". pc/pad.py passes U lines through
 // and waits for the answer (tools/sdput.py). A homebrew ROM, a core: the card stays in the board.
+// Faster: "U blk <offset> <n> <crc32>" (hex) and then n raw bytes (n <= 4096). A block that is
+// not at the file's end, or whose CRC is wrong, is dropped with what follows it and answered
+// "= error at <end>" (serviceSerial); the PC sends again from there. pc/pad.py's "X" does this.
 static File     putFile;
-static uint32_t putLeft = 0;
+static uint32_t putLeft = 0, putPos = 0;
+static uint8_t  blkBuf[4096];
+static uint32_t blkWant = 0, blkGot = 0, blkOfs = 0, blkCrc = 0, blkT = 0;
+static bool     blkSkip = false;
+static void putWrite(const uint8_t *buf, size_t n);
 static String   putDisc;                 // the disc that was in, to put back
 static void putLine(String a) {
   if (a.startsWith("open ")) {
@@ -890,8 +991,28 @@ static void putLine(String a) {
     if (slash > 0) SD.mkdir(path.substring(0, slash));
     putFile = SD.open(path, FILE_WRITE);
     if (!putFile) { Serial.println("= error cannot create " + path); return; }
-    putLeft = size;
+    putLeft = size; putPos = 0;
     Serial.println("= ok");
+    return;
+  }
+  if (a.startsWith("crc ")) {                      // "U crc <path>" -> "= <crc32> <size>" (hex): the check
+    String path = a.substring(4); path.trim();
+    File f = SD.open(path);
+    if (!f) { Serial.println("= error no such file"); return; }
+    uint32_t crc = 0, size = 0; int r;
+    while ((r = f.read(blkBuf, sizeof(blkBuf))) > 0) { crc = crc32(crc, blkBuf, r); size += r; }
+    f.close();
+    cardChanged = true;                            // (a file just arrived: the menu reads the card again)
+    Serial.printf("= %08x %x\n", (unsigned)crc, (unsigned)size);
+    return;
+  }
+  if (a.startsWith("blk ")) {
+    char *e = nullptr;
+    blkOfs = strtoul(a.c_str() + 4, &e, 16);
+    uint32_t n = strtoul(e, &e, 16);
+    blkCrc = strtoul(e, &e, 16);
+    if (n == 0 || n > sizeof(blkBuf)) { Serial.println("= error block size"); return; }
+    blkWant = n; blkGot = 0; blkT = millis();       // (serviceSerial gathers the bytes)
     return;
   }
   if (a == "close") {
@@ -906,7 +1027,13 @@ static void putLine(String a) {
   if (mbedtls_base64_decode(buf, sizeof(buf), &n, (const uint8_t *)a.c_str(), a.length()) != 0) {
     Serial.println("= error bad base64"); return;
   }
+  putWrite(buf, n);
+}
+
+// n bytes at the file's end, from a "U" line or a "U blk" block
+static void putWrite(const uint8_t *buf, size_t n) {
   if (putFile.write(buf, n) != n) { Serial.println("= error write failed"); return; }
+  putPos += n;
   putLeft = putLeft > n ? putLeft - n : 0;
   if (putLeft == 0) {
     putFile.close(); listsStale = true;
@@ -943,7 +1070,18 @@ static void serialCommand(String c) {
     else { uint32_t v = strtoul(e, nullptr, 16); fpga.busWrite(a, v); Serial.println("= ok"); }
     return;
   }
+  if (c.startsWith("time ")) {                      // "time <seconds since 1970, local time>": the clock (and the DS1302)
+    menu::clockSet((time_t)strtoul(c.c_str() + 5, nullptr, 10));
+    return;
+  }
   if (c == "state") {
+    Serial.printf("  last reset: %s (boot %u since power on)%s%s\n", resetName(resetWhy), (unsigned)bootCount,
+                  lastStep[0] && resetWhy != ESP_RST_POWERON ? "; the PC disk task was in " : "", lastStep[0] && resetWhy != ESP_RST_POWERON ? lastStep : "");
+    {
+      time_t t = menu::clockNow(); struct tm tm; gmtime_r(&t, &tm);
+      Serial.printf("  clock %04d-%02d-%02d %02d:%02d:%02d (%s)\n", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    menu::clkModule ? "the DS1302" : "no DS1302: counting from 2000-01-01");
+    }
     // (internal RAM first: Bluetooth's buffers come out of it, and it is short)
     Serial.printf("  internal RAM %u free, largest piece %u, lowest ever %u; PSRAM %u free\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -982,6 +1120,61 @@ static void serialCommand(String c) {
       Serial.printf("  xabench: %u us a sector (%d words), CPU %u MHz\n", (unsigned)((micros() - t0) / 10), n, (unsigned)getCpuFrequencyMhz());
     }
     free(sec); free(out);
+  } else if (c.startsWith("quaddrive ")) {           // "quaddrive 0-3": the quad data pins' drive (0 weakest)
+    fpga.quadDrive(c.substring(10).toInt());
+    Serial.printf("  quad data pins at drive %d\n", (int)c.substring(10).toInt());
+  } else if (c == "quadtest") {
+    // the quad wires: 256 words through the menu image's highlight register (written quad, read back a
+    // bit at a time) at three clocks, the wrong bits counted by wire (bit % 4: 0 MOSI, 1 MISO, 2 WP
+    // GPIO22, 3 HD GPIO21); then 256 kB quad into its image memory (the menu sends its images again)
+    Status st = fpga.status();
+    if (!fpga.quadWired() || !st.alive || st.core != 0 || st.version < 5) Serial.println("  quadtest: needs the menu image, version 5, and the wires");
+    else {
+      const uint32_t hzs[3] = { 5000000, 8000000, 10000000 };
+      for (uint32_t hz : hzs) {
+        int bad = 0, lane[4] = { 0, 0, 0, 0 }, patBad[4] = { 0, 0, 0, 0 };
+        for (int i = 0; i < 256; i++) {
+          // (patterns by quarter: none switching, all four together, one wire at a time, random)
+          int pat = i / 64;
+          uint32_t w = pat == 0 ? 0 : pat == 1 ? ((i & 1) ? 0x03FF03FFu : 0x00F000F0u) : pat == 2 ? (0x00110011u << (i & 3)) : esp_random();
+          w &= 0x03FF03FF;
+          fpga.busWriteQuad(0x00090020, &w, 1, hz);
+          uint32_t r = fpga.busRead(0x00090020);
+          if (r != w) {
+            bad++;
+            uint32_t x = r ^ w;
+            for (int k = 0; k < 32; k++) if (x >> k & 1) lane[k & 3]++;
+            patBad[pat]++;
+            if (bad <= 3) Serial.printf("    %8u Hz: wrote %08x read %08x\n", (unsigned)hz, (unsigned)w, (unsigned)r);
+          }
+        }
+        Serial.printf("  quadtest %8u Hz: %d of 256 words wrong; wrong bits by wire: MOSI %d, MISO %d, WP %d, HD %d\n",
+                      (unsigned)hz, bad, lane[0], lane[1], lane[2], lane[3]);
+        Serial.printf("    by pattern (64 each): none switching %d, all four together %d, one at a time %d, random %d\n", patBad[0], patBad[1], patBad[2], patBad[3]);
+      }
+      static uint32_t blk[1024];
+      for (int i = 0; i < 1024; i++) blk[i] = 0x5A5A5A5Au ^ (uint32_t)i;
+      uint32_t t0 = micros();
+      for (int k = 0; k < 64; k++) fpga.busWriteQuad(0x000D0000 + 4096 * (k & 15), blk, 1024);
+      uint32_t us = micros() - t0;
+      Serial.printf("  quadtest: 256 kB in %u us, %u kB/s\n", (unsigned)us, (unsigned)(256000ull * 1000 / us));
+      menu::freshBoard(); menu::draw();
+    }
+  } else if (c == "linkbench") {
+    // 256 kB of picture words to the menu image's picture (its top band, over and over), a few
+    // clocks and a few block sizes: kB/s each. The menu is drawn again after.
+    static uint32_t blk[1024];
+    for (int i = 0; i < 1024; i++) blk[i] = 0x11111111u * (i & 1);
+    fpga.busWrite(0x00090010, 0); fpga.busWrite(0x00090014, (16u << 16) | 640u);
+    const uint32_t hzs[4] = { 5000000, 10000000, 11430000, 13330000 };
+    for (uint32_t hz : hzs)
+      for (int words : { 256, 1024 }) {
+        uint32_t t0 = micros();
+        for (int k = 0; k < (256 * 1024) / (words * 4); k++) fpga.busWriteAt(0x00091000, blk, words, hz);
+        uint32_t us = micros() - t0;
+        Serial.printf("  %8u Hz, %4d words a frame: %u kB/s\n", hz, words, (unsigned)(256000ull * 1000 / us));
+      }
+    gfx::forget(); menu::draw();
   } else if (c == "linkraw") {
     // a status frame's raw bytes at several clocks and both clock phases (the signature
     // A5 first, when all is well)
@@ -1013,6 +1206,9 @@ static void serialCommand(String c) {
       Serial.print(linkPins());
     }
     fpga.begin(5000000);
+#if !CONFIG_IDF_TARGET_ESP32S3
+  fpga.quadPins(22, 21);                           // (the T8's WP and HD: quad writes' extra wires)
+#endif
     Status st = fpga.status();
     Serial.printf("  status: %s, protocol %u, core %u\n", st.alive ? "answering" : "SILENT", st.version, st.core);
   } else if (c == "pins") {
@@ -1045,7 +1241,7 @@ static void serialCommand(String c) {
     String was = discPath;
     readerPause();
     if (discFile) discFile.close();
-    if (mhz) { SD.end(); haveCard = SD.begin(PIN_SD_CS, sdBus, mhz * 1000000); listsStale = true; }
+    if (mhz && !SD.mmc) { SD.end(); haveCard = SD.begin(PIN_SD_CS, sdBus, mhz * 1000000); listsStale = true; }
     File f = haveCard ? SD.open(was.length() ? was : String("/discs/crash2.bin")) : File();
     if (!f) { Serial.println("  cannot open the image" + String(haveCard ? "" : " (the card did not mount)")); }
     else {
@@ -1104,13 +1300,211 @@ static void serialCommand(String c) {
       return;
     }
     Serial.println("  installing " + cardCore + " from the card");
+  } else if (c.startsWith("kb ")) {
+    // kb <hex> ...: bytes to the PC's keyboard (PS/2 set 2: pc/pad.py's keyboard window sends these)
+    int i = 3;
+    while (i < (int)c.length()) {
+      while (i < (int)c.length() && c[i] == ' ') i++;
+      int j = i;
+      while (j < (int)c.length() && c[j] != ' ') j++;
+      if (j > i) pc::key((uint8_t)strtoul(c.substring(i, j).c_str(), nullptr, 16));
+      i = j;
+    }
+  } else if (c.startsWith("pcboot ")) {
+    // pcboot <image>: the PC (the board must be the PC core already) started on that disk image
+    String path = c.substring(7); path.trim();
+    String e = pc::start(path, menu::stream, menu::NES_PRG, menu::NES_CART_BANK);
+    // (as a game started from the menu: the menu closed and told a game is running -- else it opens
+    // itself over the PC's picture when the core comes up and keeps it covered)
+    if (!e.length()) { menu::gameIn = true; menu::gameName = "PC"; menu::open_ = false; menu::osd(0); }
+    Serial.println(e.length() ? "  pcboot: " + e : String("  pcboot: running ") + path);
+  } else if (c == "pcgrab") {
+    // the PC's screen, out of its DDR3 frame (pc_fb.v): "G <w> <h>", then a line a row,
+    // "G<y> <base64 of the row's RGB565>" -- tools/pc/pcgrab.py makes a picture of it
+    uint32_t st = fpga.busRead(pc::STAT), w = st & 0x7FF, h = (st >> 16) & 0x3FF;
+    if (w > 1024) w = 1024;
+    Serial.printf("G %u %u\n", (unsigned)w, (unsigned)h);
+    static uint8_t row[2048]; static unsigned char b64[2800];
+    uint32_t lines = (w + 7) / 8;
+    for (uint32_t y = 0; y < h; y++) {
+      for (uint32_t i = 0; i < lines; i++) {
+        fpga.busWrite(pc::PAGE + 0x7030, 0x800000 + y * 128 + i);
+        for (int k = 0; k < 4; k++) { uint32_t v = fpga.busRead(pc::PAGE + 0x7034 + 4 * k); memcpy(row + i * 16 + 4 * k, &v, 4); }
+      }
+      size_t ol = 0;
+      mbedtls_base64_encode(b64, sizeof b64, &ol, row, lines * 16);
+      b64[ol] = 0;
+      Serial.printf("G%u %s\n", (unsigned)y, (const char *)b64);
+    }
+    Serial.println("G end");
+  } else if (c == "pctime") {
+    // where the PC's disk requests' time goes: per request, on average
+    uint32_t n = pc::nReq ? pc::nReq : 1;
+    Serial.printf("  pc disk: %u requests, %u sectors (%.1f a request); a request: waiting for it %u us, cache hits %u, read %u us, link %u us%s",
+                  (unsigned)pc::nReq, (unsigned)pc::served, (double)pc::served / n, (unsigned)(pc::usGap / n),
+                  (unsigned)pc::cHits, (unsigned)(pc::usRead / n), (unsigned)(pc::usLink / n), "\n");
+    Serial.printf("  gaps <0.1 ms %u, <0.5 %u, <1 %u, <2 %u, <5 %u, <10 %u, <20 %u, <50 %u, more %u\n", (unsigned)pc::gapHist[0], (unsigned)pc::gapHist[1],
+                  (unsigned)pc::gapHist[2], (unsigned)pc::gapHist[3], (unsigned)pc::gapHist[4], (unsigned)pc::gapHist[5], (unsigned)pc::gapHist[6],
+                  (unsigned)pc::gapHist[7], (unsigned)pc::gapHist[8]);
+  } else if (c == "pcstat") {
+    uint32_t st = fpga.busRead(pc::STAT), dbg = fpga.busRead(pc::DBG), irq = fpga.busRead(pc::PAGE + 0x701C);
+    Serial.printf("  pc: %s, picture %u x %u, CS:IP %04X:%04X, %u sectors read, %u written, IRQ0 %u, IRQ1 %u%s", pc::on ? "running" : "off",
+                  (unsigned)(st & 0x7FF), (unsigned)((st >> 16) & 0x3FF), (unsigned)(dbg >> 16), (unsigned)(dbg & 0xFFFF),
+                  (unsigned)pc::served, (unsigned)pc::written, (unsigned)(irq >> 16), (unsigned)(irq & 0xFFFF), "\n");
+  } else if (c.startsWith("sdbench")) {
+    // sdbench [path]: a file read through in 16 kB pieces, as the loader reads a cartridge
+    String path = c.length() > 8 ? c.substring(8) : String("/cores/n64.bin");
+    path.trim();
+    File f = SD.open(path);
+    if (!f) { Serial.println("  cannot open " + path); return; }
+    static uint8_t *b = (uint8_t *)heap_caps_malloc(16384, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint32_t t0 = millis(), got = 0, n;
+    while (got < 8u * 1024 * 1024 && (n = f.read(b, 16384)) > 0) got += n;
+    uint32_t ms = millis() - t0;
+    f.close();
+    Serial.printf("  sdbench %s: %u kB in %u ms, %u kB/s (%s)\n", path.c_str(), (unsigned)(got / 1024), (unsigned)ms,
+                  (unsigned)(ms ? got / ms : 0), SD.mmc ? "the SD bus" : "SPI");
+  } else if (c == "pads") {
+    // the two players as this chip sees them, and the words last written to JOY1 / JOY2
+    pads::Player p[2]; pads::view(p);
+    for (int i = 0; i < 2; i++)
+      Serial.printf("  player %d: %s %s%s, JOY%d = %08x\n", i + 1, p[i].on ? "on" : "off",
+                    p[i].name, p[i].bt ? " (Bluetooth)" : "", i + 1, (unsigned)pads::last[i]);
+#if PADS_BT
+    for (int i = 0; i < 2; i++)
+      Serial.printf("  BT slot %d: %s\n", i, !pads::slot[i] ? "empty" :
+                    (String(pads::slot[i]->isConnected() ? "connected" : "gone") +
+                     (pads::slot[i]->isGamepad() ? ", gamepad, " : ", NOT a gamepad, ") +
+                     pads::slot[i]->getModelName().c_str()).c_str());
+#endif
+    Serial.printf("  console %u, %s, swap %d\n", pads::which, pads::there ? "there" : "not there", pads::swapPlayers);
   } else if (c == "log on" || c == "log off") {
     Log.on = c.endsWith("on");
     Serial.println(Log.on ? "  logging on (until a reset)" : "  logging off");
+  } else if (c == "vgrab" || c.startsWith("vgrab ")) {
+    // vgrab [step]: the picture the core sends to HDMI (console_top's line_grab: not in the PS1 or N64
+    // images), every step-th line: "V 640 480 <step>", then "V<y> <base64 of the line's RGB565>" --
+    // tools/vgrab.py makes a picture of it
+    int step = c.length() > 6 ? c.substring(6).toInt() : 1;
+    if (step < 1) step = 1;
+    const uint32_t LG = 0x80000 + 0x1F0;
+    Serial.printf("V 640 480 %d\n", step);
+    static uint8_t row[1280]; static unsigned char b64[1800];
+    for (uint32_t y = 0; y < 480; y += step) {
+      fpga.busWrite(LG, y);
+      uint32_t t0 = millis();
+      while (!(fpga.busRead(LG) & 1) && millis() - t0 < 100) delay(1);
+      if (!(fpga.busRead(LG) & 1)) { Serial.printf("V no line %u (no grabber in this image?)\n", (unsigned)y); break; }
+      for (uint32_t k = 0; k < 320; k++) {
+        fpga.busWrite(LG + 4, k);
+        uint32_t v = fpga.busRead(LG + 4);
+        memcpy(row + 4 * k, &v, 4);
+      }
+      size_t ol = 0;
+      mbedtls_base64_encode(b64, sizeof b64, &ol, row, sizeof row);
+      b64[ol] = 0;
+      Serial.printf("V%u %s\n", (unsigned)y, (const char *)b64);
+    }
+    Serial.println("V end");
+  } else if (c == "quad off" || c == "quad on") {
+    menu::quadOff = c == "quad off";
+    Serial.printf("  loads %s" "\n", menu::quadOff ? "a bit at a time (quad off)" : "quad when the board takes it");
+  } else if (c.startsWith("bulk ")) {
+    // bulk <hz>: the bulk transfers' clock by hand (menu.h sets it from the image's clock at each load)
+    uint32_t hz = c.substring(5).toInt();
+    if (hz >= 1000000 && hz <= 20000000) fpga.setBulkHz(hz);
+    Serial.printf("  bulk transfers at %u Hz" "\n", (unsigned)fpga.bulkHz());
+  } else if (c.startsWith("rm ")) {
+    // rm <path>: a file off the card (not one the PC is running from)
+    String path = c.substring(3); path.trim();
+    if (pc::on) Serial.println("  rm: the PC is running a disk -- start another game first");
+    else Serial.printf("  rm %s: %s" "\n", path.c_str(), SD.remove(path) ? "removed" : "FAILED (no such file?)");
+  } else if (c == "ds") {
+    // the DS1302's own registers, twice two seconds apart: is it there, running (seconds bit 7 clear),
+    // ticking, and what does it hold (it keeps time over a power cut only with a good coin cell)
+    for (int k = 0; k < 2; k++) {
+      uint8_t r[8]; menu::dsRead(r);
+      Serial.printf("  DS1302: %02x %02x %02x %02x %02x %02x %02x %02x  (sec min hour date month wday year wp)%s\n",
+                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], (r[0] & 0x80) ? " -- HALTED" : "");
+      if (!k) delay(2000);
+    }
+  } else if (c.startsWith("pcread ")) {
+    // pcread <path> [lba]: the sector as the PC's disk task would read it (a plain open, no cache)
+    String a = c.substring(7); a.trim();
+    int sp = a.lastIndexOf(' '); uint32_t lba = 0;
+    if (sp > 0 && a.substring(sp + 1).toInt() >= 0 && isDigit(a[sp + 1])) { lba = a.substring(sp + 1).toInt(); a = a.substring(0, sp); }
+    File f = SD.open(a, "r");
+    if (!f) Serial.printf("  pcread: cannot open %s" "\n", a.c_str());
+    else {
+      uint8_t b[512]; bool sk = f.seek((uint64_t)lba * 512); int got = f.read(b, 512);
+      Serial.printf("  pcread %s sector %u: size %u, seek %s, read %d:", a.c_str(), (unsigned)lba, (unsigned)f.size(), sk ? "ok" : "FAILED", got);
+      for (int i = 0; i < 16; i++) Serial.printf(" %02x", b[i]);
+      Serial.printf(" ... %02x %02x" "\n", b[510], b[511]);
+      f.close();
+    }
+  } else if (c == "pclink") {
+    // the ESP32-to-FPGA link checked on the PC core: 4 kB into its disk buffer, quad (the fast way, as the
+    // disk task sends sectors) and a bit at a time, each read back word by word
+    if (pc::on) Serial.println("  pclink: the PC is running a disk -- stop it first (start another game)");
+    else {
+      // (the pattern in internal RAM, as the disk task's buffer: the quad write sends from it; taken for the test only)
+      uint32_t *pat = (uint32_t *)heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      uint32_t *back = (uint32_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+      if (!pat || !back) Serial.println("  pclink: no memory");
+      for (int pass = 0; pat && back && pass < 2; pass++) {
+        bool quad = pass == 0 && fpga.quadWired();
+        int bad = 0, lane[4] = { 0, 0, 0, 0 };
+        for (int rep = 0; rep < 8; rep++) {
+          for (int i = 0; i < 1024; i++) pat[i] = esp_random();
+          if (quad) fpga.busWriteQuad(pc::DSK_BUF, pat, 1024); else fpga.busWriteFast(pc::DSK_BUF, pat, 1024);
+          for (int i = 0; i < 1024; i++) back[i] = fpga.busRead(pc::DSK_BUF + 4 * i);
+          for (int i = 0; i < 1024; i++) if (back[i] != pat[i]) {
+            if (bad < 3) Serial.printf("    word %d: wrote %08x read %08x\n", i, (unsigned)pat[i], (unsigned)back[i]);
+            bad++; uint32_t x = back[i] ^ pat[i]; for (int b = 0; b < 32; b++) if (x >> b & 1) lane[b & 3]++;
+          }
+        }
+        Serial.printf("  pclink %s: %d of 8192 words wrong (wrong bits by wire: 0 %d, 1 %d, 2 %d, 3 %d)\n",
+                      quad ? "quad (4 wires)" : (pass == 0 ? "single (no quad wires found)" : "single"), bad, lane[0], lane[1], lane[2], lane[3]);
+      }
+      free(pat); free(back);
+    }
+  } else if (c.startsWith("ls ")) {
+    // ls <folder>: what is on the card there (a game's path for "play")
+    String dir = c.substring(3); dir.trim();
+    File d = SD.open(dir);
+    int n = 0;
+    while (d) {
+      File e = d.openNextFile();
+      if (!e) break;
+      Serial.printf("  %s%s %u\n", e.name(), e.isDirectory() ? "/" : "", (unsigned)e.size());
+      e.close();
+      if (++n >= 200) break;
+    }
+    if (d) d.close();
+    Serial.printf("  (%d)\n", n);
+  } else if (c.startsWith("play ")) {
+    // play <path>: a game started exactly as the menu starts it (its console installed if need be) -- for
+    // testing every core from the PC
+    String path = c.substring(5); path.trim();
+    int s1 = path.indexOf('/', 1), s2 = s1 >= 0 ? path.indexOf('/', s1 + 1) : -1;
+    String folder = (s1 >= 0 && s2 > s1) ? path.substring(s1 + 1, s2) : String("");
+    int m = path.startsWith("/discs/") ? 4 : menu::machineOfFolder(folder);
+    File f = SD.open(path);
+    if (m < 0 || !f) { Serial.printf("  play: no %s (or no console for '%s')\n", path.c_str(), folder.c_str()); if (f) f.close(); }
+    else {
+      static String keepPath, keepName;
+      keepPath = path;
+      keepName = path.substring(path.lastIndexOf('/') + 1); keepName = keepName.substring(0, keepName.lastIndexOf('.'));
+      menu::Game g = { keepPath.c_str(), keepName.c_str(), (int8_t)m, (uint32_t)f.size() };
+      f.close();
+      menu::playGame(g);
+      Serial.printf("  play: %s on %s%s%s\n", path.c_str(), menu::MACHINES[m].name, menu::note.length() ? " -- " : "", menu::note.c_str());
+    }
   } else if (c == "boot" || c == "core") {
     fpga.boot(true);
     Serial.println("  booting the core");
   } else if (c == "shell") {
+    pc::stop();
     fpga.forceShell();
     Serial.println(PIN_PROG_B >= 0 ? "  pulled PROGRAM_B, back in the shell"
                                    : "  PROGRAM_B is not wired");
@@ -1121,6 +1515,8 @@ static void serialCommand(String c) {
 
 void loop() {
   pads::poll();
+  pc::watch();
+  noteStep();
   if (!xaTaskUp) xaService();                     // (normally its own task: see setup)
 
   serviceSerial(false);
@@ -1134,7 +1530,27 @@ static void serviceSerial(bool inUpload) {
   if (!inUpload)
     for (int i = 0; i < heldN; i++) serialCommand(heldCmd[i]);
   if (!inUpload) heldN = 0;
+  // A bad "U blk" (wrong CRC, wrong offset, bytes that stopped coming): whatever follows is the
+  // rest of the PC's blocks, not lines, so it is all dropped until the line has been quiet for
+  // 300 ms, and only then one "= error at <end>": the PC sends again from there.
+  if (blkWant && millis() - blkT > 1000) { blkWant = 0; blkSkip = true; blkT = millis(); }
+  if (blkSkip) {
+    while (Serial.available()) { Serial.read(blkBuf, sizeof(blkBuf)); blkT = millis(); }
+    if (millis() - blkT < 300) return;
+    blkSkip = false; serLine = "";
+    Serial.printf("= error at %x\n", (unsigned)putPos);
+  }
   while (Serial.available()) {
+    if (blkWant) {                                // a "U blk" block's raw bytes
+      blkGot += Serial.read(blkBuf + blkGot, blkWant - blkGot);
+      if (blkGot < blkWant) continue;
+      uint32_t n = blkWant; blkWant = 0;
+      if (!putFile || blkOfs != putPos || crc32(0, blkBuf, n) != blkCrc) {
+        blkSkip = true; blkT = millis(); return;
+      }
+      putWrite(blkBuf, n);
+      continue;
+    }
     char ch = Serial.read();
     if (ch == char(10) || ch == char(13)) {
       if (serLine.length()) {

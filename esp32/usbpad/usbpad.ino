@@ -95,8 +95,15 @@ void setup() {
 	Serial.println("\nusbpad: waiting for a USB device on the native (left) port");
 	usb_host_config_t cfg = {};
 	cfg.skip_phy_setup = false;
+	cfg.root_port_unpowered = true;           // (powered below, once D+/D- are swapped)
 	cfg.intr_flags = ESP_INTR_FLAG_LEVEL1;
 	if (usb_host_install(&cfg) != ESP_OK) Serial.println("usb_host_install failed");
+	// The dongle's D+ is on GPIO19 and its D- on GPIO20 (the wiring as it is): swap them in the
+	// chip -- USB_WRAP_OTG_CONF_REG bit 5 exchg_pins_override, bit 6 exchg_pins (S3 ECO1 on)
+	volatile uint32_t *otg_conf = (volatile uint32_t *)0x60039000;
+	*otg_conf |= (1u << 5) | (1u << 6);
+	Serial.printf("usbpad: D+/D- swapped in the chip (USB_WRAP_OTG_CONF %08X)\n", (unsigned)*otg_conf);
+	usb_host_lib_set_root_port_power(true);
 	xTaskCreatePinnedToCore(host_task, "usbh", 4096, nullptr, 2, nullptr, 0);
 	usb_host_client_config_t cc = {};
 	cc.is_synchronous = false;
@@ -110,6 +117,15 @@ void loop() {
 	usb_host_client_handle_events(client, pdMS_TO_TICKS(10));
 	if (new_addr) { uint8_t a = new_addr; new_addr = 0; open_device(a); }
 	if (gone) { gone = false; Serial.println("device unplugged"); dev = nullptr; }
+	// nothing enumerated: power the root port off and on again -- the host sees the device
+	// connect afresh and enumerates it again (a first failed enumeration is never retried)
 	static uint32_t t = 0;
-	if (!dev && millis() - t > 3000) { t = millis(); Serial.println("usbpad: nothing on the port yet"); }
+	if (!dev && millis() - t > 1500) {
+		t = millis();
+		// the host port register: [0] connected, [11:10] line state (bit 10 D+, bit 11 D-), [18:17] speed, [12] port power
+		uint32_t hprt = *(volatile uint32_t *)0x60080440;
+		Serial.printf("usbpad: nothing enumerated; HPRT %08X: connected %u, D+ %u, D- %u, speed %u, power %u\n",
+		              (unsigned)hprt, (unsigned)(hprt & 1), (unsigned)((hprt >> 10) & 1), (unsigned)((hprt >> 11) & 1),
+		              (unsigned)((hprt >> 17) & 3), (unsigned)((hprt >> 12) & 1));
+	}
 }

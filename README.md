@@ -1,73 +1,122 @@
-# fpga-console
+<div align="center">
 
-Game console and DOS PC cores for the QMTECH Artix-7 XC7A100T board, with HDMI output, an
-ESP32-based menu and Bluetooth controllers.
+# SiSTer
 
-<p align="center">
-  <img src="docs/images/screens/grid.png" width="720" alt="Screenshots from the board">
-</p>
+**Silicon Systems Together.** Twelve classic game systems and a DOS PC, rebuilt in hardware on one
+inexpensive FPGA board.
 
-## Supported systems
+Plug it into a TV, pair a controller, pick a game.
+
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
+<img src="docs/images/screens/grid.png" width="760" alt="Super Mario Bros., Super Mario World, Super Mario 64, Combat Cars, MediEvil, Doom, cgb-acid2, a GBA Mode 7 demo and PCE_Blox, captured from the board">
+
+<sub>Captured from the board's HDMI output.</sub>
+
+</div>
+
+## About
+
+SiSTer turns a QMTECH Artix-7 board into a stand-alone games machine. Each system is a
+hardware design: its processors, graphics and sound chips run as logic inside the FPGA, the way
+the original chips did. There is no emulator and no operating system. An ESP32 next to the FPGA
+runs the on-screen menu, loads games from a microSD card and connects Bluetooth controllers.
+
+The name: **Si**licon **S**ystems **T**ogether, and a nod to [MiSTer](https://github.com/MiSTer-devel),
+whose open-source work several parts of this project build on.
+
+## Features
+
+- **HDMI out** at 640×480 with stereo sound
+- **On-screen menu** with a library view, recently played games and settings
+- **Bluetooth controllers:** PlayStation 4/5, Xbox and Switch Pro
+- **Games from microSD:** cartridges, PlayStation disc images and DOS hard-disk images
+- **Saves on the card:** PlayStation memory cards, N64 EEPROM, SNES and GBA saves
+- **Video options:** sharp or smooth scaling, scanlines, and the N64's own video filters
+- **DOS games in one step:** `tools/pc/addgame.py` turns a game folder into a bootable disk
+
+## Systems
 
 | System | Status | Notes |
-|---|---|---|
-| NES | Playable | Mappers 0, 1, 2, 3, 4, 7 |
-| Master System | Playable | |
-| Game Gear | Playable | |
-| Game Boy / Game Boy Color | Playable | MBC1, MBC3, MBC5. No battery saves yet |
-| Game Boy Advance | Playable | Uses the open Cult-of-GBA BIOS unless a BIOS file is provided |
-| Atari 2600 | Playable | Bank switching up to 32 KB |
-| Mega Drive / Genesis | Playable | Cartridges up to 4 MB |
-| Super NES | Playable | No enhancement chips (Super FX, SA-1, DSP) |
-| PC Engine / TurboGrafx-16 | Playable | HuCards only |
-| PlayStation | Playable | Requires a BIOS file. Some 480i menus display incorrectly |
-| Nintendo 64 | Partial | Super Mario 64, Mario Kart 64. Some RDP modes are missing |
-| DOS PC (486) | Partial | ao486 at 62.5 MHz or z486 with FPU at 40 MHz. Doom, Quake, Rayman, Transport Tycoon Deluxe |
+|---|:---:|---|
+| NES | ✅ | Mappers 0, 1, 2, 3, 4, 7 |
+| Master System | ✅ | |
+| Game Gear | ✅ | |
+| Game Boy / Game Boy Color | ✅ | MBC1, MBC3, MBC5 |
+| Game Boy Advance | ✅ | Built-in open BIOS, cartridge clock |
+| Atari 2600 | ✅ | Bank switching up to 32 KB |
+| Mega Drive / Genesis | ✅ | Up to 4 MB |
+| Super NES | ✅ | No enhancement chips yet |
+| PC Engine / TurboGrafx-16 | ✅ | HuCards |
+| PlayStation | ✅ | Disc images, memory cards, CD audio, FMV; needs a BIOS file |
+| Nintendo 64 | 🟡 | Super Mario 64 and Mario Kart 64; some graphics modes missing |
+| DOS PC | ✅ | 486 at 62.5 MHz, SVGA, Sound Blaster 16, CD-ROM. Doom, Rayman, Transport Tycoon Deluxe |
 
-Details for each system are in [docs/CONSOLES.md](docs/CONSOLES.md); open issues and plans in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+✅ playable · 🟡 partial. Details per system: [docs/CONSOLES.md](docs/CONSOLES.md) · Plans: [docs/ROADMAP.md](docs/ROADMAP.md)
 
-## How it works
+## The menu
 
-Only one system is loaded at a time. A small resident FPGA image, the shell, writes the selected
-system's image into the board's flash and boots it. The ESP32 runs the menu, loads games from the
-SD card, and forwards controller input. Large games and the PlayStation's and PC's disk images
-are read from the SD card on demand.
+<p align="center">
+  <img src="docs/images/menu_home.png" width="400" alt="Home screen">
+  <img src="docs/images/menu_games.png" width="400" alt="Game list">
+</p>
 
 ## Hardware
 
-- QMTECH Artix-7 XC7A100T core board (256 MB DDR3)
-- An HDMI breakout connected to header U4
-- A LilyGO T8 (ESP32) with a microSD card, connected to header U2
-- A JTAG cable for programming the shell once
+| Part | Purpose |
+|---|---|
+| QMTECH Artix-7 XC7A100T core board (256 MB DDR3) | Runs the systems |
+| HDMI breakout board on header U4 | Video and audio |
+| LilyGO T8 ESP32 board with a microSD card | Menu, games, controllers |
+| JTAG programmer | One-time setup |
 
-Wiring and setup: [docs/GUIDE.md](docs/GUIDE.md).
+A 3D-printable case is in [hardware/](hardware/).
 
-## Building
+## Getting started
 
-Requirements:
-- Vivado 2026.1
-- Arduino CLI with the `esp32-bluepad32` platform
-- Python 3
-- WSL with `mtools` and `nasm`, for DOS disk images
+1. Connect the HDMI breakout and wire the ESP32 to the FPGA board.
+2. Program the menu image (the *shell*) into the board's flash over JTAG.
+3. Build and flash the ESP32 firmware.
+4. Copy the cores and your games to the microSD card.
+5. Power on, pair a controller, and pick a game.
+
+The full walkthrough, with wiring tables, is in **[docs/GUIDE.md](docs/GUIDE.md)**.
+
+## Building from source
+
+You need Vivado 2026.1, the Arduino CLI with the `esp32-bluepad32` platform, and Python 3.
 
 ```sh
-./tools/core.sh <system>      # nes sms gg gb gba a26 md snes pce ps1 n64 pc shell
+./tools/core.sh snes          # one system's FPGA image  ->  cores/snes.bin
+./tools/core.sh shell         # the menu image
+./tools/sim.sh tb_line_grab   # run a testbench
 ```
 
-The image is written to `cores/<system>.bin`. Building the ESP32 firmware is described in
-[esp32/README.md](esp32/README.md), and development tools in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Systems: `nes sms gg gb gba a26 md snes pce ps1 n64 pc`. Firmware build steps are in
+[esp32/README.md](esp32/README.md); development and debugging tools in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-## Credits
+## Repository layout
 
-The DOS PC uses [ao486](https://github.com/alfikpl/ao486) (Aleksander Osman),
-[486Tang](https://github.com/nand2mario/486tang) and [z486](https://github.com/nand2mario/z486)
-(nand2mario), parts of MiSTer's ao486, and Greg Taylor's OPL3. The Game Boy Advance core includes
-the [Cult-of-GBA BIOS](https://github.com/Cult-of-GBA/BIOS). See
-[docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) for licences.
+```
+rtl/        Verilog for every system and the board (HDMI, DDR3, ESP32 link, menu)
+esp32/      ESP32 firmware: menu, game loading, controllers
+sim/        testbenches
+tools/      build scripts, reference models, board tools
+boards/     pin and timing constraints
+hardware/   case and cable
+docs/       guide and design notes
+```
+
+## Contributing
+
+Bug reports and pull requests are welcome. If you change a core, run its testbenches in `sim/`
+first; most systems also have a reference model in `tools/` to compare against.
 
 ## License
 
-No license has been chosen yet. Third-party components keep their own licences.
+GPL-3.0, see [LICENSE](LICENSE). Some components come from other projects and keep their own
+compatible licences; see [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md). The DOS PC is built on
+ao486 by Aleksander Osman and 486Tang by nand2mario.
 
-This repository contains no games or BIOS files. Use your own copies.
+No games or BIOS files are included. Use your own.

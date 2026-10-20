@@ -16,7 +16,8 @@ module tb_shell_screen;
 		.sym_0(), .sym_1(), .sym_2(), .aud_l(16'd0), .aud_r(16'd0), .aud_tog(1'b0));
 	reg op_start = 0; reg [1:0] op = 0; reg [22:0] offset = 0;
 	shell_screen dut (.clk(clk), .rst(rst), .op_start(op_start), .op(op), .offset(offset), .boot_go(1'b0),
-		.pclk(pclk), .x(x), .y(y), .rgb(rgb));
+		.ext_we(1'b0), .ext_off(16'd0), .ext_wdata(32'd0), .ext_rdata(),
+		.pclk(pclk), .x(x), .y(y), .bg(24'd0), .rgb(rgb));
 	integer i, f, n = 0;
 	task go; input [1:0] o; input [22:0] a; begin @(posedge clk); op <= o; offset <= a; op_start <= 1; @(posedge clk); op_start <= 0; end endtask
 	initial begin

@@ -201,7 +201,9 @@ module gb_apu_pulse #(
 endmodule
 
 // --- the APU ---------------------------------------------------------------------------------------------
-module gb_apu (
+module gb_apu #(
+	parameter GBA = 0                 // the Game Boy Advance's channels: 0..15, no DAC (silence is 0)
+) (
 	input  wire        clk,
 	input  wire        rst,
 	input  wire        ce,            // T-cycle
@@ -401,12 +403,13 @@ module gb_apu (
 	end
 
 	// --- the mixer --------------------------------------------------------------------------------------------
-	// DAC: digital 0..15 to +15..-15 (yes, falling); a DAC that is off gives 0.
+	// DAC: digital 0..15 to +15..-15 (yes, falling); a DAC that is off gives 0. The Game Boy
+	// Advance has no such DAC: a channel's 0..15 goes straight into its mix (mGBA's dcOffset 0).
 	function signed [5:0] dac;
 		input       on;
 		input [3:0] d;
 		begin
-			dac = on ? (6'sd15 - $signed({1'b0, d, 1'b0})) : 6'sd0;
+			dac = !on ? 6'sd0 : GBA ? $signed({2'b00, d}) : (6'sd15 - $signed({1'b0, d, 1'b0}));
 		end
 	endfunction
 	wire signed [5:0] a1 = dac(c1_dac, c1_out);

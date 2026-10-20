@@ -61,6 +61,8 @@ module gb_cpu (
 	input  wire        clk,
 	input  wire        rst,
 	input  wire        ce,          // one pulse per T-cycle (4.194304 MHz); four make an M-cycle
+	input  wire        cgb,         // a Game Boy Color's boot ROM left the registers (A = $11: the game's sign of a CGB)
+	input  wire        wake,        // leave HALT without an interrupt: the end of a CGB speed switch's pause
 
 	// the bus: valid for a whole M-cycle, din sampled at the cycle's last T
 	output reg  [15:0] addr,
@@ -139,6 +141,13 @@ module gb_cpu (
 		S_INT5  = 5'd17;  // set PC
 
 	reg [4:0] state;
+	// (a wake is a clock's pulse from outside; HALT looks only on its own step)
+	reg  wake_pend = 1'b0;
+	always @(posedge clk) begin
+		if (rst) wake_pend <= 1'b0;
+		else if (wake) wake_pend <= 1'b1;
+		else if (step && state == S_HALT) wake_pend <= 1'b0;
+	end
 
 	// --- decode fields -------------------------------------------------------------------
 	// During FETCH the opcode is still on the bus; afterwards it is in ir.
@@ -362,9 +371,11 @@ module gb_cpu (
 		irq_ack <= 1'b0;
 		stop    <= 1'b0;
 		if (rst) begin
-			// The values the DMG boot ROM leaves behind; there is no boot ROM here.
-			A <= 8'h01; f_z <= 1'b1; f_n <= 1'b0; f_h <= 1'b1; f_c <= 1'b1;
-			B <= 8'h00; C <= 8'h13; D <= 8'h00; E <= 8'hD8; H <= 8'h01; L <= 8'h4D;
+			// The values the boot ROM leaves behind (Pan Docs, "Power-up sequence"); there is
+			// no boot ROM here. A DMG's, or a CGB's for a CGB game: A = $11 is what games check.
+			A <= cgb ? 8'h11 : 8'h01; f_z <= 1'b1; f_n <= 1'b0; f_h <= !cgb; f_c <= !cgb;
+			B <= 8'h00; C <= cgb ? 8'h00 : 8'h13; D <= cgb ? 8'hFF : 8'h00; E <= cgb ? 8'h56 : 8'hD8;
+			H <= cgb ? 8'h00 : 8'h01; L <= cgb ? 8'h0D : 8'h4D;
 			SP <= 16'hFFFE; PC <= 16'h0100;
 			Z <= 8'd0; W <= 8'd0; ir <= 8'd0; cb <= 8'd0;
 			ime <= 1'b0; ime_pend <= 1'b0; halted <= 1'b0; halt_bug <= 1'b0;
@@ -762,7 +773,7 @@ module gb_cpu (
 
 			// ----------------------------------------------------------------------------
 			S_HALT: begin
-				if (|irq) begin
+				if (|irq || wake_pend) begin
 					halted <= 1'b0;
 					next_instr(PC, ime);    // IME on: the dispatch; off: carry on after HALT
 				end else bus_idle;

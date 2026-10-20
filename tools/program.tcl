@@ -87,6 +87,10 @@ if {$do_flash} {
     set_property PROGRAM.FILES        [list $mcs] $cm
     set_property PROGRAM.BLANK_CHECK  0          $cm
     set_property PROGRAM.ERASE        1          $cm
+    # only the sectors the image covers: the shell is the first 1.4 MB, and the core slot
+    # from 2 MB up stays (the default erases the whole flash, and the ESP32 then believes a
+    # core is installed that is not there any more)
+    set_property PROGRAM.ADDRESS_RANGE {use_file} $cm
     set_property PROGRAM.CFG_PROGRAM  1          $cm
     set_property PROGRAM.VERIFY       1          $cm
     create_hw_bitstream -hw_device $dev [get_property PROGRAM.HW_CFGMEM_BITFILE $dev]

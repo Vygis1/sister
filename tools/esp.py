@@ -24,7 +24,7 @@ def _find_port():
 
 
 PORT = os.environ.get("ESP_PORT") or _find_port()    # ESP_PORT: the ESP32's USB serial port
-BAUD = 115200
+BAUD = 2000000      # the firmware's Serial.begin (115200 before 2026-10-15)
 
 
 def main():

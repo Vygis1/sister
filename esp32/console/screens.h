@@ -15,6 +15,8 @@ struct Chrome {
   int wifiBars = -1;            // -1 not connected, 0-3
   bool pad1 = false, pad2 = false;
   std::string running;          // the console behind the menu ("" the shell)
+  std::string time, date;       // the clock (top right, as the graphical menu's)
+  std::string crumbs;           // under the title: where this page is ("" the game's name)
 };
 
 // the button hints at the bottom: glyph + word, in the pad's own colours
@@ -22,28 +24,38 @@ struct Hint { uint8_t g; const char *what; };
 static int buttonInk(uint8_t g) {
   return g == art::G_CROSS ? BLUE : g == art::G_CIRCLE ? RED : g == art::G_SQUARE ? PINK : g == art::G_TRIANGLE ? GREEN : WHITE;
 }
-static void hints(const std::vector<Hint> &h) {
-  int w = 0;
-  for (auto &x : h) w += 2 + (int)strlen(x.what) + 3;
-  int c = (COLS - w + 3) / 2;
+// (as the graphical menu: from the left, the symbol and its word capitalised; a note on the right)
+static void hints(const std::vector<Hint> &h, const std::string &note = "") {
+  int c = 2;
   for (auto &x : h) {
-    if (x.g) glyph(c, 28, x.g, buttonInk(x.g));
-    else glyph(c, 28, ' ');
-    text(c + 2, 28, x.what, GREY);
-    c += 2 + (int)strlen(x.what) + 3;
+    if (x.g) { glyph(c, 28, x.g, buttonInk(x.g)); c += 2; }
+    std::string w = x.what;
+    if (!w.empty()) w[0] = (char)toupper((unsigned char)w[0]);
+    text(c, 28, w, GREY);
+    c += (int)w.size() + 3;
   }
+  if (!note.empty() && c < 36) right(37, 28, fit(note, 37 - c), YELLOW);
 }
 
-static void chrome(const Chrome &ch, const std::vector<Hint> &h) {
+// the top: the page's title and where it is; the clock on the right (gfxmenu.h's top())
+static std::string titleCase(const std::string &t) {
+  std::string s;
+  for (size_t i = 0; i < t.size(); i++) s += (char)(i == 0 || t[i - 1] == ' ' ? t[i] : tolower((unsigned char)t[i]));
+  return s;
+}
+static void header(const Chrome &ch, const std::string &title) {
+  int tw = ch.time.empty() ? 36 : 36 - (int)ch.time.size() - 2;
+  text(2, 1, fit(titleCase(title), tw), WHITE);
+  if (!ch.time.empty()) right(37, 1, ch.time, WHITE);
+  std::string cr = !ch.crumbs.empty() ? ch.crumbs : ch.running;
+  int dw = ch.date.empty() ? 36 : 36 - (int)ch.date.size() - 2;
+  if (!cr.empty()) text(2, 2, fit(cr, dw), GREY);
+  if (!ch.date.empty()) right(37, 2, ch.date, GREY);
+}
+
+static void chrome(const Chrome &ch, const std::vector<Hint> &h, const std::string &title = "FPGA Console") {
   clear();
-  fill(0, 0, COLS - 1, 2, BAR);
-  fill(0, 27, COLS - 1, 29, BAR);
-  glyph(2, 1, art::G_HEART, PINK);
-  text(4, 1, "BYBA GAMES", YELLOW);
-  if (!ch.running.empty()) text(16, 1, fit(ch.running, 12), GREY);
-  // the two pads
-  glyph(33, 1, art::G_PAD, ch.pad1 ? GREEN : GREY); glyph(34, 1, '1', ch.pad1 ? GREEN : GREY);
-  glyph(36, 1, art::G_PAD, ch.pad2 ? GREEN : GREY); glyph(37, 1, '2', ch.pad2 ? GREEN : GREY);
+  header(ch, title);
   hints(h);
 }
 
@@ -60,57 +72,44 @@ struct Item {
 static void list(const Chrome &ch, const std::string &title, const std::vector<Item> &items, int sel, int &top,
                  const std::vector<std::string> &info, const std::string &note, const std::vector<Hint> &h,
                  int step = 0) {
-  chrome(ch, h);
-  frame(1, 4, 38, 25, title);
-  int rowsAvail = 19 - (info.empty() ? 0 : (int)info.size() + 1);
-  if (step == 0) {            // a line apart when they all fit that way, else one under another
-    int need = 0;
-    for (size_t i = 0; i < items.size(); i++) need += 2 + (items[i].gap && i ? 1 : 0);
-    step = need <= rowsAvail + 1 ? 2 : 1;
-  }
-  // rows each item takes (its gap and its step)
-  auto rowsOf = [&](int i) { return step + (items[i].gap && i > top ? 1 : 0); };
+  (void)step;
+  clear();
+  header(ch, title);
+  // (as the graphical list: a rounded card a row, 32 pixels with 16 between; the selected one blue)
+  int infoRows = info.empty() ? 0 : (int)info.size() + 1;
+  int fitN = (27 - 4 - infoRows) / 3;
+  if (fitN < 1) fitN = 1;
+  int n = (int)items.size();
   if (sel < top) top = sel;
-  for (;;) {           // sel must fit below top
-    int used = 0;
-    for (int i = top; i <= sel && i < (int)items.size(); i++) used += rowsOf(i);
-    if (used <= rowsAvail || top >= sel) break;
-    top++;
-  }
-  int row = 6;
-  int last = top;
-  for (int i = top; i < (int)items.size(); i++) {
-    int need = rowsOf(i);
-    if (row - 6 + need > rowsAvail) break;
-    if (items[i].gap && i > top) row++;
-    const Item &it = items[i];
-    bool here = i == sel;
-    uint32_t hl = here ? HL : 0;
-    text(2, row, "", WHITE, hl, 36);
-    if (here) glyph(3, row, 0x10, YELLOW, HL);
-    int c = 5;
-    if (it.icon) { glyph(c, row, it.icon, it.iconInk, hl); c += 2; }
+  if (sel >= top + fitN) top = sel - fitN + 1;
+  if (top > n - fitN) top = n - fitN > 0 ? n - fitN : 0;
+  for (int k = 0; k < fitN && top + k < n; k++) {
+    const Item &it = items[top + k];
+    bool here = top + k == sel;
+    int r = 4 + 3 * k;
+    card(1, r, 38, r + 2, here ? BLUE : BLACK);
+    int c = 3;
+    if (it.icon) { glyph(c, r + 1, it.icon, here ? WHITE : it.iconInk == GREEN ? GREEN : GREY); c += 2; }
     int vw = (int)it.value.size() + (it.valueGlyph ? 2 : 0);
-    text(c, row, fit(it.text, 36 - c - (vw ? vw + 1 : 0)), it.ink, hl);
-    if (it.valueGlyph) glyph(36, row, it.valueGlyph, it.valueGlyphInk, hl);
-    if (!it.value.empty()) right(it.valueGlyph ? 34 : 36, row, it.value, it.valueInk, hl);
-    row += step;
-    last = i;
+    text(c, r + 1, fit(it.text, 37 - c - (vw ? vw + 1 : 0)), here && it.ink == GREY ? WHITE : it.ink);
+    if (it.valueGlyph) glyph(36, r + 1, it.valueGlyph, here ? WHITE : it.valueGlyphInk);
+    if (!it.value.empty()) right(it.valueGlyph ? 34 : 36, r + 1, it.value, here ? WHITE : it.valueInk == GREY ? GREY : YELLOW);
   }
-  if (top > 0) glyph(38, 6, 0x1E, YELLOW);
-  if (last + 1 < (int)items.size()) glyph(38, 6 + rowsAvail - 1, 0x1F, YELLOW);
-  if (items.size() > (size_t)rowsAvail / step && items.size() > 9)
-    right(36, 25, " " + num(sel + 1) + "/" + num((long)items.size()) + " ", GREY);
-  for (size_t k = 0; k < info.size(); k++) text(3, 25 - (int)info.size() + (int)k, fit(info[k], 34), GREY);
-  if (!note.empty()) text(2, 26, fit(note, 36), YELLOW);
+  // more above or below
+  if (top > 0) glyph(39, 5, 0x1E, GREY);
+  if (top + fitN < n) glyph(39, 4 + 3 * fitN - 2, 0x1F, GREY);
+  for (size_t k = 0; k < info.size(); k++) text(2, 27 - (int)info.size() + (int)k, fit(info[k], 36), GREY);
+  std::string nt = note;
+  if (nt.empty() && n > fitN) nt = num(sel + 1) + " / " + num(n);
+  hints(h, nt);
 }
 
 // --- a message in a box (loading, switching, an error) ---------------------------------------
 static void message(const Chrome &ch, const std::string &a, const std::string &b = "", int ink = WHITE) {
   chrome(ch, {});
-  frame(2, 10, 37, 18);
-  centre(13, fit(a, 32), ink);
-  if (!b.empty()) centre(15, fit(b, 32), GREY);
+  card(4, 11, 35, 18);
+  centre(13, fit(a, 28), ink == YELLOW ? WHITE : ink);
+  if (!b.empty()) centre(15, fit(b, 28), GREY);
 }
 
 // --- the splash: the logo, then the name, a letter at a time ---------------------------------

@@ -6,24 +6,28 @@ create_clock -name sys_clk -period 20.000 [get_ports sys_clk]
 # away from the board: HDMI pin k sits on U4 pin 27-k (see HEADERS.md). The headers pair
 # their balls across the two rows and the breakout puts a pair's + and - in one row, so
 # no pair lands on a true P/N pair: each wire is its own LVCMOS33 output, + and - driven
-# opposite by the serialisers (hdmi_tx PSEUDO), fast and strong into the display's
-# 50 ohm terminations. The shields, ground, the shell, CEC, the reserved pin, DDC and
+# opposite by the serialisers (hdmi_tx PSEUDO), into the display's 50 ohm terminations to
+# 3.3 V. DRIVE 4, the weakest: TMDS wants each wire pulled down only 0.4-0.6 V, and a strong
+# driver with no series resistance dragged it to ~1 V -- a swing some four times the
+# standard's, which one TV took and a 4K Philips refused (no signal, 2026-10-16). The weak
+# driver's own resistance is the series resistor the breakout has no room for; still over
+# the standard, but closer. CEC (13) floats: the display's bus, idling high. The shields, ground, the shell, CEC, the reserved pin, DDC and
 # hot-plug are held low (the display's pull-ups then cannot lift a ball to 5 V); the
 # +5V pin is held at 3.3 V (the display's sign of a source).
 #   HDMI 1  D2+   U4 26 F4      HDMI 3  D2-   U4 24 E2
 #   HDMI 4  D1+   U4 23 F2      HDMI 6  D1-   U4 21 E1
 #   HDMI 7  D0+   U4 20 B1      HDMI 9  D0-   U4 18 D5
 #   HDMI 10 CLK+  U4 17 E5      HDMI 12 CLK-  U4 15 C2
-#   held low: HDMI 2 G4, 5 D1, 8 C1, 11 B2, 13 C4, 14 D4, 15 A2, 16 A3, 17 A4, 19 A5, 20 B5
+#   held low: HDMI 2 G4, 5 D1, 8 C1, 11 B2, 14 D4, 15 A2, 16 A3, 17 A4, 19 A5, 20 B5; floating: 13 C4 (CEC)
 #   HDMI 18 +5V   U4 9  B4 (3.3 V)
-set_property -dict {PACKAGE_PIN F4 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 16} [get_ports {hdmi_d_p[2]}]
-set_property -dict {PACKAGE_PIN E2 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 16} [get_ports {hdmi_d_n[2]}]
-set_property -dict {PACKAGE_PIN F2 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 16} [get_ports {hdmi_d_p[1]}]
-set_property -dict {PACKAGE_PIN E1 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 16} [get_ports {hdmi_d_n[1]}]
-set_property -dict {PACKAGE_PIN B1 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 16} [get_ports {hdmi_d_p[0]}]
-set_property -dict {PACKAGE_PIN D5 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 16} [get_ports {hdmi_d_n[0]}]
-set_property -dict {PACKAGE_PIN E5 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 16} [get_ports hdmi_ck_p]
-set_property -dict {PACKAGE_PIN C2 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 16} [get_ports hdmi_ck_n]
+set_property -dict {PACKAGE_PIN F4 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 4} [get_ports {hdmi_d_p[2]}]
+set_property -dict {PACKAGE_PIN E2 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 4} [get_ports {hdmi_d_n[2]}]
+set_property -dict {PACKAGE_PIN F2 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 4} [get_ports {hdmi_d_p[1]}]
+set_property -dict {PACKAGE_PIN E1 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 4} [get_ports {hdmi_d_n[1]}]
+set_property -dict {PACKAGE_PIN B1 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 4} [get_ports {hdmi_d_p[0]}]
+set_property -dict {PACKAGE_PIN D5 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 4} [get_ports {hdmi_d_n[0]}]
+set_property -dict {PACKAGE_PIN E5 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 4} [get_ports hdmi_ck_p]
+set_property -dict {PACKAGE_PIN C2 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 4} [get_ports hdmi_ck_n]
 set_property -dict {PACKAGE_PIN G4 IOSTANDARD LVCMOS33 DRIVE 8} [get_ports {hdmi_lo[0]}]
 set_property -dict {PACKAGE_PIN D1 IOSTANDARD LVCMOS33 DRIVE 8} [get_ports {hdmi_lo[1]}]
 set_property -dict {PACKAGE_PIN C1 IOSTANDARD LVCMOS33 DRIVE 8} [get_ports {hdmi_lo[2]}]

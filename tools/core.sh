@@ -72,13 +72,32 @@ case "${1:-nes}" in
          # so the memory controller again; 160 x 144 tripled on HDMI, stereo sound.
          NAME=gb;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_GB:1 -gen JTAG_DBG:${JTAG:-0}"
          EXTRA="-ip $MIG_XCI" ;;
+  pce|pcengine|tg16)
+         # The PC Engine (pce_top.v): its HuCard in DDR3 (cart_ddr3 + cart_cache, as the Game Boy's),
+         # so the memory controller again; 256-512 x 240 in 9-bit colour, the PSG's stereo.
+         NAME=pce;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PCE:1 -gen JTAG_DBG:${JTAG:-0}"
+         EXTRA="-ip $MIG_XCI" ;;
+  gba|gameboyadvance)
+         # The Game Boy Advance (gba_top.v): the cartridge and the work RAM in DDR3 (mem_arb, cart_ddr3,
+         # cart_cache, gba_ewram), the BIOS built in; 240 x 160 in 15-bit colour.
+         NAME=gba;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_GBA:1 -gen JTAG_DBG:${JTAG:-0}"
+         EXTRA="-ip $MIG_XCI" ;;
   a26|atari|atari2600)
          # The Atari 2600 (a26_top.v): its cartridge (up to 32 kB) in the core's own block RAM,
          # filled through the program window like the Master System's; no memory controller.
          NAME=a26;   GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_A26:1"; EXTRA="$NOMIG" ;;
+  pc|dos|486)
+         # The PC (pc_top.v): a 486 (ao486 from 486Tang, rtl/pc), its memory and its picture in
+         # DDR3, its hard disk served by the ESP32 from an image on the card; VGA to 640x480.
+         # 62.5 MHz (PC_DIV 16; 486Tang's 486SX-20 pace was at 50): the CPU's stall chain (ao486's busy
+         # signals, write stage back to decode, one clock) is the critical path, 80% routing -- it closes
+         # with the Explore directives and the ExtraTimingOpt placer (+0.022 ns, 2026-10-18), not without
+         NAME=pc;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PC:1 -gen CLK_DIV:${PC_DIV:-16} -gen JTAG_DBG:${JTAG:-0}"
+         [ "${PC_DIV:-16}" -lt 20 ] && { EFFORT=${EFFORT:-1}; export PLACE_DIR=${PLACE_DIR:-ExtraTimingOpt}; }
+         EXTRA="-ip $MIG_XCI" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;
   shell) NAME=shell; TOP=shell_top; XDC=boards/qmtech_a100t/shell_top.xdc ;;
-  *) echo "usage: tools/core.sh [nes|sms|gg|md|ps1|n64|snes|gb|a26|dev|shell]" >&2; exit 1 ;;
+  *) echo "usage: tools/core.sh [nes|sms|gg|md|ps1|n64|snes|gb|a26|pce|gba|pc|dev|shell]" >&2; exit 1 ;;
 esac
 # RELEASE=1: the shipping image. Everything a developer or a PC on the network read is left
 # out -- the logic analyser, the PC sound ring, the frame reader, the bare-CPU test slot, the

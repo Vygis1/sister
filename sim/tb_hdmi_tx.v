@@ -24,7 +24,9 @@ module tb_hdmi_tx;
 	reg [15:0] au = 16'h1000; reg atog = 0; integer acnt = 0;
 	always @(posedge clk) begin
 		acnt = acnt + 1;
-		if (acnt == 521) begin acnt = 0; au <= au + 16'd1; atog <= ~atog; end
+		// a sample every 525 clocks: 48 kHz at the 25.2 MHz the transmitter's pacing assumes
+		// (hdmi_tx A_TOP); any faster and its queue overruns -- hdmi_check sees samples skipped
+		if (acnt == 525) begin acnt = 0; au <= au + 16'd1; atog <= ~atog; end
 	end
 	integer df; initial df = $fopen("../../sim/hdmi_syms.txt", "w");
 	function [4:0] ter;                      // {valid, the 4 bits} of a TERC4 symbol

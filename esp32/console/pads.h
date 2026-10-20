@@ -129,16 +129,30 @@ static const CBtn L_A26[] = {
   { "Game Select", 6, { PB_SELECT, PB_NONE } }, { "Game Reset", 7, { PB_START, PB_NONE } },
   { "Up", 0, { PB_UP, PB_LS_UP } }, { "Down", 1, { PB_DOWN, PB_LS_DOWN } },
   { "Left", 2, { PB_LEFT, PB_LS_LEFT } }, { "Right", 3, { PB_RIGHT, PB_LS_RIGHT } } };
+// the PC Engine, in pce_top's order: I, II, select, run, up, right, down, left
+static const CBtn L_PCE[] = {
+  { "I", 0, { PB_CROSS, PB_CIRCLE } }, { "II", 1, { PB_SQUARE, PB_TRIANGLE } },
+  { "Select", 2, { PB_SELECT, PB_NONE } }, { "Run", 3, { PB_START, PB_NONE } },
+  { "Up", 4, { PB_UP, PB_LS_UP } }, { "Right", 5, { PB_RIGHT, PB_LS_RIGHT } },
+  { "Down", 6, { PB_DOWN, PB_LS_DOWN } }, { "Left", 7, { PB_LEFT, PB_LS_LEFT } } };
+// the Game Boy Advance, in gba_top's order: A, B, select, start, right, left, up, down, R, L
+static const CBtn L_GBA[] = {
+  { "A", 0, { PB_CROSS, PB_SQUARE } }, { "B", 1, { PB_CIRCLE, PB_TRIANGLE } },
+  { "Select", 2, { PB_SELECT, PB_NONE } }, { "Start", 3, { PB_START, PB_NONE } },
+  { "Right", 4, { PB_RIGHT, PB_LS_RIGHT } }, { "Left", 5, { PB_LEFT, PB_LS_LEFT } },
+  { "Up", 6, { PB_UP, PB_LS_UP } }, { "Down", 7, { PB_DOWN, PB_LS_DOWN } },
+  { "R", 8, { PB_R1, PB_R2 } }, { "L", 9, { PB_L1, PB_L2 } } };
 #define NB(x) (uint8_t)(sizeof(x) / sizeof(x[0]))
 // by the board's console number (NES+0x20): 0 NES, 1 SMS, 2 MD, 3 PS1, 4 N64, 5 SNES, 6 GG,
-// 7 Game Boy, 8 Atari 2600
-static const Layout LAYOUTS[9] = {
+// 7 Game Boy, 8 Atari 2600, 9 PC Engine, 10 Game Boy Advance
+static const Layout LAYOUTS[11] = {
   { "nes", "NES", L_NES, NB(L_NES) }, { "sms", "Master System", L_SMS, NB(L_SMS) },
   { "md", "Mega Drive", L_MD, NB(L_MD) }, { "ps1", "PlayStation", L_PS1, NB(L_PS1) },
   { "n64", "Nintendo 64", L_N64, NB(L_N64) }, { "snes", "Super NES", L_SNES, NB(L_SNES) },
   { "gg", "Game Gear", L_GG, NB(L_GG) }, { "gb", "Game Boy", L_GB, NB(L_GB) },
-  { "a26", "Atari 2600", L_A26, NB(L_A26) } };
-static const int NLAYOUTS = 9;
+  { "a26", "Atari 2600", L_A26, NB(L_A26) }, { "pce", "PC Engine", L_PCE, NB(L_PCE) },
+  { "gba", "Game Boy Advance", L_GBA, NB(L_GBA) } };
+static const int NLAYOUTS = 11;
 static const int MAXB = 16;
 static uint8_t bind[NLAYOUTS][MAXB][2];
 
@@ -321,6 +335,8 @@ static void poll() {
   // (written again now and then, whatever changed: a register a core reset cleared)
   bool again = millis() - lastSend > 250;
   if (again) lastSend = millis();
+  // the PC: the first controller as Doom's keys (pc.h)
+  if (which == pc::CONSOLE_PC) pc::padKeys(np[0].on, np[0].in);
   for (int i = 0; i < 2; i++) {
     const In &p = np[i].in;
     uint32_t v = np[i].on ? word(p, which) : 0;

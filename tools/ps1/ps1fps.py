@@ -1,5 +1,5 @@
 """ps1fps.py - the PlayStation game's frame rate on the board, from its own display flips: how
-often the displayed buffer (console 0x6C, dbg_disp [18:0]) changes, read through pc/pad.py's
+often the displayed buffer (console 0x6C, dbg_disp: y [25:17], x [9:0]) changes, read through pc/pad.py's
 tool port -- no network. Reported per second, then the median and the slowest second.
 
     python tools/ps1/ps1fps.py [SECONDS]
@@ -17,15 +17,16 @@ def rd(a):
     return int(f.readline().split()[-1], 16)
 
 
+DISP = (0x1FF << 17) | 0x3FF     # (the old 0x7FFFF missed every flip between y 0 and y 240)
 secs = int(sys.argv[1]) if len(sys.argv) > 1 else 20
-last = rd(0x0008006C) & 0x7FFFF
+last = rd(0x0008006C) & DISP
 per = [0] * secs
 t0 = time.time()
 while True:
     t = time.time() - t0
     if t >= secs:
         break
-    v = rd(0x0008006C) & 0x7FFFF
+    v = rd(0x0008006C) & DISP
     if v != last:
         per[int(t)] += 1
         last = v

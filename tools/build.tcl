@@ -60,6 +60,13 @@ if {![info exists effort]} { set effort 0 }
 if {![info exists fresh]}  { set fresh 0 }
 if {![info exists incr]}   { set incr 0 }
 if {$outdir eq ""} { set outdir $root/build/$top }
+# CONSOLE_CLK_HZ, a Verilog define, for the code that cannot take a parameter -- a SystemVerilog
+# package (the PC's OPL3, opl3_pkg.sv): eth_top's console clock is 1000 MHz / CLK_DIV
+set defines {}
+foreach g $generics {
+    if {[regexp {^CLK_DIV=([0-9]+)$} $g -> cdiv]} { lappend defines "CONSOLE_CLK_HZ=[expr {1000000000 / $cdiv}]" }
+}
+
 file mkdir $outdir
 
 puts ""
@@ -91,6 +98,21 @@ if {[llength $srcs] == 0} { puts " *** no sources in $rtldir"; exit 1 }
 foreach f [lsort $srcs] {
     puts " read: [file tail $f]"
     if {[file extension $f] eq ".sv"} { read_verilog -sv $f } else { read_verilog $f }
+}
+# the PC (CORE_PC=1): ao486 and its chipset from rtl/pc, by its file list (rtl/pc/files.f -- the
+# folder holds 486Tang's alternatives too, under the same module names)
+set incdirs {}
+if {[lsearch -exact $generics "CORE_PC=1"] >= 0} {
+    set fl [open $rtldir/pc/files.f]
+    foreach f [split [read $fl] "
+"] {
+        set f [string trim $f]
+        if {$f eq ""} continue
+        puts " read: pc/$f"
+        read_verilog -sv $rtldir/pc/$f      ;# (all of it as SystemVerilog: some of ao486's .v files are)
+    }
+    close $fl
+    lappend incdirs $rtldir/pc/ao486
 }
 if {![file exists $xdc]} { puts " *** no such xdc: $xdc"; exit 1 }
 read_xdc $xdc
@@ -139,12 +161,18 @@ if {[llength $generics] > 0} {
 # half only. 8 is the most Vivado accepts.
 set_param general.maxThreads 8
 
+set defopt {}
+if {[llength $defines]} { set defopt [list -verilog_define $defines]; puts " defines: $defines" }
+# RETIME=1 (the environment): synthesis moves registers across long combinational chains to balance
+# them -- the same behaviour every clock
+if {[info exists ::env(RETIME)] && $::env(RETIME) eq "1"} { lappend defopt -retiming; puts " retiming on" }
+
 # AREA=1 (the environment) asks synthesis and opt_design for their area-first directives:
 # for a design that would not otherwise fit (the N64 with its RDP pipeline: 97% of the LUTs).
 if {[info exists ::env(AREA)] && $::env(AREA) ne ""} {
-    synth_design -top $top -part $part -generic $generics -directive AreaOptimized_high
+    synth_design -top $top -part $part -generic $generics -include_dirs $incdirs {*}$defopt -directive AreaOptimized_high
 } else {
-    synth_design -top $top -part $part -generic $generics
+    synth_design -top $top -part $part -generic $generics -include_dirs $incdirs {*}$defopt
 }
 
 # Critical warnings are errors wearing a friendlier label. A multi-driven net

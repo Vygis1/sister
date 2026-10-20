@@ -14,11 +14,13 @@ module tb_esp_bus;
 	reg clk = 0, rst = 1;
 	always #10 clk = ~clk;
 
-	reg sclk = 0, mosi = 0, cs_n = 1; wire miso;
+	reg sclk = 0, mosi = 0, cs_n = 1; wire miso, miso_t;
+	reg qd1 = 0, qd2 = 0, qd3 = 0;                   // (a quad write's other three data wires)
 	wire [31:0] e_addr, e_wdata, a_addr_w, bus_addr, bus_wdata;
 	wire e_we, e_re, e_ack, a_ack, bus_we, bus_re, bus_ack;
 	wire [31:0] bus_rdata;
 	esp_bus #(.CORE_ID(8'h4E)) dut (.clk(clk), .rst(rst), .spi_sclk(sclk), .spi_mosi(mosi), .spi_miso(miso), .spi_cs_n(cs_n),
+		.spi_d1(qd1), .spi_d2(qd2), .spi_d3(qd3), .spi_miso_t(miso_t),
 		.bus_addr(e_addr), .bus_wdata(e_wdata), .bus_we(e_we), .bus_re(e_re), .bus_rdata(bus_rdata), .bus_ack(e_ack));
 
 	// the other master: a read or a write of its own words, back to back
@@ -61,14 +63,22 @@ module tb_esp_bus;
 			mosi = o[b]; #50; sclk = 1; i[b] = miso; #50; sclk = 0;
 		end
 	end endtask
+	// a byte four bits a clock, the high nibble first, on {d3, d2, d1, d0 = MOSI}
+	task qxfer; input [7:0] o; integer h; begin
+		for (h = 1; h >= 0; h = h - 1) begin
+			{qd3, qd2, qd1, mosi} = o[4 * h +: 4]; #50; sclk = 1; #50; sclk = 0;
+		end
+	end endtask
 	reg [7:0] r [0:15]; reg [7:0] t;
+	integer let_go = 0;
+	always @(posedge sclk) if (miso_t) let_go = let_go + 1;
 	integer n, w;
 	reg [31:0] got;
 	initial begin
 		repeat (10) @(posedge clk); rst = 0; #1000;
 		// PING
 		cs_n = 0; #200; for (n = 0; n < 4; n = n + 1) xfer(n == 0 ? 8'h01 : 8'h00, r[n]); #200; cs_n = 1; #1000;
-		if (r[0] !== 8'hA5 || r[1] !== 8'd1 || r[2] !== 8'h4E) begin errors = errors + 1; $display("tb_esp_bus: PING %02x %02x %02x %02x", r[0], r[1], r[2], r[3]); end
+		if (r[0] !== 8'hA5 || r[1] !== 8'd2 || r[2] !== 8'h4E) begin errors = errors + 1; $display("tb_esp_bus: PING %02x %02x %02x %02x", r[0], r[1], r[2], r[3]); end
 		// one frame: 64 words from 0x400
 		cs_n = 0; #200;
 		xfer(8'h40, t); xfer(8'h00, t); xfer(8'h00, t); xfer(8'h04, t); xfer(8'h00, t);
@@ -104,6 +114,22 @@ module tb_esp_bus;
 			end
 		end
 		#200; cs_n = 1; #600;
+		// a quad write: 64 words from 0x800, the command and address a bit a clock, the data four
+		cs_n = 0; #200;
+		xfer(8'h43, t); xfer(8'h00, t); xfer(8'h00, t); xfer(8'h08, t); xfer(8'h00, t);
+		#300;                                              // (the ESP32's gap: its next transaction)
+		for (w = 0; w < 64; w = w + 1) begin
+			got = 32'hC0DE_0000 ^ (w * 32'h0103_0507);
+			qxfer(got[7:0]); qxfer(got[15:8]); qxfer(got[23:16]); qxfer(got[31:24]);
+		end
+		#400; cs_n = 1; #1000;
+		for (w = 0; w < 64; w = w + 1)
+			if (mem[(32'h800 >> 2) + w] !== (32'hC0DE_0000 ^ (w * 32'h0103_0507))) begin
+				errors = errors + 1;
+				if (errors < 8) $display("tb_esp_bus: quad word %0d is %08x, wrote %08x", w, mem[(32'h800 >> 2) + w], 32'hC0DE_0000 ^ (w * 32'h0103_0507));
+			end
+		if (let_go < 500) begin errors = errors + 1; $display("tb_esp_bus: MISO let go for only %0d clocks of the quad data", let_go); end
+		if (miso_t) begin errors = errors + 1; $display("tb_esp_bus: MISO still let go after the frame"); end
 		$display("tb_esp_bus: the other master made %0d transfers meanwhile", a_done);
 		if (errors == 0 && a_done > 10000) $display("tb_esp_bus: all checks passed"); else $display("tb_esp_bus: FAIL (%0d errors)", errors);
 		$finish;
