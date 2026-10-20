@@ -8,6 +8,7 @@ inexpensive FPGA board.
 Plug it into a TV, pair a controller, pick a game.
 
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+[![Ko-fi](https://img.shields.io/badge/support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/vygandasvalantiejus)
 
 <img src="docs/images/screens/grid.png" width="760" alt="Super Mario Bros., Super Mario World, Super Mario 64, Combat Cars, MediEvil, Doom, cgb-acid2, a GBA Mode 7 demo and PCE_Blox, captured from the board">
 
@@ -112,6 +113,13 @@ docs/       guide and design notes
 
 Bug reports and pull requests are welcome. If you change a core, run its testbenches in `sim/`
 first; most systems also have a reference model in `tools/` to compare against.
+
+## Support the project
+
+SiSTer is free and open source. If you enjoy it, you can support its development on
+[Ko-fi](https://ko-fi.com/vygandasvalantiejus): it pays for boards, test hardware and time for new systems.
+
+<a href="https://ko-fi.com/vygandasvalantiejus"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi"></a>
 
 ## License
 
