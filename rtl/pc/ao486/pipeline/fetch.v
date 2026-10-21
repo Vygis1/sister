@@ -41,9 +41,12 @@ module fetch(
     output              prefetchfifo_accept_do,
     input       [67:0]  prefetchfifo_accept_data,
     input               prefetchfifo_accept_empty,
+    input       [3:0]   prefetchfifo_accept_length_nopr,   // (SiSTer: the head's length and empty with pr_reset low)
+    input               prefetchfifo_accept_empty_nopr,
     
     // fetch interface to decode
     output      [3:0]   fetch_valid,            // how many bytes in `fetch` are valid
+    output      [3:0]   fetch_valid_nopr,       // (SiSTer: fetch_valid when pr_reset is low)
     output      [63:0]  fetch,                  // the whole fetch buffer
     output              fetch_limit,
     output              fetch_page_fault,
@@ -66,6 +69,8 @@ assign prefetch_eip = wr_eip;
 
 assign fetch_valid      = (prefetchfifo_accept_empty || prefetchfifo_accept_data[67:64] >= `PREFETCH_MIN_FAULT)? 4'd0 : prefetchfifo_accept_data[67:64] - fetch_count;
 
+// (SiSTer: the same from the head as it is with pr_reset low)
+assign fetch_valid_nopr = (prefetchfifo_accept_empty_nopr || prefetchfifo_accept_length_nopr >= `PREFETCH_MIN_FAULT)? 4'd0 : prefetchfifo_accept_length_nopr - fetch_count;
 assign fetch_limit      = prefetchfifo_accept_empty == `FALSE && prefetchfifo_accept_data[67:64] == `PREFETCH_GP_FAULT;
 assign fetch_page_fault = prefetchfifo_accept_empty == `FALSE && prefetchfifo_accept_data[67:64] == `PREFETCH_PF_FAULT;
 

@@ -120,6 +120,7 @@ module tlb(
     output  [3:0]       dcacheread_length,
     output              dcacheread_cache_disable,
     output  [31:0]      dcacheread_address,
+    output  [3:0]       dcacheread_rgn,     // (SiSTer: the L2 regions of dcacheread_address)
     input   [63:0]      dcacheread_data,
     //END
     
@@ -130,6 +131,7 @@ module tlb(
     output  [2:0]       dcachewrite_length,
     output              dcachewrite_cache_disable,
     output  [31:0]      dcachewrite_address,
+    output  [3:0]       dcachewrite_rgn,    // (SiSTer: the L2 regions of dcachewrite_address)
     output              dcachewrite_write_through,
     output  [31:0]      dcachewrite_data,
     //END
@@ -240,6 +242,7 @@ wire translate_combined_su;
 wire        translate_do;
 wire        translate_valid;
 wire [31:0] translate_physical;
+wire [3:0]  translate_rgn;      // (SiSTer: tlb_regs)
 wire        translate_pwt;
 wire        translate_pcd;
 
@@ -338,6 +341,7 @@ tlb_regs tlb_regs_inst(
     .translate_linear           (linear),                       //input [31:0]
     .translate_valid            (translate_valid),              //output
     .translate_physical         (translate_physical),           //output [31:0]
+    .translate_rgn              (translate_rgn),                //output [3:0] (SiSTer)
     .translate_pwt              (translate_pwt),                //output
     .translate_pcd              (translate_pcd),                //output
     .translate_combined_rw      (translate_combined_rw),        //output
@@ -1553,5 +1557,37 @@ assign dcacheread_cache_disable =
     (cond_40 && cond_12 && ~cond_37 && ~cond_28 && cond_29)? (    cr0_cd || pte[4] || memtype_cache_disable) :
     (cond_43 && cond_12 && ~cond_28 && cond_29)? (    cr0_cd || pte[4] || memtype_cache_disable) :
     1'd0;
+
+//------------------------------------------------------------------------------
+
+// (SiSTer: the L2 regions (ao486_l2_rgn) of memtype_physical -- and so of dcacheread_address and
+//  dcachewrite_address, which are memtype_physical -- from the same condition chain, each value's regions
+//  from where the value comes from: translate_physical's from tlb_regs (stored with the entry), the page-walk
+//  addresses' from cr3_base, pde, pte (registers). They are there as early as the address is, and the L2
+//  cache uses them instead of decoding the address at the end of the path)
+wire [3:0] memtype_rgn;
+wire [3:0] memtype_rgn_v1; ao486_l2_rgn memtype_rgn_v1_inst(.a({ cr3_base[31:12], linear[31:22], 2'd0 }), .f(memtype_rgn_v1));
+wire [3:0] memtype_rgn_v2; ao486_l2_rgn memtype_rgn_v2_inst(.a({ pde[31:12], linear[21:12], 2'd0 }), .f(memtype_rgn_v2));
+wire [3:0] memtype_rgn_v3; ao486_l2_rgn memtype_rgn_v3_inst(.a({ pde[31:12], linear[21:12], 2'b00 }), .f(memtype_rgn_v3));
+wire [3:0] memtype_rgn_v4; ao486_l2_rgn memtype_rgn_v4_inst(.a({ pte[31:12], linear[11:0] }), .f(memtype_rgn_v4));
+assign memtype_rgn =
+    (cond_15 && cond_17 && ~cond_18)? ( translate_rgn) :
+    (cond_15 && ~cond_17)? ( memtype_rgn_v1) :
+    (cond_19 && cond_17 && ~cond_18 && ~cond_20)? ( translate_rgn) :
+    (cond_19 && ~cond_17)? ( memtype_rgn_v1) :
+    (cond_21 && ~cond_17)? ( memtype_rgn_v1) :
+    (cond_22 && ~cond_23 && cond_17 && ~cond_18)? ( translate_rgn) :
+    (cond_22 && ~cond_23 && ~cond_17)? ( memtype_rgn_v1) :
+    (cond_30)? ( memtype_rgn_v2) :
+    (cond_35 && cond_36)? ( memtype_rgn_v1) :
+    (cond_35 && ~cond_36 && cond_37)? ( memtype_rgn_v3) :
+    (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? ( memtype_rgn_v4) :
+    (cond_39)? ( memtype_rgn_v4) :
+    (cond_40 && cond_12 && ~cond_37 && ~cond_28 && cond_29)? ( memtype_rgn_v4) :
+    (cond_41)? ( memtype_rgn_v3) :
+    (cond_42 && ~cond_38)? ( memtype_rgn_v4) :
+    memtype_rgn_v4;
+assign dcacheread_rgn  = memtype_rgn;
+assign dcachewrite_rgn = memtype_rgn;
 
 endmodule

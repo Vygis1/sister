@@ -181,7 +181,16 @@ module write(
     output      [31:0]  eax,
     output      [31:0]  ebx,
     output      [31:0]  ecx,
+    output              ecx_lo_is_0,    // (SiSTer: ecx[15:0] == 0, registered with ecx -- write_register.v)
+    output              ecx_lo_is_1,    // (SiSTer: ecx[15:0] == 1)
+    output              ecx_hi_is_0,    // (SiSTer: ecx[31:16] == 0)
     output      [31:0]  edx,
+    output              eax_lo_is_0,    // (SiSTer: write_register.v)
+    output              eax_lo_is_8000,
+    output              eax_hi_is_0,
+    output              edx_lo_is_0,
+    output              edx_lo_is_8000,
+    output              edx_hi_is_8000,
     output      [31:0]  esi,
     output      [31:0]  edi,
     output      [31:0]  ebp,
@@ -546,7 +555,16 @@ wire wr_one_cycle_wait;
 
 assign wr_ready = ~(wr_waiting) && wr_cmd != `CMD_NULL; //NOTE: do not use: wr_mutex[`MUTEX_ACTIVE_BIT];
 
-assign wr_busy = wr_waiting || exc_init || wr_debug_prepare || wr_interrupt_possible_prepare || (wr_one_cycle_wait && wr_first_cycle);
+// (SiSTer: was ... || wr_debug_prepare || wr_interrupt_possible_prepare || ...; wr_interrupt_possible_prepare is
+//  wr_interrupt_possible_nodebug && ~wr_debug_prepare, and A || (~A && B) is A || B, so the interrupt term no
+//  longer waits for the debug one)
+wire wr_interrupt_possible_nodebug =
+    interrupt_do &&
+    wr_ready && (~(wr_not_finished) || wr_hlt_in_progress || wr_string_in_progress) &&
+    ~(wr_inhibit_interrupts_and_debug) && ~(wr_inhibit_interrupts) && iflag_to_reg;
+// (SiSTer: wr_busy was
+//      assign wr_busy = wr_waiting || exc_init || wr_debug_prepare || wr_interrupt_possible_nodebug || (wr_one_cycle_wait && wr_first_cycle);
+//  it is now built for both values of write_for_wr_ready, below write_for_wr_ready)
 
 assign w_load = exe_ready;
 
@@ -682,33 +700,53 @@ wire [31:0] wr_string_es_linear;
 assign memory_write_system =
     write_system_touch || write_system_busy_tss || write_system_dword || write_system_word || write_rmw_system_dword;
 
-assign write_cpl = 
-    (write_new_stack_virtual)?      glob_descriptor_2[`DESC_BITS_DPL] :
+// (SiSTer: the write request below is built twice -- once as if no limit check failed (the _ok
+//  versions: the stack, new-stack and string-ES selects are their raw command decodes), once as if all
+//  three selects were low (_flt) -- and write_fault_hit, the late limit checks, picks. The three raw
+//  selects never overlap (no wr_cmd/wr_cmdex sets two of them: checked over all 128 x 16 values), so
+//  with exact selects ws = raw_s && ~push_fault, wns = raw_n && ~new_push_fault,
+//  es = es_b || (es_a && ~es_fault): when a check fails for the command that has it, all three exact
+//  selects are low; otherwise they are the raw ones)
+wire write_stack_virtual_raw, write_new_stack_virtual_raw, write_string_es_virtual_a, write_string_es_virtual_b;
+wire write_es_ok = write_string_es_virtual_a || write_string_es_virtual_b;
+wire write_fault_hit = (write_stack_virtual_raw && wr_push_ss_fault) || (write_new_stack_virtual_raw && wr_new_push_ss_fault) ||
+                       (write_string_es_virtual_a && wr_string_es_fault);
+
+wire [1:0] write_cpl_ok =
+    (write_new_stack_virtual_raw)?  glob_descriptor_2[`DESC_BITS_DPL] :
     (memory_write_system)?          2'd0 :
                                     cpl;
+wire [1:0] write_cpl_flt =
+    (memory_write_system)?          2'd0 :
+                                    cpl;
+assign write_cpl = (write_new_stack_virtual_raw && wr_new_push_ss_fault)? write_cpl_flt : write_cpl_ok;   // (SiSTer: only the new-stack check can change it)
 
 assign write_lock = wr_prefix_group_1_lock;
 
 assign write_rmw = write_rmw_virtual || write_rmw_system_dword;
 
-assign write_address =
-    (write_string_es_virtual)?                  wr_string_es_linear :
-    (write_stack_virtual)?                      wr_push_linear :
-    (write_new_stack_virtual)?                  wr_new_push_linear :
+wire [31:0] write_address_rest =
     (write_system_touch)?                       wr_descriptor_touch_offset :
     (write_system_busy_tss)?                    wr_descriptor_busy_tss_offset :
     (write_system_dword || write_system_word)?  wr_system_linear :
                                                 wr_linear; //used by write_rmw_system_dword
 
-assign write_data =
-    (write_stack_virtual || write_string_es_virtual || write_new_stack_virtual)?    result_push :
+wire [31:0] write_address_ok =
+    (write_es_ok)?                              wr_string_es_linear :
+    (write_stack_virtual_raw)?                  wr_push_linear :
+    (write_new_stack_virtual_raw)?              wr_new_push_linear :
+                                                write_address_rest;
+assign write_address = (write_fault_hit)? write_address_rest : write_address_ok;
+
+wire [31:0] write_data_rest =
     (write_system_touch)?                                                           { 24'd0, glob_descriptor[47:41], 1'b1 } :
     (write_system_busy_tss)?                                                        glob_descriptor[63:32] | 32'h00000200 :
     (write_rmw_system_dword || write_system_dword || write_system_word)?            wr_system_dword :
                                                                                     result;
 
-assign write_length =
-    (write_stack_virtual || write_new_stack_virtual)?   wr_push_length :
+assign write_data = (~(write_fault_hit) && (write_stack_virtual_raw || write_es_ok || write_new_stack_virtual_raw))? result_push : write_data_rest;
+
+wire [2:0] write_length_rest =
     (write_system_touch)?       3'd1 :
     (write_system_busy_tss)?    3'd4 :
     (write_length_word)?        3'd2 :
@@ -720,12 +758,46 @@ assign write_length =
     wr_operand_16bit?           3'd2 :
                                 3'd4;
 
+// (SiSTer: the original (write_stack_virtual || write_new_stack_virtual)? ...: only the two push checks can
+//  change it -- write_fault_hit would add the string-ES check, which never matters here)
+assign write_length = ((write_stack_virtual_raw && ~(wr_push_ss_fault)) || (write_new_stack_virtual_raw && ~(wr_new_push_ss_fault)))? wr_push_length : write_length_rest;
+
 assign write_do = ~(wr_reset) && ~(write_page_fault) && ~(write_ac_fault) &&
-    (write_rmw_virtual || write_virtual || write_stack_virtual || write_new_stack_virtual ||
-     write_string_es_virtual || memory_write_system);
+    (write_rmw_virtual || write_virtual || memory_write_system ||
+     (~(write_fault_hit) && (write_stack_virtual_raw || write_new_stack_virtual_raw || write_es_ok)));   // (SiSTer: as above)
 
 
 assign write_for_wr_ready = write_done && ~(write_page_fault) && ~(write_ac_fault);
+
+// (SiSTer: wr_busy for each value of write_for_wr_ready and wr_string_zf_finish, chosen by them last. With
+//  those values, wr_waiting, wr_not_finished and wr_string_in_progress are the matching copy's
+//  (write_commands_w<x>z<z>_inst), and so
+//      wr_ready         = ~wr_waiting && wr_cmd != CMD_NULL
+//      wr_finished      = wr_ready && (~wr_not_finished || (wr_hlt_in_progress && iflag_to_reg && interrupt_do) || wr_string_in_progress)
+//      wr_debug_prepare = wr_finished && ~wr_inhibit_interrupts_and_debug && (wr_debug_static || (~wr_string_in_progress && wr_debug_code_cmp))
+//  (write_debug.v), and wr_interrupt_possible_nodebug as above)
+wire wr_debug_static, wr_debug_code_cmp;
+wire wr_waiting_w0z0, wr_not_finished_w0z0, wr_string_in_progress_w0z0;
+wire wr_waiting_w0z1, wr_not_finished_w0z1, wr_string_in_progress_w0z1;
+wire wr_waiting_w1z0, wr_not_finished_w1z0, wr_string_in_progress_w1z0;
+wire wr_waiting_w1z1, wr_not_finished_w1z1, wr_string_in_progress_w1z1;
+wire [3:0] wr_busy_wz;      // [{write_for_wr_ready, wr_string_zf_finish}]
+generate
+    genvar wx;
+    for(wx = 0; wx < 4; wx = wx + 1) begin : g_wr_busy
+        wire waiting  = (wx == 0)? wr_waiting_w0z0            : (wx == 1)? wr_waiting_w0z1            : (wx == 2)? wr_waiting_w1z0            : wr_waiting_w1z1;
+        wire nfin     = (wx == 0)? wr_not_finished_w0z0       : (wx == 1)? wr_not_finished_w0z1       : (wx == 2)? wr_not_finished_w1z0       : wr_not_finished_w1z1;
+        wire sip      = (wx == 0)? wr_string_in_progress_w0z0 : (wx == 1)? wr_string_in_progress_w0z1 : (wx == 2)? wr_string_in_progress_w1z0 : wr_string_in_progress_w1z1;
+        wire ready    = ~(waiting) && wr_cmd != `CMD_NULL;
+        wire finished = ready && (~(nfin) || (wr_hlt_in_progress && iflag_to_reg && interrupt_do) || sip);
+        wire dprep    = finished && ~(wr_inhibit_interrupts_and_debug) && (wr_debug_static || (~(sip) && wr_debug_code_cmp));
+        wire intp     = interrupt_do && ready && (~(nfin) || wr_hlt_in_progress || sip) &&
+                        ~(wr_inhibit_interrupts_and_debug) && ~(wr_inhibit_interrupts) && iflag_to_reg;
+        wire busy     = waiting || exc_init || dprep || intp || (wr_one_cycle_wait && wr_first_cycle);
+        assign wr_busy_wz[wx] = busy;
+    end
+endgenerate
+assign wr_busy = wr_busy_wz[{ write_for_wr_ready, wr_string_zf_finish }];
 
 //------------------------------------------------------------------------------ write io
 
@@ -900,6 +972,10 @@ write_commands write_commands_inst(
 
     //stack
     .write_stack_virtual           (write_stack_virtual),           //output
+    .write_stack_virtual_raw       (write_stack_virtual_raw),       //output (SiSTer)
+    .write_new_stack_virtual_raw   (write_new_stack_virtual_raw),   //output (SiSTer)
+    .write_string_es_virtual_a     (write_string_es_virtual_a),     //output (SiSTer)
+    .write_string_es_virtual_b     (write_string_es_virtual_b),     //output (SiSTer)
     .write_new_stack_virtual       (write_new_stack_virtual),       //output
 
     .wr_push_length_word           (wr_push_length_word),           //output
@@ -1119,6 +1195,1459 @@ write_commands write_commands_inst(
     .ldtr_rpl                      (ldtr_rpl),                      //input [1:0]
     .tr_rpl                        (tr_rpl)                         //input [1:0]
 );
+
+// (SiSTer: write_commands four times more, with write_for_wr_ready -- the memory write's completion, late from
+//  the TLB and the bus -- and wr_string_zf_finish -- REPE/REPNE's end, late from the zero test of result --
+//  fixed to each of their four values; only the three outputs that read them (wr_waiting, wr_not_finished,
+//  wr_string_in_progress: their autogen terms; nothing else those read depends on either) are taken, for
+//  wr_busy)
+write_commands write_commands_w0z0_inst(
+    .clk                (clk),
+    .rst_n              (reset_n[1]),
+    
+    //general input
+    .real_mode              (real_mode),                //input
+    .v8086_mode             (v8086_mode),               //input
+    .protected_mode         (protected_mode),           //input
+    
+    .cpl                    (cpl),                      //input [1:0]
+    
+    .tr_base                (tr_base),                  //input [31:0]
+    
+    .eip                    (eip),                      //input [31:0]
+    
+    .io_allow_check_needed  (io_allow_check_needed),    //input
+    
+    .exc_push_error         (exc_push_error),           //input
+    .exc_eip                (exc_eip),                  //input [31:0]
+    
+    //global input
+    .glob_descriptor               (glob_descriptor),               //input [63:0]
+    .glob_desc_base                (glob_desc_base),                //input [31:0]
+                                   
+    .glob_param_1                  (glob_param_1),                  //input [31:0]
+    .glob_param_2                  (glob_param_2),                  //input [31:0]
+    .glob_param_3                  (glob_param_3),                  //input [31:0]
+    .glob_param_4                  (glob_param_4),                  //input [31:0]
+    .glob_param_5                  (glob_param_5),                  //input [31:0]
+
+    //write
+    .wr_ready                      (wr_ready),                      //input
+    .wr_decoder                    (wr_decoder),                    //input [15:0]
+    .wr_cmd                        (wr_cmd),                        //input [6:0]
+    .wr_cmdex                      (wr_cmdex),                      //input [3:0]
+    .wr_is_8bit                    (wr_is_8bit),                    //input
+    .wr_address_16bit              (wr_address_16bit),              //input
+    .wr_operand_16bit              (wr_operand_16bit),              //input
+    .wr_operand_32bit              (wr_operand_32bit),              //input
+    .wr_mult_overflow              (wr_mult_overflow),              //input
+    .wr_arith_index                (wr_arith_index),                //input [3:0]
+    .wr_modregrm_mod               (wr_modregrm_mod),               //input [1:0]
+    .wr_modregrm_reg               (wr_modregrm_reg),               //input [2:0]
+    .wr_modregrm_rm                (wr_modregrm_rm),                //input [2:0]
+    .wr_dst_is_memory              (wr_dst_is_memory),              //input
+    .wr_dst_is_reg                 (wr_dst_is_reg),                 //input
+    .wr_dst_is_rm                  (wr_dst_is_rm),                  //input
+    .wr_dst_is_implicit_reg        (wr_dst_is_implicit_reg),        //input
+    .wr_dst_is_edx_eax             (wr_dst_is_edx_eax),             //input
+    .wr_dst_is_eax                 (wr_dst_is_eax),                 //input
+    
+    .wr_arith_add_carry            (wr_arith_add_carry),            //input
+    .wr_arith_adc_carry            (wr_arith_adc_carry),            //input
+    .wr_arith_sbb_carry            (wr_arith_sbb_carry),            //input
+    .wr_arith_sub_carry            (wr_arith_sub_carry),            //input
+    
+    .result                        (result),                        //input [31:0]
+    .result2                       (result2),                       //input [31:0]
+
+    .wr_src                        (wr_src),                        //input [31:0]
+    .wr_dst                        (wr_dst),                        //input [31:0]
+    .result_signals                (result_signals),                //input [4:0]
+    .result_push                   (result_push),                   //input [31:0]
+
+    .exe_buffer                    (exe_buffer),                    //input [31:0]
+    .exe_buffer_shifted            (exe_buffer_shifted),            //input [463:0]
+    
+    //global output
+    .wr_glob_param_1_set              (),            //output (unused)
+    .wr_glob_param_1_value            (),          //output (unused)
+
+    .wr_glob_param_3_set              (),            //output (unused)
+    .wr_glob_param_3_value            (),          //output (unused)
+
+    .wr_glob_param_4_set              (),            //output (unused)
+    .wr_glob_param_4_value            (),          //output (unused)
+
+    //debug output
+    .wr_debug_trap_clear     (),                     //output (unused)
+    .wr_debug_task_trigger   (),                   //output (unused)
+    
+    //exception
+    .wr_int                          (),                          //output (unused)
+    .wr_int_soft_int                 (),                 //output (unused)
+    .wr_int_soft_int_ib              (),              //output (unused)
+    .wr_int_vector                   (),                   //output (unused)
+
+    .wr_exception_external_set       (),       //output (unused)
+    .wr_exception_finished           (),           //output (unused)
+    
+    .wr_inhibit_interrupts           (),           //output (unused)
+    .wr_inhibit_interrupts_and_debug (), //output (unused)
+    
+    //memory
+    .write_for_wr_ready            (1'b0),            //input (SiSTer)
+
+    .write_rmw_virtual             (),             //output (unused)
+    .write_virtual                 (),                 //output (unused)
+    .write_rmw_system_dword        (),        //output (unused)
+    .write_system_word             (),             //output (unused)
+    .write_system_dword            (),            //output (unused)
+    .write_system_busy_tss         (),         //output (unused)
+    .write_system_touch            (),            //output (unused)
+
+    .write_length_word             (),             //output (unused)
+    .write_length_dword            (),            //output (unused)
+
+    .wr_system_dword               (),               //output (unused)
+    .wr_system_linear              (),              //output (unused)
+
+    
+    //write regrm
+    .write_regrm                   (),                   //output (unused)
+    .write_eax                     (),                     //output (unused)
+    .wr_regrm_word                 (),                 //output (unused)
+    .wr_regrm_dword                (),                //output (unused)
+
+    
+    //write output
+    .wr_not_finished               (wr_not_finished_w0z0),               //output (SiSTer)
+    .wr_hlt_in_progress            (),            //output (unused)
+    .wr_string_in_progress         (wr_string_in_progress_w0z0),         //output (SiSTer)
+    .wr_waiting                    (wr_waiting_w0z0),                    //output (SiSTer)
+
+    .wr_req_reset_pr               (),               //output (unused)
+    .wr_req_reset_dec              (),              //output (unused)
+    .wr_req_reset_micro            (),            //output (unused)
+    .wr_req_reset_rd               (),               //output (unused)
+    .wr_req_reset_exe              (),              //output (unused)
+
+    .wr_zflag_result               (),               //output (unused)
+    
+    .wr_task_rpl                   (),                   //output (unused)
+    
+    .wr_one_cycle_wait             (),             //output (unused)
+
+    //stack
+    .write_stack_virtual           (),           //output (unused)
+    .write_stack_virtual_raw       (),       //output (unused)
+    .write_new_stack_virtual_raw   (),   //output (unused)
+    .write_string_es_virtual_a     (),     //output (unused)
+    .write_string_es_virtual_b     (),     //output (unused)
+    .write_new_stack_virtual       (),       //output (unused)
+
+    .wr_push_length_word           (),           //output (unused)
+    .wr_push_length_dword          (),          //output (unused)
+
+    .wr_stack_esp                  (wr_stack_esp),                  //input [31:0]
+    .wr_new_stack_esp              (wr_new_stack_esp),              //input [31:0]
+
+                                   
+    .wr_push_ss_fault_check        (),        //output (unused)
+    .wr_push_ss_fault              (wr_push_ss_fault),              //input
+
+    .wr_new_push_ss_fault_check    (),    //output (unused)
+    .wr_new_push_ss_fault          (wr_new_push_ss_fault),          //input
+
+    .wr_error_code                 (),                 //output (unused)
+
+    .wr_make_esp_speculative       (),       //output (unused)
+    .wr_make_esp_commit            (),            //output (unused)
+    
+    //string
+    .wr_string_ignore              (wr_string_ignore),              //input
+    .wr_prefix_group_1_rep         (wr_prefix_group_1_rep),         //input [1:0]
+    .wr_string_zf_finish           (1'b0),           //input (SiSTer)
+    .wr_string_es_fault            (wr_string_es_fault),            //input
+    .wr_string_finish              (wr_string_finish),              //input
+
+    .wr_esi_final                  (wr_esi_final),                  //input [31:0]
+    .wr_edi_final                  (wr_edi_final),                  //input [31:0]
+    .wr_ecx_final                  (wr_ecx_final),                  //input [31:0]
+
+    .wr_string_gp_fault_check      (),      //output (unused)
+    .write_string_es_virtual       (),       //output (unused)
+
+    //io write
+    .write_io                      (),                      //output (unused)
+    .write_io_for_wr_ready         (write_io_for_wr_ready),         //input
+    
+    //segment
+    .wr_seg_sel                    (),                    //output (unused)
+    .wr_seg_cache_valid            (),            //output (unused)
+    .wr_seg_rpl                    (),                    //output (unused)
+    .wr_seg_cache_mask             (),             //output (unused)
+
+    .write_seg_cache               (),               //output (unused)
+    .write_seg_sel                 (),                 //output (unused)
+    .write_seg_cache_valid         (),         //output (unused)
+    .write_seg_rpl                 (),                 //output (unused)
+
+    .wr_validate_seg_regs          (),          //output (unused)
+
+    //flush tlb
+    .tlbflushall_do                (),                //output (unused)
+    
+    //---------------------
+    
+    .eax_to_reg                    (),                    //output (unused)
+    .ebx_to_reg                    (),                    //output (unused)
+    .ecx_to_reg                    (),                    //output (unused)
+    .edx_to_reg                    (),                    //output (unused)
+    .esi_to_reg                    (),                    //output (unused)
+    .edi_to_reg                    (),                    //output (unused)
+    .ebp_to_reg                    (),                    //output (unused)
+    .esp_to_reg                    (),                    //output (unused)
+    .cr0_pe_to_reg                 (),                 //output (unused)
+    .cr0_mp_to_reg                 (),                 //output (unused)
+    .cr0_em_to_reg                 (),                 //output (unused)
+    .cr0_ts_to_reg                 (),                 //output (unused)
+    .cr0_ne_to_reg                 (),                 //output (unused)
+    .cr0_wp_to_reg                 (),                 //output (unused)
+    .cr0_am_to_reg                 (),                 //output (unused)
+    .cr0_nw_to_reg                 (),                 //output (unused)
+    .cr0_cd_to_reg                 (),                 //output (unused)
+    .cr0_pg_to_reg                 (),                 //output (unused)
+    .cr2_to_reg                    (),                    //output (unused)
+    .cr3_to_reg                    (),                    //output (unused)
+    .cflag_to_reg                  (),                  //output (unused)
+    .pflag_to_reg                  (),                  //output (unused)
+    .aflag_to_reg                  (),                  //output (unused)
+    .zflag_to_reg                  (),                  //output (unused)
+    .sflag_to_reg                  (),                  //output (unused)
+    .oflag_to_reg                  (),                  //output (unused)
+    .tflag_to_reg                  (),                  //output (unused)
+    .iflag_to_reg                  (),                  //output (unused)
+    .dflag_to_reg                  (),                  //output (unused)
+    .iopl_to_reg                   (),                   //output (unused)
+    .ntflag_to_reg                 (),                 //output (unused)
+    .rflag_to_reg                  (),                  //output (unused)
+    .vmflag_to_reg                 (),                 //output (unused)
+    .acflag_to_reg                 (),                 //output (unused)
+    .idflag_to_reg                 (),                 //output (unused)
+    .gdtr_base_to_reg              (),              //output (unused)
+    .gdtr_limit_to_reg             (),             //output (unused)
+    .idtr_base_to_reg              (),              //output (unused)
+    .idtr_limit_to_reg             (),             //output (unused)
+    .dr0_to_reg                    (),                    //output (unused)
+    .dr1_to_reg                    (),                    //output (unused)
+    .dr2_to_reg                    (),                    //output (unused)
+    .dr3_to_reg                    (),                    //output (unused)
+    .dr6_breakpoints_to_reg        (),        //output (unused)
+    .dr6_b12_to_reg                (),                //output (unused)
+    .dr6_bd_to_reg                 (),                 //output (unused)
+    .dr6_bs_to_reg                 (),                 //output (unused)
+    .dr6_bt_to_reg                 (),                 //output (unused)
+    .dr7_to_reg                    (),                    //output (unused)
+    .es_to_reg                     (),                     //output (unused)
+    .ds_to_reg                     (),                     //output (unused)
+    .ss_to_reg                     (),                     //output (unused)
+    .fs_to_reg                     (),                     //output (unused)
+    .gs_to_reg                     (),                     //output (unused)
+    .cs_to_reg                     (),                     //output (unused)
+    .ldtr_to_reg                   (),                   //output (unused)
+    .tr_to_reg                     (),                     //output (unused)
+    .es_cache_to_reg               (),               //output (unused)
+    .ds_cache_to_reg               (),               //output (unused)
+    .ss_cache_to_reg               (),               //output (unused)
+    .fs_cache_to_reg               (),               //output (unused)
+    .gs_cache_to_reg               (),               //output (unused)
+    .cs_cache_to_reg               (),               //output (unused)
+    .ldtr_cache_to_reg             (),             //output (unused)
+    .tr_cache_to_reg               (),               //output (unused)
+    .es_cache_valid_to_reg         (),         //output (unused)
+    .ds_cache_valid_to_reg         (),         //output (unused)
+    .ss_cache_valid_to_reg         (),         //output (unused)
+    .fs_cache_valid_to_reg         (),         //output (unused)
+    .gs_cache_valid_to_reg         (),         //output (unused)
+    .cs_cache_valid_to_reg         (),         //output (unused)
+    .ldtr_cache_valid_to_reg       (),       //output (unused)
+    .es_rpl_to_reg                 (),                 //output (unused)
+    .ds_rpl_to_reg                 (),                 //output (unused)
+    .ss_rpl_to_reg                 (),                 //output (unused)
+    .fs_rpl_to_reg                 (),                 //output (unused)
+    .gs_rpl_to_reg                 (),                 //output (unused)
+    .cs_rpl_to_reg                 (),                 //output (unused)
+    .ldtr_rpl_to_reg               (),               //output (unused)
+    .tr_rpl_to_reg                 (),                 //output (unused)
+    
+    //output
+    .eax                           (eax),                           //input [31:0]
+    .ebx                           (ebx),                           //input [31:0]
+    .ecx                           (ecx),                           //input [31:0]
+    .edx                           (edx),                           //input [31:0]
+    .esi                           (esi),                           //input [31:0]
+    .edi                           (edi),                           //input [31:0]
+    .ebp                           (ebp),                           //input [31:0]
+    .esp                           (esp),                           //input [31:0]
+    .cr0_pe                        (cr0_pe),                        //input
+    .cr0_mp                        (cr0_mp),                        //input
+    .cr0_em                        (cr0_em),                        //input
+    .cr0_ts                        (cr0_ts),                        //input
+    .cr0_ne                        (cr0_ne),                        //input
+    .cr0_wp                        (cr0_wp),                        //input
+    .cr0_am                        (cr0_am),                        //input
+    .cr0_nw                        (cr0_nw),                        //input
+    .cr0_cd                        (cr0_cd),                        //input
+    .cr0_pg                        (cr0_pg),                        //input
+    .cr2                           (cr2),                           //input [31:0]
+    .cr3                           (cr3),                           //input [31:0]
+    .cflag                         (cflag),                         //input
+    .pflag                         (pflag),                         //input
+    .aflag                         (aflag),                         //input
+    .zflag                         (zflag),                         //input
+    .sflag                         (sflag),                         //input
+    .oflag                         (oflag),                         //input
+    .tflag                         (tflag),                         //input
+    .iflag                         (iflag),                         //input
+    .dflag                         (dflag),                         //input
+    .iopl                          (iopl),                          //input [1:0]
+    .ntflag                        (ntflag),                        //input
+    .rflag                         (rflag),                         //input
+    .vmflag                        (vmflag),                        //input
+    .acflag                        (acflag),                        //input
+    .idflag                        (idflag),                        //input
+    .gdtr_base                     (gdtr_base),                     //input [31:0]
+    .gdtr_limit                    (gdtr_limit),                    //input [15:0]
+    .idtr_base                     (idtr_base),                     //input [31:0]
+    .idtr_limit                    (idtr_limit),                    //input [15:0]
+    .dr0                           (dr0),                           //input [31:0]
+    .dr1                           (dr1),                           //input [31:0]
+    .dr2                           (dr2),                           //input [31:0]
+    .dr3                           (dr3),                           //input [31:0]
+    .dr6_breakpoints               (dr6_breakpoints),               //input [3:0]
+    .dr6_b12                       (dr6_b12),                       //input
+    .dr6_bd                        (dr6_bd),                        //input
+    .dr6_bs                        (dr6_bs),                        //input
+    .dr6_bt                        (dr6_bt),                        //input
+    .dr7                           (dr7),                           //input [31:0]
+    .es                            (es),                            //input [15:0]
+    .ds                            (ds),                            //input [15:0]
+    .ss                            (ss),                            //input [15:0]
+    .fs                            (fs),                            //input [15:0]
+    .gs                            (gs),                            //input [15:0]
+    .cs                            (cs),                            //input [15:0]
+    .ldtr                          (ldtr),                          //input [15:0]
+    .tr                            (tr),                            //input [15:0]
+    .es_cache                      (es_cache),                      //input [63:0]
+    .ds_cache                      (ds_cache),                      //input [63:0]
+    .ss_cache                      (ss_cache),                      //input [63:0]
+    .fs_cache                      (fs_cache),                      //input [63:0]
+    .gs_cache                      (gs_cache),                      //input [63:0]
+    .cs_cache                      (cs_cache),                      //input [63:0]
+    .ldtr_cache                    (ldtr_cache),                    //input [63:0]
+    .tr_cache                      (tr_cache),                      //input [63:0]
+    .es_cache_valid                (es_cache_valid),                //input
+    .ds_cache_valid                (ds_cache_valid),                //input
+    .ss_cache_valid                (ss_cache_valid),                //input
+    .fs_cache_valid                (fs_cache_valid),                //input
+    .gs_cache_valid                (gs_cache_valid),                //input
+    .cs_cache_valid                (cs_cache_valid),                //input
+    .ldtr_cache_valid              (ldtr_cache_valid),              //input
+    .es_rpl                        (es_rpl),                        //input [1:0]
+    .ds_rpl                        (ds_rpl),                        //input [1:0]
+    .ss_rpl                        (ss_rpl),                        //input [1:0]
+    .fs_rpl                        (fs_rpl),                        //input [1:0]
+    .gs_rpl                        (gs_rpl),                        //input [1:0]
+    .cs_rpl                        (cs_rpl),                        //input [1:0]
+    .ldtr_rpl                      (ldtr_rpl),                      //input [1:0]
+    .tr_rpl                        (tr_rpl)                         //input [1:0]
+);
+
+write_commands write_commands_w0z1_inst(
+    .clk                (clk),
+    .rst_n              (reset_n[1]),
+    
+    //general input
+    .real_mode              (real_mode),                //input
+    .v8086_mode             (v8086_mode),               //input
+    .protected_mode         (protected_mode),           //input
+    
+    .cpl                    (cpl),                      //input [1:0]
+    
+    .tr_base                (tr_base),                  //input [31:0]
+    
+    .eip                    (eip),                      //input [31:0]
+    
+    .io_allow_check_needed  (io_allow_check_needed),    //input
+    
+    .exc_push_error         (exc_push_error),           //input
+    .exc_eip                (exc_eip),                  //input [31:0]
+    
+    //global input
+    .glob_descriptor               (glob_descriptor),               //input [63:0]
+    .glob_desc_base                (glob_desc_base),                //input [31:0]
+                                   
+    .glob_param_1                  (glob_param_1),                  //input [31:0]
+    .glob_param_2                  (glob_param_2),                  //input [31:0]
+    .glob_param_3                  (glob_param_3),                  //input [31:0]
+    .glob_param_4                  (glob_param_4),                  //input [31:0]
+    .glob_param_5                  (glob_param_5),                  //input [31:0]
+
+    //write
+    .wr_ready                      (wr_ready),                      //input
+    .wr_decoder                    (wr_decoder),                    //input [15:0]
+    .wr_cmd                        (wr_cmd),                        //input [6:0]
+    .wr_cmdex                      (wr_cmdex),                      //input [3:0]
+    .wr_is_8bit                    (wr_is_8bit),                    //input
+    .wr_address_16bit              (wr_address_16bit),              //input
+    .wr_operand_16bit              (wr_operand_16bit),              //input
+    .wr_operand_32bit              (wr_operand_32bit),              //input
+    .wr_mult_overflow              (wr_mult_overflow),              //input
+    .wr_arith_index                (wr_arith_index),                //input [3:0]
+    .wr_modregrm_mod               (wr_modregrm_mod),               //input [1:0]
+    .wr_modregrm_reg               (wr_modregrm_reg),               //input [2:0]
+    .wr_modregrm_rm                (wr_modregrm_rm),                //input [2:0]
+    .wr_dst_is_memory              (wr_dst_is_memory),              //input
+    .wr_dst_is_reg                 (wr_dst_is_reg),                 //input
+    .wr_dst_is_rm                  (wr_dst_is_rm),                  //input
+    .wr_dst_is_implicit_reg        (wr_dst_is_implicit_reg),        //input
+    .wr_dst_is_edx_eax             (wr_dst_is_edx_eax),             //input
+    .wr_dst_is_eax                 (wr_dst_is_eax),                 //input
+    
+    .wr_arith_add_carry            (wr_arith_add_carry),            //input
+    .wr_arith_adc_carry            (wr_arith_adc_carry),            //input
+    .wr_arith_sbb_carry            (wr_arith_sbb_carry),            //input
+    .wr_arith_sub_carry            (wr_arith_sub_carry),            //input
+    
+    .result                        (result),                        //input [31:0]
+    .result2                       (result2),                       //input [31:0]
+
+    .wr_src                        (wr_src),                        //input [31:0]
+    .wr_dst                        (wr_dst),                        //input [31:0]
+    .result_signals                (result_signals),                //input [4:0]
+    .result_push                   (result_push),                   //input [31:0]
+
+    .exe_buffer                    (exe_buffer),                    //input [31:0]
+    .exe_buffer_shifted            (exe_buffer_shifted),            //input [463:0]
+    
+    //global output
+    .wr_glob_param_1_set              (),            //output (unused)
+    .wr_glob_param_1_value            (),          //output (unused)
+
+    .wr_glob_param_3_set              (),            //output (unused)
+    .wr_glob_param_3_value            (),          //output (unused)
+
+    .wr_glob_param_4_set              (),            //output (unused)
+    .wr_glob_param_4_value            (),          //output (unused)
+
+    //debug output
+    .wr_debug_trap_clear     (),                     //output (unused)
+    .wr_debug_task_trigger   (),                   //output (unused)
+    
+    //exception
+    .wr_int                          (),                          //output (unused)
+    .wr_int_soft_int                 (),                 //output (unused)
+    .wr_int_soft_int_ib              (),              //output (unused)
+    .wr_int_vector                   (),                   //output (unused)
+
+    .wr_exception_external_set       (),       //output (unused)
+    .wr_exception_finished           (),           //output (unused)
+    
+    .wr_inhibit_interrupts           (),           //output (unused)
+    .wr_inhibit_interrupts_and_debug (), //output (unused)
+    
+    //memory
+    .write_for_wr_ready            (1'b0),            //input (SiSTer)
+
+    .write_rmw_virtual             (),             //output (unused)
+    .write_virtual                 (),                 //output (unused)
+    .write_rmw_system_dword        (),        //output (unused)
+    .write_system_word             (),             //output (unused)
+    .write_system_dword            (),            //output (unused)
+    .write_system_busy_tss         (),         //output (unused)
+    .write_system_touch            (),            //output (unused)
+
+    .write_length_word             (),             //output (unused)
+    .write_length_dword            (),            //output (unused)
+
+    .wr_system_dword               (),               //output (unused)
+    .wr_system_linear              (),              //output (unused)
+
+    
+    //write regrm
+    .write_regrm                   (),                   //output (unused)
+    .write_eax                     (),                     //output (unused)
+    .wr_regrm_word                 (),                 //output (unused)
+    .wr_regrm_dword                (),                //output (unused)
+
+    
+    //write output
+    .wr_not_finished               (wr_not_finished_w0z1),               //output (SiSTer)
+    .wr_hlt_in_progress            (),            //output (unused)
+    .wr_string_in_progress         (wr_string_in_progress_w0z1),         //output (SiSTer)
+    .wr_waiting                    (wr_waiting_w0z1),                    //output (SiSTer)
+
+    .wr_req_reset_pr               (),               //output (unused)
+    .wr_req_reset_dec              (),              //output (unused)
+    .wr_req_reset_micro            (),            //output (unused)
+    .wr_req_reset_rd               (),               //output (unused)
+    .wr_req_reset_exe              (),              //output (unused)
+
+    .wr_zflag_result               (),               //output (unused)
+    
+    .wr_task_rpl                   (),                   //output (unused)
+    
+    .wr_one_cycle_wait             (),             //output (unused)
+
+    //stack
+    .write_stack_virtual           (),           //output (unused)
+    .write_stack_virtual_raw       (),       //output (unused)
+    .write_new_stack_virtual_raw   (),   //output (unused)
+    .write_string_es_virtual_a     (),     //output (unused)
+    .write_string_es_virtual_b     (),     //output (unused)
+    .write_new_stack_virtual       (),       //output (unused)
+
+    .wr_push_length_word           (),           //output (unused)
+    .wr_push_length_dword          (),          //output (unused)
+
+    .wr_stack_esp                  (wr_stack_esp),                  //input [31:0]
+    .wr_new_stack_esp              (wr_new_stack_esp),              //input [31:0]
+
+                                   
+    .wr_push_ss_fault_check        (),        //output (unused)
+    .wr_push_ss_fault              (wr_push_ss_fault),              //input
+
+    .wr_new_push_ss_fault_check    (),    //output (unused)
+    .wr_new_push_ss_fault          (wr_new_push_ss_fault),          //input
+
+    .wr_error_code                 (),                 //output (unused)
+
+    .wr_make_esp_speculative       (),       //output (unused)
+    .wr_make_esp_commit            (),            //output (unused)
+    
+    //string
+    .wr_string_ignore              (wr_string_ignore),              //input
+    .wr_prefix_group_1_rep         (wr_prefix_group_1_rep),         //input [1:0]
+    .wr_string_zf_finish           (1'b1),           //input (SiSTer)
+    .wr_string_es_fault            (wr_string_es_fault),            //input
+    .wr_string_finish              (wr_string_finish),              //input
+
+    .wr_esi_final                  (wr_esi_final),                  //input [31:0]
+    .wr_edi_final                  (wr_edi_final),                  //input [31:0]
+    .wr_ecx_final                  (wr_ecx_final),                  //input [31:0]
+
+    .wr_string_gp_fault_check      (),      //output (unused)
+    .write_string_es_virtual       (),       //output (unused)
+
+    //io write
+    .write_io                      (),                      //output (unused)
+    .write_io_for_wr_ready         (write_io_for_wr_ready),         //input
+    
+    //segment
+    .wr_seg_sel                    (),                    //output (unused)
+    .wr_seg_cache_valid            (),            //output (unused)
+    .wr_seg_rpl                    (),                    //output (unused)
+    .wr_seg_cache_mask             (),             //output (unused)
+
+    .write_seg_cache               (),               //output (unused)
+    .write_seg_sel                 (),                 //output (unused)
+    .write_seg_cache_valid         (),         //output (unused)
+    .write_seg_rpl                 (),                 //output (unused)
+
+    .wr_validate_seg_regs          (),          //output (unused)
+
+    //flush tlb
+    .tlbflushall_do                (),                //output (unused)
+    
+    //---------------------
+    
+    .eax_to_reg                    (),                    //output (unused)
+    .ebx_to_reg                    (),                    //output (unused)
+    .ecx_to_reg                    (),                    //output (unused)
+    .edx_to_reg                    (),                    //output (unused)
+    .esi_to_reg                    (),                    //output (unused)
+    .edi_to_reg                    (),                    //output (unused)
+    .ebp_to_reg                    (),                    //output (unused)
+    .esp_to_reg                    (),                    //output (unused)
+    .cr0_pe_to_reg                 (),                 //output (unused)
+    .cr0_mp_to_reg                 (),                 //output (unused)
+    .cr0_em_to_reg                 (),                 //output (unused)
+    .cr0_ts_to_reg                 (),                 //output (unused)
+    .cr0_ne_to_reg                 (),                 //output (unused)
+    .cr0_wp_to_reg                 (),                 //output (unused)
+    .cr0_am_to_reg                 (),                 //output (unused)
+    .cr0_nw_to_reg                 (),                 //output (unused)
+    .cr0_cd_to_reg                 (),                 //output (unused)
+    .cr0_pg_to_reg                 (),                 //output (unused)
+    .cr2_to_reg                    (),                    //output (unused)
+    .cr3_to_reg                    (),                    //output (unused)
+    .cflag_to_reg                  (),                  //output (unused)
+    .pflag_to_reg                  (),                  //output (unused)
+    .aflag_to_reg                  (),                  //output (unused)
+    .zflag_to_reg                  (),                  //output (unused)
+    .sflag_to_reg                  (),                  //output (unused)
+    .oflag_to_reg                  (),                  //output (unused)
+    .tflag_to_reg                  (),                  //output (unused)
+    .iflag_to_reg                  (),                  //output (unused)
+    .dflag_to_reg                  (),                  //output (unused)
+    .iopl_to_reg                   (),                   //output (unused)
+    .ntflag_to_reg                 (),                 //output (unused)
+    .rflag_to_reg                  (),                  //output (unused)
+    .vmflag_to_reg                 (),                 //output (unused)
+    .acflag_to_reg                 (),                 //output (unused)
+    .idflag_to_reg                 (),                 //output (unused)
+    .gdtr_base_to_reg              (),              //output (unused)
+    .gdtr_limit_to_reg             (),             //output (unused)
+    .idtr_base_to_reg              (),              //output (unused)
+    .idtr_limit_to_reg             (),             //output (unused)
+    .dr0_to_reg                    (),                    //output (unused)
+    .dr1_to_reg                    (),                    //output (unused)
+    .dr2_to_reg                    (),                    //output (unused)
+    .dr3_to_reg                    (),                    //output (unused)
+    .dr6_breakpoints_to_reg        (),        //output (unused)
+    .dr6_b12_to_reg                (),                //output (unused)
+    .dr6_bd_to_reg                 (),                 //output (unused)
+    .dr6_bs_to_reg                 (),                 //output (unused)
+    .dr6_bt_to_reg                 (),                 //output (unused)
+    .dr7_to_reg                    (),                    //output (unused)
+    .es_to_reg                     (),                     //output (unused)
+    .ds_to_reg                     (),                     //output (unused)
+    .ss_to_reg                     (),                     //output (unused)
+    .fs_to_reg                     (),                     //output (unused)
+    .gs_to_reg                     (),                     //output (unused)
+    .cs_to_reg                     (),                     //output (unused)
+    .ldtr_to_reg                   (),                   //output (unused)
+    .tr_to_reg                     (),                     //output (unused)
+    .es_cache_to_reg               (),               //output (unused)
+    .ds_cache_to_reg               (),               //output (unused)
+    .ss_cache_to_reg               (),               //output (unused)
+    .fs_cache_to_reg               (),               //output (unused)
+    .gs_cache_to_reg               (),               //output (unused)
+    .cs_cache_to_reg               (),               //output (unused)
+    .ldtr_cache_to_reg             (),             //output (unused)
+    .tr_cache_to_reg               (),               //output (unused)
+    .es_cache_valid_to_reg         (),         //output (unused)
+    .ds_cache_valid_to_reg         (),         //output (unused)
+    .ss_cache_valid_to_reg         (),         //output (unused)
+    .fs_cache_valid_to_reg         (),         //output (unused)
+    .gs_cache_valid_to_reg         (),         //output (unused)
+    .cs_cache_valid_to_reg         (),         //output (unused)
+    .ldtr_cache_valid_to_reg       (),       //output (unused)
+    .es_rpl_to_reg                 (),                 //output (unused)
+    .ds_rpl_to_reg                 (),                 //output (unused)
+    .ss_rpl_to_reg                 (),                 //output (unused)
+    .fs_rpl_to_reg                 (),                 //output (unused)
+    .gs_rpl_to_reg                 (),                 //output (unused)
+    .cs_rpl_to_reg                 (),                 //output (unused)
+    .ldtr_rpl_to_reg               (),               //output (unused)
+    .tr_rpl_to_reg                 (),                 //output (unused)
+    
+    //output
+    .eax                           (eax),                           //input [31:0]
+    .ebx                           (ebx),                           //input [31:0]
+    .ecx                           (ecx),                           //input [31:0]
+    .edx                           (edx),                           //input [31:0]
+    .esi                           (esi),                           //input [31:0]
+    .edi                           (edi),                           //input [31:0]
+    .ebp                           (ebp),                           //input [31:0]
+    .esp                           (esp),                           //input [31:0]
+    .cr0_pe                        (cr0_pe),                        //input
+    .cr0_mp                        (cr0_mp),                        //input
+    .cr0_em                        (cr0_em),                        //input
+    .cr0_ts                        (cr0_ts),                        //input
+    .cr0_ne                        (cr0_ne),                        //input
+    .cr0_wp                        (cr0_wp),                        //input
+    .cr0_am                        (cr0_am),                        //input
+    .cr0_nw                        (cr0_nw),                        //input
+    .cr0_cd                        (cr0_cd),                        //input
+    .cr0_pg                        (cr0_pg),                        //input
+    .cr2                           (cr2),                           //input [31:0]
+    .cr3                           (cr3),                           //input [31:0]
+    .cflag                         (cflag),                         //input
+    .pflag                         (pflag),                         //input
+    .aflag                         (aflag),                         //input
+    .zflag                         (zflag),                         //input
+    .sflag                         (sflag),                         //input
+    .oflag                         (oflag),                         //input
+    .tflag                         (tflag),                         //input
+    .iflag                         (iflag),                         //input
+    .dflag                         (dflag),                         //input
+    .iopl                          (iopl),                          //input [1:0]
+    .ntflag                        (ntflag),                        //input
+    .rflag                         (rflag),                         //input
+    .vmflag                        (vmflag),                        //input
+    .acflag                        (acflag),                        //input
+    .idflag                        (idflag),                        //input
+    .gdtr_base                     (gdtr_base),                     //input [31:0]
+    .gdtr_limit                    (gdtr_limit),                    //input [15:0]
+    .idtr_base                     (idtr_base),                     //input [31:0]
+    .idtr_limit                    (idtr_limit),                    //input [15:0]
+    .dr0                           (dr0),                           //input [31:0]
+    .dr1                           (dr1),                           //input [31:0]
+    .dr2                           (dr2),                           //input [31:0]
+    .dr3                           (dr3),                           //input [31:0]
+    .dr6_breakpoints               (dr6_breakpoints),               //input [3:0]
+    .dr6_b12                       (dr6_b12),                       //input
+    .dr6_bd                        (dr6_bd),                        //input
+    .dr6_bs                        (dr6_bs),                        //input
+    .dr6_bt                        (dr6_bt),                        //input
+    .dr7                           (dr7),                           //input [31:0]
+    .es                            (es),                            //input [15:0]
+    .ds                            (ds),                            //input [15:0]
+    .ss                            (ss),                            //input [15:0]
+    .fs                            (fs),                            //input [15:0]
+    .gs                            (gs),                            //input [15:0]
+    .cs                            (cs),                            //input [15:0]
+    .ldtr                          (ldtr),                          //input [15:0]
+    .tr                            (tr),                            //input [15:0]
+    .es_cache                      (es_cache),                      //input [63:0]
+    .ds_cache                      (ds_cache),                      //input [63:0]
+    .ss_cache                      (ss_cache),                      //input [63:0]
+    .fs_cache                      (fs_cache),                      //input [63:0]
+    .gs_cache                      (gs_cache),                      //input [63:0]
+    .cs_cache                      (cs_cache),                      //input [63:0]
+    .ldtr_cache                    (ldtr_cache),                    //input [63:0]
+    .tr_cache                      (tr_cache),                      //input [63:0]
+    .es_cache_valid                (es_cache_valid),                //input
+    .ds_cache_valid                (ds_cache_valid),                //input
+    .ss_cache_valid                (ss_cache_valid),                //input
+    .fs_cache_valid                (fs_cache_valid),                //input
+    .gs_cache_valid                (gs_cache_valid),                //input
+    .cs_cache_valid                (cs_cache_valid),                //input
+    .ldtr_cache_valid              (ldtr_cache_valid),              //input
+    .es_rpl                        (es_rpl),                        //input [1:0]
+    .ds_rpl                        (ds_rpl),                        //input [1:0]
+    .ss_rpl                        (ss_rpl),                        //input [1:0]
+    .fs_rpl                        (fs_rpl),                        //input [1:0]
+    .gs_rpl                        (gs_rpl),                        //input [1:0]
+    .cs_rpl                        (cs_rpl),                        //input [1:0]
+    .ldtr_rpl                      (ldtr_rpl),                      //input [1:0]
+    .tr_rpl                        (tr_rpl)                         //input [1:0]
+);
+
+write_commands write_commands_w1z0_inst(
+    .clk                (clk),
+    .rst_n              (reset_n[1]),
+    
+    //general input
+    .real_mode              (real_mode),                //input
+    .v8086_mode             (v8086_mode),               //input
+    .protected_mode         (protected_mode),           //input
+    
+    .cpl                    (cpl),                      //input [1:0]
+    
+    .tr_base                (tr_base),                  //input [31:0]
+    
+    .eip                    (eip),                      //input [31:0]
+    
+    .io_allow_check_needed  (io_allow_check_needed),    //input
+    
+    .exc_push_error         (exc_push_error),           //input
+    .exc_eip                (exc_eip),                  //input [31:0]
+    
+    //global input
+    .glob_descriptor               (glob_descriptor),               //input [63:0]
+    .glob_desc_base                (glob_desc_base),                //input [31:0]
+                                   
+    .glob_param_1                  (glob_param_1),                  //input [31:0]
+    .glob_param_2                  (glob_param_2),                  //input [31:0]
+    .glob_param_3                  (glob_param_3),                  //input [31:0]
+    .glob_param_4                  (glob_param_4),                  //input [31:0]
+    .glob_param_5                  (glob_param_5),                  //input [31:0]
+
+    //write
+    .wr_ready                      (wr_ready),                      //input
+    .wr_decoder                    (wr_decoder),                    //input [15:0]
+    .wr_cmd                        (wr_cmd),                        //input [6:0]
+    .wr_cmdex                      (wr_cmdex),                      //input [3:0]
+    .wr_is_8bit                    (wr_is_8bit),                    //input
+    .wr_address_16bit              (wr_address_16bit),              //input
+    .wr_operand_16bit              (wr_operand_16bit),              //input
+    .wr_operand_32bit              (wr_operand_32bit),              //input
+    .wr_mult_overflow              (wr_mult_overflow),              //input
+    .wr_arith_index                (wr_arith_index),                //input [3:0]
+    .wr_modregrm_mod               (wr_modregrm_mod),               //input [1:0]
+    .wr_modregrm_reg               (wr_modregrm_reg),               //input [2:0]
+    .wr_modregrm_rm                (wr_modregrm_rm),                //input [2:0]
+    .wr_dst_is_memory              (wr_dst_is_memory),              //input
+    .wr_dst_is_reg                 (wr_dst_is_reg),                 //input
+    .wr_dst_is_rm                  (wr_dst_is_rm),                  //input
+    .wr_dst_is_implicit_reg        (wr_dst_is_implicit_reg),        //input
+    .wr_dst_is_edx_eax             (wr_dst_is_edx_eax),             //input
+    .wr_dst_is_eax                 (wr_dst_is_eax),                 //input
+    
+    .wr_arith_add_carry            (wr_arith_add_carry),            //input
+    .wr_arith_adc_carry            (wr_arith_adc_carry),            //input
+    .wr_arith_sbb_carry            (wr_arith_sbb_carry),            //input
+    .wr_arith_sub_carry            (wr_arith_sub_carry),            //input
+    
+    .result                        (result),                        //input [31:0]
+    .result2                       (result2),                       //input [31:0]
+
+    .wr_src                        (wr_src),                        //input [31:0]
+    .wr_dst                        (wr_dst),                        //input [31:0]
+    .result_signals                (result_signals),                //input [4:0]
+    .result_push                   (result_push),                   //input [31:0]
+
+    .exe_buffer                    (exe_buffer),                    //input [31:0]
+    .exe_buffer_shifted            (exe_buffer_shifted),            //input [463:0]
+    
+    //global output
+    .wr_glob_param_1_set              (),            //output (unused)
+    .wr_glob_param_1_value            (),          //output (unused)
+
+    .wr_glob_param_3_set              (),            //output (unused)
+    .wr_glob_param_3_value            (),          //output (unused)
+
+    .wr_glob_param_4_set              (),            //output (unused)
+    .wr_glob_param_4_value            (),          //output (unused)
+
+    //debug output
+    .wr_debug_trap_clear     (),                     //output (unused)
+    .wr_debug_task_trigger   (),                   //output (unused)
+    
+    //exception
+    .wr_int                          (),                          //output (unused)
+    .wr_int_soft_int                 (),                 //output (unused)
+    .wr_int_soft_int_ib              (),              //output (unused)
+    .wr_int_vector                   (),                   //output (unused)
+
+    .wr_exception_external_set       (),       //output (unused)
+    .wr_exception_finished           (),           //output (unused)
+    
+    .wr_inhibit_interrupts           (),           //output (unused)
+    .wr_inhibit_interrupts_and_debug (), //output (unused)
+    
+    //memory
+    .write_for_wr_ready            (1'b1),            //input (SiSTer)
+
+    .write_rmw_virtual             (),             //output (unused)
+    .write_virtual                 (),                 //output (unused)
+    .write_rmw_system_dword        (),        //output (unused)
+    .write_system_word             (),             //output (unused)
+    .write_system_dword            (),            //output (unused)
+    .write_system_busy_tss         (),         //output (unused)
+    .write_system_touch            (),            //output (unused)
+
+    .write_length_word             (),             //output (unused)
+    .write_length_dword            (),            //output (unused)
+
+    .wr_system_dword               (),               //output (unused)
+    .wr_system_linear              (),              //output (unused)
+
+    
+    //write regrm
+    .write_regrm                   (),                   //output (unused)
+    .write_eax                     (),                     //output (unused)
+    .wr_regrm_word                 (),                 //output (unused)
+    .wr_regrm_dword                (),                //output (unused)
+
+    
+    //write output
+    .wr_not_finished               (wr_not_finished_w1z0),               //output (SiSTer)
+    .wr_hlt_in_progress            (),            //output (unused)
+    .wr_string_in_progress         (wr_string_in_progress_w1z0),         //output (SiSTer)
+    .wr_waiting                    (wr_waiting_w1z0),                    //output (SiSTer)
+
+    .wr_req_reset_pr               (),               //output (unused)
+    .wr_req_reset_dec              (),              //output (unused)
+    .wr_req_reset_micro            (),            //output (unused)
+    .wr_req_reset_rd               (),               //output (unused)
+    .wr_req_reset_exe              (),              //output (unused)
+
+    .wr_zflag_result               (),               //output (unused)
+    
+    .wr_task_rpl                   (),                   //output (unused)
+    
+    .wr_one_cycle_wait             (),             //output (unused)
+
+    //stack
+    .write_stack_virtual           (),           //output (unused)
+    .write_stack_virtual_raw       (),       //output (unused)
+    .write_new_stack_virtual_raw   (),   //output (unused)
+    .write_string_es_virtual_a     (),     //output (unused)
+    .write_string_es_virtual_b     (),     //output (unused)
+    .write_new_stack_virtual       (),       //output (unused)
+
+    .wr_push_length_word           (),           //output (unused)
+    .wr_push_length_dword          (),          //output (unused)
+
+    .wr_stack_esp                  (wr_stack_esp),                  //input [31:0]
+    .wr_new_stack_esp              (wr_new_stack_esp),              //input [31:0]
+
+                                   
+    .wr_push_ss_fault_check        (),        //output (unused)
+    .wr_push_ss_fault              (wr_push_ss_fault),              //input
+
+    .wr_new_push_ss_fault_check    (),    //output (unused)
+    .wr_new_push_ss_fault          (wr_new_push_ss_fault),          //input
+
+    .wr_error_code                 (),                 //output (unused)
+
+    .wr_make_esp_speculative       (),       //output (unused)
+    .wr_make_esp_commit            (),            //output (unused)
+    
+    //string
+    .wr_string_ignore              (wr_string_ignore),              //input
+    .wr_prefix_group_1_rep         (wr_prefix_group_1_rep),         //input [1:0]
+    .wr_string_zf_finish           (1'b0),           //input (SiSTer)
+    .wr_string_es_fault            (wr_string_es_fault),            //input
+    .wr_string_finish              (wr_string_finish),              //input
+
+    .wr_esi_final                  (wr_esi_final),                  //input [31:0]
+    .wr_edi_final                  (wr_edi_final),                  //input [31:0]
+    .wr_ecx_final                  (wr_ecx_final),                  //input [31:0]
+
+    .wr_string_gp_fault_check      (),      //output (unused)
+    .write_string_es_virtual       (),       //output (unused)
+
+    //io write
+    .write_io                      (),                      //output (unused)
+    .write_io_for_wr_ready         (write_io_for_wr_ready),         //input
+    
+    //segment
+    .wr_seg_sel                    (),                    //output (unused)
+    .wr_seg_cache_valid            (),            //output (unused)
+    .wr_seg_rpl                    (),                    //output (unused)
+    .wr_seg_cache_mask             (),             //output (unused)
+
+    .write_seg_cache               (),               //output (unused)
+    .write_seg_sel                 (),                 //output (unused)
+    .write_seg_cache_valid         (),         //output (unused)
+    .write_seg_rpl                 (),                 //output (unused)
+
+    .wr_validate_seg_regs          (),          //output (unused)
+
+    //flush tlb
+    .tlbflushall_do                (),                //output (unused)
+    
+    //---------------------
+    
+    .eax_to_reg                    (),                    //output (unused)
+    .ebx_to_reg                    (),                    //output (unused)
+    .ecx_to_reg                    (),                    //output (unused)
+    .edx_to_reg                    (),                    //output (unused)
+    .esi_to_reg                    (),                    //output (unused)
+    .edi_to_reg                    (),                    //output (unused)
+    .ebp_to_reg                    (),                    //output (unused)
+    .esp_to_reg                    (),                    //output (unused)
+    .cr0_pe_to_reg                 (),                 //output (unused)
+    .cr0_mp_to_reg                 (),                 //output (unused)
+    .cr0_em_to_reg                 (),                 //output (unused)
+    .cr0_ts_to_reg                 (),                 //output (unused)
+    .cr0_ne_to_reg                 (),                 //output (unused)
+    .cr0_wp_to_reg                 (),                 //output (unused)
+    .cr0_am_to_reg                 (),                 //output (unused)
+    .cr0_nw_to_reg                 (),                 //output (unused)
+    .cr0_cd_to_reg                 (),                 //output (unused)
+    .cr0_pg_to_reg                 (),                 //output (unused)
+    .cr2_to_reg                    (),                    //output (unused)
+    .cr3_to_reg                    (),                    //output (unused)
+    .cflag_to_reg                  (),                  //output (unused)
+    .pflag_to_reg                  (),                  //output (unused)
+    .aflag_to_reg                  (),                  //output (unused)
+    .zflag_to_reg                  (),                  //output (unused)
+    .sflag_to_reg                  (),                  //output (unused)
+    .oflag_to_reg                  (),                  //output (unused)
+    .tflag_to_reg                  (),                  //output (unused)
+    .iflag_to_reg                  (),                  //output (unused)
+    .dflag_to_reg                  (),                  //output (unused)
+    .iopl_to_reg                   (),                   //output (unused)
+    .ntflag_to_reg                 (),                 //output (unused)
+    .rflag_to_reg                  (),                  //output (unused)
+    .vmflag_to_reg                 (),                 //output (unused)
+    .acflag_to_reg                 (),                 //output (unused)
+    .idflag_to_reg                 (),                 //output (unused)
+    .gdtr_base_to_reg              (),              //output (unused)
+    .gdtr_limit_to_reg             (),             //output (unused)
+    .idtr_base_to_reg              (),              //output (unused)
+    .idtr_limit_to_reg             (),             //output (unused)
+    .dr0_to_reg                    (),                    //output (unused)
+    .dr1_to_reg                    (),                    //output (unused)
+    .dr2_to_reg                    (),                    //output (unused)
+    .dr3_to_reg                    (),                    //output (unused)
+    .dr6_breakpoints_to_reg        (),        //output (unused)
+    .dr6_b12_to_reg                (),                //output (unused)
+    .dr6_bd_to_reg                 (),                 //output (unused)
+    .dr6_bs_to_reg                 (),                 //output (unused)
+    .dr6_bt_to_reg                 (),                 //output (unused)
+    .dr7_to_reg                    (),                    //output (unused)
+    .es_to_reg                     (),                     //output (unused)
+    .ds_to_reg                     (),                     //output (unused)
+    .ss_to_reg                     (),                     //output (unused)
+    .fs_to_reg                     (),                     //output (unused)
+    .gs_to_reg                     (),                     //output (unused)
+    .cs_to_reg                     (),                     //output (unused)
+    .ldtr_to_reg                   (),                   //output (unused)
+    .tr_to_reg                     (),                     //output (unused)
+    .es_cache_to_reg               (),               //output (unused)
+    .ds_cache_to_reg               (),               //output (unused)
+    .ss_cache_to_reg               (),               //output (unused)
+    .fs_cache_to_reg               (),               //output (unused)
+    .gs_cache_to_reg               (),               //output (unused)
+    .cs_cache_to_reg               (),               //output (unused)
+    .ldtr_cache_to_reg             (),             //output (unused)
+    .tr_cache_to_reg               (),               //output (unused)
+    .es_cache_valid_to_reg         (),         //output (unused)
+    .ds_cache_valid_to_reg         (),         //output (unused)
+    .ss_cache_valid_to_reg         (),         //output (unused)
+    .fs_cache_valid_to_reg         (),         //output (unused)
+    .gs_cache_valid_to_reg         (),         //output (unused)
+    .cs_cache_valid_to_reg         (),         //output (unused)
+    .ldtr_cache_valid_to_reg       (),       //output (unused)
+    .es_rpl_to_reg                 (),                 //output (unused)
+    .ds_rpl_to_reg                 (),                 //output (unused)
+    .ss_rpl_to_reg                 (),                 //output (unused)
+    .fs_rpl_to_reg                 (),                 //output (unused)
+    .gs_rpl_to_reg                 (),                 //output (unused)
+    .cs_rpl_to_reg                 (),                 //output (unused)
+    .ldtr_rpl_to_reg               (),               //output (unused)
+    .tr_rpl_to_reg                 (),                 //output (unused)
+    
+    //output
+    .eax                           (eax),                           //input [31:0]
+    .ebx                           (ebx),                           //input [31:0]
+    .ecx                           (ecx),                           //input [31:0]
+    .edx                           (edx),                           //input [31:0]
+    .esi                           (esi),                           //input [31:0]
+    .edi                           (edi),                           //input [31:0]
+    .ebp                           (ebp),                           //input [31:0]
+    .esp                           (esp),                           //input [31:0]
+    .cr0_pe                        (cr0_pe),                        //input
+    .cr0_mp                        (cr0_mp),                        //input
+    .cr0_em                        (cr0_em),                        //input
+    .cr0_ts                        (cr0_ts),                        //input
+    .cr0_ne                        (cr0_ne),                        //input
+    .cr0_wp                        (cr0_wp),                        //input
+    .cr0_am                        (cr0_am),                        //input
+    .cr0_nw                        (cr0_nw),                        //input
+    .cr0_cd                        (cr0_cd),                        //input
+    .cr0_pg                        (cr0_pg),                        //input
+    .cr2                           (cr2),                           //input [31:0]
+    .cr3                           (cr3),                           //input [31:0]
+    .cflag                         (cflag),                         //input
+    .pflag                         (pflag),                         //input
+    .aflag                         (aflag),                         //input
+    .zflag                         (zflag),                         //input
+    .sflag                         (sflag),                         //input
+    .oflag                         (oflag),                         //input
+    .tflag                         (tflag),                         //input
+    .iflag                         (iflag),                         //input
+    .dflag                         (dflag),                         //input
+    .iopl                          (iopl),                          //input [1:0]
+    .ntflag                        (ntflag),                        //input
+    .rflag                         (rflag),                         //input
+    .vmflag                        (vmflag),                        //input
+    .acflag                        (acflag),                        //input
+    .idflag                        (idflag),                        //input
+    .gdtr_base                     (gdtr_base),                     //input [31:0]
+    .gdtr_limit                    (gdtr_limit),                    //input [15:0]
+    .idtr_base                     (idtr_base),                     //input [31:0]
+    .idtr_limit                    (idtr_limit),                    //input [15:0]
+    .dr0                           (dr0),                           //input [31:0]
+    .dr1                           (dr1),                           //input [31:0]
+    .dr2                           (dr2),                           //input [31:0]
+    .dr3                           (dr3),                           //input [31:0]
+    .dr6_breakpoints               (dr6_breakpoints),               //input [3:0]
+    .dr6_b12                       (dr6_b12),                       //input
+    .dr6_bd                        (dr6_bd),                        //input
+    .dr6_bs                        (dr6_bs),                        //input
+    .dr6_bt                        (dr6_bt),                        //input
+    .dr7                           (dr7),                           //input [31:0]
+    .es                            (es),                            //input [15:0]
+    .ds                            (ds),                            //input [15:0]
+    .ss                            (ss),                            //input [15:0]
+    .fs                            (fs),                            //input [15:0]
+    .gs                            (gs),                            //input [15:0]
+    .cs                            (cs),                            //input [15:0]
+    .ldtr                          (ldtr),                          //input [15:0]
+    .tr                            (tr),                            //input [15:0]
+    .es_cache                      (es_cache),                      //input [63:0]
+    .ds_cache                      (ds_cache),                      //input [63:0]
+    .ss_cache                      (ss_cache),                      //input [63:0]
+    .fs_cache                      (fs_cache),                      //input [63:0]
+    .gs_cache                      (gs_cache),                      //input [63:0]
+    .cs_cache                      (cs_cache),                      //input [63:0]
+    .ldtr_cache                    (ldtr_cache),                    //input [63:0]
+    .tr_cache                      (tr_cache),                      //input [63:0]
+    .es_cache_valid                (es_cache_valid),                //input
+    .ds_cache_valid                (ds_cache_valid),                //input
+    .ss_cache_valid                (ss_cache_valid),                //input
+    .fs_cache_valid                (fs_cache_valid),                //input
+    .gs_cache_valid                (gs_cache_valid),                //input
+    .cs_cache_valid                (cs_cache_valid),                //input
+    .ldtr_cache_valid              (ldtr_cache_valid),              //input
+    .es_rpl                        (es_rpl),                        //input [1:0]
+    .ds_rpl                        (ds_rpl),                        //input [1:0]
+    .ss_rpl                        (ss_rpl),                        //input [1:0]
+    .fs_rpl                        (fs_rpl),                        //input [1:0]
+    .gs_rpl                        (gs_rpl),                        //input [1:0]
+    .cs_rpl                        (cs_rpl),                        //input [1:0]
+    .ldtr_rpl                      (ldtr_rpl),                      //input [1:0]
+    .tr_rpl                        (tr_rpl)                         //input [1:0]
+);
+
+write_commands write_commands_w1z1_inst(
+    .clk                (clk),
+    .rst_n              (reset_n[1]),
+    
+    //general input
+    .real_mode              (real_mode),                //input
+    .v8086_mode             (v8086_mode),               //input
+    .protected_mode         (protected_mode),           //input
+    
+    .cpl                    (cpl),                      //input [1:0]
+    
+    .tr_base                (tr_base),                  //input [31:0]
+    
+    .eip                    (eip),                      //input [31:0]
+    
+    .io_allow_check_needed  (io_allow_check_needed),    //input
+    
+    .exc_push_error         (exc_push_error),           //input
+    .exc_eip                (exc_eip),                  //input [31:0]
+    
+    //global input
+    .glob_descriptor               (glob_descriptor),               //input [63:0]
+    .glob_desc_base                (glob_desc_base),                //input [31:0]
+                                   
+    .glob_param_1                  (glob_param_1),                  //input [31:0]
+    .glob_param_2                  (glob_param_2),                  //input [31:0]
+    .glob_param_3                  (glob_param_3),                  //input [31:0]
+    .glob_param_4                  (glob_param_4),                  //input [31:0]
+    .glob_param_5                  (glob_param_5),                  //input [31:0]
+
+    //write
+    .wr_ready                      (wr_ready),                      //input
+    .wr_decoder                    (wr_decoder),                    //input [15:0]
+    .wr_cmd                        (wr_cmd),                        //input [6:0]
+    .wr_cmdex                      (wr_cmdex),                      //input [3:0]
+    .wr_is_8bit                    (wr_is_8bit),                    //input
+    .wr_address_16bit              (wr_address_16bit),              //input
+    .wr_operand_16bit              (wr_operand_16bit),              //input
+    .wr_operand_32bit              (wr_operand_32bit),              //input
+    .wr_mult_overflow              (wr_mult_overflow),              //input
+    .wr_arith_index                (wr_arith_index),                //input [3:0]
+    .wr_modregrm_mod               (wr_modregrm_mod),               //input [1:0]
+    .wr_modregrm_reg               (wr_modregrm_reg),               //input [2:0]
+    .wr_modregrm_rm                (wr_modregrm_rm),                //input [2:0]
+    .wr_dst_is_memory              (wr_dst_is_memory),              //input
+    .wr_dst_is_reg                 (wr_dst_is_reg),                 //input
+    .wr_dst_is_rm                  (wr_dst_is_rm),                  //input
+    .wr_dst_is_implicit_reg        (wr_dst_is_implicit_reg),        //input
+    .wr_dst_is_edx_eax             (wr_dst_is_edx_eax),             //input
+    .wr_dst_is_eax                 (wr_dst_is_eax),                 //input
+    
+    .wr_arith_add_carry            (wr_arith_add_carry),            //input
+    .wr_arith_adc_carry            (wr_arith_adc_carry),            //input
+    .wr_arith_sbb_carry            (wr_arith_sbb_carry),            //input
+    .wr_arith_sub_carry            (wr_arith_sub_carry),            //input
+    
+    .result                        (result),                        //input [31:0]
+    .result2                       (result2),                       //input [31:0]
+
+    .wr_src                        (wr_src),                        //input [31:0]
+    .wr_dst                        (wr_dst),                        //input [31:0]
+    .result_signals                (result_signals),                //input [4:0]
+    .result_push                   (result_push),                   //input [31:0]
+
+    .exe_buffer                    (exe_buffer),                    //input [31:0]
+    .exe_buffer_shifted            (exe_buffer_shifted),            //input [463:0]
+    
+    //global output
+    .wr_glob_param_1_set              (),            //output (unused)
+    .wr_glob_param_1_value            (),          //output (unused)
+
+    .wr_glob_param_3_set              (),            //output (unused)
+    .wr_glob_param_3_value            (),          //output (unused)
+
+    .wr_glob_param_4_set              (),            //output (unused)
+    .wr_glob_param_4_value            (),          //output (unused)
+
+    //debug output
+    .wr_debug_trap_clear     (),                     //output (unused)
+    .wr_debug_task_trigger   (),                   //output (unused)
+    
+    //exception
+    .wr_int                          (),                          //output (unused)
+    .wr_int_soft_int                 (),                 //output (unused)
+    .wr_int_soft_int_ib              (),              //output (unused)
+    .wr_int_vector                   (),                   //output (unused)
+
+    .wr_exception_external_set       (),       //output (unused)
+    .wr_exception_finished           (),           //output (unused)
+    
+    .wr_inhibit_interrupts           (),           //output (unused)
+    .wr_inhibit_interrupts_and_debug (), //output (unused)
+    
+    //memory
+    .write_for_wr_ready            (1'b1),            //input (SiSTer)
+
+    .write_rmw_virtual             (),             //output (unused)
+    .write_virtual                 (),                 //output (unused)
+    .write_rmw_system_dword        (),        //output (unused)
+    .write_system_word             (),             //output (unused)
+    .write_system_dword            (),            //output (unused)
+    .write_system_busy_tss         (),         //output (unused)
+    .write_system_touch            (),            //output (unused)
+
+    .write_length_word             (),             //output (unused)
+    .write_length_dword            (),            //output (unused)
+
+    .wr_system_dword               (),               //output (unused)
+    .wr_system_linear              (),              //output (unused)
+
+    
+    //write regrm
+    .write_regrm                   (),                   //output (unused)
+    .write_eax                     (),                     //output (unused)
+    .wr_regrm_word                 (),                 //output (unused)
+    .wr_regrm_dword                (),                //output (unused)
+
+    
+    //write output
+    .wr_not_finished               (wr_not_finished_w1z1),               //output (SiSTer)
+    .wr_hlt_in_progress            (),            //output (unused)
+    .wr_string_in_progress         (wr_string_in_progress_w1z1),         //output (SiSTer)
+    .wr_waiting                    (wr_waiting_w1z1),                    //output (SiSTer)
+
+    .wr_req_reset_pr               (),               //output (unused)
+    .wr_req_reset_dec              (),              //output (unused)
+    .wr_req_reset_micro            (),            //output (unused)
+    .wr_req_reset_rd               (),               //output (unused)
+    .wr_req_reset_exe              (),              //output (unused)
+
+    .wr_zflag_result               (),               //output (unused)
+    
+    .wr_task_rpl                   (),                   //output (unused)
+    
+    .wr_one_cycle_wait             (),             //output (unused)
+
+    //stack
+    .write_stack_virtual           (),           //output (unused)
+    .write_stack_virtual_raw       (),       //output (unused)
+    .write_new_stack_virtual_raw   (),   //output (unused)
+    .write_string_es_virtual_a     (),     //output (unused)
+    .write_string_es_virtual_b     (),     //output (unused)
+    .write_new_stack_virtual       (),       //output (unused)
+
+    .wr_push_length_word           (),           //output (unused)
+    .wr_push_length_dword          (),          //output (unused)
+
+    .wr_stack_esp                  (wr_stack_esp),                  //input [31:0]
+    .wr_new_stack_esp              (wr_new_stack_esp),              //input [31:0]
+
+                                   
+    .wr_push_ss_fault_check        (),        //output (unused)
+    .wr_push_ss_fault              (wr_push_ss_fault),              //input
+
+    .wr_new_push_ss_fault_check    (),    //output (unused)
+    .wr_new_push_ss_fault          (wr_new_push_ss_fault),          //input
+
+    .wr_error_code                 (),                 //output (unused)
+
+    .wr_make_esp_speculative       (),       //output (unused)
+    .wr_make_esp_commit            (),            //output (unused)
+    
+    //string
+    .wr_string_ignore              (wr_string_ignore),              //input
+    .wr_prefix_group_1_rep         (wr_prefix_group_1_rep),         //input [1:0]
+    .wr_string_zf_finish           (1'b1),           //input (SiSTer)
+    .wr_string_es_fault            (wr_string_es_fault),            //input
+    .wr_string_finish              (wr_string_finish),              //input
+
+    .wr_esi_final                  (wr_esi_final),                  //input [31:0]
+    .wr_edi_final                  (wr_edi_final),                  //input [31:0]
+    .wr_ecx_final                  (wr_ecx_final),                  //input [31:0]
+
+    .wr_string_gp_fault_check      (),      //output (unused)
+    .write_string_es_virtual       (),       //output (unused)
+
+    //io write
+    .write_io                      (),                      //output (unused)
+    .write_io_for_wr_ready         (write_io_for_wr_ready),         //input
+    
+    //segment
+    .wr_seg_sel                    (),                    //output (unused)
+    .wr_seg_cache_valid            (),            //output (unused)
+    .wr_seg_rpl                    (),                    //output (unused)
+    .wr_seg_cache_mask             (),             //output (unused)
+
+    .write_seg_cache               (),               //output (unused)
+    .write_seg_sel                 (),                 //output (unused)
+    .write_seg_cache_valid         (),         //output (unused)
+    .write_seg_rpl                 (),                 //output (unused)
+
+    .wr_validate_seg_regs          (),          //output (unused)
+
+    //flush tlb
+    .tlbflushall_do                (),                //output (unused)
+    
+    //---------------------
+    
+    .eax_to_reg                    (),                    //output (unused)
+    .ebx_to_reg                    (),                    //output (unused)
+    .ecx_to_reg                    (),                    //output (unused)
+    .edx_to_reg                    (),                    //output (unused)
+    .esi_to_reg                    (),                    //output (unused)
+    .edi_to_reg                    (),                    //output (unused)
+    .ebp_to_reg                    (),                    //output (unused)
+    .esp_to_reg                    (),                    //output (unused)
+    .cr0_pe_to_reg                 (),                 //output (unused)
+    .cr0_mp_to_reg                 (),                 //output (unused)
+    .cr0_em_to_reg                 (),                 //output (unused)
+    .cr0_ts_to_reg                 (),                 //output (unused)
+    .cr0_ne_to_reg                 (),                 //output (unused)
+    .cr0_wp_to_reg                 (),                 //output (unused)
+    .cr0_am_to_reg                 (),                 //output (unused)
+    .cr0_nw_to_reg                 (),                 //output (unused)
+    .cr0_cd_to_reg                 (),                 //output (unused)
+    .cr0_pg_to_reg                 (),                 //output (unused)
+    .cr2_to_reg                    (),                    //output (unused)
+    .cr3_to_reg                    (),                    //output (unused)
+    .cflag_to_reg                  (),                  //output (unused)
+    .pflag_to_reg                  (),                  //output (unused)
+    .aflag_to_reg                  (),                  //output (unused)
+    .zflag_to_reg                  (),                  //output (unused)
+    .sflag_to_reg                  (),                  //output (unused)
+    .oflag_to_reg                  (),                  //output (unused)
+    .tflag_to_reg                  (),                  //output (unused)
+    .iflag_to_reg                  (),                  //output (unused)
+    .dflag_to_reg                  (),                  //output (unused)
+    .iopl_to_reg                   (),                   //output (unused)
+    .ntflag_to_reg                 (),                 //output (unused)
+    .rflag_to_reg                  (),                  //output (unused)
+    .vmflag_to_reg                 (),                 //output (unused)
+    .acflag_to_reg                 (),                 //output (unused)
+    .idflag_to_reg                 (),                 //output (unused)
+    .gdtr_base_to_reg              (),              //output (unused)
+    .gdtr_limit_to_reg             (),             //output (unused)
+    .idtr_base_to_reg              (),              //output (unused)
+    .idtr_limit_to_reg             (),             //output (unused)
+    .dr0_to_reg                    (),                    //output (unused)
+    .dr1_to_reg                    (),                    //output (unused)
+    .dr2_to_reg                    (),                    //output (unused)
+    .dr3_to_reg                    (),                    //output (unused)
+    .dr6_breakpoints_to_reg        (),        //output (unused)
+    .dr6_b12_to_reg                (),                //output (unused)
+    .dr6_bd_to_reg                 (),                 //output (unused)
+    .dr6_bs_to_reg                 (),                 //output (unused)
+    .dr6_bt_to_reg                 (),                 //output (unused)
+    .dr7_to_reg                    (),                    //output (unused)
+    .es_to_reg                     (),                     //output (unused)
+    .ds_to_reg                     (),                     //output (unused)
+    .ss_to_reg                     (),                     //output (unused)
+    .fs_to_reg                     (),                     //output (unused)
+    .gs_to_reg                     (),                     //output (unused)
+    .cs_to_reg                     (),                     //output (unused)
+    .ldtr_to_reg                   (),                   //output (unused)
+    .tr_to_reg                     (),                     //output (unused)
+    .es_cache_to_reg               (),               //output (unused)
+    .ds_cache_to_reg               (),               //output (unused)
+    .ss_cache_to_reg               (),               //output (unused)
+    .fs_cache_to_reg               (),               //output (unused)
+    .gs_cache_to_reg               (),               //output (unused)
+    .cs_cache_to_reg               (),               //output (unused)
+    .ldtr_cache_to_reg             (),             //output (unused)
+    .tr_cache_to_reg               (),               //output (unused)
+    .es_cache_valid_to_reg         (),         //output (unused)
+    .ds_cache_valid_to_reg         (),         //output (unused)
+    .ss_cache_valid_to_reg         (),         //output (unused)
+    .fs_cache_valid_to_reg         (),         //output (unused)
+    .gs_cache_valid_to_reg         (),         //output (unused)
+    .cs_cache_valid_to_reg         (),         //output (unused)
+    .ldtr_cache_valid_to_reg       (),       //output (unused)
+    .es_rpl_to_reg                 (),                 //output (unused)
+    .ds_rpl_to_reg                 (),                 //output (unused)
+    .ss_rpl_to_reg                 (),                 //output (unused)
+    .fs_rpl_to_reg                 (),                 //output (unused)
+    .gs_rpl_to_reg                 (),                 //output (unused)
+    .cs_rpl_to_reg                 (),                 //output (unused)
+    .ldtr_rpl_to_reg               (),               //output (unused)
+    .tr_rpl_to_reg                 (),                 //output (unused)
+    
+    //output
+    .eax                           (eax),                           //input [31:0]
+    .ebx                           (ebx),                           //input [31:0]
+    .ecx                           (ecx),                           //input [31:0]
+    .edx                           (edx),                           //input [31:0]
+    .esi                           (esi),                           //input [31:0]
+    .edi                           (edi),                           //input [31:0]
+    .ebp                           (ebp),                           //input [31:0]
+    .esp                           (esp),                           //input [31:0]
+    .cr0_pe                        (cr0_pe),                        //input
+    .cr0_mp                        (cr0_mp),                        //input
+    .cr0_em                        (cr0_em),                        //input
+    .cr0_ts                        (cr0_ts),                        //input
+    .cr0_ne                        (cr0_ne),                        //input
+    .cr0_wp                        (cr0_wp),                        //input
+    .cr0_am                        (cr0_am),                        //input
+    .cr0_nw                        (cr0_nw),                        //input
+    .cr0_cd                        (cr0_cd),                        //input
+    .cr0_pg                        (cr0_pg),                        //input
+    .cr2                           (cr2),                           //input [31:0]
+    .cr3                           (cr3),                           //input [31:0]
+    .cflag                         (cflag),                         //input
+    .pflag                         (pflag),                         //input
+    .aflag                         (aflag),                         //input
+    .zflag                         (zflag),                         //input
+    .sflag                         (sflag),                         //input
+    .oflag                         (oflag),                         //input
+    .tflag                         (tflag),                         //input
+    .iflag                         (iflag),                         //input
+    .dflag                         (dflag),                         //input
+    .iopl                          (iopl),                          //input [1:0]
+    .ntflag                        (ntflag),                        //input
+    .rflag                         (rflag),                         //input
+    .vmflag                        (vmflag),                        //input
+    .acflag                        (acflag),                        //input
+    .idflag                        (idflag),                        //input
+    .gdtr_base                     (gdtr_base),                     //input [31:0]
+    .gdtr_limit                    (gdtr_limit),                    //input [15:0]
+    .idtr_base                     (idtr_base),                     //input [31:0]
+    .idtr_limit                    (idtr_limit),                    //input [15:0]
+    .dr0                           (dr0),                           //input [31:0]
+    .dr1                           (dr1),                           //input [31:0]
+    .dr2                           (dr2),                           //input [31:0]
+    .dr3                           (dr3),                           //input [31:0]
+    .dr6_breakpoints               (dr6_breakpoints),               //input [3:0]
+    .dr6_b12                       (dr6_b12),                       //input
+    .dr6_bd                        (dr6_bd),                        //input
+    .dr6_bs                        (dr6_bs),                        //input
+    .dr6_bt                        (dr6_bt),                        //input
+    .dr7                           (dr7),                           //input [31:0]
+    .es                            (es),                            //input [15:0]
+    .ds                            (ds),                            //input [15:0]
+    .ss                            (ss),                            //input [15:0]
+    .fs                            (fs),                            //input [15:0]
+    .gs                            (gs),                            //input [15:0]
+    .cs                            (cs),                            //input [15:0]
+    .ldtr                          (ldtr),                          //input [15:0]
+    .tr                            (tr),                            //input [15:0]
+    .es_cache                      (es_cache),                      //input [63:0]
+    .ds_cache                      (ds_cache),                      //input [63:0]
+    .ss_cache                      (ss_cache),                      //input [63:0]
+    .fs_cache                      (fs_cache),                      //input [63:0]
+    .gs_cache                      (gs_cache),                      //input [63:0]
+    .cs_cache                      (cs_cache),                      //input [63:0]
+    .ldtr_cache                    (ldtr_cache),                    //input [63:0]
+    .tr_cache                      (tr_cache),                      //input [63:0]
+    .es_cache_valid                (es_cache_valid),                //input
+    .ds_cache_valid                (ds_cache_valid),                //input
+    .ss_cache_valid                (ss_cache_valid),                //input
+    .fs_cache_valid                (fs_cache_valid),                //input
+    .gs_cache_valid                (gs_cache_valid),                //input
+    .cs_cache_valid                (cs_cache_valid),                //input
+    .ldtr_cache_valid              (ldtr_cache_valid),              //input
+    .es_rpl                        (es_rpl),                        //input [1:0]
+    .ds_rpl                        (ds_rpl),                        //input [1:0]
+    .ss_rpl                        (ss_rpl),                        //input [1:0]
+    .fs_rpl                        (fs_rpl),                        //input [1:0]
+    .gs_rpl                        (gs_rpl),                        //input [1:0]
+    .cs_rpl                        (cs_rpl),                        //input [1:0]
+    .ldtr_rpl                      (ldtr_rpl),                      //input [1:0]
+    .tr_rpl                        (tr_rpl)                         //input [1:0]
+);
     
 //------------------------------------------------------------------------------
 
@@ -1171,6 +2700,8 @@ write_debug write_debug_inst(
     
     //output
     .wr_debug_prepare                   (wr_debug_prepare),                 //output
+    .wr_debug_static                    (wr_debug_static),                  //output (SiSTer)
+    .wr_debug_code_cmp                  (wr_debug_code_cmp),                //output (SiSTer)
     
     .wr_debug_code_reg                  (wr_debug_code_reg),                //output [3:0]
     .wr_debug_write_reg                 (wr_debug_write_reg),               //output [3:0]
@@ -1356,7 +2887,16 @@ write_register write_register_inst(
     .eax                 (eax),                 //output [31:0]
     .ebx                 (ebx),                 //output [31:0]
     .ecx                 (ecx),                 //output [31:0]
+    .ecx_lo_is_0         (ecx_lo_is_0),         //output (SiSTer)
+    .ecx_lo_is_1         (ecx_lo_is_1),         //output (SiSTer)
+    .ecx_hi_is_0         (ecx_hi_is_0),         //output (SiSTer)
     .edx                 (edx),                 //output [31:0]
+    .eax_lo_is_0         (eax_lo_is_0),           //output (SiSTer)
+    .eax_lo_is_8000      (eax_lo_is_8000),        //output (SiSTer)
+    .eax_hi_is_0         (eax_hi_is_0),           //output (SiSTer)
+    .edx_lo_is_0         (edx_lo_is_0),           //output (SiSTer)
+    .edx_lo_is_8000      (edx_lo_is_8000),        //output (SiSTer)
+    .edx_hi_is_8000      (edx_hi_is_8000),        //output (SiSTer)
     .esi                 (esi),                 //output [31:0]
     .edi                 (edi),                 //output [31:0]
     .ebp                 (ebp),                 //output [31:0]
@@ -1490,6 +3030,9 @@ write_string write_string_inst(
     .wr_zflag_result            (wr_zflag_result),          //input
     
     .ecx                        (ecx),                      //input [31:0]
+    .ecx_lo_is_0                (ecx_lo_is_0),              //input (SiSTer)
+    .ecx_lo_is_1                (ecx_lo_is_1),              //input (SiSTer)
+    .ecx_hi_is_0                (ecx_hi_is_0),              //input (SiSTer)
     .esi                        (esi),                      //input [31:0]
     .edi                        (edi),                      //input [31:0]
     

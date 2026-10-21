@@ -74,6 +74,7 @@ module read_segment(
     
     output              rd_seg_gp_fault_init,
     output              rd_seg_ss_fault_init,
+    output              rd_seg_fault_init,      // (SiSTer: rd_seg_gp_fault_init || rd_seg_ss_fault_init)
     
     output      [31:0]  rd_seg_linear
 );
@@ -164,13 +165,48 @@ assign seg_limit_overflow =
     (seg_select == 3'd5 && (((gs_cache[43] || !gs_cache[42]) && rd_address_effective > gs_limit) || (!gs_cache[43] && gs_cache[42] && (rd_address_effective <= gs_limit || rd_address_effective > { {16{gs_cache[54]}}, 16'hFFFF }))));
 
 //NOTE: only valid for (not SYSTEM)
+// (SiSTer: was, for each segment x, (x_left >= 32'd15)? 5'd16 : x_left[3:0] + 4'd1, x_left being
+//  bound - rd_address_effective (bound: the limit, or the top of an expand-down segment) -- a subtract and
+//  then a compare. x_left <= 14, mod 2^32, is rd_address_effective lying in [bound - 14, bound] mod 2^32,
+//  which is two compares against bounds made from the segment registers alone; and x_left[3:0] is
+//  bound[3:0] - rd_address_effective[3:0]. So the same five bits, without the 32-bit subtract in the path)
+wire [31:0] es_bound = (es_cache[43] || !es_cache[42])? es_limit : { {16{es_cache[54]}}, 16'hFFFF };
+wire [31:0] es_bound_lo = es_bound - 32'd14;
+wire        es_near = (es_bound >= 32'd14)? (rd_address_effective >= es_bound_lo && rd_address_effective <= es_bound) :
+                                           (rd_address_effective >= es_bound_lo || rd_address_effective <= es_bound);
+wire [3:0]  es_left_lo = es_bound[3:0] - rd_address_effective[3:0];
+wire [31:0] cs_bound = (cs_cache[43] || !cs_cache[42])? cs_limit : { {16{cs_cache[54]}}, 16'hFFFF };
+wire [31:0] cs_bound_lo = cs_bound - 32'd14;
+wire        cs_near = (cs_bound >= 32'd14)? (rd_address_effective >= cs_bound_lo && rd_address_effective <= cs_bound) :
+                                           (rd_address_effective >= cs_bound_lo || rd_address_effective <= cs_bound);
+wire [3:0]  cs_left_lo = cs_bound[3:0] - rd_address_effective[3:0];
+wire [31:0] ss_bound = (ss_cache[43] || !ss_cache[42])? ss_limit : { {16{ss_cache[54]}}, 16'hFFFF };
+wire [31:0] ss_bound_lo = ss_bound - 32'd14;
+wire        ss_near = (ss_bound >= 32'd14)? (rd_address_effective >= ss_bound_lo && rd_address_effective <= ss_bound) :
+                                           (rd_address_effective >= ss_bound_lo || rd_address_effective <= ss_bound);
+wire [3:0]  ss_left_lo = ss_bound[3:0] - rd_address_effective[3:0];
+wire [31:0] ds_bound = (ds_cache[43] || !ds_cache[42])? ds_limit : { {16{ds_cache[54]}}, 16'hFFFF };
+wire [31:0] ds_bound_lo = ds_bound - 32'd14;
+wire        ds_near = (ds_bound >= 32'd14)? (rd_address_effective >= ds_bound_lo && rd_address_effective <= ds_bound) :
+                                           (rd_address_effective >= ds_bound_lo || rd_address_effective <= ds_bound);
+wire [3:0]  ds_left_lo = ds_bound[3:0] - rd_address_effective[3:0];
+wire [31:0] fs_bound = (fs_cache[43] || !fs_cache[42])? fs_limit : { {16{fs_cache[54]}}, 16'hFFFF };
+wire [31:0] fs_bound_lo = fs_bound - 32'd14;
+wire        fs_near = (fs_bound >= 32'd14)? (rd_address_effective >= fs_bound_lo && rd_address_effective <= fs_bound) :
+                                           (rd_address_effective >= fs_bound_lo || rd_address_effective <= fs_bound);
+wire [3:0]  fs_left_lo = fs_bound[3:0] - rd_address_effective[3:0];
+wire [31:0] gs_bound = (gs_cache[43] || !gs_cache[42])? gs_limit : { {16{gs_cache[54]}}, 16'hFFFF };
+wire [31:0] gs_bound_lo = gs_bound - 32'd14;
+wire        gs_near = (gs_bound >= 32'd14)? (rd_address_effective >= gs_bound_lo && rd_address_effective <= gs_bound) :
+                                           (rd_address_effective >= gs_bound_lo || rd_address_effective <= gs_bound);
+wire [3:0]  gs_left_lo = gs_bound[3:0] - rd_address_effective[3:0];
 assign seg_left =
-    (seg_select == 3'd0)?   ((es_left >= 32'd15)? 5'd16 : es_left[3:0] + 4'd1) :
-    (seg_select == 3'd1)?   ((cs_left >= 32'd15)? 5'd16 : cs_left[3:0] + 4'd1) :
-    (seg_select == 3'd2)?   ((ss_left >= 32'd15)? 5'd16 : ss_left[3:0] + 4'd1) :
-    (seg_select == 3'd3)?   ((ds_left >= 32'd15)? 5'd16 : ds_left[3:0] + 4'd1) :
-    (seg_select == 3'd4)?   ((fs_left >= 32'd15)? 5'd16 : fs_left[3:0] + 4'd1) :
-                            ((gs_left >= 32'd15)? 5'd16 : gs_left[3:0] + 4'd1);    
+    (seg_select == 3'd0)?   ((es_near)? { 1'b0, es_left_lo } + 5'd1 : 5'd16) :
+    (seg_select == 3'd1)?   ((cs_near)? { 1'b0, cs_left_lo } + 5'd1 : 5'd16) :
+    (seg_select == 3'd2)?   ((ss_near)? { 1'b0, ss_left_lo } + 5'd1 : 5'd16) :
+    (seg_select == 3'd3)?   ((ds_near)? { 1'b0, ds_left_lo } + 5'd1 : 5'd16) :
+    (seg_select == 3'd4)?   ((fs_near)? { 1'b0, fs_left_lo } + 5'd1 : 5'd16) :
+                            ((gs_near)? { 1'b0, gs_left_lo } + 5'd1 : 5'd16);
     
 //NOTE: only valid for SEGMENT (not SYSTEM)
 // for read: CODE and (not READABLE); for write: DATA and (not WRITABLE)
@@ -199,12 +235,20 @@ assign seg_valid =
     
 //------------------------------------------------------------------------------    
     
-assign seg_fault = 
-    (rd_address_effective_ready && (seg_read || seg_write)) &&
-    ((seg_invalid_read_access && seg_read) || (seg_invalid_write_access && seg_write) ||
-     seg_limit_overflow || (seg_left < { 1'b0, read_length }) || ~(seg_valid));
+// (SiSTer: was
+//      (rd_address_effective_ready && (seg_read || seg_write)) &&
+//      ((seg_invalid_read_access && seg_read) || (seg_invalid_write_access && seg_write) ||
+//       seg_limit_overflow || (seg_left < { 1'b0, read_length }) || ~(seg_valid));
+//  the same as (seg_read && fault_if_read) || (seg_write && fault_if_write) below (each term of the original
+//  needs seg_read or seg_write, and the common checks count for either): seg_read and seg_write, the read
+//  stage's late access decodes, then only meet the last gate)
+wire seg_fault_common = seg_limit_overflow || (seg_left < { 1'b0, read_length }) || ~(seg_valid);
+wire seg_fault_if_read  = rd_address_effective_ready && (seg_invalid_read_access  || seg_fault_common);
+wire seg_fault_if_write = rd_address_effective_ready && (seg_invalid_write_access || seg_fault_common);
+assign seg_fault = (seg_read && seg_fault_if_read) || (seg_write && seg_fault_if_write);
 
 assign rd_seg_gp_fault_init = seg_select != 3'd2 && seg_fault;
+assign rd_seg_fault_init    = seg_fault;      // (SiSTer: the two above together, without seg_select)
 assign rd_seg_ss_fault_init = seg_select == 3'd2 && seg_fault;
 
 //------------------------------------------------------------------------------

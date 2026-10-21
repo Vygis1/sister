@@ -39,6 +39,7 @@ module memory_read(
     //RESP:
     input               read_do,
     output              read_done,
+    output              read_done_r0,      // (SiSTer: read_done when rd_reset is low)
     output reg          read_page_fault,
     output reg          read_ac_fault,
     
@@ -158,6 +159,9 @@ assign tlbread_do =
 
 
 assign read_done = (state == STATE_WAIT && ~(tlbread_page_fault || tlbread_ac_fault || (tlbread_retry && reset_waiting)) && tlbread_done && ~rd_reset && ~reset_waiting)? 1'b1 : read_done_next;
+// (SiSTer: read_done as it is whenever rd_reset is low -- the same expression without the ~rd_reset
+//  term -- for read.v, which settles its stall for both values of the late rd_reset and picks at the end)
+assign read_done_r0 = (state == STATE_WAIT && ~(tlbread_page_fault || tlbread_ac_fault || (tlbread_retry && reset_waiting)) && tlbread_done && ~reset_waiting)? 1'b1 : read_done_next;
 assign read_data = (state == STATE_WAIT) ? tlbread_data : read_data_next;
 
 

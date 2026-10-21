@@ -38,6 +38,7 @@ module avalon_mem(
     output              writeburst_done,
     
     input       [31:0]  writeburst_address,
+    input       [3:0]   writeburst_rgn,     // (SiSTer: its L2 regions)
     input       [2:0]   writeburst_length,
     input       [31:0]  writeburst_data_in,
     //END
@@ -47,6 +48,7 @@ module avalon_mem(
     output              readburst_done,
     
     input       [31:0]  readburst_address,
+    input       [3:0]   readburst_rgn,      // (SiSTer: its L2 regions)
     input       [3:0]   readburst_length,
     output      [95:0]  readburst_data_out,
     //END
@@ -66,6 +68,7 @@ module avalon_mem(
 
     // avalon master
     output      [31:2]  avm_address,
+    output      [3:0]   avm_rgn,            // (SiSTer: the L2 regions of avm_address)
     output      [31:0]  avm_writedata,
     output      [3:0]   avm_byteenable,
     output      [3:0]   avm_burstcount,
@@ -205,6 +208,20 @@ assign avm_address =
    readcode_do           ? readcode_address[31:2] :
                            dma_address[23:2];
 
+// (SiSTer: the L2 regions (ao486_l2_rgn) of avm_address, by the same selection; the TLB-translated addresses'
+//  come with them from the tlb, the rest from registers or the DMA port -- the L2 cache reads these
+//  instead of decoding avm_address)
+wire [3:0] writeaddr_next_rgn, readcode_rgn, dma_rgn;
+ao486_l2_rgn writeaddr_next_rgn_inst(.a({ writeaddr_next, 2'b00 }),          .f(writeaddr_next_rgn));
+ao486_l2_rgn readcode_rgn_inst      (.a({ readcode_address[31:2], 2'b00 }),  .f(readcode_rgn));
+ao486_l2_rgn dma_rgn_inst           (.a({ 8'd0, dma_address[23:2], 2'b00 }), .f(dma_rgn));
+assign avm_rgn =
+   (state != STATE_IDLE) ? writeaddr_next_rgn :
+   writeburst_do         ? writeburst_rgn :
+   readburst_do          ? readburst_rgn :
+   readcode_do           ? readcode_rgn :
+                           dma_rgn;
+
 assign avm_writedata  =
    (state != STATE_IDLE) ? writedata_next :
    writeburst_do         ? writeburst_data[31:0] :
@@ -309,4 +326,18 @@ always @(posedge clk) begin
 	end
 end
 
+endmodule
+
+// (SiSTer: the L2 cache's address regions (cache/l2_cache.v, ADDRBITS 24, no UMA RAM) of a byte address, so
+//  that they can travel beside an address rather than be decoded from it at the end of a long path:
+//  f[0] ram (below 256 MB), f[1] rom (0xC0000-0xFFFFF), f[2] the VGA window's 128 kB (0xA0000-0xBFFFF, before
+//  the mode mask), f[3] the shared-folder window (0xCE000-0xCFFFF). Only address bits 31..13 are read.)
+module ao486_l2_rgn(
+    input   [31:0]  a,
+    output  [3:0]   f
+);
+assign f[0] = a[31:28] == 4'd0;
+assign f[1] = a[27:18] == 10'h3;
+assign f[2] = a[27:17] == 11'h5;
+assign f[3] = a[27:13] == 15'h67;
 endmodule

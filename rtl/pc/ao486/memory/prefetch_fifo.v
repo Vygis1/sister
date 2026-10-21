@@ -50,7 +50,11 @@ module prefetch_fifo(
     //RESP:
     input           prefetchfifo_accept_do,      // fetch wants to pop the head entry this cycle
     output [67:0]   prefetchfifo_accept_data,    // data to fetch
-    output          prefetchfifo_accept_empty    // if the FIFO is empty
+    output          prefetchfifo_accept_empty,   // if the FIFO is empty
+    // (SiSTer: the head's length and empty as they are when pr_reset is low -- icache.v)
+    input           prefetchfifo_write_do_nopr,
+    output  [3:0]   prefetchfifo_accept_length_nopr,
+    output          prefetchfifo_accept_empty_nopr
     //END
 );
 
@@ -65,6 +69,11 @@ assign bypass = prefetchfifo_write_do && empty;
 assign prefetchfifo_accept_data = (bypass) ? { prefetchfifo_write_data[35:32], 32'd0, prefetchfifo_write_data[31:0] } : { q[35:32], 32'd0, q[31:0] };
 
 assign prefetchfifo_accept_empty = empty && ~bypass;
+
+// (SiSTer: the same with prefetchfifo_write_do_nopr)
+wire bypass_nopr = prefetchfifo_write_do_nopr && empty;
+assign prefetchfifo_accept_length_nopr = (bypass_nopr) ? prefetchfifo_write_data[35:32] : q[35:32];
+assign prefetchfifo_accept_empty_nopr  = empty && ~bypass_nopr;
 
 //------------------------------------------------------------------------------
 

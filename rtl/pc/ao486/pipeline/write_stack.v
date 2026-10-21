@@ -89,9 +89,21 @@ assign wr_new_push_linear = glob_desc_base + wr_stack_offset;
 assign w_new_upper_limit = (glob_descriptor[`DESC_BIT_D_B])? 32'hFFFFFFFF : 32'h0000FFFF; //d-b
 
 // (CODE or not EXPAND-DOWN)
-assign w_new_push_not_fit = (glob_descriptor[43] || ~(glob_descriptor[42]))?
-    glob_desc_limit   - wr_stack_offset < { 29'd0, wr_push_length_minus_1 } :
-    w_new_upper_limit - wr_stack_offset < { 29'd0, wr_push_length_minus_1 };
+// (SiSTer: was
+//      (glob_descriptor[43] || ~(glob_descriptor[42]))?
+//          glob_desc_limit   - wr_stack_offset < { 29'd0, wr_push_length_minus_1 } :
+//          w_new_upper_limit - wr_stack_offset < { 29'd0, wr_push_length_minus_1 };
+//  wr_push_length is 2 or 4, so wr_push_length_minus_1 is 1 or 3: both compares are made from the
+//  registers alone and the push length, decoded late from the command, picks one at the end)
+// (SiSTer, further: room = (bound - wr_stack_offset) mod 2^32; room < 1 is wr_stack_offset == bound, and room < 3
+//  is wr_stack_offset in [bound - 2, bound] mod 2^32 -- compares against bounds from the descriptor alone, with
+//  no subtract in series with wr_stack_offset)
+wire [31:0] w_new_push_bound    = (glob_descriptor[43] || ~(glob_descriptor[42]))? glob_desc_limit : w_new_upper_limit;
+wire [31:0] w_new_push_bound_lo = w_new_push_bound - 32'd2;
+wire        w_new_push_room_0   = wr_stack_offset == w_new_push_bound;
+wire        w_new_push_room_lt3 = (w_new_push_bound >= 32'd2)? (wr_stack_offset >= w_new_push_bound_lo && wr_stack_offset <= w_new_push_bound) :
+                                                               (wr_stack_offset >= w_new_push_bound_lo || wr_stack_offset <= w_new_push_bound);
+assign w_new_push_not_fit = (wr_push_length == 3'd2)? w_new_push_room_0 : w_new_push_room_lt3;
   
 assign w_new_push_limit_overflow =
     ((glob_descriptor[43] || !glob_descriptor[42]) &&  wr_stack_offset >  glob_desc_limit) ||
@@ -110,9 +122,18 @@ wire        w_push_limit_overflow;
 assign w_upper_limit = (ss_cache[`DESC_BIT_D_B])? 32'hFFFFFFFF : 32'h0000FFFF;
 
 // (CODE or not EXPAND-DOWN)
-assign w_push_not_fit = (ss_cache[43] || ~(ss_cache[42]))?
-    ss_limit      - wr_stack_offset < { 29'd0, wr_push_length_minus_1 } :
-    w_upper_limit - wr_stack_offset < { 29'd0, wr_push_length_minus_1 };
+// (SiSTer: was
+//      (ss_cache[43] || ~(ss_cache[42]))?
+//          ss_limit      - wr_stack_offset < { 29'd0, wr_push_length_minus_1 } :
+//          w_upper_limit - wr_stack_offset < { 29'd0, wr_push_length_minus_1 };
+//  the same split as w_new_push_not_fit above)
+// (SiSTer, further: the same window compares as w_new_push_not_fit above)
+wire [31:0] w_push_bound    = (ss_cache[43] || ~(ss_cache[42]))? ss_limit : w_upper_limit;
+wire [31:0] w_push_bound_lo = w_push_bound - 32'd2;
+wire        w_push_room_0   = wr_stack_offset == w_push_bound;
+wire        w_push_room_lt3 = (w_push_bound >= 32'd2)? (wr_stack_offset >= w_push_bound_lo && wr_stack_offset <= w_push_bound) :
+                                                       (wr_stack_offset >= w_push_bound_lo || wr_stack_offset <= w_push_bound);
+assign w_push_not_fit = (wr_push_length == 3'd2)? w_push_room_0 : w_push_room_lt3;
 
 assign w_push_limit_overflow =
     ((ss_cache[43] || !ss_cache[42]) && wr_stack_offset > ss_limit) || (!ss_cache[43] && ss_cache[42] && (wr_stack_offset <= ss_limit || wr_stack_offset > w_upper_limit));

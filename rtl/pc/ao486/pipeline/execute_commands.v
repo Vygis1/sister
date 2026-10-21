@@ -326,11 +326,7 @@ assign exe_privilege_not_accepted =
 wire        exe_buffer_shift;
 wire        exe_buffer_shift_word;
 
-always @(posedge clk) begin
-    if(rst_n == 1'b0)               exe_buffer_shifted <= 464'd0;
-    else if(exe_buffer_shift)       exe_buffer_shifted <= { exe_buffer_shifted[431:0], exe_buffer };
-    else if(exe_buffer_shift_word)  exe_buffer_shifted <= { exe_buffer_shifted[447:0], exe_buffer[15:0] };
-end
+// (SiSTer: the register is written below the autogen include: see there)
 
 //------------------------------------------------------------------------------ 
 
@@ -413,6 +409,25 @@ wire _unused_ok = &{ 1'b0, edx[31:16], tr_cache[63:44], tr_cache[39:0], exe_mute
 //------------------------------------------------------------------------------
 
 `include "autogen/execute_commands.v"
+
+// (SiSTer: was
+//      if(rst_n == 1'b0)               exe_buffer_shifted <= 464'd0;
+//      else if(exe_buffer_shift)       exe_buffer_shifted <= { exe_buffer_shifted[431:0], exe_buffer };
+//      else if(exe_buffer_shift_word)  exe_buffer_shifted <= { exe_buffer_shifted[447:0], exe_buffer[15:0] };
+//  Both selects are autogen terms (cond_X && cond_36), cond_36 being exe_ready, the late end of the
+//  write/execute stall chain. Written with exe_ready as the enable and the command terms alone choosing
+//  the shift, it is the same register, but exe_ready meets only the 464 enables, not the data muxes.
+//  exe_buffer_shift_cmd / _word_cmd are exe_buffer_shift / _word with cond_36 true.)
+wire exe_buffer_shift_cmd =
+    cond_134 || cond_258 || (cond_262 && exe_cmdex <= `CMDEX_task_switch_3_STEP_8) || cond_285;
+wire exe_buffer_shift_word_cmd =
+    cond_262 && exe_cmdex >  `CMDEX_task_switch_3_STEP_8;
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0)                                                       exe_buffer_shifted <= 464'd0;
+    else if(exe_ready && (exe_buffer_shift_cmd || exe_buffer_shift_word_cmd))
+        exe_buffer_shifted <= (exe_buffer_shift_cmd)? { exe_buffer_shifted[431:0], exe_buffer } : { exe_buffer_shifted[447:0], exe_buffer[15:0] };
+end
 
 //------------------------------------------------------------------------------
     

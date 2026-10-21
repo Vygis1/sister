@@ -57,6 +57,7 @@ module icache(
     //REQ:
     output              prefetchfifo_write_do,
     output  [35:0]      prefetchfifo_write_data,
+    output              prefetchfifo_write_do_nopr,   // (SiSTer: prefetchfifo_write_do when pr_reset is low)
     //END
     
     //REQ:
@@ -188,6 +189,13 @@ assign prefetchfifo_write_do =
    (state == STATE_READ && reset_combined == `FALSE && reset_waiting == `FALSE && readcode_cache_valid) ? (`TRUE) :
    `FALSE;
    
+// (SiSTer: the same with pr_reset low -- reset_combined is reset_prefetch | pr_reset -- for decode_regs'
+//  count, which is only taken when dec_reset is low, and then pr_reset is low too: pipeline.v)
+assign prefetchfifo_write_do_nopr =
+   (~rst_n) ? (`FALSE) :
+   (state == STATE_READ && reset_prefetch == `FALSE && reset_waiting == `FALSE && readcode_cache_valid) ? (`TRUE) :
+   `FALSE;
+
 assign prefetched_length       = partial_length_current;
 
 assign prefetched_do =

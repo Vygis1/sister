@@ -44,6 +44,7 @@ module decode(
     
     //fetch interface
     input       [3:0]   fetch_valid,
+    input       [3:0]   fetch_valid_nopr,   // (SiSTer: fetch_valid when pr_reset is low)
     input       [63:0]  fetch,
     input               fetch_limit,
     input               fetch_page_fault,
@@ -61,6 +62,7 @@ module decode(
     
     output      [95:0]  decoder,
     output      [31:0]  dec_eip,
+    output      [31:0]  dec_eip_go,         // (SiSTer: dec_eip as it is when dec_ready)
     output              dec_operand_32bit,
     output              dec_address_32bit,
     output      [1:0]   dec_prefix_group_1_rep,
@@ -68,6 +70,7 @@ module decode(
     output      [2:0]   dec_prefix_group_2_seg,
     output              dec_prefix_2byte,
     output      [3:0]   dec_consumed,
+    output      [3:0]   dec_consumed_go,    // (SiSTer: dec_consumed as it is when dec_ready)
     output      [2:0]   dec_modregrm_len,  
     output              dec_is_8bit,
     output      [6:0]   dec_cmd,
@@ -208,10 +211,13 @@ decode_regs decode_regs_inst(
     .dec_reset          (dec_reset),        //input
     
     .fetch_valid        (fetch_valid),      //input [3:0]
+    .fetch_valid_nopr   (fetch_valid_nopr), //input [3:0] (SiSTer)
     .fetch              (fetch),            //input [63:0]
     
     .prefix_count       (prefix_count),     //input [3:0]
-    .consume_count      (consume_count),    //input [3:0]
+    .consume_count_go   (consume_count_go),     //input [3:0] (SiSTer: consume_count split, see below)
+    .consume_count_stall(consume_count_stall),  //input [3:0]
+    .consume_stall      (consume_stall),        //input
     
     .dec_acceptable     (dec_acceptable),   //output [3:0]
     
@@ -288,6 +294,13 @@ assign consume_count =
     (micro_busy)?       4'd0 :
                         consume_count_local;
 
+// (SiSTer: the same, as its two values and the late select -- consume_count == (consume_stall)?
+//  consume_count_stall : consume_count_go -- for decode_regs, which builds its next state for both;
+//  dec_reset and micro_busy, the end of the write/read stall chain, then meet only the last mux)
+wire [3:0] consume_count_go    = (instr_prefix)? 4'd1 : consume_count_local;
+wire [3:0] consume_count_stall = (instr_prefix)? 4'd1 : 4'd0;
+wire       consume_stall       = dec_reset || micro_busy;
+
 assign dec_consumed = (dec_ready)? consume_count_local + prefix_count : 4'd0;
 
 
@@ -340,12 +353,20 @@ end
 
 //------------------------------------------------------------------------------ eip
 
-assign dec_eip = eip + { 28'd0, dec_consumed };
+// (SiSTer: was eip + dec_consumed, dec_consumed being 0 unless dec_ready: the same value with the
+//  adder ahead of the late dec_ready rather than behind it -- dec_ready selects the sum or eip)
+assign dec_consumed_go = consume_count_local + prefix_count;
+// (SiSTer: eip + { 28'd0, dec_consumed_go } as a carry-select add: the low nibble's sum, late with the
+//  instruction length, picks eip[31:4] or eip[31:4] + 1, both ready from the eip register)
+wire [4:0]  dec_eip_lo_sum = { 1'b0, eip[3:0] } + { 1'b0, dec_consumed_go };
+wire [27:0] dec_eip_hi_inc = eip[31:4] + 28'd1;
+assign dec_eip_go      = { (dec_eip_lo_sum[4])? dec_eip_hi_inc : eip[31:4], dec_eip_lo_sum[3:0] };
+assign dec_eip = (dec_ready)? dec_eip_go : eip;
 
 always @(posedge clk) begin
     if(rst_n == 1'b0)                           eip <= `STARTUP_EIP;
     else if(pr_reset)                           eip <= prefetch_eip;
-    else if(dec_ready)                          eip <= dec_eip;
+    else if(dec_ready)                          eip <= dec_eip_go;  // (SiSTer: dec_eip, given dec_ready)
 end
 
 //------------------------------------------------------------------------------

@@ -36,6 +36,12 @@ module execute(
     input       [31:0]  eax,
     input       [31:0]  ecx,
     input       [31:0]  edx,
+    input               eax_lo_is_0,    // (SiSTer: write_register.v)
+    input               eax_lo_is_8000,
+    input               eax_hi_is_0,
+    input               edx_lo_is_0,
+    input               edx_lo_is_8000,
+    input               edx_hi_is_8000,
     input       [31:0]  ebp,
     input       [31:0]  esp,
     
@@ -564,6 +570,12 @@ execute_divide execute_divide_inst(
     
     .eax                    (eax),                  //input [31:0]
     .edx                    (edx),                  //input [31:0]
+    .eax_lo_is_0           (eax_lo_is_0),           //input (SiSTer)
+    .eax_lo_is_8000        (eax_lo_is_8000),        //input (SiSTer)
+    .eax_hi_is_0           (eax_hi_is_0),           //input (SiSTer)
+    .edx_lo_is_0           (edx_lo_is_0),           //input (SiSTer)
+    .edx_lo_is_8000        (edx_lo_is_8000),        //input (SiSTer)
+    .edx_hi_is_8000        (edx_hi_is_8000),        //input (SiSTer)
     
     .src                    (src),                  //input [31:0]
     

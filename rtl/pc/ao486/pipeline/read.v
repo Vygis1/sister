@@ -100,6 +100,8 @@ module read(
     input       [31:0]  eax,
     input       [31:0]  ebx,
     input       [31:0]  ecx,
+    input               ecx_lo_is_0,    // (SiSTer: ecx[15:0] == 0, registered with ecx -- write_register.v)
+    input               ecx_hi_is_0,    // (SiSTer: ecx[31:16] == 0)
     input       [31:0]  edx,
     input       [31:0]  esp,
     input       [31:0]  ebp,
@@ -156,6 +158,7 @@ module read(
     //read
     output              read_do,
     input               read_done,
+    input               read_done_r0,   // (SiSTer: read_done when rd_reset is low)
     input               read_page_fault,
     input               read_ac_fault,
     
@@ -375,9 +378,41 @@ wire rd_dst_is_eip;
 
 //------------------------------------------------------------------------------
 
-assign rd_ready = ~(rd_reset) && ~(rd_waiting) && rd_cmd != `CMD_NULL && ~(exe_busy);
+// (SiSTer: rd_ready and rd_busy settled for both values of rd_reset, the late end of the write stage's
+//  reset requests, and chosen by it last. Was
+//      rd_ready = ~(rd_reset) && ~(rd_waiting) && rd_cmd != `CMD_NULL && ~(exe_busy);
+//      rd_busy  = rd_waiting || (rd_ready == `FALSE && rd_cmd != `CMD_NULL);
+//  rd_reset low: rd_waiting is rd_waiting_r0 (read_commands_r0_inst: the same logic fed with
+//  read_done_r0 and write_virtual_check_ready_r0, which equal read_done and write_virtual_check_ready
+//  whenever rd_reset is low), so rd_ready = ~rd_waiting_r0 && cmd && ~exe_busy and
+//  rd_busy = rd_waiting_r0 || (cmd && exe_busy).
+//  rd_reset high: rd_ready is 0, and rd_busy = rd_waiting || cmd = cmd -- every rd_waiting term needs
+//  an rd_cmd other than CMD_NULL (autogen/read_commands.v), so rd_waiting implies rd_cmd != CMD_NULL)
+wire rd_waiting_r0;
+wire rd_waiting_r0_f0, rd_waiting_r0_f1;   // (SiSTer: read_commands_r0f0/f1_inst)
+wire rd_ready_r0 = ~(rd_waiting_r0) && ~(rd_io_allow_2_fault_w) && rd_cmd != `CMD_NULL && ~(exe_busy);   // (rd_waiting_r0 || the io compare: below)
 
-assign rd_busy  = rd_waiting || (rd_ready == `FALSE && rd_cmd != `CMD_NULL);
+assign rd_ready = ~(rd_reset) && rd_ready_r0;
+
+assign rd_busy  = (rd_reset)? rd_cmd != `CMD_NULL : rd_waiting_r0 || rd_io_allow_2_fault_w || (rd_cmd != `CMD_NULL && exe_busy);
+
+// (SiSTer: both read_commands instances are built with io_allow_2_fault_off, as if CMD_io_allow's step-2
+//  permission compare (rd_memory_last + port/8 >= tr_limit: an add and a compare) were false, and it is
+//  applied here, last. It is cond_36 of autogen/read_commands.v and only ever true with cond_35 (rd_cmd ==
+//  CMD_io_allow, step 2); every output that reads it has its cond_35 terms ahead of any other term for
+//  that command (all of their other terms need another rd_cmd), so with the compare c:
+//      rd_io_allow_fault = nf || c       (it is rd_io_allow_1_fault || rd_io_allow_2_fault)
+//      rd_waiting        = nf || c       ((cond_35 && cond_36)? TRUE : (cond_35 && ~cond_36 && cond_5)? ...)
+//      read_system_word  = nf && ~c      ((cond_35 && ~cond_36)? TRUE)
+//      rd_src_is_memory  = nf && ~c      ((cond_35 && ~cond_36)? TRUE)
+//  where nf is the output built with the compare false; rd_ready_r0 and rd_busy above use rd_waiting_r0 || c)
+wire rd_io_allow_fault_nf;
+wire rd_io_allow_2_fault_w;
+wire rd_src_is_memory_nf;
+wire read_system_word_nf;
+assign rd_io_allow_fault = rd_io_allow_fault_nf || rd_io_allow_2_fault_w;
+assign read_system_word  = read_system_word_nf && ~(rd_io_allow_2_fault_w);
+assign rd_src_is_memory  = rd_src_is_memory_nf && ~(rd_io_allow_2_fault_w);
 
 assign r_load = micro_ready;
 
@@ -451,8 +486,12 @@ assign dst_reg_index =
 
 //------------------------------------------------------------------------------
 
-assign src_wire =
-    (rd_src_is_memory)?                                     read_4 :
+// (SiSTer: was (rd_src_is_memory)? read_4 : <the rest>; rd_src_is_memory == rd_src_is_memory_nf &&
+//  ~rd_io_allow_2_fault (see rd_busy), so the slow io-permission compare is applied last)
+wire [31:0] src_wire_rest;
+assign src_wire = (rd_src_is_memory_nf && ~(rd_io_allow_2_fault_w))? read_4 : src_wire_rest;
+
+assign src_wire_rest =
     (rd_src_is_io)?                                         io_read_data :
     (rd_src_is_modregrm_imm)?                               rd_modregrm_imm :
     (rd_src_is_modregrm_imm_se)?                            { {24{rd_modregrm_imm[7]}}, rd_modregrm_imm[7:0] } :
@@ -520,6 +559,7 @@ assign rd_io_ready = rd_one_io_read || io_read_done;
 
 wire rd_seg_gp_fault_init;
 wire rd_seg_ss_fault_init;
+wire rd_seg_fault_init;     // (SiSTer: rd_seg_gp_fault_init || rd_seg_ss_fault_init -- read_segment.v)
 
 always @(posedge clk) begin
     if(rst_n == 1'b0)               rd_seg_gp_fault <= `FALSE;
@@ -536,7 +576,29 @@ end
 
 //------------------------------------------------------------------------------ read memory
 
-assign memory_read_system = read_system_descriptor || read_system_word || read_system_dword || read_system_qword || read_rmw_system_dword;
+// (SiSTer: the same with read_system_word_nf, for read_do and read_segment: they differ from the exact ones
+//  only under CMD_io_allow step 2 with its permission compare true, when read_do is low anyway
+//  (~rd_io_allow_fault) and read_segment's fault needs seg_read/seg_write, never set for CMD_io_allow)
+wire memory_read_system_nf = read_system_descriptor || read_system_word_nf || read_system_dword || read_system_qword || read_rmw_system_dword;
+wire [3:0] read_length_nf =
+    read_system_word_nf?        4'd2 :
+    read_system_dword?          4'd4 :
+    read_system_qword?          4'd8 :
+    read_rmw_system_dword?      4'd4 :
+    read_system_descriptor?     4'd8 :
+    rd_is_8bit?                 4'd1 :
+    read_length_word?           4'd2 :
+    read_length_dword?          4'd4 :
+    rd_operand_16bit?           4'd2 :
+                                4'd4;
+
+// (SiSTer: was read_system_descriptor || read_system_word || read_system_dword || read_system_qword ||
+//  read_rmw_system_dword. read_system_word is read_system_word_nf && ~c (c: the io-permission compare,
+//  rd_io_allow_2_fault_w), so this is memory_read_system_nf with c applied last: when one of the other four
+//  is set both are 1, else both are read_system_word_nf && ~c)
+assign memory_read_system = memory_read_system_nf &&
+    ~(rd_io_allow_2_fault_w && ~(read_system_descriptor || read_system_dword || read_system_qword || read_rmw_system_dword));
+
 
 assign read_cpl  = (memory_read_system)? 2'd0 : cpl;
 assign read_rmw  = read_rmw_virtual || read_rmw_system_dword;
@@ -548,8 +610,9 @@ assign read_address =
     (read_system_descriptor)?               rd_descriptor_offset :
                                             rd_system_linear; //used by read_rmw_system_dword, read_system_dword,read_system_word,read_system_qword
 
-assign read_length =
-    read_system_word?           4'd2 :
+// (SiSTer: read_system_word is read_system_word_nf && ~c, so read_length is read_length_nf when c is low and
+//  the same chain with read_system_word low when c is high: c, the slow io-permission compare, picks last)
+wire [3:0] read_length_w0 =
     read_system_dword?          4'd4 :
     read_system_qword?          4'd8 :
     read_rmw_system_dword?      4'd4 :
@@ -559,6 +622,8 @@ assign read_length =
     read_length_dword?          4'd4 :
     rd_operand_16bit?           4'd2 :
                                 4'd4;
+// (was: read_system_word? 4'd2 : <the chain of read_length_w0>)
+assign read_length = (rd_io_allow_2_fault_w)? read_length_w0 : read_length_nf;
 
 always @(posedge clk) begin
     if(rst_n == 1'b0)                                               rd_one_mem_read <= `FALSE;
@@ -568,11 +633,15 @@ end
 
 assign read_do = 
     ~(rd_reset) &&
-    ((rd_address_effective_ready && (read_rmw_virtual || read_virtual)) || memory_read_system) &&
+    ((rd_address_effective_ready && (read_rmw_virtual || read_virtual)) || memory_read_system_nf) &&   // (SiSTer: _nf, see above)
     ~(rd_one_mem_read) && ~(read_page_fault) && ~(read_ac_fault) &&
-    ~(rd_seg_gp_fault_init) && ~(rd_seg_gp_fault) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault_init) && ~(rd_seg_ss_fault) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault);
+    ~(rd_seg_fault_init) && ~(rd_seg_gp_fault) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault);   // (SiSTer: ~gp_init && ~ss_init is ~rd_seg_fault_init)
         
 assign read_for_rd_ready = rd_one_mem_read || (read_done && ~(read_page_fault) && ~(read_ac_fault));
+
+// (SiSTer: the same when rd_reset is low, for read_commands_r0_inst)
+wire read_for_rd_ready_r0 = rd_one_mem_read || (read_done_r0 && ~(read_page_fault) && ~(read_ac_fault));
+assign rd_waiting_r0 = (read_for_rd_ready_r0)? rd_waiting_r0_f1 : rd_waiting_r0_f0;   // (SiSTer: see read_commands_r0f0_inst)
 
 assign read_4 = read_data[31:0];
 assign read_8 = read_data;
@@ -589,6 +658,16 @@ assign write_virtual_check_ready =
     ~(rd_reset) &&
     rd_address_effective_ready_delayed &&
     ~(rd_seg_gp_fault) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault);
+
+// (SiSTer: for read_commands_r0_inst, whose only output used is rd_waiting: the same with rd_reset low, and
+//  without the three faults that need a command under which rd_waiting never reads it. rd_waiting reads
+//  write_virtual_check_ready (its cond_29 and cond_215) only in terms for PUSH_MOV_SEG, POP, SMSW,
+//  SETcc, MOV, SGDT and SIDT; rd_descriptor_gp_fault needs read_system_descriptor (call/jmp/int/iret/
+//  load_seg/LAR/LSL/VERx/task-switch steps), rd_io_allow_fault CMD_io_allow, rd_ss_esp_from_tss_fault
+//  CALL_2/int_2 -- so in those terms they are always low. What is left is registers)
+wire write_virtual_check_ready_r0 =
+        rd_address_effective_ready_delayed &&
+    ~(rd_seg_gp_fault) && ~(rd_seg_ss_fault);
 
 //------------------------------------------------------------------------------ misc
 
@@ -650,7 +729,7 @@ read_segment read_segment_inst(
     
     .rd_address_effective       (rd_address_effective),         //input [31:0]
     .rd_address_effective_ready (rd_address_effective_ready),   //input
-    .read_length                (read_length),                  //input [3:0]
+    .read_length                (read_length_nf),               //input [3:0] (SiSTer: _nf, see read_length_nf)
     
     .rd_prefix_group_2_seg      (rd_prefix_group_2_seg),        //input [2:0]
     
@@ -662,6 +741,7 @@ read_segment read_segment_inst(
     
     .rd_seg_gp_fault_init       (rd_seg_gp_fault_init),         //output
     .rd_seg_ss_fault_init       (rd_seg_ss_fault_init),         //output
+    .rd_seg_fault_init          (rd_seg_fault_init),            //output (SiSTer)
     
     .rd_seg_linear              (rd_seg_linear)                 //output [31:0]
 );
@@ -794,6 +874,8 @@ read_commands read_commands_inst(
     .idtr_base                          (idtr_base),                            //input [31:0]
         
     .ecx                                (ecx),                                  //input [31:0]
+    .ecx_lo_is_0                        (ecx_lo_is_0),                          //input (SiSTer)
+    .ecx_hi_is_0                        (ecx_hi_is_0),                          //input (SiSTer)
     .edx                                (edx),                                  //input [31:0]
         
     .iopl                               (iopl),                                 //input [1:0]
@@ -909,7 +991,7 @@ read_commands read_commands_inst(
     .write_virtual_check                (write_virtual_check),                  //output
     
     .read_system_descriptor             (read_system_descriptor),               //output
-    .read_system_word                   (read_system_word),                     //output
+    .read_system_word                   (read_system_word_nf),                  //output (SiSTer: with io_allow_2_fault_off)
     .read_system_dword                  (read_system_dword),                    //output
     .read_system_qword                  (read_system_qword),                    //output
     .read_rmw_system_dword              (read_rmw_system_dword),                //output
@@ -926,7 +1008,7 @@ read_commands read_commands_inst(
     .read_8                             (read_8),                               //input [63:0]
 
     //read signals
-    .rd_src_is_memory                   (rd_src_is_memory),                     //output
+    .rd_src_is_memory                   (rd_src_is_memory_nf),                  //output (SiSTer: with io_allow_2_fault_off)
     .rd_src_is_io                       (rd_src_is_io),                         //output
     .rd_src_is_modregrm_imm             (rd_src_is_modregrm_imm),               //output
     .rd_src_is_modregrm_imm_se          (rd_src_is_modregrm_imm_se),            //output
@@ -979,7 +1061,443 @@ read_commands read_commands_inst(
     .io_read_address                    (io_read_address),                      //output [15:0]
     .rd_io_ready                        (rd_io_ready),                          //input
     
-    .rd_io_allow_fault                  (rd_io_allow_fault)                     //output
+    .rd_io_allow_fault                  (rd_io_allow_fault_nf),                 //output (SiSTer: with io_allow_2_fault_off)
+    .io_allow_2_fault_off               (1'b1),                                 //input (SiSTer)
+    .rd_io_allow_2_fault_out            (rd_io_allow_2_fault_w)                 //output (SiSTer)
+);
+
+// (SiSTer: read_commands once more, with read_for_rd_ready and write_virtual_check_ready as they are
+//  when rd_reset is low (their only rd_reset terms); only its rd_waiting is used, as rd_waiting_r0)
+// (SiSTer: and that copy twice, with read_for_rd_ready fixed low and high: the memory read's completion, late
+//  from the TLB and the bus, then picks between the two rd_waiting values last -- rd_waiting_r0 below)
+read_commands read_commands_r0f0_inst(
+    .clk                                (clk),
+    .rst_n                              (rst_n),
+    
+    //general input
+    .glob_descriptor                    (glob_descriptor),                      //input [63:0]
+    .glob_param_1                       (glob_param_1),                         //input [31:0]
+    .glob_param_2                       (glob_param_2),                         //input [31:0]
+    .glob_param_3                       (glob_param_3),                         //input [31:0]
+    
+    .glob_desc_base                     (glob_desc_base),                       //input [31:0]
+    .glob_desc_limit                    (glob_desc_limit),                      //input [31:0]
+    
+    .tr                                 (tr),                                   //input [15:0]
+    .tr_base                            (tr_base),                              //input [31:0]
+    .tr_cache                           (tr_cache),                             //input [63:0]
+    .tr_cache_valid                     (tr_cache_valid),                       //input
+    .tr_limit                           (tr_limit),                             //input [31:0]
+    
+    .gdtr_base                          (gdtr_base),                            //input [31:0]
+    .idtr_base                          (idtr_base),                            //input [31:0]
+        
+    .ecx                                (ecx),                                  //input [31:0]
+    .ecx_lo_is_0                        (ecx_lo_is_0),                          //input (SiSTer)
+    .ecx_hi_is_0                        (ecx_hi_is_0),                          //input (SiSTer)
+    .edx                                (edx),                                  //input [31:0]
+        
+    .iopl                               (iopl),                                 //input [1:0]
+    
+    .exc_vector                         (exc_vector),                           //input [7:0]
+    
+    .io_allow_check_needed              (io_allow_check_needed),                //input
+    
+    .cpl                                (cpl),                                  //input [1:0]
+    .cr0_pg                             (cr0_pg),                               //input
+    
+    .real_mode                          (real_mode),                            //input
+    .v8086_mode                         (v8086_mode),                           //input
+    .protected_mode                     (protected_mode),                       //input
+    
+    .exe_mutex                          (exe_mutex),                            //input [10:0]
+    
+    //rd input
+    .rd_decoder                         (rd_decoder),                           //input [87:0]
+    .rd_cmd                             (rd_cmd),                               //input [6:0]
+    .rd_cmdex                           (rd_cmdex),                             //input [3:0]
+    .rd_modregrm_mod                    (rd_modregrm_mod),                      //input [1:0]
+    .rd_operand_16bit                   (rd_operand_16bit),                     //input
+    .rd_operand_32bit                   (rd_operand_32bit),                     //input
+    .rd_memory_last                     (rd_memory_last),                       //input [31:0]
+    .rd_prefix_group_1_rep              (rd_prefix_group_1_rep),                //input [1:0]
+    .rd_address_16bit                   (rd_address_16bit),                     //input
+    .rd_address_32bit                   (rd_address_32bit),                     //input
+    .rd_ready                           (rd_ready),                             //input
+                                 
+    .dst_wire                           (dst_wire),                             //input [31:0]
+    
+    .rd_descriptor_not_in_limits        (rd_descriptor_not_in_limits),          //input
+    .rd_consumed                        (rd_consumed),                          //input [3:0]
+
+    //rd mutex busy
+    .rd_mutex_busy_active               (rd_mutex_busy_active),                 //input
+    .rd_mutex_busy_memory               (rd_mutex_busy_memory),                 //input
+    .rd_mutex_busy_eflags               (rd_mutex_busy_eflags),                 //input
+    .rd_mutex_busy_ebp                  (rd_mutex_busy_ebp),                    //input
+    .rd_mutex_busy_esp                  (rd_mutex_busy_esp),                    //input
+    .rd_mutex_busy_edx                  (rd_mutex_busy_edx),                    //input
+    .rd_mutex_busy_ecx                  (rd_mutex_busy_ecx),                    //input
+    .rd_mutex_busy_eax                  (rd_mutex_busy_eax),                    //input
+    .rd_mutex_busy_modregrm_reg         (rd_mutex_busy_modregrm_reg),           //input
+    .rd_mutex_busy_modregrm_rm          (rd_mutex_busy_modregrm_rm),            //input
+    .rd_mutex_busy_implicit_reg         (rd_mutex_busy_implicit_reg),           //input
+    
+    //rd output
+    .rd_extra_wire                      (),                        //output (unused)
+    .rd_system_linear                   (),                     //output (unused)
+    
+    .rd_error_code                      (),                        //output (unused)
+                                 
+    .rd_ss_esp_from_tss_fault           (),             //output (unused)
+    
+    .rd_waiting                         (rd_waiting_r0_f0),                           //output (SiSTer)
+    
+    //mutex req
+    .rd_req_memory                      (),                        //output (unused)
+    .rd_req_eflags                      (),                        //output (unused)
+    .rd_req_all                         (),                           //output (unused)
+    .rd_req_reg                         (),                           //output (unused)
+    .rd_req_rm                          (),                            //output (unused)
+    .rd_req_implicit_reg                (),                  //output (unused)
+    .rd_req_reg_not_8bit                (),                  //output (unused)
+    .rd_req_edi                         (),                           //output (unused)
+    .rd_req_esi                         (),                           //output (unused)
+    .rd_req_ebp                         (),                           //output (unused)
+    .rd_req_esp                         (),                           //output (unused)
+    .rd_req_ebx                         (),                           //output (unused)
+    .rd_req_edx_eax                     (),                       //output (unused)
+    .rd_req_edx                         (),                           //output (unused)
+    .rd_req_ecx                         (),                           //output (unused)
+    .rd_req_eax                         (),                           //output (unused)
+    
+    //address control
+    .address_enter_init                 (),                   //output (unused)
+    .address_enter                      (),                        //output (unused)
+    .address_enter_last                 (),                   //output (unused)
+    .address_leave                      (),                        //output (unused)
+    .address_esi                        (),                          //output (unused)
+    .address_edi                        (),                          //output (unused)
+    .address_xlat_transform             (),               //output (unused)
+    .address_bits_transform             (),               //output (unused)
+    
+    .address_stack_pop                  (),                    //output (unused)
+    .address_stack_pop_speedup          (),            //output (unused)
+    
+    .address_stack_pop_next             (),               //output (unused)
+    .address_stack_pop_esp_prev         (),           //output (unused)
+    .address_stack_pop_for_call         (),           //output (unused)
+    .address_stack_save                 (),                   //output (unused)
+    .address_stack_add_4_to_saved       (),         //output (unused)
+    
+    .address_stack_for_ret_first        (),          //output (unused)
+    .address_stack_for_ret_second       (),         //output (unused)
+    .address_stack_for_iret_first       (),         //output (unused)
+    .address_stack_for_iret_second      (),        //output (unused)
+    .address_stack_for_iret_third       (),         //output (unused)
+    .address_stack_for_iret_last        (),          //output (unused)
+    .address_stack_for_iret_to_v86      (),        //output (unused)
+    .address_stack_for_call_param_first (),   //output (unused)
+    
+    .address_ea_buffer                  (),                    //output (unused)
+    .address_ea_buffer_plus_2           (),             //output (unused)
+    
+    .address_memoffset                  (),                    //output (unused)
+   
+    //read control
+    .read_virtual                       (),                         //output (unused)
+    .read_rmw_virtual                   (),                     //output (unused)
+    .write_virtual_check                (),                  //output (unused)
+    
+    .read_system_descriptor             (),               //output (unused)
+    .read_system_word                   (),                     //output (unused)
+    .read_system_dword                  (),                    //output (unused)
+    .read_system_qword                  (),                    //output (unused)
+    .read_rmw_system_dword              (),                //output (unused)
+    
+    .read_length_word                   (),                     //output (unused)
+    .read_length_dword                  (),                    //output (unused)
+    
+    .read_for_rd_ready                  (1'b0)          ,                    //input (SiSTer)
+    .write_virtual_check_ready          (write_virtual_check_ready_r0),            //input (SiSTer)
+    
+    .rd_address_effective_ready         (rd_address_effective_ready),           //input
+    
+    .read_4                             (read_4),                               //input [31:0]
+    .read_8                             (read_8),                               //input [63:0]
+
+    //read signals
+    .rd_src_is_memory                   (),                     //output (unused)
+    .rd_src_is_io                       (),                         //output (unused)
+    .rd_src_is_modregrm_imm             (),               //output (unused)
+    .rd_src_is_modregrm_imm_se          (),            //output (unused)
+    .rd_src_is_imm                      (),                        //output (unused)
+    .rd_src_is_imm_se                   (),                     //output (unused)
+    .rd_src_is_1                        (),                          //output (unused)
+    .rd_src_is_eax                      (),                        //output (unused)
+    .rd_src_is_ecx                      (),                        //output (unused)
+    .rd_src_is_cmdex                    (),                      //output (unused)
+    .rd_src_is_implicit_reg             (),               //output (unused)
+    .rd_src_is_rm                       (),                         //output (unused)
+    .rd_src_is_reg                      (),                        //output (unused)
+
+    .rd_dst_is_0                        (),                          //output (unused)
+    .rd_dst_is_modregrm_imm_se          (),            //output (unused)
+    .rd_dst_is_modregrm_imm             (),               //output (unused)
+    .rd_dst_is_memory                   (),                     //output (unused)
+    .rd_dst_is_memory_last              (),                //output (unused)
+    .rd_dst_is_eip                      (),                        //output (unused)
+    .rd_dst_is_eax                      (),                        //output (unused)
+    .rd_dst_is_edx_eax                  (),                    //output (unused)
+    .rd_dst_is_implicit_reg             (),               //output (unused)
+    .rd_dst_is_rm                       (),                         //output (unused)
+    .rd_dst_is_reg                      (),                        //output (unused)
+    
+    //global set
+    .rd_glob_descriptor_set             (),               //output (unused)
+    .rd_glob_descriptor_value           (),             //output (unused)
+    
+    .rd_glob_descriptor_2_set           (),             //output (unused)
+    .rd_glob_descriptor_2_value         (),           //output (unused)
+    
+    .rd_glob_param_1_set                (),                  //output (unused)
+    .rd_glob_param_1_value              (),                //output (unused)
+    
+    .rd_glob_param_2_set                (),                  //output (unused)
+    .rd_glob_param_2_value              (),                //output (unused)
+    
+    .rd_glob_param_3_set                (),                  //output (unused)
+    .rd_glob_param_3_value              (),                //output (unused)
+    
+    .rd_glob_param_4_set                (),                  //output (unused)
+    .rd_glob_param_4_value              (),                //output (unused)
+    
+    .rd_glob_param_5_set                (),                  //output (unused)
+    .rd_glob_param_5_value              (),                //output (unused)
+    
+    //io
+    .io_read                            (),                              //output (unused)
+    .io_read_address                    (),                      //output (unused)
+    .rd_io_ready                        (rd_io_ready),                          //input
+    
+    .rd_io_allow_fault                  (),                    //output (unused)
+    .io_allow_2_fault_off               (1'b1),                //input (SiSTer)
+    .rd_io_allow_2_fault_out            ()                     //output (unused)
+);
+
+read_commands read_commands_r0f1_inst(
+    .clk                                (clk),
+    .rst_n                              (rst_n),
+    
+    //general input
+    .glob_descriptor                    (glob_descriptor),                      //input [63:0]
+    .glob_param_1                       (glob_param_1),                         //input [31:0]
+    .glob_param_2                       (glob_param_2),                         //input [31:0]
+    .glob_param_3                       (glob_param_3),                         //input [31:0]
+    
+    .glob_desc_base                     (glob_desc_base),                       //input [31:0]
+    .glob_desc_limit                    (glob_desc_limit),                      //input [31:0]
+    
+    .tr                                 (tr),                                   //input [15:0]
+    .tr_base                            (tr_base),                              //input [31:0]
+    .tr_cache                           (tr_cache),                             //input [63:0]
+    .tr_cache_valid                     (tr_cache_valid),                       //input
+    .tr_limit                           (tr_limit),                             //input [31:0]
+    
+    .gdtr_base                          (gdtr_base),                            //input [31:0]
+    .idtr_base                          (idtr_base),                            //input [31:0]
+        
+    .ecx                                (ecx),                                  //input [31:0]
+    .ecx_lo_is_0                        (ecx_lo_is_0),                          //input (SiSTer)
+    .ecx_hi_is_0                        (ecx_hi_is_0),                          //input (SiSTer)
+    .edx                                (edx),                                  //input [31:0]
+        
+    .iopl                               (iopl),                                 //input [1:0]
+    
+    .exc_vector                         (exc_vector),                           //input [7:0]
+    
+    .io_allow_check_needed              (io_allow_check_needed),                //input
+    
+    .cpl                                (cpl),                                  //input [1:0]
+    .cr0_pg                             (cr0_pg),                               //input
+    
+    .real_mode                          (real_mode),                            //input
+    .v8086_mode                         (v8086_mode),                           //input
+    .protected_mode                     (protected_mode),                       //input
+    
+    .exe_mutex                          (exe_mutex),                            //input [10:0]
+    
+    //rd input
+    .rd_decoder                         (rd_decoder),                           //input [87:0]
+    .rd_cmd                             (rd_cmd),                               //input [6:0]
+    .rd_cmdex                           (rd_cmdex),                             //input [3:0]
+    .rd_modregrm_mod                    (rd_modregrm_mod),                      //input [1:0]
+    .rd_operand_16bit                   (rd_operand_16bit),                     //input
+    .rd_operand_32bit                   (rd_operand_32bit),                     //input
+    .rd_memory_last                     (rd_memory_last),                       //input [31:0]
+    .rd_prefix_group_1_rep              (rd_prefix_group_1_rep),                //input [1:0]
+    .rd_address_16bit                   (rd_address_16bit),                     //input
+    .rd_address_32bit                   (rd_address_32bit),                     //input
+    .rd_ready                           (rd_ready),                             //input
+                                 
+    .dst_wire                           (dst_wire),                             //input [31:0]
+    
+    .rd_descriptor_not_in_limits        (rd_descriptor_not_in_limits),          //input
+    .rd_consumed                        (rd_consumed),                          //input [3:0]
+
+    //rd mutex busy
+    .rd_mutex_busy_active               (rd_mutex_busy_active),                 //input
+    .rd_mutex_busy_memory               (rd_mutex_busy_memory),                 //input
+    .rd_mutex_busy_eflags               (rd_mutex_busy_eflags),                 //input
+    .rd_mutex_busy_ebp                  (rd_mutex_busy_ebp),                    //input
+    .rd_mutex_busy_esp                  (rd_mutex_busy_esp),                    //input
+    .rd_mutex_busy_edx                  (rd_mutex_busy_edx),                    //input
+    .rd_mutex_busy_ecx                  (rd_mutex_busy_ecx),                    //input
+    .rd_mutex_busy_eax                  (rd_mutex_busy_eax),                    //input
+    .rd_mutex_busy_modregrm_reg         (rd_mutex_busy_modregrm_reg),           //input
+    .rd_mutex_busy_modregrm_rm          (rd_mutex_busy_modregrm_rm),            //input
+    .rd_mutex_busy_implicit_reg         (rd_mutex_busy_implicit_reg),           //input
+    
+    //rd output
+    .rd_extra_wire                      (),                        //output (unused)
+    .rd_system_linear                   (),                     //output (unused)
+    
+    .rd_error_code                      (),                        //output (unused)
+                                 
+    .rd_ss_esp_from_tss_fault           (),             //output (unused)
+    
+    .rd_waiting                         (rd_waiting_r0_f1),                           //output (SiSTer)
+    
+    //mutex req
+    .rd_req_memory                      (),                        //output (unused)
+    .rd_req_eflags                      (),                        //output (unused)
+    .rd_req_all                         (),                           //output (unused)
+    .rd_req_reg                         (),                           //output (unused)
+    .rd_req_rm                          (),                            //output (unused)
+    .rd_req_implicit_reg                (),                  //output (unused)
+    .rd_req_reg_not_8bit                (),                  //output (unused)
+    .rd_req_edi                         (),                           //output (unused)
+    .rd_req_esi                         (),                           //output (unused)
+    .rd_req_ebp                         (),                           //output (unused)
+    .rd_req_esp                         (),                           //output (unused)
+    .rd_req_ebx                         (),                           //output (unused)
+    .rd_req_edx_eax                     (),                       //output (unused)
+    .rd_req_edx                         (),                           //output (unused)
+    .rd_req_ecx                         (),                           //output (unused)
+    .rd_req_eax                         (),                           //output (unused)
+    
+    //address control
+    .address_enter_init                 (),                   //output (unused)
+    .address_enter                      (),                        //output (unused)
+    .address_enter_last                 (),                   //output (unused)
+    .address_leave                      (),                        //output (unused)
+    .address_esi                        (),                          //output (unused)
+    .address_edi                        (),                          //output (unused)
+    .address_xlat_transform             (),               //output (unused)
+    .address_bits_transform             (),               //output (unused)
+    
+    .address_stack_pop                  (),                    //output (unused)
+    .address_stack_pop_speedup          (),            //output (unused)
+    
+    .address_stack_pop_next             (),               //output (unused)
+    .address_stack_pop_esp_prev         (),           //output (unused)
+    .address_stack_pop_for_call         (),           //output (unused)
+    .address_stack_save                 (),                   //output (unused)
+    .address_stack_add_4_to_saved       (),         //output (unused)
+    
+    .address_stack_for_ret_first        (),          //output (unused)
+    .address_stack_for_ret_second       (),         //output (unused)
+    .address_stack_for_iret_first       (),         //output (unused)
+    .address_stack_for_iret_second      (),        //output (unused)
+    .address_stack_for_iret_third       (),         //output (unused)
+    .address_stack_for_iret_last        (),          //output (unused)
+    .address_stack_for_iret_to_v86      (),        //output (unused)
+    .address_stack_for_call_param_first (),   //output (unused)
+    
+    .address_ea_buffer                  (),                    //output (unused)
+    .address_ea_buffer_plus_2           (),             //output (unused)
+    
+    .address_memoffset                  (),                    //output (unused)
+   
+    //read control
+    .read_virtual                       (),                         //output (unused)
+    .read_rmw_virtual                   (),                     //output (unused)
+    .write_virtual_check                (),                  //output (unused)
+    
+    .read_system_descriptor             (),               //output (unused)
+    .read_system_word                   (),                     //output (unused)
+    .read_system_dword                  (),                    //output (unused)
+    .read_system_qword                  (),                    //output (unused)
+    .read_rmw_system_dword              (),                //output (unused)
+    
+    .read_length_word                   (),                     //output (unused)
+    .read_length_dword                  (),                    //output (unused)
+    
+    .read_for_rd_ready                  (1'b1)          ,                    //input (SiSTer)
+    .write_virtual_check_ready          (write_virtual_check_ready_r0),            //input (SiSTer)
+    
+    .rd_address_effective_ready         (rd_address_effective_ready),           //input
+    
+    .read_4                             (read_4),                               //input [31:0]
+    .read_8                             (read_8),                               //input [63:0]
+
+    //read signals
+    .rd_src_is_memory                   (),                     //output (unused)
+    .rd_src_is_io                       (),                         //output (unused)
+    .rd_src_is_modregrm_imm             (),               //output (unused)
+    .rd_src_is_modregrm_imm_se          (),            //output (unused)
+    .rd_src_is_imm                      (),                        //output (unused)
+    .rd_src_is_imm_se                   (),                     //output (unused)
+    .rd_src_is_1                        (),                          //output (unused)
+    .rd_src_is_eax                      (),                        //output (unused)
+    .rd_src_is_ecx                      (),                        //output (unused)
+    .rd_src_is_cmdex                    (),                      //output (unused)
+    .rd_src_is_implicit_reg             (),               //output (unused)
+    .rd_src_is_rm                       (),                         //output (unused)
+    .rd_src_is_reg                      (),                        //output (unused)
+
+    .rd_dst_is_0                        (),                          //output (unused)
+    .rd_dst_is_modregrm_imm_se          (),            //output (unused)
+    .rd_dst_is_modregrm_imm             (),               //output (unused)
+    .rd_dst_is_memory                   (),                     //output (unused)
+    .rd_dst_is_memory_last              (),                //output (unused)
+    .rd_dst_is_eip                      (),                        //output (unused)
+    .rd_dst_is_eax                      (),                        //output (unused)
+    .rd_dst_is_edx_eax                  (),                    //output (unused)
+    .rd_dst_is_implicit_reg             (),               //output (unused)
+    .rd_dst_is_rm                       (),                         //output (unused)
+    .rd_dst_is_reg                      (),                        //output (unused)
+    
+    //global set
+    .rd_glob_descriptor_set             (),               //output (unused)
+    .rd_glob_descriptor_value           (),             //output (unused)
+    
+    .rd_glob_descriptor_2_set           (),             //output (unused)
+    .rd_glob_descriptor_2_value         (),           //output (unused)
+    
+    .rd_glob_param_1_set                (),                  //output (unused)
+    .rd_glob_param_1_value              (),                //output (unused)
+    
+    .rd_glob_param_2_set                (),                  //output (unused)
+    .rd_glob_param_2_value              (),                //output (unused)
+    
+    .rd_glob_param_3_set                (),                  //output (unused)
+    .rd_glob_param_3_value              (),                //output (unused)
+    
+    .rd_glob_param_4_set                (),                  //output (unused)
+    .rd_glob_param_4_value              (),                //output (unused)
+    
+    .rd_glob_param_5_set                (),                  //output (unused)
+    .rd_glob_param_5_value              (),                //output (unused)
+    
+    //io
+    .io_read                            (),                              //output (unused)
+    .io_read_address                    (),                      //output (unused)
+    .rd_io_ready                        (rd_io_ready),                          //input
+    
+    .rd_io_allow_fault                  (),                    //output (unused)
+    .io_allow_2_fault_off               (1'b1),                //input (SiSTer)
+    .rd_io_allow_2_fault_out            ()                     //output (unused)
 );
 
 //------------------------------------------------------------------------------

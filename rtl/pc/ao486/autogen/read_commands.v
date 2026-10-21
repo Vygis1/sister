@@ -4,7 +4,10 @@ assign rd_call_gate_param = glob_param_3[24:20] - 5'd1;
 wire rd_io_allow_1_fault;
 wire rd_io_allow_2_fault;
 assign rd_io_allow_1_fault = rd_cmd == `CMD_io_allow && rd_cmdex == `CMDEX_io_allow_1 && (   ~(tr_cache_valid) || (tr_cache[`DESC_BITS_TYPE] != `DESC_TSS_AVAIL_386 && tr_cache[`DESC_BITS_TYPE] != `DESC_TSS_BUSY_386) || tr_limit < 32'd103 );
-assign rd_io_allow_2_fault = rd_cmd == `CMD_io_allow && rd_cmdex == `CMDEX_io_allow_2 && ({ 16'd0, rd_memory_last[15:0] } + { 16'd0, 3'd0, glob_param_1[15:3] }) >= tr_limit;
+// (SiSTer: the compare as rd_io_allow_2_fault_raw, and rd_io_allow_2_fault forced low by io_allow_2_fault_off --
+//  read.v builds this module's outputs without the slow compare and applies it at the end; read_commands.v)
+wire   rd_io_allow_2_fault_raw = rd_cmd == `CMD_io_allow && rd_cmdex == `CMDEX_io_allow_2 && ({ 16'd0, rd_memory_last[15:0] } + { 16'd0, 3'd0, glob_param_1[15:3] }) >= tr_limit;
+assign rd_io_allow_2_fault = ~(io_allow_2_fault_off) && rd_io_allow_2_fault_raw;
 assign rd_io_allow_fault = rd_io_allow_1_fault || rd_io_allow_2_fault;
 
 wire rd_imul_modregrm_mutex_busy;

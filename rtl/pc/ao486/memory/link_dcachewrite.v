@@ -40,6 +40,7 @@ module link_dcachewrite(
     input   [2:0]       req_dcachewrite_length,
     input               req_dcachewrite_cache_disable,
     input   [31:0]      req_dcachewrite_address,
+    input   [3:0]       req_dcachewrite_rgn,         // (SiSTer: its L2 regions, held with it)
     input               req_dcachewrite_write_through,
     input   [31:0]      req_dcachewrite_data,
     
@@ -50,6 +51,7 @@ module link_dcachewrite(
     output  [2:0]       resp_dcachewrite_length,
     output              resp_dcachewrite_cache_disable,
     output  [31:0]      resp_dcachewrite_address,
+    output  [3:0]       resp_dcachewrite_rgn,        // (SiSTer)
     output              resp_dcachewrite_write_through,
     output  [31:0]      resp_dcachewrite_data
 );
@@ -84,6 +86,10 @@ end
 always @(posedge clk) begin if(rst_n == 1'b0) length        <= 3'd0;  else if(save) length        <= req_dcachewrite_length;        end
 always @(posedge clk) begin if(rst_n == 1'b0) cache_disable <= 1'b0;  else if(save) cache_disable <= req_dcachewrite_cache_disable; end
 always @(posedge clk) begin if(rst_n == 1'b0) address       <= 32'd0; else if(save) address       <= req_dcachewrite_address;       end
+// (SiSTer: the regions of address, kept in step with it; 32'd0's at reset)
+wire [3:0] rgn_zero; ao486_l2_rgn rgn_zero_inst(.a(32'd0), .f(rgn_zero));
+reg  [3:0] rgn;
+always @(posedge clk) begin if(rst_n == 1'b0) rgn           <= rgn_zero; else if(save) rgn           <= req_dcachewrite_rgn;           end
 always @(posedge clk) begin if(rst_n == 1'b0) write_through <= 1'b0;  else if(save) write_through <= req_dcachewrite_write_through; end
 always @(posedge clk) begin if(rst_n == 1'b0) data          <= 32'd0; else if(save) data          <= req_dcachewrite_data;          end
 
@@ -100,6 +106,7 @@ assign resp_dcachewrite_do            = (req_dcachewrite_do)? req_dcachewrite_do
 assign resp_dcachewrite_length        = (req_dcachewrite_do)? req_dcachewrite_length        : length;
 assign resp_dcachewrite_cache_disable = (req_dcachewrite_do)? req_dcachewrite_cache_disable : cache_disable;
 assign resp_dcachewrite_address       = (req_dcachewrite_do)? req_dcachewrite_address       : address;
+assign resp_dcachewrite_rgn           = (req_dcachewrite_do)? req_dcachewrite_rgn           : rgn;    // (SiSTer)
 assign resp_dcachewrite_write_through = (req_dcachewrite_do)? req_dcachewrite_write_through : write_through;
 assign resp_dcachewrite_data          = (req_dcachewrite_do)? req_dcachewrite_data          : data;
 

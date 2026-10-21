@@ -8,6 +8,7 @@ module l2_cache #(parameter ADDRBITS = 24)
 
 	// CPU bus, master, 32bit
 	input  [29:0] CPU_ADDR,
+	input   [3:0] CPU_RGN,     // (SiSTer: CPU_ADDR's regions, decoded beside it -- ao486_l2_rgn, ao486/memory/avalon_mem.v)
 	input  [31:0] CPU_DIN,
 	output [31:0] CPU_DOUT,
 	output        CPU_DOUT_READY,
@@ -185,11 +186,15 @@ always @(posedge CLK) begin
 	endcase
 end
 
-wire ram_rgn = !CPU_ADDR[29:ADDRBITS+2];                                                       // = below 256MB
+// (SiSTer: with ADDRBITS 24 the address compares below come decoded with CPU_ADDR (CPU_RGN: ram, rom without
+//  UMA RAM, the VGA window's 128 kB, the shared-folder window -- the same compares on the same bits, made
+//  where the address is formed), so that they are not made at the end of the CPU's request path)
+wire rgn_in   = ADDRBITS == 24;
+wire ram_rgn = rgn_in ? CPU_RGN[0] : !CPU_ADDR[29:ADDRBITS+2];                                // = below 256MB
 wire rom_rgn = uma_ram ? (CPU_ADDR[ADDRBITS+1:14] == 'hC) || (CPU_ADDR[ADDRBITS+1:14] == 'hF)  // = 0xC0000-0xCFFFF (VGA-ROM), 0xD0000-0xEFFFF (UMA RAM), 0xF0000-0xFFFFF (BIOS-ROM)
-                       : (CPU_ADDR[ADDRBITS+1:16] == 'h3);                                     // = 0xC0000-0xFFFFF (VGA-ROM...BIOS-ROM) (UMA RAM disabled)
-wire vga_rgn = (CPU_ADDR[ADDRBITS+1:15] == 'h5)  && ((CPU_ADDR[14:13] & vga_mask) == vga_cmp); // = 0xA0000-0xBFFFF (VGA: exact region depends on VGA_MODE)
-wire shr_rgn = (CPU_ADDR[ADDRBITS+1:11] == 'h67) && shr_rgn_en;                                // = 0xCE000-0xCFFFF (used by shared folder)
+                       : rgn_in ? CPU_RGN[1] : (CPU_ADDR[ADDRBITS+1:16] == 'h3);             // = 0xC0000-0xFFFFF (VGA-ROM...BIOS-ROM) (UMA RAM disabled)
+wire vga_rgn = (rgn_in ? CPU_RGN[2] : (CPU_ADDR[ADDRBITS+1:15] == 'h5)) && ((CPU_ADDR[14:13] & vga_mask) == vga_cmp); // = 0xA0000-0xBFFFF (VGA: exact region depends on VGA_MODE)
+wire shr_rgn = (rgn_in ? CPU_RGN[3] : (CPU_ADDR[ADDRBITS+1:11] == 'h67)) && shr_rgn_en;       // = 0xCE000-0xCFFFF (used by shared folder)
 
 wire [7:0] be64 = CPU_ADDR[0] ? {CPU_BE, 4'h0} : {4'h0, CPU_BE};
 

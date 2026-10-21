@@ -70,6 +70,10 @@ module write_debug(
     //output
     output              wr_debug_prepare,
     
+    // (SiSTer: wr_debug_prepare == wr_finished && ~wr_inhibit_interrupts_and_debug &&
+    //  (wr_debug_static || (~wr_string_in_progress && wr_debug_code_cmp)) -- write.v)
+    output              wr_debug_static,
+    output              wr_debug_code_cmp,
     output reg  [3:0]   wr_debug_code_reg,
     output reg  [3:0]   wr_debug_write_reg,
     output reg  [3:0]   wr_debug_read_reg,
@@ -257,6 +261,18 @@ assign wr_debug_prepare =
     wr_finished && ~(wr_inhibit_interrupts_and_debug) && (
         wr_debug_task_trigger || wr_debug_step || wr_debug_code_active || wr_debug_read_active || wr_debug_write_active
     );
+
+// (SiSTer: the parts of wr_debug_prepare that do not wait for wr_finished and wr_string_in_progress, for write.v.
+//  wr_debug_code_active is wr_debug_code_trigger-gated: wr_debug_code_trigger = wr_finished && ~wr_string_in_progress
+//  && (wr_eip <= cs_limit && rflag_to_reg == 1'b0 && ~wr_debug_breakpoints_disabled), so with
+//  wr_debug_code_cmp the rest of it, wr_debug_code_active == wr_finished && ~wr_string_in_progress && wr_debug_code_cmp)
+assign wr_debug_static = wr_debug_task_trigger || wr_debug_step || wr_debug_read_active || wr_debug_write_active;
+assign wr_debug_code_cmp =
+    wr_eip <= cs_limit && rflag_to_reg == 1'b0 && ~(wr_debug_breakpoints_disabled) && (
+    (dr7[29:28] == 2'b00 && { dr3[31:3], dr3[2:0] & debug_len3 } == { wr_code_linear[31:3], wr_code_linear[2:0] & debug_len3 } && dr7[7:6] != 2'b00) ||
+    (dr7[25:24] == 2'b00 && { dr2[31:3], dr2[2:0] & debug_len2 } == { wr_code_linear[31:3], wr_code_linear[2:0] & debug_len2 } && dr7[5:4] != 2'b00) ||
+    (dr7[21:20] == 2'b00 && { dr1[31:3], dr1[2:0] & debug_len1 } == { wr_code_linear[31:3], wr_code_linear[2:0] & debug_len1 } && dr7[3:2] != 2'b00) ||
+    (dr7[17:16] == 2'b00 && { dr0[31:3], dr0[2:0] & debug_len0 } == { wr_code_linear[31:3], wr_code_linear[2:0] & debug_len0 } && dr7[1:0] != 2'b00));
 
 //------------------------------------------------------------------------------
 

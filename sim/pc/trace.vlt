@@ -1,0 +1,8 @@
+`verilator_config
+// the CPU's boundary in pc_top, readable from main.cpp for the per-clock trace hash (cycle-exact gate)
+public_flat_rd -module "pc_top" -var "avm_*"
+public_flat_rd -module "pc_top" -var "cpu_io_*"
+public_flat_rd -module "pc_top" -var "interrupt*"
+public_flat_rd -module "pc_top" -var "debug_*"
+public_flat_rd -module "pc_top" -var "dma_*"
+public_flat_rd -module "pc_top" -var "a20_enable"

@@ -89,11 +89,11 @@ case "${1:-nes}" in
   pc|dos|486)
          # The PC (pc_top.v): a 486 (ao486 from 486Tang, rtl/pc), its memory and its picture in
          # DDR3, its hard disk served by the ESP32 from an image on the card; VGA to 640x480.
-         # 62.5 MHz (PC_DIV 16; 486Tang's 486SX-20 pace was at 50): the CPU's stall chain (ao486's busy
-         # signals, write stage back to decode, one clock) is the critical path, 80% routing -- it closes
-         # with the Explore directives and the ExtraTimingOpt placer (+0.022 ns, 2026-10-18), not without
-         NAME=pc;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PC:1 -gen CLK_DIV:${PC_DIV:-16} -gen JTAG_DBG:${JTAG:-0}"
-         [ "${PC_DIV:-16}" -lt 20 ] && { EFFORT=${EFFORT:-1}; export PLACE_DIR=${PLACE_DIR:-ExtraTimingOpt}; }
+         # 66.7 MHz (PC_DIV 15): ao486's decode/write/read stall chains restructured (2026-10-21, every change
+         # checked cycle-exact by sim/pc's per-clock trace hash) -- closes with the Explore directives and the
+         # ExtraTimingOpt placer (+0.060 ns); Doom's demo3 16.6 fps against 15.6 at the old 62.5 MHz
+         NAME=pc;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PC:1 -gen CLK_DIV:${PC_DIV:-15} -gen JTAG_DBG:${JTAG:-0}"
+         [ "${PC_DIV:-15}" -lt 20 ] && { EFFORT=${EFFORT:-1}; export PLACE_DIR=${PLACE_DIR:-ExtraTimingOpt}; }
          EXTRA="-ip $MIG_XCI" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;
   shell) NAME=shell; TOP=shell_top; XDC=boards/qmtech_a100t/shell_top.xdc ;;

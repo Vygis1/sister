@@ -41,6 +41,7 @@ module ao486 (
 
 	//-------------------------------------------------------------------------- memory bus
 	output      [29:0]  avm_address,
+	output      [3:0]   avm_rgn,        // (SiSTer: the L2 regions of avm_address, for cache/l2_cache.v)
 	output      [31:0]  avm_writedata,
 	output      [3:0]   avm_byteenable,
 	output      [3:0]   avm_burstcount,
@@ -191,6 +192,7 @@ assign      avm_address = {avm_address_pre[31:21], avm_address_pre[20] & a20_ena
 
 wire        read_do;
 wire        read_done;
+wire        read_done_r0;   // (SiSTer: read_done when rd_reset is low)
 
 wire [1:0]  read_cpl;
 wire [31:0] read_address;
@@ -244,6 +246,8 @@ wire [31:0] cr3;
 wire        prefetchfifo_accept_do;
 wire [67:0] prefetchfifo_accept_data;
 wire        prefetchfifo_accept_empty;
+wire [3:0]  prefetchfifo_accept_length_nopr;   // (SiSTer: prefetch_fifo.v)
+wire        prefetchfifo_accept_empty_nopr;    // (SiSTer)
 
 wire        pipeline_after_read_empty;
 wire        pipeline_after_prefetch_empty;
@@ -446,6 +450,7 @@ memory memory_inst(
     //REQ:
     .read_do                       (read_do),                       //input
     .read_done                     (read_done),                     //output
+    .read_done_r0                  (read_done_r0),                  //output (SiSTer)
     .read_page_fault               (read_page_fault),               //output
     .read_ac_fault                 (read_ac_fault),                 //output
     
@@ -516,6 +521,8 @@ memory memory_inst(
     .prefetchfifo_accept_do        (prefetchfifo_accept_do),        //input
     .prefetchfifo_accept_data      (prefetchfifo_accept_data),      //output [67:0]
     .prefetchfifo_accept_empty     (prefetchfifo_accept_empty),     //output
+    .prefetchfifo_accept_length_nopr(prefetchfifo_accept_length_nopr), //output (SiSTer)
+    .prefetchfifo_accept_empty_nopr(prefetchfifo_accept_empty_nopr), //output (SiSTer)
     
     // pipeline state
     .pipeline_after_read_empty     (pipeline_after_read_empty),     //input
@@ -539,6 +546,7 @@ memory memory_inst(
     
     // avalon master
     .avm_address                   (avm_address_pre),                   //output [31:0]
+    .avm_rgn                       (avm_rgn),                       //output [3:0] (SiSTer)
     .avm_writedata                 (avm_writedata),                 //output [31:0]
     .avm_byteenable                (avm_byteenable),                //output [3:0]
     .avm_burstcount                (avm_burstcount),                //output [3:0]
@@ -711,6 +719,8 @@ pipeline pipeline_inst(
     .prefetchfifo_accept_do        (prefetchfifo_accept_do),        //output
     .prefetchfifo_accept_data      (prefetchfifo_accept_data),      //input [67:0]
     .prefetchfifo_accept_empty     (prefetchfifo_accept_empty),     //input
+    .prefetchfifo_accept_length_nopr(prefetchfifo_accept_length_nopr), //input (SiSTer)
+    .prefetchfifo_accept_empty_nopr(prefetchfifo_accept_empty_nopr), //input (SiSTer)
     
     //io_read
     .io_read_do                    (io_read_do),                    //output
@@ -722,6 +732,7 @@ pipeline pipeline_inst(
     //read memory
     .read_do                       (read_do),                       //output
     .read_done                     (read_done),                     //input
+    .read_done_r0                  (read_done_r0),                  //input (SiSTer)
     .read_page_fault               (read_page_fault),               //input
     .read_ac_fault                 (read_ac_fault),                 //input
     

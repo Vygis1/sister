@@ -60,6 +60,7 @@ module microcode(
     
     input       [95:0]  decoder,
     input       [31:0]  dec_eip,
+    input       [31:0]  dec_eip_go,         // (SiSTer: dec_eip when dec_ready)
     input               dec_operand_32bit,
     input               dec_address_32bit,
     input       [1:0]   dec_prefix_group_1_rep,
@@ -67,6 +68,7 @@ module microcode(
     input       [2:0]   dec_prefix_group_2_seg,
     input               dec_prefix_2byte,
     input       [3:0]   dec_consumed,
+    input       [3:0]   dec_consumed_go,    // (SiSTer: dec_consumed when dec_ready)
     input       [2:0]   dec_modregrm_len,  
     input               dec_is_8bit,
     input       [6:0]   dec_cmd,
@@ -200,14 +202,14 @@ end
 
 always @(posedge clk) begin
     if(rst_n == 1'b0)   mc_consumed <= 4'd0;
-    else if(m_load)     mc_consumed <= dec_consumed;
+    else if(m_load)     mc_consumed <= dec_consumed_go;    // (SiSTer: m_load implies dec_ready)
     else if(task_start) mc_consumed <= 4'd0;
     else if(exc_load)   mc_consumed <= 4'd0;
 end
 
 always @(posedge clk) begin
     if(rst_n == 1'b0)   mc_eip <= 32'd0;
-    else if(m_load)     mc_eip <= dec_eip;
+    else if(m_load)     mc_eip <= dec_eip_go;              // (SiSTer: m_load implies dec_ready)
     else if(task_start) mc_eip <= task_eip;
     else if(exc_load)   mc_eip <= exc_eip;
 end
@@ -234,17 +236,23 @@ assign micro_cmdex =
     (m_overlay)?        mc_cmdex_current :
                         dec_cmdex;
 
+// (SiSTer: micro_consumed and micro_eip are only ever taken by read.v when micro_ready (r_load), and
+//  then task_start is task_start_sel, and the decoder's values are taken only when dec_ready (with no
+//  m_overlay, micro_ready is dec_ready): selecting on task_start_sel and reading dec_*_go keeps the
+//  late micro_ready and dec_ready out of their data path)
+wire task_start_sel = micro_cmd == `CMD_task_switch_4 && micro_cmdex == `CMDEX_task_switch_4_STEP_1;
+
 assign micro_consumed =
-    (task_start)?       4'd0 :
+    (task_start_sel)?   4'd0 :
     (exc_load)?   4'd0 :
     (m_overlay)?        mc_consumed :
-                        dec_consumed;
+                        dec_consumed_go;
 
 assign micro_eip =
-    (task_start)?   task_eip :
+    (task_start_sel)? task_eip :
     (exc_load)?     exc_eip :
     (m_overlay)?    mc_eip :
-                    dec_eip;
+                    dec_eip_go;
 
 //------------------------------------------------------------------------------
 

@@ -40,6 +40,13 @@ module execute_divide(
     
     input       [31:0]  eax,
     input       [31:0]  edx,
+    // (SiSTer: halves of eax and edx against 0 and 16'h8000, registered beside them in write_register.v)
+    input               eax_lo_is_0,
+    input               eax_lo_is_8000,
+    input               eax_hi_is_0,
+    input               edx_lo_is_0,
+    input               edx_lo_is_8000,
+    input               edx_hi_is_8000,
     
     input       [31:0]  src,
     
@@ -101,10 +108,12 @@ always @(posedge clk) begin
     else if(div_counter > 6'd1)  div_one_time <= `TRUE;
 end
 
+// (SiSTer: the compares read from the flags registered beside eax and edx: eax[15:0] == 16'h8000 is
+//  eax_lo_is_8000, edx == 32'h80000000 is edx_hi_is_8000 && edx_lo_is_0, eax == 0 is eax_hi_is_0 && eax_lo_is_0)
 assign div_exception_min_int = div_counter == 6'd0 && exe_cmd == `CMD_IDIV && (
-    (  exe_is_8bit  &&                                                   eax[15:0] == 16'h8000) ||
-    ((~exe_is_8bit) && exe_operand_16bit && edx[15:0] == 16'h8000     && eax[15:0] == 16'h0000) ||
-    ((~exe_is_8bit) && exe_operand_32bit && edx       == 32'h80000000 && eax       == 32'h00000000));
+    (  exe_is_8bit  &&                                                   eax_lo_is_8000) ||
+    ((~exe_is_8bit) && exe_operand_16bit && edx_lo_is_8000               && eax_lo_is_0) ||
+    ((~exe_is_8bit) && exe_operand_32bit && edx_hi_is_8000 && edx_lo_is_0 && eax_hi_is_0 && eax_lo_is_0));
 
 assign div_exception_zero = div_counter == 6'd0 && (exe_cmd == `CMD_IDIV || exe_cmd == `CMD_DIV || exe_cmd == `CMD_AAM) && (
     (exe_is_8bit        && src[7:0]  == 8'd0) ||

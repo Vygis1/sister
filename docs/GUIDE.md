@@ -215,7 +215,7 @@ PC running `pc/pad.py` also types into the game.
 | Super NES | Plays Super Mario World; save RAM kept on the SD card. LoROM and HiROM cartridges up to 6 MB; no add-on chips (Super FX, SA-1, DSP-1...). Hi-res screens are shown 256 wide. |
 | PlayStation | Boots the real BIOS, plays commercial games at the console's own frame rates (Crash Bandicoot 30 fps, Syphon Filter 20), memory card, CD audio and XA from the disc image, FMVs. |
 | Nintendo 64 | Plays Super Mario 64 and Mario Kart 64 at close to the console's speed (SM64 27-30 of its 30 fps); the RDP (graphics) still lacks a few modes. |
-| DOS PC | A 486 at 62.5 MHz (ao486), 32 MB, VGA and VESA SVGA, Sound Blaster 16 + OPL3, CD-ROM with CD audio. Doom, Rayman, Transport Tycoon Deluxe, Fallout. No FPU. |
+| DOS PC | A 486 at 66.7 MHz (ao486), 32 MB, VGA and VESA SVGA, Sound Blaster 16 + OPL3, CD-ROM with CD audio. Doom, Rayman, Transport Tycoon Deluxe, Fallout. No FPU. |
 
 ## When something goes wrong
 

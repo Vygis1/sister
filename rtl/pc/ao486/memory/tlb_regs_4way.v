@@ -41,7 +41,8 @@ module tlb_regs(
     output              translate_pwt,
     output              translate_pcd,
     output              translate_combined_rw,
-    output              translate_combined_su
+    output              translate_combined_su,
+    output  [3:0]       translate_rgn       // (SiSTer: the L2 regions of translate_physical)
     //END
 );
 
@@ -54,12 +55,13 @@ module tlb_regs(
     // [43]    combined RW
     // [44]    combined SU
     // [45]    DIRTY (set on write fill)
+    // [49:46] (SiSTer) the L2 regions of the physical page (ao486_l2_rgn), stored at the fill
 
     localparam WAYS = 4;
     localparam SETS = 8;          // 32 entries total
     localparam SETBITS = 3;       // log2(SETS)
 
-    reg  [45:0] tlb   [0:SETS-1][0:WAYS-1];
+    reg  [49:0] tlb   [0:SETS-1][0:WAYS-1];
     reg  [1:0]  rrptr [0:SETS-1];    // simple round-robin replacement per set
 
     wire [19:0] lin_page_t  = translate_linear[31:12];
@@ -79,9 +81,9 @@ module tlb_regs(
     endgenerate
 
     // Selected entry mux (one-hot)
-    reg  [45:0] selected;
+    reg  [49:0] selected;
     always @* begin
-        selected = 46'd0;
+        selected = 50'd0;
         unique case (1'b1)
             way_hit[0]: selected = tlb[set_t][0];
             way_hit[1]: selected = tlb[set_t][1];
@@ -101,6 +103,12 @@ module tlb_regs(
     assign translate_pcd         = selected[41];
     assign translate_combined_rw = selected[43];
     assign translate_combined_su = selected[44];
+
+    // (SiSTer: the L2 regions of translate_physical: with translate_valid it is { selected[39:20], linear[11:0] }
+    //  and the regions read only bits 31..13, the page's, stored at the fill; else it is translate_linear)
+    wire [3:0] linear_rgn;
+    ao486_l2_rgn linear_rgn_inst(.a(translate_linear), .f(linear_rgn));
+    assign translate_rgn = translate_valid ? selected[49:46] : linear_rgn;
 
     // Single flush comparator against full tag
     wire [19:0] lin_page_flush = tlbflushsingle_address[31:12];
@@ -134,7 +142,9 @@ module tlb_regs(
     end
 
     // Compose write data
-    wire [45:0] write_data = { rw, tlbregs_write_combined_su, tlbregs_write_combined_rw, 1'b1,
+    wire [3:0]  write_rgn;     // (SiSTer)
+    ao486_l2_rgn write_rgn_inst(.a(tlbregs_write_physical), .f(write_rgn));
+    wire [49:0] write_data = { write_rgn, rw, tlbregs_write_combined_su, tlbregs_write_combined_rw, 1'b1,
                                tlbregs_write_pcd, tlbregs_write_pwt,
                                tlbregs_write_physical[31:12], tlbregs_write_linear[31:12] };
 
@@ -144,14 +154,14 @@ module tlb_regs(
             for (si = 0; si < SETS; si = si + 1) begin
                 rrptr[si] <= 2'd0;
                 for (sj = 0; sj < WAYS; sj = sj + 1)
-                    tlb[si][sj] <= 46'd0;
+                    tlb[si][sj] <= 50'd0;
             end
         end else begin
             // Flush-all
             if (tlbflushall_do) begin
                 for (si = 0; si < SETS; si = si + 1)
                     for (sj = 0; sj < WAYS; sj = sj + 1)
-                        tlb[si][sj] <= 46'd0;
+                        tlb[si][sj] <= 50'd0;
             end else begin
                 // Flush single and dirty-miss invalidation
                 for (si = 0; si < SETS; si = si + 1) begin
@@ -166,7 +176,7 @@ module tlb_regs(
                         if (translate_valid_but_not_dirty && way_hit[sj] && si[SETBITS-1:0] == set_t)
                             do_inval = 1'b1;
                         if (do_inval)
-                            tlb[si][sj] <= 46'd0;
+                            tlb[si][sj] <= 50'd0;
                     end
                 end
 

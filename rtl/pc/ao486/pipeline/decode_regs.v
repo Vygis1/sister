@@ -31,10 +31,20 @@ module decode_regs(
     input               dec_reset,
     
     input       [3:0]   fetch_valid,
+    // (SiSTer: fetch_valid as it is when pr_reset is low. decoder_count takes the accepted count only when
+    //  dec_reset is low; dec_reset is exc_dec_reset | wr_req_reset_dec and pr_reset is wr_req_reset_pr, the
+    //  same expression (autogen/write_commands.v), so then pr_reset is low and fetch_valid is fetch_valid_nopr)
+    input       [3:0]   fetch_valid_nopr,
     input       [63:0]  fetch,
     
     input       [3:0]   prefix_count,
-    input       [3:0]   consume_count,
+    // (SiSTer: consume_count arrives as its two possible values and the late select between them --
+    //  consume_count == (consume_stall)? consume_count_stall : consume_count_go -- so the stall chain
+    //  (write stage -> read stage -> micro_busy) meets the decoder only at the last mux before the
+    //  registers; the next state is computed for both values and chosen at the end. decode.v)
+    input       [3:0]   consume_count_go,
+    input       [3:0]   consume_count_stall,
+    input               consume_stall,
     
     output      [3:0]   dec_acceptable,
     
@@ -44,8 +54,6 @@ module decode_regs(
 
 //------------------------------------------------------------------------------
 
-wire [3:0] after_consume_count;
-
 wire [4:0] total_count;
 
 wire [3:0] acceptable_1;
@@ -53,15 +61,7 @@ wire [3:0] acceptable_2;
 
 wire [3:0] accepted;
 
-wire [95:0] after_consume;
-
-wire [95:0] decoder_next;
-
 //------------------------------------------------------------------------------
-
-//------------------------------------------------------------------------------
-
-assign after_consume_count = decoder_count - consume_count;
 
 assign total_count         = prefix_count + decoder_count;
 
@@ -84,24 +84,68 @@ assign dec_acceptable   = (dec_reset)?                      4'd0 :
 
 assign accepted         = (dec_acceptable > fetch_valid)? fetch_valid : dec_acceptable;
 
+// (SiSTer: accepted as it is when dec_reset is low -- dec_acceptable is acceptable_1 and pr_reset is low --
+//  the only time decoder_count takes it)
+wire [3:0] accepted_nr  = (acceptable_1 > fetch_valid_nopr)? fetch_valid_nopr : acceptable_1;
+
 //------------------------------------------------------------------------------
+
+// (SiSTer: the original after_consume / decoder_next, built once for each value consume_count can
+//  take -- decode_regs_next below is that logic unchanged -- and the late consume_stall picks)
+wire [95:0] decoder_next_go,     decoder_next_stall;
+wire [3:0]  count_next_go,       count_next_stall;
+wire [3:0]  count_next_go_nr,    count_next_stall_nr;   // (SiSTer: with accepted_nr)
+
+decode_regs_next next_go_inst(
+    .decoder(decoder), .decoder_count(decoder_count), .fetch(fetch), .accepted(accepted),
+    .consume_count(consume_count_go), .decoder_next(decoder_next_go), .count_next(count_next_go), .accepted_nr(accepted_nr), .count_next_nr(count_next_go_nr));
+
+decode_regs_next next_stall_inst(
+    .decoder(decoder), .decoder_count(decoder_count), .fetch(fetch), .accepted(accepted),
+    .consume_count(consume_count_stall), .decoder_next(decoder_next_stall), .count_next(count_next_stall), .accepted_nr(accepted_nr), .count_next_nr(count_next_stall_nr));
+
+wire [95:0] decoder_next = (consume_stall)? decoder_next_stall : decoder_next_go;
+
+//------------------------------------------------------------------------------
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0)   decoder <= 96'd0;
+    else                decoder <= decoder_next;
+end
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0)   decoder_count <= 4'd0;
+    else if(dec_reset)  decoder_count <= 4'd0;
+    else                decoder_count <= (consume_stall)? count_next_stall_nr : count_next_go_nr;   // (SiSTer: dec_reset is low here: accepted_nr)
+end
+
+//------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+
+endmodule
+
+// (SiSTer: decode_regs' original next-state logic, unchanged, as a module of its own so that
+//  decode_regs can build it for both values of consume_count)
+module decode_regs_next(
+    input       [95:0]  decoder,
+    input       [3:0]   decoder_count,
+    input       [63:0]  fetch,
+    input       [3:0]   accepted,
+    input       [3:0]   consume_count,
+    output      [95:0]  decoder_next,
+    output      [3:0]   count_next,
+    input       [3:0]   accepted_nr,
+    output      [3:0]   count_next_nr
+);
+
+wire [3:0] after_consume_count;
+wire [95:0] after_consume;
+
+assign after_consume_count = decoder_count - consume_count;
 
 assign after_consume = decoder >> (consume_count * 8);
 
-// assign after_consume = 
-//     (consume_count == 4'd0)?            decoder :
-//     (consume_count == 4'd1)?  { 8'd0,   decoder[95:8] } :
-//     (consume_count == 4'd2)?  { 16'd0,  decoder[95:16] } :
-//     (consume_count == 4'd3)?  { 24'd0,  decoder[95:24] } :
-//     (consume_count == 4'd4)?  { 32'd0,  decoder[95:32] } :
-//     (consume_count == 4'd5)?  { 40'd0,  decoder[95:40] } :
-//     (consume_count == 4'd6)?  { 48'd0,  decoder[95:48] } :
-//     (consume_count == 4'd7)?  { 56'd0,  decoder[95:56] } :
-//     (consume_count == 4'd8)?  { 64'd0,  decoder[95:64] } :
-//     (consume_count == 4'd9)?  { 72'd0,  decoder[95:72] } :
-//     (consume_count == 4'd10)? { 80'd0,  decoder[95:80] } :
-//                               { 88'd0,  decoder[95:88] };
-        
 assign decoder_next =
     (after_consume_count == 4'd0)?   { 32'd0,fetch } :
     (after_consume_count == 4'd1)?   { 24'd0,fetch,       after_consume[7:0] } :
@@ -117,21 +161,7 @@ assign decoder_next =
     (after_consume_count == 4'd11)?  {       fetch[7:0],  after_consume[87:0] } :
                                                           after_consume;
 
-//------------------------------------------------------------------------------
-
-always @(posedge clk) begin
-    if(rst_n == 1'b0)   decoder <= 96'd0;
-    else                decoder <= decoder_next;
-end
-
-always @(posedge clk) begin
-    if(rst_n == 1'b0)   decoder_count <= 4'd0;
-    else if(dec_reset)  decoder_count <= 4'd0;
-    else                decoder_count <= after_consume_count + accepted;
-end
-
-//------------------------------------------------------------------------------
-
-//------------------------------------------------------------------------------
+assign count_next = after_consume_count + accepted;
+assign count_next_nr = after_consume_count + accepted_nr;   // (SiSTer)
 
 endmodule

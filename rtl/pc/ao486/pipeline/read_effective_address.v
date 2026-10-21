@@ -139,7 +139,20 @@ assign disp16 =
     (rd_modregrm_mod == 2'b01)?     { {8{address_disp16[7]}}, address_disp16[7:0] } :
                                     16'd0;
 
-assign base16_plus_disp16 = base16 + disp16;
+// (SiSTer: was base16 + disp16, base16 itself a sum of two registers for rm 000..011: the same three-operand
+//  sum, mod 2^16, as a carry-save add -- one carry chain instead of two in a row)
+wire [15:0] ea16_a =
+    (rd_modregrm_rm == 3'b000 || rd_modregrm_rm == 3'b001 || rd_modregrm_rm == 3'b111)?   ebx[15:0] :
+    (rd_modregrm_rm == 3'b010 || rd_modregrm_rm == 3'b011 || rd_modregrm_rm == 3'b110)?   ebp[15:0] :
+    (rd_modregrm_rm == 3'b100)?                                                         esi[15:0] :
+                                                                                        edi[15:0];
+wire [15:0] ea16_b =
+    (rd_modregrm_rm == 3'b000 || rd_modregrm_rm == 3'b010)?     esi[15:0] :
+    (rd_modregrm_rm == 3'b001 || rd_modregrm_rm == 3'b011)?     edi[15:0] :
+                                                                16'd0;
+wire [15:0] ea16_sum   = ea16_a ^ ea16_b ^ disp16;
+wire [15:0] ea16_carry = { (ea16_a[14:0] & ea16_b[14:0]) | (ea16_a[14:0] & disp16[14:0]) | (ea16_b[14:0] & disp16[14:0]), 1'b0 };
+assign base16_plus_disp16 = ea16_sum + ea16_carry;
 
 //------------------------------------------------------------------------------ modregrm 32-bit
 
@@ -191,7 +204,21 @@ assign disp32 =
     (rd_modregrm_mod == 2'b01)?     { {24{address_disp32[7]}}, address_disp32[7:0] } :
                                     32'd0;
 
-assign base32_plus_disp32 = base32 + disp32;
+// (SiSTer: was base32 + disp32, base32 being sib_base32 + sib_index32_scaled for rm 100: the same sum,
+//  mod 2^32, as a carry-save add of three operands -- one carry chain instead of two in a row)
+wire [31:0] ea32_a =
+    (rd_modregrm_rm == 3'b000)?     eax :
+    (rd_modregrm_rm == 3'b001)?     ecx :
+    (rd_modregrm_rm == 3'b010)?     edx :
+    (rd_modregrm_rm == 3'b011)?     ebx :
+    (rd_modregrm_rm == 3'b100)?     sib_base32 :
+    (rd_modregrm_rm == 3'b101)?     ebp :
+    (rd_modregrm_rm == 3'b110)?     esi :
+                                    edi;
+wire [31:0] ea32_b = (rd_modregrm_rm == 3'b100)? sib_index32_scaled : 32'd0;
+wire [31:0] ea32_sum   = ea32_a ^ ea32_b ^ disp32;
+wire [31:0] ea32_carry = { (ea32_a[30:0] & ea32_b[30:0]) | (ea32_a[30:0] & disp32[30:0]) | (ea32_b[30:0] & disp32[30:0]), 1'b0 };
+assign base32_plus_disp32 = ea32_sum + ea32_carry;
 
 //------------------------------------------------------------------------------ modregrm final
 

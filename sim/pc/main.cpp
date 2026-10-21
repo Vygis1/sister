@@ -8,6 +8,8 @@
 //
 //   obj_dir/Vpc_top <image.img> <boot0.rom> <boot1.rom> [frames-to-run] [save-every] [disc.cue]
 #include "Vpc_top.h"
+#include "Vpc_top___024root.h"
+#include "Vpc_top_pc_top.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +33,45 @@ static int frames_run = 400, save_every = 10;
 
 // --- the host's actions, a clock each (spaced as the link would) ------------------------------------
 static void eval_edge();
+// --- the cycle-exact gate: a running hash of the CPU's boundary (its memory, IO, DMA and interrupt
+// signals, both directions) and its debug CS:EIP, every clock; printed every SIM_TRACE_EVERY clocks
+// (default 1M) to trace.txt -- two RTL versions are the same machine only if the files are identical
+static uint64_t th = 1469598103934665603ULL;
+static FILE *tf;
+static uint64_t trace_every = 1000000;
+static inline void th_mix(uint64_t v) { th = (th ^ v) * 1099511628211ULL; th ^= th >> 29; }
+static void trace_clock() {
+	auto *r = t->rootp->pc_top;
+	th_mix(((uint64_t)r->avm_address << 32) | r->avm_writedata);
+	th_mix((uint64_t)r->avm_byteenable | ((uint64_t)r->avm_burstcount << 4) |
+	       ((uint64_t)r->avm_write << 8) | ((uint64_t)r->avm_read << 9) |
+	       ((uint64_t)r->avm_waitrequest << 10) | ((uint64_t)r->avm_readdatavalid << 11) |
+	       ((uint64_t)r->avm_readdata << 32));
+	th_mix((uint64_t)r->cpu_io_read_do | ((uint64_t)r->cpu_io_write_do << 1) |
+	       ((uint64_t)r->cpu_io_read_done << 2) | ((uint64_t)r->cpu_io_write_done << 3) |
+	       ((uint64_t)r->cpu_io_read_length << 4) | ((uint64_t)r->cpu_io_write_length << 8) |
+	       ((uint64_t)r->cpu_io_read_address << 16) | ((uint64_t)r->cpu_io_write_address << 32));
+	th_mix(((uint64_t)r->cpu_io_read_data << 32) | r->cpu_io_write_data);
+	th_mix((uint64_t)r->interrupt_do | ((uint64_t)r->interrupt_done << 1) |
+	       ((uint64_t)r->interrupt_vector << 8) | ((uint64_t)r->a20_enable << 16) |
+	       ((uint64_t)r->dma_16bit << 17) | ((uint64_t)r->dma_write << 18) |
+	       ((uint64_t)r->dma_read << 19) | ((uint64_t)r->dma_readdatavalid << 20) |
+	       ((uint64_t)r->dma_waitrequest << 21) | ((uint64_t)r->dma_address << 32));
+	th_mix(((uint64_t)r->dma_writedata << 16) | r->dma_readdata |
+	       ((uint64_t)r->debug_cs << 32));
+	th_mix(r->debug_eip);
+#ifdef RGN_CHECK
+	// (the CPU's avm_rgn -- the L2 cache's address regions, decoded in the CPU beside the address -- must be
+	// the regions of avm_address on every clock: ram, rom, VGA window, shared-folder window)
+	{
+		uint32_t a = (uint32_t)r->avm_address << 2;
+		unsigned f = ((a >> 28) == 0) | ((((a >> 18) & 0x3FF) == 0x3) << 1) | ((((a >> 17) & 0x7FF) == 0x5) << 2) | ((((a >> 13) & 0x7FFF) == 0x67) << 3);
+		static uint64_t bad = 0;
+		if (f != r->avm_rgn && bad++ < 20) printf("%10llu: avm_rgn %x but avm_address %08x has %x%c", (unsigned long long)cyc, (unsigned)r->avm_rgn, a, f, 10);
+	}
+#endif
+	if (tf && cyc % trace_every == 0) { fprintf(tf, "%llu %016llx %04x:%08x%c",(unsigned long long)cyc, (unsigned long long)th, (unsigned)r->debug_cs, (unsigned)r->debug_eip, 10); fflush(tf); }
+}
 static void host_wr(uint16_t off, uint32_t v) {
 	t->h_we = 1; t->h_off = off; t->h_wdata = v; eval_edge(); t->h_we = 0;
 	for (int i = 0; i < 4; i++) eval_edge();
@@ -140,6 +181,7 @@ static void eval_edge() {
 	}
 	t->clk = 1; t->eval();
 	t->clk = 0; if (prise) t->pclk = 0; t->eval();
+	trace_clock();
 	cyc++;
 }
 
@@ -183,6 +225,8 @@ int main(int argc, char **argv) {
 	if (getenv("SIM_DDR_REFI")) REFI = atoi(getenv("SIM_DDR_REFI"));
 	if (getenv("SIM_DDR_RFC")) RFC = atoi(getenv("SIM_DDR_RFC"));
 	t = new Vpc_top;
+	if (getenv("SIM_TRACE_EVERY")) trace_every = strtoull(getenv("SIM_TRACE_EVERY"), nullptr, 0);
+	tf = fopen(getenv("SIM_TRACE") ? getenv("SIM_TRACE") : "trace.txt", "w");
 	disk = fopen(argv[1], "r+b");
 	if (!disk) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
 	std::string cfgp = std::string(argv[1]); cfgp = cfgp.substr(0, cfgp.rfind('.')) + ".cfg";
@@ -248,6 +292,7 @@ int main(int argc, char **argv) {
 		if ((sectors & 0x3FF) < cnt) { printf("%10llu: %llu sectors read so far\n", (unsigned long long)cyc, (unsigned long long)sectors); fflush(stdout); }
 	}
 	fclose(disk);
+	if (tf) { fprintf(tf, "end %llu %016llx%c", (unsigned long long)cyc, (unsigned long long)th, 10);fclose(tf); }
 	delete t;
 	return 0;
 }

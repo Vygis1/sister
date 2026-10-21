@@ -39,6 +39,7 @@ module link_dcacheread(
     input   [3:0]       req_dcacheread_length,
     input               req_dcacheread_cache_disable,
     input   [31:0]      req_dcacheread_address,
+    input   [3:0]       req_dcacheread_rgn,         // (SiSTer: its L2 regions, held with it)
     output  [63:0]      req_dcacheread_data,
     
     // dcacheread RESP
@@ -48,6 +49,7 @@ module link_dcacheread(
     output  [3:0]       resp_dcacheread_length,
     output              resp_dcacheread_cache_disable,
     output  [31:0]      resp_dcacheread_address,
+    output  [3:0]       resp_dcacheread_rgn,        // (SiSTer)
     input   [63:0]      resp_dcacheread_data
 );
 
@@ -77,6 +79,10 @@ end
 always @(posedge clk) begin if(rst_n == 1'b0) length        <= 4'd0;  else if(save) length        <= req_dcacheread_length;        end
 always @(posedge clk) begin if(rst_n == 1'b0) cache_disable <= 1'b0;  else if(save) cache_disable <= req_dcacheread_cache_disable; end
 always @(posedge clk) begin if(rst_n == 1'b0) address       <= 32'd0; else if(save) address       <= req_dcacheread_address;       end
+// (SiSTer: the regions of address, kept in step with it; 32'd0's at reset)
+wire [3:0] rgn_zero; ao486_l2_rgn rgn_zero_inst(.a(32'd0), .f(rgn_zero));
+reg  [3:0] rgn;
+always @(posedge clk) begin if(rst_n == 1'b0) rgn           <= rgn_zero; else if(save) rgn           <= req_dcacheread_rgn;           end
 
 //------------------------------------------------------------------------------
 
@@ -87,6 +93,7 @@ assign resp_dcacheread_do            = (req_dcacheread_do)? req_dcacheread_do   
 assign resp_dcacheread_length        = (req_dcacheread_do)? req_dcacheread_length        : length;
 assign resp_dcacheread_cache_disable = (req_dcacheread_do)? req_dcacheread_cache_disable : cache_disable;
 assign resp_dcacheread_address       = (req_dcacheread_do)? req_dcacheread_address       : address;
+assign resp_dcacheread_rgn           = (req_dcacheread_do)? req_dcacheread_rgn           : rgn;    // (SiSTer)
 
 //------------------------------------------------------------------------------
 

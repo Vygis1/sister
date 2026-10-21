@@ -176,13 +176,14 @@ module pc_top #(
 	wire  [2:0] cpu_io_read_length, cpu_io_write_length;
 	wire [31:0] cpu_io_read_data, cpu_io_write_data;
 	wire [29:0] avm_address; wire [31:0] avm_writedata, avm_readdata; wire [3:0] avm_byteenable, avm_burstcount;
+	wire  [3:0] avm_rgn;    // (SiSTer: avm_address's L2 regions, decoded in the CPU beside the address -- l2_cache.v)
 	wire        avm_write, avm_read, avm_waitrequest, avm_readdatavalid;
 	wire [23:0] dma_address; wire dma_16bit, dma_write, dma_read, dma_readdatavalid, dma_waitrequest;
 	wire [15:0] dma_writedata, dma_readdata;
 
 	ao486 ao486 (
 		.clk(clk), .rst_n(cpu_reset_n), .cache_disable(1'b0),
-		.avm_address(avm_address), .avm_writedata(avm_writedata), .avm_byteenable(avm_byteenable),
+		.avm_address(avm_address), .avm_rgn(avm_rgn), .avm_writedata(avm_writedata), .avm_byteenable(avm_byteenable),
 		.avm_burstcount(avm_burstcount), .avm_write(avm_write), .avm_read(avm_read),
 		.avm_waitrequest(avm_waitrequest), .avm_readdatavalid(avm_readdatavalid), .avm_readdata(avm_readdata),
 		.interrupt_do(interrupt_do), .interrupt_vector(interrupt_vector), .interrupt_done(interrupt_done),
@@ -205,7 +206,7 @@ module pc_top #(
 	l2_cache #(.ADDRBITS(24)
 	) u_l2 (
 		.CLK(clk), .RESET(!cpu_reset_n), .DISABLE(1'b0),
-		.CPU_ADDR(avm_address), .CPU_DIN(avm_writedata), .CPU_DOUT(avm_readdata), .CPU_DOUT_READY(avm_readdatavalid),
+		.CPU_ADDR(avm_address), .CPU_RGN(avm_rgn), .CPU_DIN(avm_writedata), .CPU_DOUT(avm_readdata), .CPU_DOUT_READY(avm_readdatavalid),
 		.CPU_BE(avm_byteenable), .CPU_BURSTCNT(avm_burstcount), .CPU_BUSY(avm_waitrequest),
 		.CPU_RD(avm_read), .CPU_WE(avm_write),
 		.DDRAM_ADDR(ddr_addr), .DDRAM_DIN(ddr_din), .DDRAM_DOUT(ddr_dout), .DDRAM_DOUT_READY(ddr_dout_ready),

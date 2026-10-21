@@ -163,6 +163,11 @@ module write_commands(
     
     //stack
     output              write_stack_virtual,
+    // (SiSTer: the write selects without their late limit checks -- see the end of this file)
+    output              write_stack_virtual_raw,
+    output              write_new_stack_virtual_raw,
+    output              write_string_es_virtual_a,
+    output              write_string_es_virtual_b,
     output              write_new_stack_virtual,
     
     output              wr_push_length_word,
@@ -584,6 +589,18 @@ wire _unused_ok = &{ 1'b0, glob_param_1[31:21], glob_param_5[31:22], glob_param_
 //------------------------------------------------------------------------------
 
 `include "autogen/write_commands.v"
+
+// (SiSTer: autogen's write_stack_virtual is a chain of (cond_i && cond_10)? TRUE terms, so it is
+//  write_stack_virtual_raw && ~wr_push_ss_fault (cond_10 is ~wr_push_ss_fault); write_new_stack_virtual likewise
+//  with cond_15 (~wr_new_push_ss_fault); write_string_es_virtual is
+//  (cond_192 && cond_33 && cond_193) || (cond_196 && ~cond_197 && cond_33) || (cond_261 && cond_33 && cond_193)
+//  = write_string_es_virtual_b || (write_string_es_virtual_a && ~wr_string_es_fault), cond_193 being
+//  ~wr_string_es_fault. write.v builds its write request from these and applies the faults last)
+assign write_stack_virtual_raw     = cond_8 || cond_11 || cond_21 || cond_65 || cond_124 || cond_130 || cond_132 ||
+                                     cond_158 || cond_189 || cond_202 || (cond_253 && cond_254);
+assign write_new_stack_virtual_raw = cond_14 || cond_18 || cond_19 || cond_54 || cond_55;
+assign write_string_es_virtual_a   = (cond_192 || cond_261) && cond_33;
+assign write_string_es_virtual_b   = cond_196 && ~cond_197 && cond_33;
 
 //------------------------------------------------------------------------------
 

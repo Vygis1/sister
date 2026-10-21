@@ -35,6 +35,7 @@ module memory(
     //REQ:
     input               read_do,
     output              read_done,
+    output              read_done_r0,   // (SiSTer: read_done when rd_reset is low, memory_read.v)
     output              read_page_fault,
     output              read_ac_fault,
     
@@ -115,6 +116,8 @@ module memory(
     input               prefetchfifo_accept_do,
     output      [67:0]  prefetchfifo_accept_data,
     output              prefetchfifo_accept_empty,
+    output      [3:0]   prefetchfifo_accept_length_nopr,   // (SiSTer: with pr_reset low -- prefetch_fifo.v)
+    output              prefetchfifo_accept_empty_nopr,    // (SiSTer)
     
     input               pipeline_after_read_empty,
     input               pipeline_after_prefetch_empty,
@@ -139,6 +142,7 @@ module memory(
     
     // avalon master
     output      [31:2]  avm_address,
+    output      [3:0]   avm_rgn,        // (SiSTer: the L2 regions of avm_address -- avalon_mem.v)
     output      [31:0]  avm_writedata,
     output      [3:0]   avm_byteenable,
     output      [3:0]   avm_burstcount,
@@ -172,6 +176,7 @@ wire             req_dcacheread_done;
 wire [3:0]       req_dcacheread_length;
 wire             req_dcacheread_cache_disable;
 wire [31:0]      req_dcacheread_address;
+wire [3:0]       req_dcacheread_rgn;     // (SiSTer)
 wire [63:0]      req_dcacheread_data;
 
 wire             resp_dcacheread_do;
@@ -179,6 +184,7 @@ wire             resp_dcacheread_done;
 wire [3:0]       resp_dcacheread_length;
 wire             resp_dcacheread_cache_disable;
 wire [31:0]      resp_dcacheread_address;
+wire [3:0]       resp_dcacheread_rgn;    // (SiSTer)
 wire [63:0]      resp_dcacheread_data;
 
 link_dcacheread link_dcacheread_inst(
@@ -192,6 +198,7 @@ link_dcacheread link_dcacheread_inst(
     .req_dcacheread_length              (req_dcacheread_length),          //input [3:0]
     .req_dcacheread_cache_disable       (req_dcacheread_cache_disable),   //input
     .req_dcacheread_address             (req_dcacheread_address),         //input [31:0]
+    .req_dcacheread_rgn                 (req_dcacheread_rgn),             //input [3:0] (SiSTer)
     .req_dcacheread_data                (req_dcacheread_data),            //output [63:0]
     
     // dcacheread RESP
@@ -201,6 +208,7 @@ link_dcacheread link_dcacheread_inst(
     .resp_dcacheread_length             (resp_dcacheread_length),         //output [3:0]
     .resp_dcacheread_cache_disable      (resp_dcacheread_cache_disable),  //output
     .resp_dcacheread_address            (resp_dcacheread_address),        //output [31:0]
+    .resp_dcacheread_rgn                (resp_dcacheread_rgn),            //output [3:0] (SiSTer)
     .resp_dcacheread_data               (resp_dcacheread_data)            //input [63:0]
 );
 
@@ -211,6 +219,7 @@ wire               req_dcachewrite_done;
 wire   [2:0]       req_dcachewrite_length;
 wire               req_dcachewrite_cache_disable;
 wire   [31:0]      req_dcachewrite_address;
+wire   [3:0]       req_dcachewrite_rgn;    // (SiSTer)
 wire               req_dcachewrite_write_through;
 wire   [31:0]      req_dcachewrite_data;
 
@@ -219,6 +228,7 @@ wire              resp_dcachewrite_done;
 wire  [2:0]       resp_dcachewrite_length;
 wire              resp_dcachewrite_cache_disable;
 wire  [31:0]      resp_dcachewrite_address;
+wire  [3:0]       resp_dcachewrite_rgn;   // (SiSTer)
 wire              resp_dcachewrite_write_through;
 wire  [31:0]      resp_dcachewrite_data;
 
@@ -233,6 +243,7 @@ link_dcachewrite link_dcachewrite_inst(
     .req_dcachewrite_length             (req_dcachewrite_length),         //input [2:0]
     .req_dcachewrite_cache_disable      (req_dcachewrite_cache_disable),  //input
     .req_dcachewrite_address            (req_dcachewrite_address),        //input [31:0]
+    .req_dcachewrite_rgn                (req_dcachewrite_rgn),            //input [3:0] (SiSTer)
     .req_dcachewrite_write_through      (req_dcachewrite_write_through),  //input
     .req_dcachewrite_data               (req_dcachewrite_data),           //input [31:0]
     
@@ -243,6 +254,7 @@ link_dcachewrite link_dcachewrite_inst(
     .resp_dcachewrite_length            (resp_dcachewrite_length),        //output [2:0]
     .resp_dcachewrite_cache_disable     (resp_dcachewrite_cache_disable), //output
     .resp_dcachewrite_address           (resp_dcachewrite_address),       //output [31:0]
+    .resp_dcachewrite_rgn               (resp_dcachewrite_rgn),           //output [3:0] (SiSTer)
     .resp_dcachewrite_write_through     (resp_dcachewrite_write_through), //output
     .resp_dcachewrite_data              (resp_dcachewrite_data)           //output [31:0]
 );
@@ -290,6 +302,7 @@ wire [4:0]  icacheread_length; // takes into account: page size and cs segment l
 //------------------------------------------------------------------------------
 
 wire            prefetchfifo_write_do;
+wire            prefetchfifo_write_do_nopr;   // (SiSTer: icache.v)
 wire [35:0]    prefetchfifo_write_data;
 
 //------------------------------------------------------------------------------
@@ -342,6 +355,7 @@ avalon_mem avalon_mem_inst(
     .writeburst_done            (resp_dcachewrite_done),        //output
     
     .writeburst_address         (resp_dcachewrite_address),     //input [31:0]
+    .writeburst_rgn             (resp_dcachewrite_rgn),         //input [3:0] (SiSTer)
     .writeburst_length          (resp_dcachewrite_length),      //input [2:0]
     .writeburst_data_in         (resp_dcachewrite_data),        //input [31:0]
     //END
@@ -351,6 +365,7 @@ avalon_mem avalon_mem_inst(
     .readburst_done             (resp_dcacheread_done),         //output
     
     .readburst_address          (resp_dcacheread_address),      //input  [31:0]
+    .readburst_rgn              (resp_dcacheread_rgn),          //input [3:0] (SiSTer)
     .readburst_length           (resp_dcacheread_length),       //input  [3:0]
     .readburst_data_out         (resp_dcacheread_data),         //output [63:0]
     //END
@@ -370,6 +385,7 @@ avalon_mem avalon_mem_inst(
     
     // avalon master
     .avm_address                (avm_address),                  //output [31:0]
+    .avm_rgn                    (avm_rgn),                      //output [3:0] (SiSTer)
     .avm_writedata              (avm_writedata),                //output [31:0]
     .avm_byteenable             (avm_byteenable),               //output [3:0]
     .avm_burstcount             (avm_burstcount),               //output [3:0]
@@ -424,6 +440,7 @@ icache icache_inst(
     
     //REQ:
     .prefetchfifo_write_do      (prefetchfifo_write_do),      //output
+    .prefetchfifo_write_do_nopr (prefetchfifo_write_do_nopr), //output (SiSTer)
     .prefetchfifo_write_data    (prefetchfifo_write_data),    //output [35:0]
     //END
     
@@ -453,6 +470,7 @@ memory_read memory_read_inst(
     //RESP:
     .read_do            (read_do),            //input
     .read_done          (read_done),          //output
+    .read_done_r0       (read_done_r0),       //output (SiSTer)
     .read_page_fault    (read_page_fault),    //output
     .read_ac_fault      (read_ac_fault),      //output
     
@@ -581,7 +599,10 @@ prefetch_fifo prefetch_fifo_inst(
     //RESP:
     .prefetchfifo_accept_do     (prefetchfifo_accept_do),     //input
     .prefetchfifo_accept_data   (prefetchfifo_accept_data),   //output [67:0]
-    .prefetchfifo_accept_empty  (prefetchfifo_accept_empty)   //output
+    .prefetchfifo_accept_empty  (prefetchfifo_accept_empty),  //output
+    .prefetchfifo_write_do_nopr     (prefetchfifo_write_do_nopr),     //input (SiSTer)
+    .prefetchfifo_accept_length_nopr(prefetchfifo_accept_length_nopr),//output (SiSTer)
+    .prefetchfifo_accept_empty_nopr (prefetchfifo_accept_empty_nopr)  //output (SiSTer)
     //END
 );
 
@@ -720,6 +741,7 @@ tlb tlb_inst(
     .dcacheread_length          (req_dcacheread_length),
     .dcacheread_cache_disable   (req_dcacheread_cache_disable),
     .dcacheread_address         (req_dcacheread_address),
+    .dcacheread_rgn             (req_dcacheread_rgn),           // (SiSTer)
     .dcacheread_data            (req_dcacheread_data),
     //END
     
@@ -730,6 +752,7 @@ tlb tlb_inst(
     .dcachewrite_length             (req_dcachewrite_length),             //output [2:0]
     .dcachewrite_cache_disable      (req_dcachewrite_cache_disable),      //output
     .dcachewrite_address            (req_dcachewrite_address),            //output [31:0]
+    .dcachewrite_rgn                (req_dcachewrite_rgn),                //output [3:0] (SiSTer)
     .dcachewrite_write_through      (req_dcachewrite_write_through),      //output
     .dcachewrite_data               (req_dcachewrite_data),               //output [31:0]
     //END

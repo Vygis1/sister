@@ -51,6 +51,8 @@ module read_commands(
     input       [31:0]  idtr_base,
         
     input       [31:0]  ecx,
+    input               ecx_lo_is_0,    // (SiSTer: ecx[15:0] == 0, registered with ecx -- write_register.v)
+    input               ecx_hi_is_0,    // (SiSTer: ecx[31:16] == 0)
     input       [31:0]  edx,
         
     input       [1:0]   iopl,
@@ -236,15 +238,24 @@ module read_commands(
     output      [15:0]  io_read_address,
     input               rd_io_ready,
     
-    output              rd_io_allow_fault
+    output              rd_io_allow_fault,
+
+    // (SiSTer: io_allow_2_fault_off high builds every output as if the CMD_io_allow step-2 permission
+    //  compare were false; rd_io_allow_2_fault_out is that compare. read.v puts it back at the end:
+    //  only rd_io_allow_fault, rd_src_is_memory, read_system_word and rd_waiting depend on it, each with
+    //  a CMD_io_allow-only term -- see read.v)
+    input               io_allow_2_fault_off,
+    output              rd_io_allow_2_fault_out
 );
 
 //------------------------------------------------------------------------------ string
 
 wire rd_string_ignore;
 
+// (SiSTer: the ecx compares read from the flags registered beside ecx: ecx[15:0] == 0 is ecx_lo_is_0,
+//  ecx == 0 is ecx_lo_is_0 && ecx_hi_is_0)
 assign rd_string_ignore = rd_prefix_group_1_rep != 2'd0 &&
-    ((rd_address_16bit && ecx[15:0] == 16'd0) || (rd_address_32bit && ecx == 32'd0));
+    ((rd_address_16bit && ecx_lo_is_0) || (rd_address_32bit && ecx_lo_is_0 && ecx_hi_is_0));
 
 //------------------------------------------------------------------------------
 
@@ -256,5 +267,7 @@ wire _unused_ok = &{ 1'b0, glob_param_2[31:6], glob_param_3[31:25], tr[1:0], tr_
 //------------------------------------------------------------------------------
 
 `include "autogen/read_commands.v"
+
+assign rd_io_allow_2_fault_out = rd_io_allow_2_fault_raw;   // (SiSTer)
 
 endmodule

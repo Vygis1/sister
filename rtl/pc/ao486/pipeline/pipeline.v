@@ -178,6 +178,8 @@ module pipeline(
     output              prefetchfifo_accept_do,
     input       [67:0]  prefetchfifo_accept_data,
     input               prefetchfifo_accept_empty,
+    input       [3:0]   prefetchfifo_accept_length_nopr,   // (SiSTer: with pr_reset low)
+    input               prefetchfifo_accept_empty_nopr,    // (SiSTer)
     
     //io_read
     output              io_read_do,
@@ -189,6 +191,7 @@ module pipeline(
     //read memory
     output              read_do,
     input               read_done,
+    input               read_done_r0,   // (SiSTer: read_done when rd_reset is low)
     input               read_page_fault,
     input               read_ac_fault,
     
@@ -420,6 +423,8 @@ wire [31:0] cr2;
 wire [31:0] eax /* verilator public */;
 wire [31:0] ebx /* verilator public */;
 wire [31:0] ecx /* verilator public */;
+wire        ecx_lo_is_0, ecx_lo_is_1, ecx_hi_is_0;   // (SiSTer: ecx compares registered with it, write_register.v)
+wire        eax_lo_is_0, eax_lo_is_8000, eax_hi_is_0, edx_lo_is_0, edx_lo_is_8000, edx_hi_is_8000;   // (SiSTer: eax/edx compares, write_register.v)
 wire [31:0] edx /* verilator public */;
 wire [31:0] esp /* verilator public */;
 wire [31:0] ebp /* verilator public */;
@@ -452,6 +457,7 @@ wire [31:0] dr7;
 //------------------------------------------------------------------------------
 
 wire [3:0]  fetch_valid;
+wire [3:0]  fetch_valid_nopr;   // (SiSTer: fetch.v)
 wire [63:0] fetch;
 wire        fetch_limit;
 wire        fetch_page_fault;
@@ -473,9 +479,12 @@ fetch fetch_inst(
     .prefetchfifo_accept_do     (prefetchfifo_accept_do),       //output
     .prefetchfifo_accept_data   (prefetchfifo_accept_data),     //input [67:0]
     .prefetchfifo_accept_empty  (prefetchfifo_accept_empty),    //input
+    .prefetchfifo_accept_length_nopr(prefetchfifo_accept_length_nopr), //input (SiSTer)
+    .prefetchfifo_accept_empty_nopr (prefetchfifo_accept_empty_nopr),  //input (SiSTer)
     
     // fetch interface to decode
     .fetch_valid                (fetch_valid),                  //output [3:0]
+    .fetch_valid_nopr           (fetch_valid_nopr),             //output [3:0] (SiSTer)
     .fetch                      (fetch),                        //output [63:0]
     .fetch_limit                (fetch_limit),                  //output
     .fetch_page_fault           (fetch_page_fault),             //output
@@ -500,6 +509,8 @@ wire        dec_prefix_group_1_lock;
 wire [2:0]  dec_prefix_group_2_seg;
 wire        dec_prefix_2byte;
 wire [3:0]  dec_consumed;
+wire [31:0] dec_eip_go;        // (SiSTer: decode.v)
+wire [3:0]  dec_consumed_go;   // (SiSTer: decode.v)
 wire [2:0]  dec_modregrm_len;
 wire        dec_is_8bit;
 wire [6:0]  dec_cmd;
@@ -527,6 +538,7 @@ decode decode_inst(
     
     //fetch interface
     .fetch_valid        (fetch_valid),          //input [3:0]
+    .fetch_valid_nopr   (fetch_valid_nopr),     //input [3:0] (SiSTer)
     .fetch              (fetch),                //input [63:0]
     .fetch_limit        (fetch_limit),          //input
     .fetch_page_fault   (fetch_page_fault),     //input
@@ -544,6 +556,7 @@ decode decode_inst(
     
     .decoder                    (decoder),                  //output [95:0]
     .dec_eip                    (dec_eip),                  //output [31:0]
+    .dec_eip_go                 (dec_eip_go),               //output [31:0] (SiSTer)
     .dec_operand_32bit          (dec_operand_32bit),        //output
     .dec_address_32bit          (dec_address_32bit),        //output
     .dec_prefix_group_1_rep     (dec_prefix_group_1_rep),   //output [1:0]
@@ -551,6 +564,7 @@ decode decode_inst(
     .dec_prefix_group_2_seg     (dec_prefix_group_2_seg),   //output [2:0]
     .dec_prefix_2byte           (dec_prefix_2byte),         //output
     .dec_consumed               (dec_consumed),             //output [3:0]
+    .dec_consumed_go            (dec_consumed_go),          //output [3:0] (SiSTer)
     .dec_modregrm_len           (dec_modregrm_len),         //output [2:0]
     .dec_is_8bit                (dec_is_8bit),              //output
     .dec_cmd                    (dec_cmd),                  //output [6:0]
@@ -613,6 +627,7 @@ microcode microcode_inst(
 
     .decoder                       (decoder),                       //input [95:0]
     .dec_eip                       (dec_eip),                       //input [31:0]
+    .dec_eip_go                    (dec_eip_go),                    //input [31:0] (SiSTer)
     .dec_operand_32bit             (dec_operand_32bit),             //input
     .dec_address_32bit             (dec_address_32bit),             //input
     .dec_prefix_group_1_rep        (dec_prefix_group_1_rep),        //input [1:0]
@@ -620,6 +635,7 @@ microcode microcode_inst(
     .dec_prefix_group_2_seg        (dec_prefix_group_2_seg),        //input [2:0]
     .dec_prefix_2byte              (dec_prefix_2byte),              //input
     .dec_consumed                  (dec_consumed),                  //input [3:0]
+    .dec_consumed_go               (dec_consumed_go),               //input [3:0] (SiSTer)
     .dec_modregrm_len              (dec_modregrm_len),              //input [2:0]
     .dec_is_8bit                   (dec_is_8bit),                   //input
     .dec_cmd                       (dec_cmd),                       //input [6:0]
@@ -751,6 +767,8 @@ read read_inst(
     .eax                           (eax),                           //input [31:0]
     .ebx                           (ebx),                           //input [31:0]
     .ecx                           (ecx),                           //input [31:0]
+    .ecx_lo_is_0                   (ecx_lo_is_0),                   //input (SiSTer)
+    .ecx_hi_is_0                   (ecx_hi_is_0),                   //input (SiSTer)
     .edx                           (edx),                           //input [31:0]
     .esp                           (esp),                           //input [31:0]
     .ebp                           (ebp),                           //input [31:0]
@@ -806,6 +824,7 @@ read read_inst(
     //read memory
     .read_do                       (read_do),                       //output
     .read_done                     (read_done),                     //input
+    .read_done_r0                  (read_done_r0),                  //input (SiSTer)
     .read_page_fault               (read_page_fault),               //input
     .read_ac_fault                 (read_ac_fault),                 //input
     .read_cpl                      (read_cpl),                      //output [1:0]
@@ -918,6 +937,12 @@ execute execute_inst(
     .eax                           (eax),                           //input [31:0]
     .ecx                           (ecx),                           //input [31:0]
     .edx                           (edx),                           //input [31:0]
+    .eax_lo_is_0                   (eax_lo_is_0),                     //input (SiSTer)
+    .eax_lo_is_8000                (eax_lo_is_8000),                  //input (SiSTer)
+    .eax_hi_is_0                   (eax_hi_is_0),                     //input (SiSTer)
+    .edx_lo_is_0                   (edx_lo_is_0),                     //input (SiSTer)
+    .edx_lo_is_8000                (edx_lo_is_8000),                  //input (SiSTer)
+    .edx_hi_is_8000                (edx_hi_is_8000),                  //input (SiSTer)
     .ebp                           (ebp),                           //input [31:0]
     .esp                           (esp),                           //input [31:0]
     
@@ -1299,7 +1324,16 @@ write write_inst(
     .eax                 (eax),                 //output [31:0]
     .ebx                 (ebx),                 //output [31:0]
     .ecx                 (ecx),                 //output [31:0]
+    .ecx_lo_is_0         (ecx_lo_is_0),         //output (SiSTer)
+    .ecx_lo_is_1         (ecx_lo_is_1),         //output (SiSTer)
+    .ecx_hi_is_0         (ecx_hi_is_0),         //output (SiSTer)
     .edx                 (edx),                 //output [31:0]
+    .eax_lo_is_0         (eax_lo_is_0),           //output (SiSTer)
+    .eax_lo_is_8000      (eax_lo_is_8000),        //output (SiSTer)
+    .eax_hi_is_0         (eax_hi_is_0),           //output (SiSTer)
+    .edx_lo_is_0         (edx_lo_is_0),           //output (SiSTer)
+    .edx_lo_is_8000      (edx_lo_is_8000),        //output (SiSTer)
+    .edx_hi_is_8000      (edx_hi_is_8000),        //output (SiSTer)
     .esi                 (esi),                 //output [31:0]
     .edi                 (edi),                 //output [31:0]
     .ebp                 (ebp),                 //output [31:0]

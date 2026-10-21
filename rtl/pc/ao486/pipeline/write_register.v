@@ -214,6 +214,17 @@ module write_register(
     output reg  [31:0]  eax,
     output reg  [31:0]  ebx,
     output reg  [31:0]  ecx,
+    // (SiSTer: halves of eax and edx compared with 0 and 16'h8000, kept beside them -- execute_divide.v)
+    output reg          eax_lo_is_0,
+    output reg          eax_lo_is_8000,
+    output reg          eax_hi_is_0,
+    output reg          edx_lo_is_0,
+    output reg          edx_lo_is_8000,
+    output reg          edx_hi_is_8000,
+    // (SiSTer: ecx[15:0] == 0, ecx[15:0] == 1 and ecx[31:16] == 0, kept beside ecx -- write_string.v)
+    output reg          ecx_lo_is_0,
+    output reg          ecx_lo_is_1,
+    output reg          ecx_hi_is_0,
     output reg  [31:0]  edx,
     output reg  [31:0]  esi,
     output reg  [31:0]  edi,
@@ -413,7 +424,47 @@ assign esp_value =
 always @(posedge clk) begin if(rst_n[0] == 1'b0) eax <= `STARTUP_EAX; else if(w_write_regrm) eax <= eax_value;                                              else eax <= eax_to_reg; end
 always @(posedge clk) begin if(rst_n[0] == 1'b0) ebx <= `STARTUP_EBX; else if(w_write_regrm) ebx <= ebx_value;                                              else ebx <= ebx_to_reg; end
 always @(posedge clk) begin if(rst_n[0] == 1'b0) ecx <= `STARTUP_ECX; else if(w_write_regrm) ecx <= ecx_value;                                              else ecx <= ecx_to_reg; end
+// (SiSTer: the compares write_string makes on ecx, registered with it from the same next value, so
+//  that rep's last-iteration test is a register read instead of a 32-bit compare)
+wire [31:0] ecx_next = (w_write_regrm)? ecx_value : ecx_to_reg;
+localparam [31:0] STARTUP_ECX_VALUE = `STARTUP_ECX;
+always @(posedge clk) begin
+    if(rst_n[0] == 1'b0) begin
+        ecx_lo_is_0 <= STARTUP_ECX_VALUE[15:0]  == 16'd0;
+        ecx_lo_is_1 <= STARTUP_ECX_VALUE[15:0]  == 16'd1;
+        ecx_hi_is_0 <= STARTUP_ECX_VALUE[31:16] == 16'd0;
+    end
+    else begin
+        ecx_lo_is_0 <= ecx_next[15:0]  == 16'd0;
+        ecx_lo_is_1 <= ecx_next[15:0]  == 16'd1;
+        ecx_hi_is_0 <= ecx_next[31:16] == 16'd0;
+    end
+end
 always @(posedge clk) begin if(rst_n[0] == 1'b0) edx <= `STARTUP_EDX; else if(w_write_regrm) edx <= edx_value;                                              else edx <= edx_to_reg; end
+// (SiSTer: the compares execute_divide makes on eax and edx (its IDIV overflow test), registered with them
+//  from the same next values, so that they are register reads)
+wire [31:0] eax_next = (w_write_regrm)? eax_value : eax_to_reg;
+wire [31:0] edx_next = (w_write_regrm)? edx_value : edx_to_reg;
+localparam [31:0] STARTUP_EAX_VALUE = `STARTUP_EAX;
+localparam [31:0] STARTUP_EDX_VALUE = `STARTUP_EDX;
+always @(posedge clk) begin
+    if(rst_n[0] == 1'b0) begin
+        eax_lo_is_0    <= STARTUP_EAX_VALUE[15:0]  == 16'h0000;
+        eax_lo_is_8000 <= STARTUP_EAX_VALUE[15:0]  == 16'h8000;
+        eax_hi_is_0    <= STARTUP_EAX_VALUE[31:16] == 16'h0000;
+        edx_lo_is_0    <= STARTUP_EDX_VALUE[15:0]  == 16'h0000;
+        edx_lo_is_8000 <= STARTUP_EDX_VALUE[15:0]  == 16'h8000;
+        edx_hi_is_8000 <= STARTUP_EDX_VALUE[31:16] == 16'h8000;
+    end
+    else begin
+        eax_lo_is_0    <= eax_next[15:0]  == 16'h0000;
+        eax_lo_is_8000 <= eax_next[15:0]  == 16'h8000;
+        eax_hi_is_0    <= eax_next[31:16] == 16'h0000;
+        edx_lo_is_0    <= edx_next[15:0]  == 16'h0000;
+        edx_lo_is_8000 <= edx_next[15:0]  == 16'h8000;
+        edx_hi_is_8000 <= edx_next[31:16] == 16'h8000;
+    end
+end
 always @(posedge clk) begin if(rst_n[0] == 1'b0) esi <= `STARTUP_ESI; else if(w_write_regrm) esi <= esi_value;                                              else esi <= esi_to_reg; end
 always @(posedge clk) begin if(rst_n[0] == 1'b0) edi <= `STARTUP_EDI; else if(w_write_regrm) edi <= edi_value;                                              else edi <= edi_to_reg; end
 always @(posedge clk) begin if(rst_n[0] == 1'b0) ebp <= `STARTUP_EBP; else if(w_write_regrm) ebp <= ebp_value;                                              else ebp <= ebp_to_reg; end
