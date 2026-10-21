@@ -61,7 +61,7 @@ module `GB_TB_NAME;
 	wire        sio_start;
 	wire [15:0] dbg_pc;
 	wire        dbg_halted;
-	wire [7:0]  sav_q;
+	wire [31:0] sav_word;
 	wire        cram_dirty;
 	reg  [7:0]  joy = 8'h00;
 
@@ -72,7 +72,7 @@ module `GB_TB_NAME;
 		.px_x(px_x), .px_y(px_y), .px_shade(px_shade), .px_rgb(px_rgb), .cgb_mode(cgb_mode),
 		.pixel_en(pixel_en), .frame_start(frame_start),
 		.audio_l(audio_l), .audio_r(audio_r),
-		.sav_addr(15'd0), .sav_q(sav_q), .cram_dirty(cram_dirty), .sav_clear(1'b0),
+		.h_ptr(16'd0), .h_load(1'b0), .h_wr(1'b0), .h_wdata(32'd0), .h_word(sav_word), .cram_dirty(cram_dirty), .dirty_clr(1'b0),
 		.sio_data(sio_data), .sio_start(sio_start),
 		.dbg_pc(dbg_pc), .dbg_halted(dbg_halted)
 	);

@@ -33,11 +33,11 @@ Legend: ✅ done · 🔧 in progress · ⬜ planned
 
 ### Game Boy / Game Boy Color
 - ✅ Both models, MBC1/3/5; cgb-acid2 pixel-exact on the board
-- ⬜ Battery saves on the SD card
+- ✅ Battery saves on the SD card: MBC1/3/5 RAM and the MBC3 clock
 
 ### Game Boy Advance
 - ✅ Pokémon Emerald with its clock; the open BIOS built in
-- 🔧 Saves on the SD card (written; to be confirmed on the board)
+- ✅ Saves on the SD card: SRAM, 64/128 kB flash, 512 B/8 kB EEPROM (jsmolka's save tests pass on the board)
 - ⬜ OBJ mosaic, prefetch accuracy
 
 ### PC Engine

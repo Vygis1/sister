@@ -56,8 +56,11 @@ module gba_top #(
 	output wire signed [15:0] audio_r,
 	output wire [31:0] dbg_pc,
 	output wire [31:0] dbg_bus,             // what the bus is doing (ctrl 0x1D4 on the console)
-	output reg         sram_dirty,          // the save RAM was written since the flag was cleared
+	output reg         sram_dirty,          // the save RAM was written (or erased) since the flag was cleared
 	input  wire        sram_dirty_clr,
+	input  wire        flash64,             // the cartridge's flash is a 64 kB one (FLASH512 / FLASH_V games): its ID, one bank
+	input  wire        eeprom,              // the cartridge saves to a serial EEPROM at 0x0D000000 (EEPROM_V games)
+	output wire [1:0]  eep_size,            // ...which the game has shown to be {8 kB, 512 B} by its commands' length
 	// the cartridge's clock (Pokemon, Boktai): on or not, and the time the menu keeps
 	input  wire        rtc_en,
 	input  wire [55:0] rtc_now              // {year, month, day, weekday, hour, minute, second}, BCD
@@ -133,17 +136,47 @@ module gba_top #(
 
 	// ---- the save RAM's flash chip --------------------------------------------------------------------
 	// Games that save to flash talk to the chip with the AA/55 command handshake at 0x5555/0x2AAA:
-	// 0x90 enters ID mode (reads at 0/1 give the maker and the part -- Sanyo's 128 kB one here,
-	// which has two 64 kB banks picked by command 0xB0), 0xF0 leaves it, 0x80 then 0x10 erases
-	// the chip, 0x80 then 0x30 at an address erases its 4 kB sector, 0xA0 programs the next byte
-	// written. A chip erase fills DDR3 with 0xFF while the processor waits, as the real chip would
-	// have it poll. Games that use plain SRAM never send the handshake and see 64 kB of RAM.
+	// 0x90 enters ID mode (reads at 0/1 give the maker and the part), 0xF0 leaves it, 0x80 then
+	// 0x10 erases the chip, 0x80 then 0x30 at an address erases its 4 kB sector, 0xA0 programs
+	// the next byte written. The part: Sanyo's 128 kB one (62h, 13h), which has two 64 kB banks
+	// picked by command 0xB0 -- or, with flash64, Panasonic's 64 kB one (32h, 1Bh), one bank: the
+	// games built on the 64 kB library (FLASH512_V, FLASH_V) look for a 64 kB part's ID and find
+	// no flash in Sanyo's. A chip erase fills DDR3 with 0xFF (the whole chip: both banks of the
+	// 128 kB one) while the processor waits, as the real chip would have it poll. Games that use
+	// plain SRAM never send the handshake and see 64 kB of RAM.
 	reg  [2:0]  fl_st;                     // 0 idle, 1 AA seen, 2 AA 55 seen, 3 erase armed, 4 erase armed + AA, 5 erase armed + AA 55, 6 program next, 7 bank next
 	reg         fl_id, fl_bank;
-	reg  [14:0] fl_fill_n;                 // words of 0xFF still to write (an erase)
+	reg  [15:0] fl_fill_n;                 // words of 0xFF still to write (an erase)
 	reg  [14:0] fl_fill_a;                 // ...and where (words from the save RAM's start)
 	reg         fl_fill_rq;
-	wire        fl_busy = (fl_fill_n != 15'd0);
+	wire        fl_busy = (fl_fill_n != 16'd0);
+
+	// ---- the save EEPROM (GBATEK "GBA Cart Backup EEPROM") ------------------------------------------
+	// With `eeprom` the cartridge's region D (0x0D000000 up; the cartridge is 16 MB at most here) is
+	// a serial EEPROM: bit 0 of each halfword written is the next bit of a command, sent by DMA.
+	// A read request is "11", the block's address (6 bits on a 512 B part, 14 on an 8 kB one, of
+	// which 10 are used), "0"; a write is "10", the address, 64 bits of data, "0". Which part it
+	// is shows in the length, so a command is decoded by the first READ after it: 9 / 17 bits a
+	// read request -- the next 68 reads give 4 zeros and the block's 64 bits, the first highest --
+	// 73 / 81 bits a write (the read is the game's poll for ready: 1). Blocks live in the save
+	// region (ext words 0x10000 up), block n at bytes 8n-8n+7, its first bit bit 7 of byte 8n: the
+	// layout of the emulators' .sav. A block moves to or from there through the ext port while the
+	// bus is idle, the processor and DMA held meanwhile, as for a flash erase.
+	reg  [80:0] eep_sh;                    // the command so far, its first bit highest
+	reg  [6:0]  eep_n;                     // ...how many bits (127: too many)
+	reg  [1:0]  eep_mode;                  // 0 taking a command, 1 reading a block out, 2 done (reads 1)
+	reg  [6:0]  eep_ri;                    // reads given in mode 1
+	reg  [9:0]  eep_addr;                  // the block
+	reg  [63:0] eep_data;
+	reg  [1:0]  eep_rn, eep_wn;            // words still to fetch / to store
+	reg         eep_k, eep_rq;             // which word of the block; a request out
+	reg  [1:0]  eep_sz;                    // {8 kB, 512 B} seen
+	assign eep_size = eep_sz;
+	wire        eep_busy = (eep_rn != 2'd0) || (eep_wn != 2'd0);
+	wire        eep_b1 = eep_sh[eep_n - 7'd1], eep_b2 = eep_sh[eep_n - 7'd2];   // the command's first two bits
+	// a block's words as they sit in the save memory (little-endian bytes, byte 0 the first eight bits)
+	wire [31:0] eep_w0 = {eep_data[39:32], eep_data[47:40], eep_data[55:48], eep_data[63:56]};
+	wire [31:0] eep_w1 = {eep_data[7:0], eep_data[15:8], eep_data[23:16], eep_data[31:24]};
 
 	// ---- the bus ----------------------------------------------------------------------------------
 	// One access engine for the processor and the DMA controller. An access is accepted the clock
@@ -195,6 +228,7 @@ module gba_top #(
 	wire        r_vram = (region == 4'h6);
 	wire        r_oam  = (region == 4'h7);
 	wire        r_rom  = (region >= 4'h8) && (region <= 4'hD);
+	wire        r_eep  = (region == 4'hD) && eeprom;
 	wire        r_sram = (region == 4'hE) || (region == 4'hF);
 	wire        bus16  = r_ew || r_pal || r_vram || r_rom;
 	wire        units2 = bus16 && (acc_size == 2'd2);
@@ -221,7 +255,7 @@ module gba_top #(
 	wire [31:0] dma_dst_a = {4'd0, dma_dst[b_ch]} & (b_size == 2'd2 ? 32'hFFFFFFFC : 32'hFFFFFFFE);
 
 	// what is being set up this clock
-	wire        setup_new = (bs == B_IDLE) && !fl_busy && (dma_any || (c_req && !c_ack && !halted && !pause));
+	wire        setup_new = (bs == B_IDLE) && !fl_busy && !eep_busy && (dma_any || (c_req && !c_ack && !halted && !pause));
 	wire        done_w;                    // the current unit completes this clock (below)
 	wire        setup_second = (bs == B_WAIT) && done_w && b_two && !b_second;
 	wire        setup_dmaw = (bs == B_WAIT) && done_w && !(b_two && !b_second) && b_dma && b_dma_rd;
@@ -313,7 +347,8 @@ module gba_top #(
 			end
 			dma_pend <= 0; dma_fifo <= 0; tm_ov <= 0; tpre <= 0; pf_n <= 0; pf_cnt <= 0; pf_head <= 0; pf_rom_busy <= 0; bios_last <= 32'hE129F000;
 			b_dma <= 0; b_second <= 0; b_two <= 0; b_snd <= 0; ppu_pend <= 0; b_data_ok <= 0; pal_pend <= 0;
-			fl_st <= 3'd0; fl_id <= 1'b0; fl_bank <= 1'b0; fl_fill_n <= 15'd0; fl_fill_a <= 15'd0; fl_fill_rq <= 1'b0; sram_dirty <= 1'b0;
+			fl_st <= 3'd0; fl_id <= 1'b0; fl_bank <= 1'b0; fl_fill_n <= 16'd0; fl_fill_a <= 15'd0; fl_fill_rq <= 1'b0; sram_dirty <= 1'b0;
+			eep_n <= 7'd0; eep_mode <= 2'd2; eep_ri <= 7'd0; eep_rn <= 2'd0; eep_wn <= 2'd0; eep_k <= 1'b0; eep_rq <= 1'b0; eep_sz <= 2'd0;
 		end else begin
 			tm_ov <= 4'd0;
 			// the second half of a word written to the picture's registers
@@ -358,7 +393,22 @@ module gba_top #(
 				if (!fl_fill_rq) begin
 					ext_addr <= {2'b10, fl_fill_a}; ext_we <= 1'b1; ext_be <= 4'hF; ext_wdata <= 32'hFFFFFFFF; ext_req <= 1'b1; fl_fill_rq <= 1'b1;
 				end else if (ext_ack) begin
-					ext_req <= 1'b0; fl_fill_rq <= 1'b0; fl_fill_a <= fl_fill_a + 15'd1; fl_fill_n <= fl_fill_n - 15'd1;
+					ext_req <= 1'b0; fl_fill_rq <= 1'b0; fl_fill_a <= fl_fill_a + 15'd1; fl_fill_n <= fl_fill_n - 16'd1;
+				end
+			end
+			// ---- the EEPROM's block to or from the save memory: a word at a time while the bus is idle ----
+			else if (eep_busy && bs == B_IDLE) begin
+				if (!eep_rq) begin
+					ext_addr <= {2'b10, 4'd0, eep_addr, eep_k}; ext_we <= (eep_wn != 2'd0); ext_be <= 4'hF;
+					ext_wdata <= eep_k ? eep_w1 : eep_w0; ext_req <= 1'b1; eep_rq <= 1'b1;
+				end else if (ext_ack) begin
+					ext_req <= 1'b0; eep_rq <= 1'b0; eep_k <= ~eep_k;
+					if (eep_wn != 2'd0) eep_wn <= eep_wn - 2'd1;
+					else begin
+						eep_rn <= eep_rn - 2'd1;
+						if (!eep_k) eep_data[63:32] <= {ext_rdata[7:0], ext_rdata[15:8], ext_rdata[23:16], ext_rdata[31:24]};
+						else        eep_data[31:0]  <= {ext_rdata[7:0], ext_rdata[15:8], ext_rdata[23:16], ext_rdata[31:24]};
+					end
 				end
 			end
 			if (sram_dirty_clr) sram_dirty <= 1'b0;
@@ -369,7 +419,9 @@ module gba_top #(
 				if (l_ext && ext_ack) begin
 					ext_req <= 1'b0; b_data_ok <= 1'b1;
 					mem_q <= l_sram ? {4{ext_rdata[8 * b_addr[1:0] +: 8]}} : ext_rdata;
-					if (l_sram && fl_id && b_addr[15:1] == 15'd0) mem_q <= b_addr[0] ? 32'h13131313 : 32'h62626262;   // Sanyo 128 kB
+					if (l_sram && fl_id && b_addr[15:1] == 15'd0)
+						mem_q <= flash64 ? (b_addr[0] ? 32'h1B1B1B1B : 32'h32323232)        // Panasonic 64 kB
+						                 : (b_addr[0] ? 32'h13131313 : 32'h62626262);       // Sanyo 128 kB
 				end
 				if (b_snd && snd_rd_done) begin mem_q <= snd_rd_q; b_data_ok <= 1'b1; b_snd <= 1'b0; end
 				if (tick && b_wait != 5'd0) b_wait <= b_wait - 5'd1;
@@ -424,9 +476,36 @@ module gba_top #(
 				b_wait <= pf_hit ? 5'd1 : unit_cycles;
 				b_data_ok <= 1'b0; b_snd <= 1'b0;
 				if (pf_hit) begin pf_n <= pf_n - 4'd1; pf_head <= pf_head + 25'd2; end
-				else if (r_rom) begin pf_n <= 4'd0; pf_cnt <= 4'd0; pf_head <= acc_addr[24:0] + 25'd2; end   // (the buffer starts again past this word)
+				else if (r_rom && !r_eep) begin pf_n <= 4'd0; pf_cnt <= 4'd0; pf_head <= acc_addr[24:0] + 25'd2; end   // (the buffer starts again past this word)
 				pf_rom_busy <= r_rom;
-				if (r_rom) begin
+				if (r_eep) begin
+					// the EEPROM: a bit in, or a bit out (answered now; its cycles are the cartridge's)
+					b_data_ok <= 1'b1;
+					if (acc_we) begin
+						if (eep_mode != 2'd0) begin eep_sh <= {80'd0, acc_wdata[0]}; eep_n <= 7'd1; eep_mode <= 2'd0; end
+						else begin eep_sh <= {eep_sh[79:0], acc_wdata[0]}; if (eep_n != 7'd127) eep_n <= eep_n + 7'd1; end
+					end else begin
+						mem_q <= 32'h00010001;                                  // (ready; and what reads past a block give)
+						if (eep_mode == 2'd1) begin
+							mem_q <= (eep_ri < 7'd4) ? 32'd0 : {2{15'd0, eep_data[7'd67 - eep_ri]}};
+							eep_ri <= eep_ri + 7'd1;
+							if (eep_ri == 7'd67) eep_mode <= 2'd2;
+						end else if (eep_mode == 2'd0) begin
+							eep_mode <= 2'd2;
+							if (eep_b1 && eep_b2 && (eep_n == 7'd9 || eep_n == 7'd17)) begin          // a read request
+								eep_addr <= (eep_n == 7'd9) ? {4'd0, eep_sh[6:1]} : eep_sh[10:1];
+								eep_sz <= eep_sz | ((eep_n == 7'd9) ? 2'b01 : 2'b10);
+								eep_mode <= 2'd1; eep_ri <= 7'd1; eep_rn <= 2'd2; eep_k <= 1'b0;
+								mem_q <= 32'd0;                                     // (this read is the first of the four zeros)
+							end else if (eep_b1 && !eep_b2 && (eep_n == 7'd73 || eep_n == 7'd81)) begin   // a write
+								eep_addr <= (eep_n == 7'd73) ? {4'd0, eep_sh[70:65]} : eep_sh[74:65];
+								eep_data <= eep_sh[64:1];
+								eep_sz <= eep_sz | ((eep_n == 7'd73) ? 2'b01 : 2'b10);
+								eep_wn <= 2'd2; eep_k <= 1'b0; sram_dirty <= 1'b1;
+							end
+						end
+					end
+				end else if (r_rom) begin
 					if (acc_we) begin
 						b_data_ok <= 1'b1;                                     // (a cartridge write: nothing -- but the clock's port)
 						if (gpio_a) begin rtc_we <= 1'b1; rtc_wa <= gpio_r; rtc_wd <= acc_addr[1] ? acc_wdata[19:16] : acc_wdata[3:0]; end
@@ -464,11 +543,14 @@ module gba_top #(
 								3'd4: fl_st <= 3'd5;
 								3'd5: begin
 									fl_st <= 3'd0;
-									if (fl_cmd_addr && fl_byte == 8'h10) begin fl_fill_a <= {fl_bank, 14'd0}; fl_fill_n <= 15'd16384; end   // the chip (this bank)
-									else if (fl_byte == 8'h30) begin fl_fill_a <= {fl_bank, acc_addr[15:12], 10'd0}; fl_fill_n <= 15'd1024; end   // a sector
+									if (fl_cmd_addr && fl_byte == 8'h10) begin                  // the chip: both banks of a 128 kB one
+										fl_fill_a <= 15'd0; fl_fill_n <= flash64 ? 16'd16384 : 16'd32768; sram_dirty <= 1'b1;
+									end else if (fl_byte == 8'h30) begin                        // a sector
+										fl_fill_a <= {fl_bank, acc_addr[15:12], 10'd0}; fl_fill_n <= 16'd1024; sram_dirty <= 1'b1;
+									end
 								end
 								3'd6: fl_st <= 3'd0;                                 // (the programmed byte goes through)
-								default: begin fl_st <= 3'd0; fl_bank <= fl_byte[0]; end
+								default: begin fl_st <= 3'd0; fl_bank <= fl_byte[0] && !flash64; end
 								endcase
 							end
 							if (!fl_handshake) sram_dirty <= 1'b1;

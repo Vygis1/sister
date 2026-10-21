@@ -82,6 +82,7 @@ module tb_gba_sys;
 	wire px_we; wire [7:0] px_x, px_y; wire [14:0] px_rgb; wire frame_start;
 	reg [14:0] frame [0:38399];
 	reg [9:0] keys = 0;
+	reg flash64 = 0, eeprom = 0;          // FLASH64 / EEPROM: the save type the menu would set (0x1D0 bits 28 / 27)
 	reg rtc_en = 0;                        // RTC: the cartridge clock on (2024-10-17, a Thursday, 12:34:56)
 	wire signed [15:0] audio_l, audio_r;
 	wire [31:0] dbg_pc;
@@ -92,7 +93,7 @@ module tb_gba_sys;
 		.ext_addr(ext_addr), .ext_req(ext_req), .ext_we(ext_we), .ext_be(ext_be), .ext_wdata(ext_wdata), .ext_ack(ext_ack), .ext_rdata(ext_rdata),
 		.keys(keys),
 		.px_we(px_we), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb), .frame_start(frame_start),
-		.audio_l(audio_l), .audio_r(audio_r), .dbg_pc(dbg_pc), .dbg_bus(), .sram_dirty(), .sram_dirty_clr(1'b0),
+		.audio_l(audio_l), .audio_r(audio_r), .dbg_pc(dbg_pc), .dbg_bus(), .sram_dirty(), .sram_dirty_clr(1'b0), .flash64(flash64), .eeprom(eeprom), .eep_size(),
 		.rtc_en(rtc_en), .rtc_now(56'h24101704123456)
 	);
 	integer rowcnt [0:159]; integer rc;
@@ -240,6 +241,8 @@ module tb_gba_sys;
 		if ($test$plusargs("AUDIO")) ffd = $fopen("fifo.txt", "w");
 		fastboot = $test$plusargs("FASTBOOT");
 		rtc_en = $test$plusargs("RTC");
+		flash64 = $test$plusargs("FLASH64");
+		eeprom = $test$plusargs("EEPROM");
 		for (k = 0; k < 8192; k = k + 1) dut.iwram[k] = 0;
 		for (k = 0; k < 24576; k = k + 1) dut.vram[k] = 0;
 		for (k = 0; k < 256; k = k + 1) dut.oam[k] = 0;

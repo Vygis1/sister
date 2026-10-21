@@ -40,17 +40,27 @@
 // bank registers are plain and bank 0 is allowed everywhere. Not here: MBC2 (its
 // 512 x 4-bit RAM and register decode on A8), MBC1 multicarts, MMM01, HuC1/3,
 // and the camera. The MBC3 clock counts T-cycles, so it keeps game time, not
-// wall time, and starts from zero at every reset -- a host that wants it right
-// across power cycles has to save and restore it, which is not provided yet.
+// wall time; at reset it starts from the host's preset (below), which is how a
+// save carries it across power cycles -- the host adds the time it was off.
 //
 // The ROM must be in place (DDR3 loaded) before rst is released: the header is
 // the first thing read.
 //
-// Cartridge RAM is 32 kB of block RAM inside. Saves: `sav_addr`/`sav_q` is a
-// read port on it for the host, `cram_dirty` goes high on the first write after
-// `sav_clear`; a host that wants battery saves polls dirty, reads the RAM out
-// through that port and clears the flag. Loading a save is not yet provided
-// (there is no host write port); that is the hook to add when it is wanted.
+// --- saves -----------------------------------------------------------------------------
+//
+// Cartridge RAM is 32 kB of block RAM inside, with a second port for the host, the
+// SNES's pattern (snes_top): h_ptr is a byte address, h_load reads the four bytes from
+// there into h_word (the first lowest; ready eight clocks later), h_wr writes h_wdata's
+// four there. Both work while the machine is held in reset or paused -- the loader puts
+// a save in before it lets the game go -- and while it runs (the RAM is true dual-port;
+// a read then is a snapshot a word at a time). cram_dirty goes high when the game writes
+// its RAM or its clock, and dirty_clr (or rst) clears it; the host's own writes never
+// set it.
+//
+// The MBC3 clock is at h_ptr $8000 (bit 15 set): the word at $8000 is {days[7:0], hours,
+// minutes, seconds}, the word at $8004 {24'd0, the day-high register: carry, halt, 5'd0,
+// day bit 8} -- the .sav trailer's order. A read gives the running clock; a write sets the
+// preset the clock (and its latched copy) takes at every reset, and the running clock too.
 //
 // --- post-boot state ---------------------------------------------------------------------------
 //
@@ -120,11 +130,14 @@ module gb_top #(
 	output wire signed [15:0] audio_l,
 	output wire signed [15:0] audio_r,
 
-	// saves: a read port on the cartridge RAM for the host
-	input  wire [14:0] sav_addr,
-	output reg  [7:0]  sav_q,
+	// saves: the host's port on the cartridge RAM and the MBC3 clock (see "saves" above)
+	input  wire [15:0] h_ptr,
+	input  wire        h_load,
+	input  wire        h_wr,
+	input  wire [31:0] h_wdata,
+	output reg  [31:0] h_word,
 	output reg         cram_dirty,
-	input  wire        sav_clear,
+	input  wire        dirty_clr,
 
 	// the serial port, for anyone listening (the test ROMs print through it)
 	output wire [7:0]  sio_data,
@@ -277,17 +290,24 @@ module gb_top #(
 	wire       rtc_sel = is_mbc3 && (bank_hi >= 4'h8);
 	wire       cram_ok = ram_en && !rtc_sel && (ram_size != 8'd0);
 
-	reg [7:0] cram [0:32767];
+	(* ram_style = "block" *) reg [7:0] cram [0:32767];
 	reg [7:0] cram_q;
 	wire [14:0] cram_a = {ram_bank_m, ext_a[12:0]};
 	always @(posedge clk) begin
 		if (cpu_wr && sel_cram && !dma_active && cram_ok) cram[cram_a] <= cpu_dout;
 		cram_q <= cram[cram_a];
 	end
-	always @(posedge clk) sav_q <= cram[sav_addr];
+	// port B: the host's (the sequencer is below the clock, whose registers it reads too)
+	reg [14:0] hb_a = 15'd0; reg hb_we = 1'b0; reg [7:0] hb_d, hq;
 	always @(posedge clk) begin
-		if (rst || sav_clear) cram_dirty <= 1'b0;
-		else if (cpu_wr && sel_cram && !dma_active && cram_ok) cram_dirty <= 1'b1;
+		hq <= cram[hb_a];
+		if (hb_we) cram[hb_a] <= hb_d;
+	end
+	// the game has written its RAM or its clock since the host last cleared the flag (a write
+	// in the clock of the clear wins: it is not lost)
+	always @(posedge clk) begin
+		if (cpu_wr && sel_cram && !dma_active && ram_en && (cram_ok || rtc_sel)) cram_dirty <= 1'b1;
+		else if (rst || dirty_clr) cram_dirty <= 1'b0;
 	end
 
 	// --- MBC3 real-time clock ---------------------------------------------------------------------------------
@@ -301,6 +321,15 @@ module gb_top #(
 	reg [8:0]  l_d;
 	reg        l_halt, l_carry, rtc_latch;
 	reg [7:0]  rtc_q;
+	// the host's preset, taken at every reset (a save's clock); not reset itself
+	reg [5:0]  p_s = 6'd0, p_m = 6'd0;
+	reg [4:0]  p_h = 5'd0;
+	reg [8:0]  p_d = 9'd0;
+	reg        p_halt = 1'b0, p_carry = 1'b0;
+	reg        h_rtc_we;                 // the host writes the clock's word...
+	reg        h_rtc_hi;                 // ...the day-high one ($8004), or the other
+	reg [31:0] h_rtc_d;
+	wire [7:0] rtc_dh = {rtc_carry, rtc_halt, 5'd0, rtc_d[8]};
 	always @(*) begin
 		case (bank_hi)
 			4'h8: rtc_q = {2'b00, l_s};
@@ -316,9 +345,9 @@ module gb_top #(
 	always @(posedge clk) begin
 		if (rst) begin
 			ram_en <= 1'b0; bank_lo <= 9'd1; bank_hi <= 4'd0; mbc1_mode <= 1'b0;
-			rtc_sub <= 22'd0; rtc_s <= 6'd0; rtc_m <= 6'd0; rtc_h <= 5'd0; rtc_d <= 9'd0;
-			rtc_halt <= 1'b0; rtc_carry <= 1'b0; rtc_latch <= 1'b0;
-			l_s <= 6'd0; l_m <= 6'd0; l_h <= 5'd0; l_d <= 9'd0; l_halt <= 1'b0; l_carry <= 1'b0;
+			rtc_sub <= 22'd0; rtc_s <= p_s; rtc_m <= p_m; rtc_h <= p_h; rtc_d <= p_d;
+			rtc_halt <= p_halt; rtc_carry <= p_carry; rtc_latch <= 1'b0;
+			l_s <= p_s; l_m <= p_m; l_h <= p_h; l_d <= p_d; l_halt <= p_halt; l_carry <= p_carry;
 		end else begin
 			// the clock
 			if (ce && !rtc_halt) begin
@@ -371,7 +400,42 @@ module gb_top #(
 					default: ;
 				endcase
 			end
+			// the host sets the running clock as well as the preset
+			if (h_rtc_we) begin
+				if (!h_rtc_hi) begin
+					rtc_s <= h_rtc_d[5:0]; rtc_m <= h_rtc_d[13:8]; rtc_h <= h_rtc_d[20:16]; rtc_d[7:0] <= h_rtc_d[31:24]; rtc_sub <= 22'd0;
+				end else begin
+					rtc_d[8] <= h_rtc_d[0]; rtc_halt <= h_rtc_d[6]; rtc_carry <= h_rtc_d[7];
+				end
+			end
 		end
+	end
+	always @(posedge clk) if (h_rtc_we) begin
+		if (!h_rtc_hi) begin p_s <= h_rtc_d[5:0]; p_m <= h_rtc_d[13:8]; p_h <= h_rtc_d[20:16]; p_d[7:0] <= h_rtc_d[31:24]; end
+		else begin p_d[8] <= h_rtc_d[0]; p_halt <= h_rtc_d[6]; p_carry <= h_rtc_d[7]; end
+	end
+
+	// --- the host's port: a word of four bytes, a byte a clock (snes_top's sequencer) -------------
+	reg [14:0] hbase; reg [2:0] hcnt = 3'd0; reg [1:0] hidx; reg hwr; reg [31:0] hwd;
+	reg [2:0]  rp1 = 3'd0, rp2 = 3'd0;   // reads in flight: valid, byte
+	always @(posedge clk) begin
+		hb_we <= 1'b0; rp1 <= 3'd0; h_rtc_we <= 1'b0;
+		if (h_load || h_wr) begin
+			if (h_ptr[15]) begin             // the clock: a word at once
+				hcnt <= 3'd0;
+				if (h_wr) begin h_rtc_we <= 1'b1; h_rtc_hi <= h_ptr[2]; h_rtc_d <= h_wdata; end
+				else h_word <= h_ptr[2] ? {24'd0, rtc_dh} : {rtc_d[7:0], 3'd0, rtc_h, 2'd0, rtc_m, 2'd0, rtc_s};
+			end else begin
+				hcnt <= 3'd4; hidx <= 2'd0; hwr <= h_wr; hwd <= h_wdata; hbase <= h_ptr[14:0];
+			end
+		end else if (hcnt != 3'd0) begin
+			hb_a <= hbase + {13'd0, hidx};
+			if (hwr) begin hb_we <= 1'b1; hb_d <= hwd[8 * hidx +: 8]; end
+			else rp1 <= {1'b1, hidx};
+			hidx <= hidx + 2'd1; hcnt <= hcnt - 3'd1;
+		end
+		rp2 <= rp1;
+		if (rp2[2]) h_word[8 * rp2[1:0] +: 8] <= hq;
 	end
 
 	// --- the ROM port -----------------------------------------------------------------------------------------

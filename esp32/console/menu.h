@@ -454,6 +454,8 @@ static bool readAhead() {
   if (xTaskCreatePinnedToCore(rdLoop, "cardread", 4096, nullptr, 2, nullptr, 0) != pdPASS) { rdReq = nullptr; return false; }
   return true;
 }
+// (a look at every chunk a load streams, before it goes: the Game Boy Advance's save-type scan)
+static void (*streamScan)(const uint8_t *, size_t) = nullptr;
 static bool stream(File &f, uint32_t addr, uint32_t n, int swap = 0) {
   bool ahead = readAhead();
   uint8_t *cur = buf, *next = buf2;
@@ -469,6 +471,7 @@ static bool stream(File &f, uint32_t addr, uint32_t n, int swap = 0) {
     } else got = f.read(cur, want);
     uint8_t *buf = cur;
     if (got != want) return false;
+    if (streamScan) streamScan(buf, want);
     size_t words = (want + 3) / 4;
     for (size_t k = want; k < words * 4; k++) buf[k] = 0;
     if (swap == 1) for (size_t k = 0; k + 1 < want; k += 2) std::swap(buf[k], buf[k + 1]);                 // .v64
@@ -719,6 +722,51 @@ static void srmService(bool now_ = false) {
 static const uint32_t GBA_DIRTY = NES + 0x1DC, GBA_SAVE_LINE = 0x204000, GBA_SAVE_BYTES = 128 * 1024;
 static String gsavPath; static uint8_t *gsavLast = nullptr, *gsavNow = nullptr;
 static bool gsavOn = false; static int32_t gsavPos = -1; static uint32_t gsavCheck = 0;
+static uint32_t gsavFile = 0;                       // the save file's size when it was loaded (0: none)
+
+// What the cartridge saves to: the save library's ID string in the ROM (GBATEK "GBA Cart Backup
+// IDs", word-aligned) -- found by looking at the chunks as the loader streams them, the first one
+// winning. The core is told (0x1D0 bit 27 an EEPROM at 0x0D000000, bit 28 a 64 kB flash, whose
+// ID the 64 kB library looks for), and the file is written at the size emulators use: 32 kB
+// SRAM, 64 / 128 kB flash, 512 B / 8 kB EEPROM (which, the core says in 0x1DC [2:1] once the
+// game has used it). No string (homebrew): 128 kB, as before.
+enum { GSAV_UNKNOWN, GSAV_SRAM, GSAV_FLASH64, GSAV_FLASH128, GSAV_EEPROM };
+static int gsavType = GSAV_UNKNOWN;
+static uint8_t gscanTail[12]; static size_t gscanTailN = 0;
+static int gbaIdAt(const uint8_t *p, size_t left) {
+  if (p[0] != 'E' && p[0] != 'S' && p[0] != 'F') return GSAV_UNKNOWN;
+  static const struct { const char *s; int t; } ids[] = {
+    { "EEPROM_V", GSAV_EEPROM }, { "SRAM_F_V", GSAV_SRAM }, { "SRAM_V", GSAV_SRAM },
+    { "FLASH1M_V", GSAV_FLASH128 }, { "FLASH512_V", GSAV_FLASH64 }, { "FLASH_V", GSAV_FLASH64 } };
+  for (auto &id : ids) { size_t n = strlen(id.s); if (left >= n && !memcmp(p, id.s, n)) return id.t; }
+  return GSAV_UNKNOWN;
+}
+static void gbaScan(const uint8_t *b, size_t n) {
+  if (gsavType != GSAV_UNKNOWN) return;
+  if (gscanTailN) {                                 // (one that starts at the end of the chunk before)
+    uint8_t j[24]; size_t m = min(n, (size_t)12);
+    memcpy(j, gscanTail, gscanTailN); memcpy(j + gscanTailN, b, m);
+    for (size_t i = 0; i < gscanTailN; i += 4) if ((gsavType = gbaIdAt(j + i, gscanTailN + m - i))) return;
+  }
+  for (size_t i = 0; i + 4 <= n; i += 4) if ((gsavType = gbaIdAt(b + i, n - i))) return;
+  gscanTailN = min(n, (size_t)12) & ~(size_t)3;
+  memcpy(gscanTail, b + n - gscanTailN, gscanTailN);
+}
+// the bytes of the save that are the game's (what the file holds)
+static uint32_t gbaSaveBytes() {
+  switch (gsavType) {
+    case GSAV_SRAM: return 32 * 1024;
+    case GSAV_FLASH64: return 64 * 1024;
+    case GSAV_FLASH128: return 128 * 1024;
+    case GSAV_EEPROM: {
+      uint32_t sz = (fpga.busRead(GBA_DIRTY) >> 1) & 3;
+      if (sz & 2) return 8192;
+      if (sz & 1) return 512;
+      return gsavFile == 512 ? 512 : 8192;            // (not used yet: as the file was, or the bigger)
+    }
+    default: return GBA_SAVE_BYTES;
+  }
+}
 
 static void gbaSaveBegin(const String &rom) {
   String n = rom.substring(rom.lastIndexOf('/') + 1);
@@ -729,7 +777,8 @@ static void gbaSaveBegin(const String &rom) {
   if (!gsavNow) gsavNow = bigBuf(GBA_SAVE_BYTES);
   memset(gsavLast, 0xFF, GBA_SAVE_BYTES);           // (no save yet: erased)
   File f = SD.open(gsavPath);
-  if (f) { f.read(gsavLast, min((uint32_t)f.size(), GBA_SAVE_BYTES)); f.close(); Log.println("menu: save " + gsavPath); }
+  gsavFile = 0;
+  if (f) { gsavFile = f.size(); f.read(gsavLast, min(gsavFile, GBA_SAVE_BYTES)); f.close(); Log.println("menu: save " + gsavPath); }
   // into the console's save memory, through the fill, in checked chunks as a cartridge goes
   fpga.busWrite(NES_CART_BANK, 0);
   for (uint32_t a = 0; a < GBA_SAVE_BYTES; a += 4096) {
@@ -756,15 +805,16 @@ static void gbaSaveService(bool now_ = false) {
     gsavPos = 0;
   }
   // a slice of lines a pass (all of them when it has to be now)
-  uint32_t lines = GBA_SAVE_BYTES / 16, slice = now_ ? lines : 256;
+  uint32_t bytes = gbaSaveBytes();
+  uint32_t lines = bytes / 16, slice = now_ ? lines : 256;
   for (uint32_t k = 0; k < slice && (uint32_t)gsavPos < lines; k++, gsavPos++)
     if (!cardLine(GBA_SAVE_LINE + gsavPos, gsavNow + 16 * gsavPos)) { gsavPos = -1; return; }
   if ((uint32_t)gsavPos < lines) return;
   gsavPos = -1;
-  if (!memcmp(gsavNow, gsavLast, GBA_SAVE_BYTES)) return;
+  if (!memcmp(gsavNow, gsavLast, bytes) && gsavFile == bytes) return;
   SD.mkdir("/saves"); SD.mkdir("/saves/gba");
   File f = SD.open(gsavPath, FILE_WRITE);
-  if (f) { f.write(gsavNow, GBA_SAVE_BYTES); f.close(); memcpy(gsavLast, gsavNow, GBA_SAVE_BYTES); Log.println("menu: saved " + gsavPath); }
+  if (f) { f.write(gsavNow, bytes); f.close(); memcpy(gsavLast, gsavNow, bytes); gsavFile = bytes; Log.println("menu: saved " + gsavPath); }
 }
 
 // --- the clock -----------------------------------------------------------------------------------
@@ -868,6 +918,118 @@ static bool gbaHasClock(File &f) {
   static const char *withClock[] = { "AXV", "AXP", "BPE", "U3I", "U32", "U33" };
   for (const char *c : withClock) if (!strncmp(code, c, 3)) return true;
   return false;
+}
+
+// --- the Game Boy's battery RAM ------------------------------------------------------------
+// The cartridge RAM on the board (gb_top: 32 kB of block RAM) through the SNES's two registers
+// -- the selected core answers -- 0x184 the pointer, 0x188 the word; the MBC3's clock at
+// pointer 0x8000 ({days[7:0], hours, minutes, seconds}) and 0x8004 (the day-high register:
+// carry, halt, day bit 8), a write there setting the clock the game starts with.
+// /saves/gb/<game>.sav holds the RAM and, for a cartridge with the clock, the 48 bytes BGB,
+// VBA-M and mGBA append: the five registers as 32-bit words, the latched five, and when it was
+// saved (64-bit seconds since 1970; an older 44-byte trailer has 32). Coming back in, the clock
+// is moved on by the time the game was off (the menu's clock, clockNow), so it keeps the
+// wall's time across sessions. Written back as the SNES's: when the game has written to it and
+// it has changed -- and, for a clock, always on the way out, so the time it was left at is fresh.
+static const uint32_t GB_RAM_MAX = 32768, GB_RTC_BYTES = 48, GB_RTC_PTR = 0x8000;
+static String gbsPath; static uint32_t gbsSize = 0; static bool gbsClock = false, gbsOn = false;
+static uint8_t *gbsLast = nullptr; static uint32_t gbsCheck = 0; static int32_t gbsPos = -1;
+
+// the header's cartridge type ($0147): a battery behind its RAM (MBC1, ROM + RAM, MBC3, MBC5 --
+// the mappers gb_top has), and the clock (MBC3 + timer)
+static bool gbBattery(uint8_t t) { return t == 0x03 || t == 0x09 || t == 0x0F || t == 0x10 || t == 0x13 || t == 0x1B || t == 0x1E; }
+static bool gbHasClock(uint8_t t) { return t == 0x0F || t == 0x10; }
+// the header's RAM size ($0149): 2, 8, 32 kB (the 64 and 128 kB ones keep their first 32: the core's)
+static uint32_t gbRamBytes(uint8_t r) { return r == 1 ? 2048 : r == 2 ? 8192 : (r >= 3 && r <= 5) ? GB_RAM_MAX : 0; }
+
+static uint32_t gbLe32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+static void gbPut32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+// the clock's registers {s, m, h, days low, day high} moved on by `secs` (a halted clock stays;
+// past day 511 the carry is set and the days go round, as the chip's)
+static void gbClockAdvance(uint8_t r[5], uint64_t secs) {
+  if ((r[4] & 0x40) || !secs) return;
+  uint64_t days = ((r[4] & 1) << 8) | r[3];
+  uint64_t t = (r[0] & 63) + 60ull * (r[1] & 63) + 3600ull * (r[2] & 31) + secs;
+  r[0] = t % 60; t /= 60; r[1] = t % 60; t /= 60; r[2] = t % 24; days += t / 24;
+  if (days > 511) r[4] |= 0x80;
+  days &= 511;
+  r[3] = days & 0xFF; r[4] = (r[4] & 0xFE) | (uint8_t)(days >> 8);
+}
+
+static void gbsBegin(const String &rom, uint8_t type, uint8_t ramSz) {
+  gbsOn = false;
+  gbsClock = gbHasClock(type);
+  gbsSize = gbBattery(type) ? gbRamBytes(ramSz) : 0;
+  if (!gbsSize && !gbsClock) return;
+  String n = rom.substring(rom.lastIndexOf('/') + 1);
+  int dot = n.lastIndexOf('.');
+  if (dot > 0) n = n.substring(0, dot);
+  gbsPath = "/saves/gb/" + n + ".sav";
+  if (!gbsLast) gbsLast = bigBuf(GB_RAM_MAX + GB_RTC_BYTES);
+  memset(gbsLast, 0, GB_RAM_MAX + GB_RTC_BYTES);   // (no save yet: cleared, not the last game's)
+  uint8_t r[5] = { 0, 0, 0, 0, 0 };
+  File f = SD.open(gbsPath);
+  if (f) {
+    uint32_t fs = f.size();
+    f.read(gbsLast, min(fs, gbsSize));
+    if (gbsClock && fs >= gbsSize + 44) {          // the clock's trailer
+      uint8_t t[GB_RTC_BYTES];
+      memset(t, 0, sizeof(t));
+      f.seek(gbsSize); f.read(t, min(fs - gbsSize, GB_RTC_BYTES));
+      for (int k = 0; k < 5; k++) r[k] = t[4 * k];
+      uint64_t then = gbLe32(t + 40) | (fs >= gbsSize + 48 ? (uint64_t)gbLe32(t + 44) << 32 : 0);
+      uint64_t now = (uint64_t)clockNow();
+      if (then && now > then) gbClockAdvance(r, now - then);   // (a clock behind the save's: no time passed)
+    }
+    f.close();
+    Log.println("menu: save " + gbsPath);
+  }
+  if (gbsClock) {
+    fpga.busWrite(SNES_HPTR, GB_RTC_PTR);
+    fpga.busWrite(SNES_HWORD, r[0] | r[1] << 8 | r[2] << 16 | (uint32_t)r[3] << 24);
+    fpga.busWrite(SNES_HWORD, r[4]);
+  }
+  fpga.busWrite(SNES_HPTR, 1u << 31);              // (pointer 0, the written flag down)
+  for (uint32_t a = 0; a < gbsSize; a += 4) fpga.busWrite(SNES_HWORD, gbLe32(gbsLast + a));
+  gbsOn = true; gbsCheck = millis(); gbsPos = -1;
+}
+
+static void gbsService(bool now_ = false) {
+  if (!gbsOn || !gbsPath.length()) return;
+  bool leaving = now_ && gbsClock;                  // (a clock: saved on the way out whatever)
+  static uint8_t *now = bigBuf(GB_RAM_MAX + GB_RTC_BYTES);
+  if (gbsPos < 0) {
+    if (!now_ && millis() - gbsCheck < 5000) return;
+    gbsCheck = millis();
+    bool written = fpga.busRead(SNES_HPTR) & 1;
+    if (!written && !leaving) return;               // not written since the last look
+    if (written) fpga.busWrite(SNES_HPTR, 1u << 31);  // (cleared first: a write while this reads sets it again)
+    gbsPos = 0;
+  }
+  // a slice a pass, the pads served in between (all of it when it has to be now)
+  uint32_t slice = now_ ? GB_RAM_MAX : 4096;
+  for (uint32_t k = 0; k < slice && (uint32_t)gbsPos < gbsSize; k += 4, gbsPos += 4) {
+    fpga.busWrite(SNES_HPTR, gbsPos);
+    gbPut32(now + gbsPos, fpga.busRead(SNES_HWORD));
+  }
+  if ((uint32_t)gbsPos < gbsSize) return;
+  gbsPos = -1;
+  uint32_t n = gbsSize;
+  if (gbsClock) {
+    fpga.busWrite(SNES_HPTR, GB_RTC_PTR);     uint32_t lo = fpga.busRead(SNES_HWORD);
+    fpga.busWrite(SNES_HPTR, GB_RTC_PTR + 4); uint32_t hi = fpga.busRead(SNES_HWORD);
+    uint8_t *t = now + gbsSize;
+    memset(t, 0, GB_RTC_BYTES);
+    uint8_t r[5] = { (uint8_t)lo, (uint8_t)(lo >> 8), (uint8_t)(lo >> 16), (uint8_t)(lo >> 24), (uint8_t)hi };
+    for (int k = 0; k < 5; k++) { t[4 * k] = r[k]; t[20 + 4 * k] = r[k]; }   // (the latched five: the same)
+    uint64_t when = (uint64_t)clockNow();
+    gbPut32(t + 40, (uint32_t)when); gbPut32(t + 44, (uint32_t)(when >> 32));
+    n += GB_RTC_BYTES;
+  }
+  if (!leaving && !memcmp(now, gbsLast, gbsSize)) return;
+  SD.mkdir("/saves"); SD.mkdir("/saves/gb");
+  File f = SD.open(gbsPath, FILE_WRITE);
+  if (f) { f.write(now, n); f.close(); memcpy(gbsLast, now, n); Log.println("menu: saved " + gbsPath); }
 }
 
 // The PlayStation's BIOS: SCPH*.BIN in /bios, /roms/ps1 or /roms.
@@ -1004,8 +1166,11 @@ static String load(const Game &g) {
     fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);
   } else if (g.m == 7) {                             // Game Boy: into DDR3, bank by bank, as the SNES
+    uint8_t hb[3] = { 0, 0, 0 };                     // the header's cartridge type, ROM size, RAM size
+    f.seek(0x147); f.read(hb, 3); f.seek(0);
     fpga.busWrite(NES_CONSOLE, 7);                   // first: the fill only reaches the selected core
     if (!streamBanks(f, size)) err = "the file ended early";
+    gbsBegin(g.path, hb[0], hb[2]);                  // the battery RAM (and the clock) in
     fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);   // (the core reads the header itself)
   } else if (g.m == 10) {                            // Game Boy Advance: the cartridge into DDR3; a BIOS file if the card has one
@@ -1025,7 +1190,13 @@ static String load(const Game &g) {
     gclkOn = gbaHasClock(f);
     fpga.busWrite(GBA_CFG, size | (gclkOn ? 0x20000000u : 0));   // (bit 29: the cartridge's clock)
     if (gclkOn) { gbaClockService(true); Log.println("menu: the cartridge has a clock"); }
+    gsavType = GSAV_UNKNOWN; gscanTailN = 0; streamScan = gbaScan;   // (the save type, from the chunks as they go)
     if (!streamBanks(f, size)) err = "the file ended early";
+    streamScan = nullptr;
+    // (bit 27: the save is an EEPROM; bit 28: a 64 kB flash)
+    fpga.busWrite(GBA_CFG, size | (gclkOn ? 0x20000000u : 0) | (gsavType == GSAV_EEPROM ? 0x08000000u : 0) | (gsavType == GSAV_FLASH64 ? 0x10000000u : 0));
+    static const char *const GSN[] = { "unknown (128 kB)", "SRAM", "flash 64 kB", "flash 128 kB", "EEPROM" };
+    Log.println(String("menu: the save is ") + GSN[gsavType]);
     fpga.busWrite(VID_CTRL, 3); fpga.busWrite(SYN_CTRL, 3);
     if (!err.length()) fpga.busWrite(NES_CTRL, 1);
   } else if (g.m == 9) {                             // PC Engine: into DDR3 as the Game Boy, less a copier header
@@ -1432,6 +1603,7 @@ static bool hasSave(const Game &g) {
   int dot = n.lastIndexOf('.'); if (dot > 0) n = n.substring(0, dot);
   if (g.m == 10) return SD.exists("/saves/gba/" + n + ".sav");
   if (g.m == 5) return SD.exists("/saves/snes/" + n + ".srm");
+  if (g.m == 7) return SD.exists("/saves/gb/" + n + ".sav");
   return false;
 }
 static void draw();                       // (below)
@@ -1689,6 +1861,7 @@ static void playGame(const Game &g) {
   // the N64 game running now: its save to the card while the N64 is still there
   if (eepSize) { eepService(true); eepSize = 0; }
   if (srmSize) { srmService(true); srmSize = 0; }    // (the SNES's likewise)
+  if (gbsOn) { gbsService(true); gbsOn = false; }    // (the Game Boy's likewise)
   if (gsavOn) { gbaSaveService(true); gsavOn = false; }   // (the Game Boy Advance's likewise)
   gclkOn = false;
   Status st = fpga.status();
@@ -1824,6 +1997,7 @@ static void goHome() {
   pc::stop();
   if (eepSize) { eepService(true); eepSize = 0; }
   if (srmSize) { srmService(true); srmSize = 0; }
+  if (gbsOn) { gbsService(true); gbsOn = false; }
   if (gsavOn) { gbaSaveService(true); gsavOn = false; }
   gclkOn = false;
   message("going home", "the game is saved");
@@ -1879,7 +2053,7 @@ static void task(void *) {
     }
     static uint32_t lastCard = 0;
     if (cardIn && millis() - lastCard > 100) { lastCard = millis(); cardService(); }
-    if (gameIn) { eepService(); srmService(); gbaSaveService(); gbaClockService(); }
+    if (gameIn) { eepService(); srmService(); gbsService(); gbaSaveService(); gbaClockService(); }
     // the background erase (the menu image from version 7; the slots, above): the highlighted
     // console -- its tile, or its games -- has no slot for a second and a half: the slot used less
     // recently is cleared for it, a sector at a time

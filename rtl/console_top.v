@@ -647,13 +647,16 @@ module console_top #(
 	end
 	// the SNES's save RAM from the loader: 0x184 the pointer (a write reads the word there into
 	// 0x188; bit 31 also clears the written flag, which a read of 0x184 gives in bit 0), 0x188
-	// the word (a write puts it at the pointer and moves the pointer on)
-	reg  [12:0] snes_hptr; reg snes_hload, snes_hwr, snes_dclr; reg [31:0] snes_hwd;
+	// the word (a write puts it at the pointer and moves the pointer on). The Game Boy's
+	// cartridge RAM the same way, through the same two registers (gb_top: bytes 0-0x7FFF the
+	// RAM, 0x8000 / 0x8004 the MBC3 clock); the selected console's answers.
+	reg  [15:0] snes_hptr; reg snes_hload, snes_hwr, snes_dclr; reg [31:0] snes_hwd;
 	wire [31:0] snes_hword; wire snes_dirty;
+	wire [31:0] gb_hword; wire gb_dirty;
 	always @(posedge clk) begin
 		snes_hload <= 1'b0; snes_hwr <= 1'b0; snes_dclr <= 1'b0;
-		if (snes_hwr) snes_hptr <= snes_hptr + 13'd4;      // (the sequencer took the pointer with the pulse)
-		if (ctrl_we && off == 16'h0184) begin snes_hptr <= wdata[12:0]; snes_hload <= 1'b1; snes_dclr <= wdata[31]; end
+		if (snes_hwr) snes_hptr <= snes_hptr + 16'd4;      // (the sequencer took the pointer with the pulse)
+		if (ctrl_we && off == 16'h0184) begin snes_hptr <= wdata[15:0]; snes_hload <= 1'b1; snes_dclr <= wdata[31]; end
 		if (ctrl_we && off == 16'h0188) begin snes_hwd <= wdata; snes_hwr <= 1'b1; end
 	end
 	wire [23:0] snes_dbg_pc;
@@ -673,12 +676,14 @@ module console_top #(
 	wire a26_rst  = core_rst || !a26_sel;
 	wire pce_rst  = core_rst || !pce_sel;
 	wire gba_rst  = core_rst || !gba_sel;
-	// the Game Boy Advance's loader (ctrl 0x1D0): [24:0] the cartridge's size in bytes, [31] the
-	// fill goes to the BIOS memory (16 kB) instead of the cartridge
+	// the Game Boy Advance's loader (ctrl 0x1D0): [24:0] the cartridge's size in bytes, [27] it
+	// saves to an EEPROM (gba_top eeprom), [28] its flash is a 64 kB part (gba_top flash64), [29] it has the clock, [30] the fill goes to the
+	// save, [31] the fill goes to the BIOS memory (16 kB) instead of the cartridge
 	reg  [31:0] gba_cfg;
 	reg  [55:0] gba_rtc_now;               // the cartridge clock's time, the menu's: {Y M D wd} 0x1E0, {h m s} 0x1E4, BCD
 	wire [31:0] gba_dbg_pc, gba_dbg_bus;
 	wire        gba_sram_dirty;            // ctrl 0x1DC: [0] the save RAM was written; a write clears it
+	wire [1:0]  gba_eep_size;              // ...[2:1] the EEPROM's commands have shown it {8 kB, 512 B}
 	reg  [22:0] gba_peek; reg gba_peek_go;   // ctrl 0x1D8: a halfword of the cartridge read back through the cache's second port
 	wire [15:0] gba_peek_q; wire gba_peek_ack; reg [15:0] gba_peek_d; reg gba_peek_v;
 	always @(posedge clk) begin
@@ -856,7 +861,7 @@ module console_top #(
 		16'h01D0: ctrl_rdata = gba_cfg;
 		16'h01D4: ctrl_rdata = gba_dbg_bus;
 		16'h01D8: ctrl_rdata = {15'd0, gba_peek_v, gba_peek_d};
-		16'h01DC: ctrl_rdata = {31'd0, gba_sram_dirty};
+		16'h01DC: ctrl_rdata = {29'd0, gba_eep_size, gba_sram_dirty};
 		16'h01E0: ctrl_rdata = gba_rtc_now[55:24];
 		16'h01E4: ctrl_rdata = {8'd0, gba_rtc_now[23:0]};
 		16'h0190: ctrl_rdata = {5'd0, gte_snap_state, gte_snap_word};
@@ -872,8 +877,8 @@ module console_top #(
 		16'h01BC: ctrl_rdata = PS1_DBG ? ps1_live : 32'd0;       // why the processor waits, what the GPU does (ps1_top dbg_live)
 		16'h01C0: ctrl_rdata = ps1_cc_miss;                      // the processor's RAM cache: misses (in every image)
 		16'h01C4: ctrl_rdata = ps1_cpu_wait;                     // clocks the processor waited on memory (in every image)
-		16'h0184: ctrl_rdata = {31'd0, snes_dirty};
-		16'h0188: ctrl_rdata = snes_hword;
+		16'h0184: ctrl_rdata = {31'd0, gb_sel ? gb_dirty : snes_dirty};
+		16'h0188: ctrl_rdata = gb_sel ? gb_hword : snes_hword;
 		16'h0120: ctrl_rdata = ps1_ev_data;                                    // the frame event log entry at ev_idx: {type[2:0], clock[28:0]}
 		16'h0124: ctrl_rdata = {26'd0, ps1_ev_wp};                             // ...and where the next one will go
 		16'h00E4: ctrl_rdata = ps1_dbg_v2c;   // {made, taken by CPU, taken by DMA, read with nothing there}
@@ -1269,7 +1274,7 @@ module console_top #(
 			.pad1(joy1), .pad2(joy2),
 			.px_we(px_we), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb), .lines(s_lines), .frame_start(snes_frame_st),
 			.audio_l(snes_audio_l), .audio_r(snes_audio_r), .audio_stb(),
-			.h_ptr(snes_hptr), .h_load(snes_hload), .h_wr(snes_hwr), .h_wdata(snes_hwd), .h_word(snes_hword),
+			.h_ptr(snes_hptr[12:0]), .h_load(snes_hload), .h_wr(snes_hwr), .h_wdata(snes_hwd), .h_word(snes_hword),
 			.sram_dirty(snes_dirty), .dirty_clr(snes_dclr),
 			.dbg_pc(snes_dbg_pc), .dbg_spc_pc()
 		);
@@ -1295,8 +1300,8 @@ module console_top #(
 	// with the core, so a new cartridge never answers out of the last one's lines.
 	// The picture: 160 x 144, tripled to 480 x 432 like the Game Gear's LCD -- a Color game's
 	// colours, a DMG game's shades in greens. Sound: its
-	// two channels into HDMI's stereo (audio_lr, below). No battery saves yet: gb_top's save
-	// port (sav_*) is there for when the loader learns to read and write it.
+	// two channels into HDMI's stereo (audio_lr, below). Battery saves: the cartridge RAM and
+	// the MBC3 clock through 0x184 / 0x188, as the SNES's save RAM (above).
 	generate if (CORE_GB) begin : g_gb
 		wire [19:0]  b_m_addr; wire b_m_req, b_m_ready, b_m_valid; wire [127:0] b_m_data;
 		cart_ddr3 #(.BASE(24'h00_0000)) u_gb_cart (
@@ -1323,7 +1328,8 @@ module console_top #(
 			.joy(joy1[7:0]),
 			.px_x(px_x), .px_y(px_y), .px_shade(px_shade), .px_rgb(px_rgb), .cgb_mode(gb_cgb), .pixel_en(px_en), .frame_start(gb_frame_st),
 			.audio_l(gb_audio_l), .audio_r(gb_audio_r),
-			.sav_addr(15'd0), .sav_q(), .cram_dirty(), .sav_clear(1'b0),
+			.h_ptr(snes_hptr), .h_load(snes_hload && gb_sel), .h_wr(snes_hwr && gb_sel), .h_wdata(snes_hwd), .h_word(gb_hword),
+			.cram_dirty(gb_dirty), .dirty_clr(snes_dclr),
 			.sio_data(), .sio_start(),
 			.dbg_pc(gb_dbg_pc), .dbg_halted()
 		);
@@ -1337,6 +1343,7 @@ module console_top #(
 			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(gb_vid_rgb));
 	end else begin : g_gb
 		assign gb_vid_rgb = 24'd0; assign gb_dbg_pc = 16'd0; assign gb_frame_st = 1'b0;
+		assign gb_hword = 32'd0; assign gb_dirty = 1'b0;
 		assign gb_audio_l = 16'sd0; assign gb_audio_r = 16'sd0;
 	end endgenerate
 
@@ -1432,20 +1439,38 @@ module console_top #(
 			.m_ready(pa_ready[1]), .m_rdata(pa_rdata[255:128]), .m_valid(pa_valid[1])
 		);
 		// port 2, the host: one line read for the save's write-back (hr_line / hr_data, as the
-		// PlayStation's memory card), and the save loaded into DDR3 a word at a time (a fill with
-		// gba_cfg[30] set: words into the save RAM's region, bytes masked)
+		// PlayStation's memory card), and the save loaded into DDR3 (a fill with gba_cfg[30] set:
+		// words into the save RAM's region). The fill's words are gathered into their line and the
+		// line written when its fourth word is in, as cart_ddr3 does -- a quarter of the requests,
+		// so a DDR3 stall (refresh, calibration) has four words' time to clear -- and a line that
+		// completes while the last one still waits for the port waits in hl_q behind it.
 		reg  [23:0] hl_addr; reg hl_req, hl_we; reg [127:0] hl_wdata; reg [15:0] hl_wmask; reg hl_done_r; reg [127:0] hl_data;
+		reg  [95:0] hl_line; reg [11:0] hl_lmask;                      // the line being gathered (its first three words)
+		reg         hl_qv; reg [23:0] hl_qa; reg [127:0] hl_qd; reg [15:0] hl_qm;   // a line waiting behind the one asked for
 		assign pa_addr[71:48] = hl_addr; assign pa_req[2] = hl_req; assign pa_we[2] = hl_we; assign pa_wdata[383:256] = hl_wdata; assign pa_wmask[47:32] = hl_wmask;
-		wire hl_fill = prog_we && gba_sel && gba_cfg[30];
+		wire        hl_fill = prog_we && gba_sel && gba_cfg[30];
+		wire        hl_free = !hl_req || pa_ready[2];                  // the port takes a new request this clock
+		wire [1:0]  hl_wi = md_windex_full[1:0];
+		wire [11:0] hl_m3 = (hl_wi == 2'd0) ? 12'h00F : (hl_lmask | (12'h00F << {hl_wi, 2'd0}));   // (the 4th word's bits are the line's top)
+		wire [127:0] hl_ld = {wdata, hl_line};
 		always @(posedge clk) begin
-			if (rst) begin hl_req <= 1'b0; hl_done_r <= 1'b0; end
+			if (rst) begin hl_req <= 1'b0; hl_done_r <= 1'b0; hl_qv <= 1'b0; hl_lmask <= 12'd0; end
 			else begin
+				if (hl_req && pa_ready[2]) hl_req <= 1'b0;                // (first: a request made below this clock stands)
+				if (hl_free && hl_qv) begin
+					hl_addr <= hl_qa; hl_we <= 1'b1; hl_wdata <= hl_qd; hl_wmask <= hl_qm; hl_req <= 1'b1; hl_qv <= 1'b0;
+				end
 				if (hr_go) begin hl_addr <= wdata[23:0]; hl_we <= 1'b0; hl_req <= 1'b1; hl_done_r <= 1'b0; end   // (hr_line takes the same write: not yet there)
 				else if (hl_fill) begin
-					hl_addr <= 24'h204000 + {6'd0, md_windex_full[21:2]}; hl_we <= 1'b1; hl_req <= 1'b1;
-					hl_wdata <= {4{wdata}}; hl_wmask <= 16'h000F << {md_windex_full[1:0], 2'd0};
+					if (hl_wi != 2'd3) begin
+						hl_line[32 * hl_wi +: 32] <= wdata; hl_lmask <= hl_m3;
+					end else if (hl_free && !hl_qv) begin
+						hl_addr <= 24'h204000 + {6'd0, md_windex_full[21:2]}; hl_we <= 1'b1; hl_req <= 1'b1;
+						hl_wdata <= hl_ld; hl_wmask <= {4'hF, hl_lmask};
+					end else begin
+						hl_qa <= 24'h204000 + {6'd0, md_windex_full[21:2]}; hl_qd <= hl_ld; hl_qm <= {4'hF, hl_lmask}; hl_qv <= 1'b1;
+					end
 				end
-				if (hl_req && pa_ready[2]) hl_req <= 1'b0;
 				if (pa_valid[2]) begin hl_data <= pa_rdata[383:256]; hl_done_r <= 1'b1; end
 			end
 		end
@@ -1459,14 +1484,15 @@ module console_top #(
 			.keys(joy1[9:0]),
 			.px_we(px_en), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb), .frame_start(gba_frame_st),
 			.audio_l(gba_audio_l), .audio_r(gba_audio_r), .dbg_pc(gba_dbg_pc), .dbg_bus(gba_dbg_bus),
-			.sram_dirty(gba_sram_dirty), .sram_dirty_clr(ctrl_we && off == 16'h01DC),
+			.sram_dirty(gba_sram_dirty), .sram_dirty_clr(ctrl_we && off == 16'h01DC), .flash64(gba_cfg[28]),
+			.eeprom(gba_cfg[27]), .eep_size(gba_eep_size),
 			.rtc_en(gba_cfg[29]), .rtc_now(gba_rtc_now)
 		);
 		frame_hdmi #(.FMT(3), .DW(15), .SCALE(2)) u_hdmi (.clk(clk), .we(px_en), .wx({1'b0, px_x}), .wy({1'b0, px_y}), .wd(px_rgb),
 			.w(9'd240), .h(9'd160),
 			.pclk(pclk), .x(vid_x), .y(vid_y), .req(vid_req), .rgb(gba_vid_rgb));
 	end else begin : g_gba
-		assign gba_d_wmask = 16'hFFFF; assign gba_dbg_bus = 32'd0; assign gba_peek_q = 16'd0; assign gba_peek_ack = 1'b0; assign gba_sram_dirty = 1'b0;
+		assign gba_d_wmask = 16'hFFFF; assign gba_dbg_bus = 32'd0; assign gba_peek_q = 16'd0; assign gba_peek_ack = 1'b0; assign gba_sram_dirty = 1'b0; assign gba_eep_size = 2'd0;
 		assign gba_vid_rgb = 24'd0; assign gba_dbg_pc = 32'd0; assign gba_frame_st = 1'b0;
 		assign gba_audio_l = 16'sd0; assign gba_audio_r = 16'sd0;
 	end endgenerate

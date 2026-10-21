@@ -60,7 +60,7 @@ module tb_gba;
 		.ext_addr(ext_addr), .ext_req(ext_req), .ext_we(ext_we), .ext_be(ext_be), .ext_wdata(ext_wdata), .ext_ack(ext_ack), .ext_rdata(ext_rdata),
 		.keys(keys),
 		.px_we(px_we), .px_x(px_x), .px_y(px_y), .px_rgb(px_rgb), .frame_start(frame_start),
-		.audio_l(audio_l), .audio_r(audio_r), .dbg_pc(dbg_pc), .dbg_bus(), .sram_dirty(), .sram_dirty_clr(1'b0),
+		.audio_l(audio_l), .audio_r(audio_r), .dbg_pc(dbg_pc), .dbg_bus(), .sram_dirty(), .sram_dirty_clr(1'b0), .flash64(1'b0), .eeprom(1'b0), .eep_size(),
 		.rtc_en(rtc_en), .rtc_now(56'h24101704123456)
 	);
 	integer rowcnt [0:159]; integer rc;

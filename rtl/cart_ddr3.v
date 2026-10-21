@@ -127,6 +127,15 @@ module cart_ddr3 #(
 					d_we    <= 1'b1;
 					d_req   <= 1'b1;
 					st      <= S_WRITE;
+					// The line is in d_wdata now, so the buffer is free for the next one:
+					// cleared here (a short final line pads with zeros), keeping a word the
+					// host writes this same clock. It used to be cleared when the memory
+					// TOOK the write -- and a memory that held d_ready low (refresh,
+					// calibration, another port) for longer than a word's interval had by
+					// then had the next line's first words written into the buffer, which
+					// the clear wiped: a random zero word in the cartridge.
+					fill_buf     <= host_we ? ({96'd0, wdata} << (host_windex[1:0] * 32)) : 128'd0;
+					fill_pending <= host_we && (host_windex[1:0] == 2'd3);
 				end else if (m_req && m_ready) begin
 					d_addr <= BASE + {4'd0, m_addr};
 					d_we   <= 1'b0;
@@ -137,8 +146,6 @@ module cart_ddr3 #(
 
 			S_WRITE: if (d_ready) begin
 					d_req        <= 1'b0;
-					fill_pending <= 1'b0;
-					fill_buf     <= 128'd0;   // so a short line pads with zeros
 					st           <= S_IDLE;
 				end
 

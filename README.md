@@ -32,7 +32,7 @@ whose open-source work several parts of this project build on.
 - **On-screen menu** with a library view, recently played games and settings
 - **Bluetooth controllers:** PlayStation 4/5, Xbox and Switch Pro
 - **Games from microSD:** cartridges, PlayStation disc images and DOS hard-disk images
-- **Saves on the card:** PlayStation memory cards, N64 EEPROM, SNES and GBA saves
+- **Saves on the card:** PlayStation memory cards, N64 EEPROM, SNES, Game Boy and GBA saves
 - **Video options:** sharp or smooth scaling, scanlines, and the N64's own video filters
 - **DOS games in one step:** `tools/pc/addgame.py` turns a game folder into a bootable disk
 
