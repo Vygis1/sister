@@ -11,8 +11,8 @@ Legend: ✅ done · 🔧 in progress · ⬜ planned
 - ✅ Super Mario 64 and Mario Kart 64 play; SM64 at 27-30 of its 30 frames a second
 - ✅ Saves (EEPROM) on the SD card; the VI's filters selectable in the menu
 - ⬜ Full speed in every scene (the RSP and RDP's throughput)
-- ⬜ YUV textures and the remaining RDP modes
-- ⬜ Super Smash Bros. boots
+- ✅ YUV textures and the remaining RDP modes (krom's 127 RDP tests pass; Super Smash Bros. runs)
+- ✅ Super Smash Bros. boots
 
 ### PlayStation
 - ✅ Real BIOS, disc images, memory cards, CD audio, XA streaming, MDEC movies

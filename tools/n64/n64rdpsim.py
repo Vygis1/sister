@@ -170,6 +170,8 @@ def capture(rom_path, start, nframes, pads, snap=None):
             m.cpu.step()
     r.hidden = ConstHidden(len(m.rdram) >> 1)
     r.draw = True
+    # (the primitives' count, the noise's seed, from 0 as the RTL's starts: no command sets it)
+    r.prims = 0
     # the preamble, at the top of RDRAM
     pre = preamble(r)
     base = len(m.rdram) - 4096

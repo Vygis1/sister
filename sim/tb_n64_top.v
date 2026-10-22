@@ -207,6 +207,12 @@ module tb_n64_top;
 	always @(posedge clk) if ($test$plusargs("PCSAMPLE") && dbg_retired >= pcs_next) begin
 		$display("tb_n64_top: %0d retired, pc %08x", dbg_retired, dbg_pc); pcs_next = pcs_next + 32'd200000;
 	end
+	// +VILOG: every change of the VI's origin (a frame shown), with the instruction count
+	reg [31:0] vio_last = 32'd0;
+	always @(posedge clk) if ($test$plusargs("VILOG") && vi_origin != vio_last) begin
+		$display("tb_n64_top: VI origin %08x status %08x width %0d at %0d retired, frame %0d", vi_origin, vi_status, vi_width, dbg_retired, frames);
+		vio_last <= vi_origin;
+	end
 	// +PILOG: every PI DMA, as it starts (RDRAM, cartridge, length) and as it ends (where RDRAM got to)
 	reg pib_d = 0;
 	always @(posedge clk) if ($test$plusargs("PILOG")) begin

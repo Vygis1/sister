@@ -9,7 +9,7 @@
 //   B  the shade colour, z, and s/t/w (and one pixel on in x and in y, for the LOD)
 //   C  the perspective divides (three, n64_rdp_persp.v: two clocks)
 //   D  the texture coordinates; the LOD and the tiles it picks
-//   E.. the sampler (n64_rdp_texp.v: eight clocks)
+//   E.. the sampler (n64_rdp_texp.v: ten clocks)
 //   M  the texels in hand (two-cycle mode: the first is held for the second)
 //   N  the combiner's first cycle (two-cycle mode)   O  its result, the alpha reference
 //   P  the combiner's second (or only) cycle          Q  clamped; alpha compare; the
@@ -38,6 +38,9 @@ module n64_rdp_pix (
 	input  wire [31:0]  fog_color, blend_color, prim_color, env_color,
 	input  wire [23:0]  key_center, key_scale,
 	input  wire [8:0]   k4, k5,
+	input  wire [35:0]  kconv,            // SET_CONVERT's K0..K3 (the texture's convert stage)
+	input  wire [31:0]  prim_n,           // the primitive's number (the noise's seed)
+	input  wire         sc_field,         // an interlaced scissor: the dither's y is the field's line
 	input  wire [7:0]   prim_lod_frac,
 	input  wire [4:0]   prim_min_level,
 	input  wire [5:0]   tile,
@@ -64,6 +67,17 @@ module n64_rdp_pix (
 	input  wire [255:0] sp_acc,
 	input  wire [12:0]  sp_dx0,           // COPY mode: the first pixel's dx (n64rdp.py interpolate_st_copy)
 	input  wire         sp_slot,
+	// the pipelined TEXEL1 (one-cycle mode, the combiner reading TEXEL1: the next pixel's TEXEL0).
+	// At the span's end pixel (x == end_x flipped, start_x not; its LOD length >= 8) it is the
+	// next scanline's start, if that scanline is valid: the raster says so on nx_* once it has
+	// set that scanline up (nx_y is the scanline it is about)
+	input  wire [12:0]  sp_endx,
+	input  wire         sp_ll8,
+	input  wire         nx_have, nx_valid,
+	input  wire [11:0]  nx_y,
+	input  wire [47:0]  nx_stw,           // the scanline's s, t, w (span_setup's stzw >> 16)
+	output wire         pt1,              // (the mode is on)
+	output wire         pix_cur,          // (a span is in stage A)
 	// the span buffer's slots: each one's scanline, its first pixel's index (width * y),
 	// its first colour and depth lines; whether its lines are all in
 	input  wire [23:0]  sl_y,             // slot i in [12 i +: 12]
@@ -115,6 +129,16 @@ module n64_rdp_pix (
 	wire c1_t1 = rd_tex(comb0[8:5], comb1[27:24], comb0[4:0], comb1[8:6], comb1[23:21], comb1[5:3], comb1[20:18], comb1[2:0], 3'd1);
 	wire c1_t2 = rd_tex(comb0[8:5], comb1[27:24], comb0[4:0], comb1[8:6], comb1[23:21], comb1[5:3], comb1[20:18], comb1[2:0], 3'd2);
 	wire uses_t1 = multi ? (c0_t2 || c1_t1) : 1'b0;
+	// one-cycle mode reading TEXEL1: the next pixel's TEXEL0, sampled in a second slot (n64rdp.py
+	// R_USES_PIPELINED_TEXEL1); so two slots a pixel, as two-cycle mode has
+	assign pt1 = cyc_type == 2'd0 && c1_t2;
+	wire two = multi || pt1;
+	wire conv_one = om0[9];
+	// (a TEXEL0 the combiner does not read, nor convert_one, is zero, as the model leaves it -- which
+	// matters only to the pipelined TEXEL1's convert_one)
+	wire uses_t0 = multi ? (c0_t1 || c1_t2 || (uses_t1 && conv_one)) : c1_t1;
+	// both cycles' A reading NOISE: the second cycle's noise from another seed (R_NEED_NOISE_DUAL)
+	wire noise_dual = multi && comb0[23:20] == 4'd7 && comb0[8:5] == 4'd7;
 	wire c0_lf = comb0[19:15] == 5'd13 || comb0[11:9] == 3'd0;
 	wire c1_lf = comb0[4:0] == 5'd13 || comb1[20:18] == 3'd0;
 	wire tex_lod_en = om0[16], sharpen = om0[17], detail = om0[18];
@@ -220,7 +244,17 @@ module n64_rdp_pix (
 		fc = 3'd0;
 		if (!cov[0]) fc = cov[1] ? 3'd1 : cov[2] ? 3'd2 : cov[3] ? 3'd3 : cov[4] ? 3'd4 : cov[5] ? 3'd5 : cov[6] ? 3'd6 : 3'd7;
 	end
-	wire         adv = !multi || ph;      // this slot is the pixel's last: step on after it
+	wire         adv = !two || ph;        // this slot is the pixel's last: step on after it
+	// (pt1: the span's end pixel waits, before its first slot, for the raster's word on the next
+	// scanline -- a bubble, so the two slots stay back to back for convert_one)
+	reg  [12:0]  endx;  reg ll8;
+	wire [11:0]  cur_y = cur_slot ? sl_y[23:12] : sl_y[11:0];
+	wire         at_end = pt1 && ll8 && x == endx;
+	wire         nx_ok = nx_have && nx_y == cur_y + 12'd1;
+	wire         a_wait = at_end && !ph && !nx_ok;
+	reg          pnx;  reg [47:0] pnx_stw;       // the end pixel's next-scanline values (pt1)
+	reg          a_nx;  reg [47:0] a_nxv;
+	assign pix_cur = cur_v;
 	reg          a_occ, a_val, a_ph, a_end, a_slot;
 	reg  [12:0]  a_x;
 	reg  [3:0]   a_cc;
@@ -236,13 +270,16 @@ module n64_rdp_pix (
 			if (!cur_v) begin
 				if (sp_valid) begin
 					cur_v <= 1'b1; ph <= 1'b0;
-					x <= sp_x0; x1 <= sp_x1; cur_slot <= sp_slot;
+					x <= sp_x0; x1 <= sp_x1; cur_slot <= sp_slot; endx <= sp_endx; ll8 <= sp_ll8;
 					for (i = 0; i < 4; i = i + 1) begin xl[i] <= sp_xl[63 - 16 * i -: 16]; xr[i] <= sp_xr[63 - 16 * i -: 16]; end
 					for (i = 0; i < 8; i = i + 1) acc[i] <= sp_acc[255 - 32 * i -: 32];
 					cdx <= sp_dx0;
 				end
-			end else begin
+			end else if (!a_wait) begin
 				a_occ <= 1'b1;
+				// (pt1: the end pixel's second slot samples the next scanline's start)
+				if (!ph) begin pnx <= at_end && nx_valid; pnx_stw <= nx_stw; end
+				a_nx <= ph && pnx; a_nxv <= pnx_stw;
 				// coverage: none, or (without AA) not the first sample: no pixel
 				a_val <= copy || !(cov == 8'd0 || (!aa && !cov[0]));
 				a_soff <= cdx[2:0] & c_lm;
@@ -250,7 +287,7 @@ module n64_rdp_pix (
 				a_x <= x; a_cc <= cov_n;
 				a_yo <= fc[2:1]; a_xo <= {fc[0], 1'b0} + {1'b0, fc[1]};
 				for (i = 0; i < 8; i = i + 1) a_acc[i] <= acc[i];
-				if (multi && !ph) ph <= 1'b1;
+				if (two && !ph) ph <= 1'b1;
 				else begin
 					ph <= 1'b0;
 					for (i = 0; i < 4; i = i + 1) acc[i] <= acc[i] + ($signed(d_rgba_dx[127 - 32 * i -: 32]) & ~32'sh1F);
@@ -289,9 +326,9 @@ module n64_rdp_pix (
 			b_ps <= a_acc[5][31:16]; b_pt <= a_acc[6][31:16]; b_pw <= a_acc[7][31:16];
 			// the LOD's neighbours: one pixel on in x (the way the span is walked), one in y
 			dsx = $signed(d_st_dx[95:64]) & ~32'sh1F; dtx = $signed(d_st_dx[63:32]) & ~32'sh1F; dwx = $signed(d_st_dx[31:0]) & ~32'sh1F;
-			b_xs <= flip ? (a_acc[5] + dsx) >>> 16 : (a_acc[5] - dsx) >>> 16;
-			b_xt <= flip ? (a_acc[6] + dtx) >>> 16 : (a_acc[6] - dtx) >>> 16;
-			b_xw <= flip ? (a_acc[7] + dwx) >>> 16 : (a_acc[7] - dwx) >>> 16;
+			b_xs <= a_nx ? a_nxv[47:32] : flip ? (a_acc[5] + dsx) >>> 16 : (a_acc[5] - dsx) >>> 16;
+			b_xt <= a_nx ? a_nxv[31:16] : flip ? (a_acc[6] + dtx) >>> 16 : (a_acc[6] - dtx) >>> 16;
+			b_xw <= a_nx ? a_nxv[15:0]  : flip ? (a_acc[7] + dwx) >>> 16 : (a_acc[7] - dwx) >>> 16;
 			b_ys <= (a_acc[5] + ($signed(d_st_dy[95:64]) & ~32'sh7FFF)) >>> 16;
 			b_yt <= (a_acc[6] + ($signed(d_st_dy[63:32]) & ~32'sh7FFF)) >>> 16;
 			b_yw <= (a_acc[7] + ($signed(d_st_dy[31:0]) & ~32'sh7FFF)) >>> 16;
@@ -355,7 +392,8 @@ module n64_rdp_pix (
 			l_povf <= povf;
 			l_occ <= c_occ[1]; l_val <= c_val[1]; l_ph <= c_ph[1]; l_end <= c_end[1]; l_slot <= c_slot[1];
 			l_x <= c_x[1]; l_cc <= c_cc[1]; l_shade <= c_shade[1]; l_pz <= c_pz[1];
-			l_s <= ss; l_t <= tt; l_soff <= c_soff[1];
+			// (pt1: the second slot's texel is at the next pixel -- the LOD's x neighbour)
+			l_s <= (pt1 && c_ph[1]) ? sxd : ss; l_t <= (pt1 && c_ph[1]) ? txd : tt; l_soff <= c_soff[1];
 		end
 	end
 	// =====================================================================================
@@ -365,8 +403,9 @@ module n64_rdp_pix (
 	reg  [12:0]  e_x;  reg [3:0] e_cc;  reg [31:0] e_shade;  reg [17:0] e_pz;
 	reg  signed [16:0] e_s, e_t;
 	reg  [2:0]   e_tile;
-	reg          e_bil;
+	reg          e_bil, e_cv1, e_zero;
 	reg  [8:0]   e_lf;
+	reg  [2:0]   h_tl0;  reg [8:0] h_lf;     // (pt1: the pixel's LOD, from its first slot)
 	always @(posedge clk) begin
 		if (rst) e_occ <= 1'b0;
 		else if (ce) begin : lod
@@ -404,9 +443,14 @@ module n64_rdp_pix (
 			end
 			e_occ <= l_occ; e_val <= l_val; e_ph <= l_ph; e_end <= l_end; e_slot <= l_slot;
 			e_x <= l_x; e_cc <= l_cc; e_shade <= l_shade; e_pz <= l_pz;
-			e_s <= l_s; e_t <= l_t; e_lf <= lf; e_soff <= l_soff;
-			e_tile <= l_ph ? tl1 : tl0;
+			e_s <= l_s; e_t <= l_t; e_soff <= l_soff;
+			if (!l_ph) begin h_tl0 <= tl0; h_lf <= lf; end
+			e_lf <= (pt1 && l_ph) ? h_lf : lf;
+			// (pt1: TEXEL1 is from the pixel's own tile0; two-cycle: tile1)
+			e_tile <= !l_ph ? tl0 : pt1 ? h_tl0 : tl1;
 			e_bil <= l_ph ? bilerp1 : bilerp0;
+			e_cv1 <= l_ph && conv_one;
+			e_zero <= !l_ph && !uses_t0;
 		end
 	end
 
@@ -418,25 +462,31 @@ module n64_rdp_pix (
 	n64_rdp_texp u_tex (.clk(clk), .ce(ce), .s_in(e_s), .t_in(e_t),
 		.tw(tw_all[447 - 56 * e_tile -: 56]), .tsz(tsz_all[383 - 48 * e_tile -: 48]),
 		.tlut(tlut_en), .tlut_type(tlut_type), .sample_quad(sample_quad), .mid_texel_en(mid_texel_en), .bilerp(e_bil),
+		.conv1(e_cv1), .zero(e_zero), .kconv(kconv),
 		.copy(copy), .soff(e_soff), .fb8(om_fb8), .cword(cword),
 		.fa0(fa0), .fa1(fa1), .fa2(fa2), .fa3(fa3), .fq0(fq0), .fq1(fq1), .fq2(fq2), .fq3(fq3),
 		.sa0(sa0), .sa1(sa1), .sa2(sa2), .sa3(sa3), .sq0(sq0), .sq1(sq1), .sq2(sq2), .sq3(sq3), .texel(texel));
+	// the noise (ten clocks, as the sampler): this slot's pixel's, or in its second slot the
+	// second cycle's
+	wire [15:0]  m_noise;
+	wire [11:0]  e_y = e_slot ? sl_y[23:12] : sl_y[11:0];
+	n64_rdp_noise u_noise (.clk(clk), .ce(ce), .x(e_x), .y(e_y), .prim(prim_n), .dual(e_ph), .noise(m_noise));
 	// {occ, val, ph, end, slot, x, cc, shade, pz, lf}: 1+1+1+1+1+13+4+32+18+9 = 81
 	localparam PW = 81;
 	wire [PW-1:0] e_pl = {e_occ, e_val, e_ph, e_end, e_slot, e_x, e_cc, e_shade, e_pz, e_lf};
-	reg  [PW-1:0] dl [0:7];
+	reg  [PW-1:0] dl [0:9];
 	always @(posedge clk) if (ce) begin
 		dl[0] <= e_pl;
-		for (i = 1; i < 8; i = i + 1) dl[i] <= dl[i - 1];
+		for (i = 1; i < 10; i = i + 1) dl[i] <= dl[i - 1];
 	end
-	wire [PW-1:0] m_pl = dl[7];
+	wire [PW-1:0] m_pl = dl[9];
 	// (the delay line keeps no reset: its occupancy is cleared by the one beside it)
-	reg  [7:0]   dl_occ;
+	reg  [9:0]   dl_occ;
 	always @(posedge clk) begin
-		if (rst) dl_occ <= 8'd0;
-		else if (ce) dl_occ <= {dl_occ[6:0], e_occ};
+		if (rst) dl_occ <= 10'd0;
+		else if (ce) dl_occ <= {dl_occ[8:0], e_occ};
 	end
-	wire         m_occ = dl_occ[7];
+	wire         m_occ = dl_occ[9];
 	wire         m_val = m_pl[79], m_ph = m_pl[78], m_end = m_pl[77], m_slot = m_pl[76];
 	wire [12:0]  m_x = m_pl[75:63];
 	wire [3:0]   m_cc = m_pl[62:59];
@@ -458,15 +508,17 @@ module n64_rdp_pix (
 	reg          n_occ, n_val, n_end, n_slot;
 	reg  [12:0]  n_x;  reg [3:0] n_cc;  reg [31:0] n_shade;  reg [17:0] n_pz;  reg [8:0] n_lf;
 	reg  [39:0]  n_t0, n_t1;
+	reg  [15:0]  hold_nz, n_nz0, n_nz1;
 	always @(posedge clk) begin
 		if (rst) n_occ <= 1'b0;
 		else if (ce) begin
-			if (multi && !m_ph) hold_t0 <= texel;
-			n_occ <= m_occ; n_val <= m_val && (!multi || m_ph); n_end <= m_end; n_slot <= m_slot;
+			if (two && !m_ph) begin hold_t0 <= texel; hold_nz <= m_noise; end
+			n_nz0 <= two ? hold_nz : m_noise; n_nz1 <= m_noise;
+			n_occ <= m_occ; n_val <= m_val && (!two || m_ph); n_end <= m_end; n_slot <= m_slot;
 			n_x <= m_x; n_cc <= m_cc; n_shade <= m_shade; n_pz <= m_pz; n_lf <= m_lf;
 			// (texels the combiner does not read stay 0, as the state machine left them)
-			n_t0 <= multi ? hold_t0 : texel;
-			n_t1 <= (multi && uses_t1) ? texel : 40'd0;
+			n_t0 <= two ? hold_t0 : texel;
+			n_t1 <= ((multi && uses_t1) || pt1) ? texel : 40'd0;
 		end
 	end
 
@@ -487,29 +539,34 @@ module n64_rdp_pix (
 	wire [39:0]  cc0_out;
 	n64_rdp_cc u_cc0 (.sa(comb0[23:20]), .sb(comb1[31:28]), .sc(comb0[19:15]), .sd(comb1[17:15]),
 		.aa(comb0[14:12]), .ab(comb1[14:12]), .ac(comb0[11:9]), .ad(comb1[11:9]),
-		.combined(40'd0), .texel0(n_t0), .texel1(n_t1), .shade(sh40(n_shade)), .lod_frac(n_lf), .noise(9'h020),
+		.combined(40'd0), .texel0(n_t0), .texel1(n_t1), .shade(sh40(n_shade)), .lod_frac(n_lf), .noise({n_nz0[2:0], 6'h20}),
 		.ka(k0a), .kb(k0b), .kc(k0c), .kd(k0d), .kaa(k0aa), .kab(k0ab), .kac(k0ac), .kad(k0ad), .out(cc0_out));
 	// N -> O: cycle 0's answer, registered
 	reg          o_occ, o_val, o_end, o_slot;
 	reg  [12:0]  o_x;  reg [3:0] o_cc;  reg [31:0] o_shade;  reg [17:0] o_pz;  reg [8:0] o_lf;
 	reg  [39:0]  o_t0, o_t1, o_cc0;
+	reg  [15:0]  o_nz0, o_nz1;
 	always @(posedge clk) begin
 		if (rst) o_occ <= 1'b0;
 		else if (ce) begin
 			o_occ <= n_occ; o_val <= n_val; o_end <= n_end; o_slot <= n_slot;
 			o_x <= n_x; o_cc <= n_cc; o_shade <= n_shade; o_pz <= n_pz; o_lf <= n_lf; o_t0 <= n_t0; o_t1 <= n_t1;
-			o_cc0 <= cc0_out;
+			o_cc0 <= cc0_out; o_nz0 <= n_nz0; o_nz1 <= n_nz1;
 		end
 	end
 	// O -> P: the alpha reference (cycle 0's alpha, in two-cycle mode); the dither's alpha
 	wire [11:0]  o_y = o_slot ? sl_y[23:12] : sl_y[11:0];
-	wire [2:0]   o_dm = dmat(dith_rgb[0], o_y[1:0], o_x[1:0]);
-	wire [2:0]   o_adith = alpha_dith_f(dith_rgb, dith_alpha, o_dm);
+	wire [1:0]   o_yd = sc_field ? o_y[2:1] : o_y[1:0];
+	wire [2:0]   o_dm = dmat(dith_rgb[0], o_yd, o_x[1:0]);
+	// (dither_coefficients: the noise's for mode 2)
+	wire [2:0]   o_adith = (dith_alpha == 2'd2) ? o_nz0[2:0] : alpha_dith_f(dith_rgb, dith_alpha, o_dm);
+	wire [8:0]   o_rdith = (dith_rgb == 2'd2) ? o_nz0[8:0] : rgb_dith_f(dith_rgb, o_dm);
 	reg          p_occ, p_val, p_end, p_slot;
 	reg  [12:0]  p_x;  reg [1:0] p_y;  reg [3:0] p_cc;  reg [31:0] p_shade;  reg [17:0] p_pz;  reg [8:0] p_lf;
 	reg  [39:0]  p_t0, p_t1, p_ccomb;
 	reg  [7:0]   p_aref;
-	reg  [2:0]   p_adith, p_dm;
+	reg  [2:0]   p_adith;  reg [8:0] p_dm;
+	reg  [2:0]   p_ncc;  reg [7:0] p_thr;
 	always @(posedge clk) begin
 		if (rst) p_occ <= 1'b0;
 		else if (ce) begin : ref
@@ -517,7 +574,10 @@ module n64_rdp_pix (
 			p_occ <= o_occ; p_val <= o_val; p_end <= o_end; p_slot <= o_slot;
 			p_x <= o_x; p_y <= o_y[1:0]; p_cc <= o_cc; p_shade <= o_shade; p_pz <= o_pz; p_lf <= o_lf;
 			p_t0 <= o_t0; p_t1 <= o_t1; p_ccomb <= o_cc0;
-			p_adith <= o_adith; p_dm <= o_dm;
+			p_adith <= o_adith; p_dm <= o_rdith;
+			p_ncc <= noise_dual ? o_nz1[2:0] : o_nz0[2:0];
+			// (alpha compare's threshold: the noise's low byte with ALPHA_DITHER on, else the blend alpha)
+			p_thr <= om1[1] ? o_nz0[7:0] : blend_color[7:0];
 			ca = clamp9({{22{o_cc0[9]}}, o_cc0[9:0]});
 			ea = {2'b00, ca} + {9'd0, ca == 8'hFF};
 			pr = ({4'd0, ea} * {10'd0, o_cc} + 14'd4) >> 3;
@@ -530,20 +590,20 @@ module n64_rdp_pix (
 	n64_rdp_cc u_cc1 (.sa(comb0[8:5]), .sb(comb1[27:24]), .sc(comb0[4:0]), .sd(comb1[8:6]),
 		.aa(comb1[23:21]), .ab(comb1[5:3]), .ac(comb1[20:18]), .ad(comb1[2:0]),
 		.combined(multi ? p_ccomb : 40'd0), .texel0(multi ? p_t1 : p_t0), .texel1(multi ? p_t0 : p_t1),
-		.shade(sh40(p_shade)), .lod_frac(p_lf), .noise(9'h020),
+		.shade(sh40(p_shade)), .lod_frac(p_lf), .noise({p_ncc, 6'h20}),
 		.ka(k1a), .kb(k1b), .kc(k1c), .kd(k1d), .kaa(k1aa), .kab(k1ab), .kac(k1ac), .kad(k1ad), .out(cc1_out));
 	// P -> Q: the final cycle's answer, registered
 	reg          q_occ, q_val, q_end, q_slot;
 	reg  [12:0]  q_x;  reg [1:0] q_y;  reg [3:0] q_cc;  reg [7:0] q_sha;  reg [17:0] q_pz;
 	reg  [39:0]  q_cc1;
 	reg  [7:0]   q_aref;
-	reg  [2:0]   q_adith, q_dm;
+	reg  [2:0]   q_adith;  reg [8:0] q_dm;  reg [7:0] q_thr;
 	always @(posedge clk) begin
 		if (rst) q_occ <= 1'b0;
 		else if (ce) begin
 			q_occ <= p_occ; q_val <= p_val; q_end <= p_end; q_slot <= p_slot;
 			q_x <= p_x; q_y <= p_y; q_cc <= p_cc; q_sha <= p_shade[7:0]; q_pz <= p_pz;
-			q_cc1 <= cc1_out; q_aref <= p_aref; q_adith <= p_adith; q_dm <= p_dm;
+			q_cc1 <= cc1_out; q_aref <= p_aref; q_adith <= p_adith; q_dm <= p_dm; q_thr <= p_thr;
 		end
 	end
 
@@ -563,7 +623,7 @@ module n64_rdp_pix (
 	assign stall_mem = q_occ && !(q_slot ? sl_filled[1] : sl_filled[0]);
 	reg          r_occ, r_val;
 	reg  [1:0]   r_y;  reg [12:0] r_x;
-	reg  [3:0]   r_cc;  reg [17:0] r_pz;  reg [7:0] r_comb [0:3];  reg [7:0] r_sha;  reg [2:0] r_adith, r_dm;
+	reg  [3:0]   r_cc;  reg [17:0] r_pz;  reg [7:0] r_comb [0:3];  reg [7:0] r_sha;  reg [2:0] r_adith;  reg [8:0] r_dm;
 	reg  [19:0]  r_cline, r_zline;  reg [3:0] r_pb, r_zbi;
 	always @(posedge clk) begin
 		if (rst) begin r_occ <= 1'b0; rel <= 1'b0; end
@@ -589,7 +649,7 @@ module n64_rdp_pix (
 				// no pixel: AA with no coverage left, or alpha compare (against the blend colour)
 				// (COPY: alpha compare on a 16-bit word's bit 0; nothing else)
 				if (copy) r_val <= q_val && !(alpha_test && (fb_fmt == FB_RGBA5551 || fb_fmt == FB_IA88) && !cwd[3][0]);
-				else r_val <= q_val && !((aa && ncc == 4'd0) || (alpha_test && (multi ? q_aref : af) < blend_color[7:0]));
+				else r_val <= q_val && !((aa && ncc == 4'd0) || (alpha_test && (multi ? q_aref : af) < q_thr));
 				r_y <= q_y; r_x <= q_x; r_pz <= q_pz; r_sha <= q_sha; r_adith <= q_adith; r_dm <= q_dm;
 				r_cline <= q_cline; r_zline <= q_zline; r_pb <= q_ba[3:0]; r_zbi <= q_za[3:0];
 			end
@@ -623,7 +683,7 @@ module n64_rdp_pix (
 	// buffer's block RAM through the decompression, the delta's priority encoder and shift, and
 	// the compares in one clock were the RDP's longest path at 62.5 MHz)
 	reg          k_occ, k_val, k_ovf, k_coplanar, k_maxz;
-	reg  [3:0]   k_cc;  reg [17:0] k_pz;  reg [7:0] k_comb [0:3];  reg [7:0] k_sha;  reg [2:0] k_adith, k_dm;
+	reg  [3:0]   k_cc;  reg [17:0] k_pz;  reg [7:0] k_comb [0:3];  reg [7:0] k_sha;  reg [2:0] k_adith;  reg [8:0] k_dm;
 	reg  [1:0]   k_y;  reg [12:0] k_x;
 	reg  [19:0]  k_cline, k_zline;  reg [3:0] k_pb, k_zbi;
 	reg  [23:0]  k_mem;  reg [7:0] k_mema;  reg [2:0] k_mcov;
@@ -664,7 +724,7 @@ module n64_rdp_pix (
 	reg  [2:0]   s_bsh_a, s_bsh_b;
 	reg  [3:0]   s_cc;  reg [2:0] s_mcov;
 	reg  [7:0]   s_pix [0:3];  reg [7:0] s_sha;  reg [23:0] s_mem;  reg [7:0] s_mema;
-	reg  [17:0]  s_pz;  reg [1:0] s_y;  reg [12:0] s_x;  reg [2:0] s_dm;
+	reg  [17:0]  s_pz;  reg [1:0] s_y;  reg [12:0] s_x;  reg [8:0] s_dm;
 	reg  [19:0]  s_cline, s_zline;  reg [3:0] s_pb, s_zbi;
 	always @(posedge clk) begin
 		if (rst) s_occ <= 1'b0;
@@ -738,7 +798,7 @@ module n64_rdp_pix (
 	reg  [2:0]   t_bsh_a, t_bsh_b;
 	reg  [3:0]   t_cc;  reg [2:0] t_mcov;
 	reg  [7:0]   t_sha;  reg [23:0] t_mem;  reg [7:0] t_mema;
-	reg  [17:0]  t_pz;  reg [1:0] t_y;  reg [12:0] t_x;  reg [2:0] t_dm;
+	reg  [17:0]  t_pz;  reg [1:0] t_y;  reg [12:0] t_x;  reg [8:0] t_dm;
 	reg  [19:0]  t_cline, t_zline;  reg [3:0] t_pb, t_zbi;
 	always @(posedge clk) begin
 		if (rst) t_occ <= 1'b0;
@@ -772,7 +832,7 @@ module n64_rdp_pix (
 	reg          u_occ, u_val, u_div, u_bl_en;
 	reg  [23:0]  u_rgb;
 	reg  [3:0]   u_cc;  reg [2:0] u_mcov;
-	reg  [17:0]  u_pz;  reg [2:0] u_dm;
+	reg  [17:0]  u_pz;  reg [8:0] u_dm;
 	reg  [19:0]  u_cline, u_zline;  reg [3:0] u_pb, u_zbi;
 	always @(posedge clk) begin
 		if (rst) u_occ <= 1'b0;
@@ -787,7 +847,7 @@ module n64_rdp_pix (
 	reg          v_occ, v_val, v_bl_en;
 	reg  [23:0]  v_rgb;
 	reg  [3:0]   v_cc;  reg [2:0] v_mcov;
-	reg  [17:0]  v_pz;  reg [2:0] v_dm;
+	reg  [17:0]  v_pz;  reg [8:0] v_dm;
 	reg  [19:0]  v_cline, v_zline;  reg [3:0] v_pb, v_zbi;
 	always @(posedge clk) begin
 		if (rst) v_occ <= 1'b0;
@@ -802,7 +862,7 @@ module n64_rdp_pix (
 	// =====================================================================================
 	// V: dithered, and into the lines being written; full lines out through the queues
 	// =====================================================================================
-	wire [8:0]   v_dith = rgb_dith_f(dith_rgb, v_dm);
+	wire [8:0]   v_dith = v_dm;               // (the three thresholds, worked out at O)
 	wire [7:0]   v_r = db_dither ? dith1(v_rgb[23:16], v_dith[2:0]) : v_rgb[23:16];
 	wire [7:0]   v_g = db_dither ? dith1(v_rgb[15:8], v_dith[5:3]) : v_rgb[15:8];
 	wire [7:0]   v_b = db_dither ? dith1(v_rgb[7:0], v_dith[8:6]) : v_rgb[7:0];
@@ -821,7 +881,7 @@ module n64_rdp_pix (
 	wire         qc_full = (qc_w - qc_r) == 3'd4, qz_full = (qz_w - qz_r) == 3'd4;
 	wire         qc_empty = qc_w == qc_r, qz_empty = qz_w == qz_r;
 	// (COPY writes 16-bit RGBA and 8-bit; the other formats nothing; never depth)
-	wire         v_store = v_occ && v_val && (!copy || fb_fmt == FB_RGBA5551 || fb_fmt == FB_I8);
+	wire         v_store = v_occ && v_val && (!copy || fb_fmt == FB_RGBA5551 || fb_fmt == FB_I8 || fb_fmt == FB_I4);
 	wire         zu = z_upd && !copy;
 	// (the 16 and 8-bit values written, chosen before they go into the line: COPY's word or the pixel)
 	wire [15:0]  v_w16 = copy ? cwd[9] : {v_r[7:3], v_g[7:3], v_b[7:3], new_cov[2]};
@@ -834,7 +894,7 @@ module n64_rdp_pix (
 		FB_IA88:     begin v_wd = {v_r, new_cov, 5'd0, 16'd0}; v_nb = 3'd2; end
 		FB_RGBA8888: begin v_wd = {v_r, v_g, v_b, new_cov, 5'd0}; v_nb = 3'd4; end
 		FB_I8:       begin v_wd = {v_w8, 24'd0}; v_nb = 3'd1; end
-		default:     begin v_wd = 32'd0; v_nb = 3'd0; end
+		default:     begin v_wd = 32'd0; v_nb = 3'd1; end   // (4-bit: the model writes the byte 0)
 		endcase
 	end
 	wire         drain_now;               // the pipeline empty at the primitive's end: write the lines held

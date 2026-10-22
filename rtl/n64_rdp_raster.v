@@ -36,6 +36,8 @@ module n64_rdp_raster (
 	input  wire [31:0]  fill_color, fog_color, blend_color, prim_color, env_color,
 	input  wire [23:0]  key_center, key_scale,
 	input  wire [8:0]   k4, k5,
+	input  wire [35:0]  kconv,
+	input  wire [31:0]  prim_n,
 	input  wire [7:0]   prim_lod_frac,
 	input  wire [4:0]   prim_min_level,
 	input  wire [15:0]  prim_dz,
@@ -276,6 +278,15 @@ module n64_rdp_raster (
 	end endfunction
 	reg          nslot;                   // the slot the next span goes in
 	reg          sp_slot;                 // the slot of the span offered to the pipeline
+	// the pipelined TEXEL1 (one-cycle mode reading TEXEL1, n64_rdp_pix.v pt1): each span's end
+	// pixel (end_x flipped, else start_x) and whether its LOD length (span_setup's lodlength) is
+	// 8 or more; and, per scanline as it is set up, whether it is valid and its s, t, w -- what the
+	// span before it samples at its end pixel. A scanline that is not drawn holds the next one
+	// back until the pipeline is past the span before it (pt1 only), so that one reads it.
+	wire         pt1, pix_cur;
+	reg  [12:0]  sp_endx;  reg sp_ll8;
+	reg          nx_have, nx_valid;  reg [11:0] nx_y;  reg [47:0] nx_stw;
+	reg          att_only, pushed;
 
 	// =============================================================================
 	// the pixel pipeline
@@ -290,7 +301,7 @@ module n64_rdp_raster (
 		.clk(clk), .rst(rst), .no_dither(no_dither), .busy(p_busy), .drain(p_drain), .ce(pce),
 		.om0(om0), .om1(om1), .comb0(comb0), .comb1(comb1),
 		.fog_color(fog_color), .blend_color(blend_color), .prim_color(prim_color), .env_color(env_color),
-		.key_center(key_center), .key_scale(key_scale), .k4(k4), .k5(k5),
+		.key_center(key_center), .key_scale(key_scale), .k4(k4), .k5(k5), .kconv(kconv), .prim_n(prim_n), .sc_field(sc_field),
 		.prim_lod_frac(prim_lod_frac), .prim_min_level(prim_min_level), .tile(tile), .flip(flip), .fb_fmt(fb_fmt),
 		.d_rgba_dx({d_rgba_dx[0], d_rgba_dx[1], d_rgba_dx[2], d_rgba_dx[3]}),
 		.d_rgba_dy({d_rgba_dy[0], d_rgba_dy[1], d_rgba_dy[2], d_rgba_dy[3]}),
@@ -303,7 +314,8 @@ module n64_rdp_raster (
 		.sp_valid(sp_valid), .sp_ready(sp_ready), .sp_x0(x), .sp_x1(x_end),
 		.sp_xl({xleft[0], xleft[1], xleft[2], xleft[3]}), .sp_xr({xright[0], xright[1], xright[2], xright[3]}),
 		.sp_acc({acc_rgba[0], acc_rgba[1], acc_rgba[2], acc_rgba[3], acc_z, acc_s, acc_t, acc_w}), .sp_dx0(cdx0),
-		.sp_slot(sp_slot),
+		.sp_slot(sp_slot), .sp_endx(sp_endx), .sp_ll8(sp_ll8),
+		.nx_have(nx_have), .nx_valid(nx_valid), .nx_y(nx_y), .nx_stw(nx_stw), .pt1(pt1), .pix_cur(pix_cur),
 		.sl_y({sl_y[1], sl_y[0]}), .sl_row({sl_row[1], sl_row[0]}),
 		.sl_clo({sl_clo[1], sl_clo[0]}), .sl_zlo({sl_zlo[1], sl_zlo[0]}), .sl_filled(sl_filled),
 		.rel(p_rel), .rel_slot(p_rel_slot),
@@ -361,6 +373,7 @@ module n64_rdp_raster (
 			y <= lo >>> 2;
 			y_last <= (hi - 14'sd1) >>> 2;
 			sub <= 4'd0; at_ra <= 5'd4;
+			nx_have <= 1'b0;
 			if (((hi - 14'sd1) >>> 2) < (lo >>> 2)) st <= S_DONE;
 			else st <= fill_mode ? S_Y : S_PRIM;
 		end
@@ -403,7 +416,7 @@ module n64_rdp_raster (
 			end
 		end
 		S_Y: begin
-			k <= 2'd0; all_inv <= 1'b1; all_over <= 1'b1; all_under <= 1'b1;
+			k <= 2'd0; all_inv <= 1'b1; all_over <= 1'b1; all_under <= 1'b1; pushed <= 1'b0;
 			sx_min <= 16'hFFFF; sx_max <= 16'd0;
 			row_px <= width * y[9:0];
 			// xh at this scanline: xh + dy * (dxhdy << 2)
@@ -431,14 +444,24 @@ module n64_rdp_raster (
 		// the span: its lines asked for into a free slot (the fetcher one span at a time),
 		// then its attributes, then it goes to the pipeline
 		S_SPAN: begin : span
-			reg [12:0] xe;
+			reg [12:0] xe; reg signed [17:0] ll;
 			xe = (sx_max[15:3] > {2'd0, width} - 13'd1) ? {2'd0, width} - 13'd1 : sx_max[15:3];
 			x <= sx_min[15:3];
 			x_end <= xe;
 			cdx0 <= flip ? 13'd0 : sx_max[15:3] - sx_min[15:3];
 			sub <= 6'd0;
-			if (all_inv || all_over || all_under || (sc_field && (y[0] != sc_odd))) st <= S_LINE;
-			else if (sx_min[15:3] > xe) st <= S_LINE;
+			att_only <= 1'b0;
+			sp_endx <= flip ? sx_max[15:3] : sx_min[15:3];
+			ll = flip ? $signed({5'd0, sx_max[15:3]}) - $signed({base_x[16], base_x}) : $signed({base_x[16], base_x}) - $signed({5'd0, sx_min[15:3]});
+			sp_ll8 <= $signed(ll[15:0]) >= 16'sd8;
+			if (all_inv || all_over || all_under || (sc_field && (y[0] != sc_odd))) begin
+				nx_have <= 1'b1; nx_y <= y; nx_valid <= 1'b0;
+				st <= S_LINE;
+			end else if (sx_min[15:3] > xe) begin
+				// (valid but nothing drawn: pt1 still wants its s, t, w)
+				if (pt1) begin att_only <= 1'b1; st <= S_ATTR; end
+				else st <= S_LINE;
+			end
 			else if (fill_mode) st <= S_PIX;
 			else if (f_done && !sl_used[nslot] && !sp_valid) begin
 				g_slot <= nslot;
@@ -482,7 +505,9 @@ module n64_rdp_raster (
 				default: ;
 				endcase
 			end
-			if (sub == 6'd3) begin
+			if (sub == 6'd2) begin nx_have <= 1'b1; nx_y <= y; nx_valid <= 1'b1; nx_stw <= {sp_v[4][31:16], sp_v[5][31:16], sp_v[7][31:16]}; end
+			if (sub == 6'd3 && att_only) st <= S_LINE;
+			else if (sub == 6'd3) begin
 				for (i = 0; i < 4; i = i + 1) acc_rgba[i] <= sp_v[i] + pa_de[i][31:0];
 				acc_s <= sp_v[4] + pa_de[4][31:0];
 				acc_t <= sp_v[5] + pa_de[5][31:0];
@@ -493,7 +518,7 @@ module n64_rdp_raster (
 		end
 		// to the pipeline (it takes the span from these registers on sp_ready)
 		S_PUSH: begin
-			sp_valid <= 1'b1; sp_slot <= nslot; nslot <= ~nslot; st <= S_LINE; end
+			sp_valid <= 1'b1; sp_slot <= nslot; nslot <= ~nslot; pushed <= 1'b1; st <= S_LINE; end
 		// FILL mode: the span's pixels in this line, all at once (byte k of a line is the fill
 		// colour's byte k & 3, as fill_pixel_color gives each pixel its half or byte), into the
 		// line held -- flushing it first if it is another
@@ -518,8 +543,9 @@ module n64_rdp_raster (
 			end
 		end
 		// (the registers the span went from are free once the pipeline took it)
-		S_LINE: if (!sp_valid) begin
+		S_LINE: if (!sp_valid && !(pt1 && !pushed && pix_cur)) begin
 			if (y == y_last) begin
+				nx_have <= 1'b1; nx_y <= y + 12'sd1; nx_valid <= 1'b0;    // (no scanline after the last)
 				if (fill_mode) begin st_after <= S_DONE; st <= lb_v ? S_FLUSH : S_DONE; end
 				else st <= S_DRAIN;
 			end else begin y <= y + 12'sd1; st <= S_Y; end

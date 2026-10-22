@@ -3,15 +3,24 @@
 // arithmetic as tools/n64/n64rdp.py sample_texture (texture.h) -- the coordinates
 // shifted, clamped, wrapped and mirrored; four texels read from TMEM at once (one
 // per copy, n64_rdp_tmem.v), through the TLUT where there is one; and the filter
-// (3-tap bilinear, the mid-texel average, or the one texel) -- in eight stages:
+// (3-tap bilinear, the mid-texel average, or the one texel) -- in ten stages:
 //
 //   1 the coordinates   2 the four texels' (s, t)   3 their TMEM addresses (first read)
-//   4 TMEM answers      5 the words decoded; a TLUT's entry or a 32-bit texel's second
-//                         half asked for (the high half, its own ports)
-//   6 TMEM answers      7 the second words           8 the filter
+//   4 TMEM answers      5 the words decoded; a TLUT's entry, a 32-bit texel's second
+//                         half or a YUV texel's luma asked for (the high half, its own ports)
+//   6 TMEM answers      7 the second words           8 the filter's operands
+//   9 the filter        10 the convert stage (SET_CONVERT's K0-K3) or convert_one
 //
 // A request presented with its tile on clock c has its texel on `texel` on clock
-// c + 8. Nothing moves while ce is low (the pixel pipeline is stalled).
+// c + 10. Nothing moves while ce is low (the pixel pipeline is stalled).
+//
+// YUV (texel_yuv16): a texel's chroma word (U, V) from the low half, at its pair's even
+// texel, and its luma byte from the high half; chroma and luma filtered apart (the
+// chroma's fraction is (s0 & 1) << 4 | fx >> 1). With BILERP off, every texel goes
+// through the convert stage (texture_convert_factors: its R, G, B as U, V, Y). A
+// convert_one request (cycle 1 of G_TC_FILTCONV) takes the texel the last request gave
+// (cycle 0's, on `texel` as this one reaches stage 10) as its factors; without BILERP,
+// it is that texel converted.
 //
 // COPY mode (copy = 1) goes the same way: the coordinates shifted but never clamped, the
 // pixel's offset in the framebuffer word added to s, and out of stage 8 on `cword` the 16-bit
@@ -19,7 +28,6 @@
 // TLUT entry, or -- the 8 and 4-bit texels, in the word's first half -- two texels a byte
 // each, read by the first two ports. (an 8-bit framebuffer: cword[7:0] is the byte)
 //
-// Not yet: YUV, the convert stage (SET_CONVERT's K0-K3) and convert_one.
 //////////////////////////////////////////////////////////////////////////////////
 
 `default_nettype none
@@ -33,6 +41,9 @@ module n64_rdp_texp (
 	input  wire [47:0]  tsz,
 	// the modes
 	input  wire         tlut, tlut_type, sample_quad, mid_texel_en, bilerp,
+	input  wire         conv1,            // convert_one (cycle 1 of two, G_TC_FILTCONV)
+	input  wire         zero,             // the texel is 0 (a TEXEL0 nothing reads)
+	input  wire [35:0]  kconv,            // SET_CONVERT's K0..K3, 9 bits each as sent
 	// COPY mode: the pixel's offset in its framebuffer word (dx & ~dx_mask); an 8-bit framebuffer
 	input  wire         copy,
 	input  wire [2:0]   soff,
@@ -103,11 +114,13 @@ module n64_rdp_texp (
 		cp_samp = (sz == 2'd1) ? b : (sz == 2'd0) ? {n, n} : w[15:8];
 	end endfunction
 
-	// --- the modes, carried down the stages: {fmt, size, line, tmem, palette, tlut,
-	// tlut_type, sample_quad, bilerp} (31 bits) ------------------------------------------------
-	localparam MW = 31;
-	wire [MW-1:0] m_in = {fmt_i, size_i, line_i, tmem_i, palette_i, tlut, tlut_type, sample_quad, bilerp};
-	reg  [MW-1:0] m1, m2, m3, m4, m5, m6, m7;
+	// --- the modes, carried down the stages: {conv1, fmt, size, line, tmem, palette, tlut,
+	// tlut_type, sample_quad, bilerp} (32 bits) ------------------------------------------------
+	localparam MW = 33;
+	wire [MW-1:0] m_in = {zero, conv1, fmt_i, size_i, line_i, tmem_i, palette_i, tlut, tlut_type, sample_quad, bilerp};
+	reg  [MW-1:0] m1, m2, m3, m4, m5, m6, m7, m8, m9;
+	`define M_CV(m)   m[31]
+	`define M_Z(m)    m[32]
 	`define M_FMT(m)  m[30:28]
 	`define M_SIZE(m) m[27:26]
 	`define M_LINE(m) m[25:17]
@@ -117,6 +130,7 @@ module n64_rdp_texp (
 	`define M_TLT(m)  m[2]
 	`define M_SQ(m)   m[1]
 	`define M_BL(m)   m[0]
+	`define M_YUV(m)  (m[30:28] == 3'd1 && !m[3])
 
 	// --- 1: the coordinates -------------------------------------------------------------------
 	// (shifted and clamped here; masked and mirrored, and the next row's offset, at the head
@@ -161,12 +175,20 @@ module n64_rdp_texp (
 
 	// --- 2: the four texels: base (s1, t1 when the fractions add to a texel or more), t10
 	// (s1, t0), t01 (s0, t1), t11 (s1, t1). Without sample_quad, only the base, at (s0, t0)
+	// (YUV: the base is always (s0, t0) -- the filter picks t11 itself -- and each texel's chroma
+	// is at its pair's even texel: s0 & ~1 for the s0 texels, (2 s1 - s0) & ~1 for the s1 ones,
+	// in bytes)
 	reg  [10:0]  ts_2 [0:3];  reg signed [9:0] tt_2 [0:3];
+	reg  signed [12:0] cb_2 [0:3];
 	reg  [1:0]   lo_2 [0:3];
-	reg  [4:0]   fx_2, fy_2;  reg mid_2, upr_2, up_2;
+	reg  [4:0]   fx_2, fy_2;  reg mid_2, upr_2, up_2, s0b_2;
+	wire signed [12:0] cb1_1 = ($signed({1'b0, s1_1, 1'b0}) - $signed({2'b00, s0_1})) & ~13'sd1;
 	always @(posedge clk) if (ce) begin
-		ts_2[0] <= up_1 ? s1_1 : s0_1;
-		tt_2[0] <= up_1 ? t1_1 : t0_1;
+		ts_2[0] <= (up_1 && !`M_YUV(m1)) ? s1_1 : s0_1;
+		tt_2[0] <= (up_1 && !`M_YUV(m1)) ? t1_1 : t0_1;
+		cb_2[0] <= {2'b00, s0_1[10:1], 1'b0}; cb_2[2] <= {2'b00, s0_1[10:1], 1'b0};
+		cb_2[1] <= cb1_1; cb_2[3] <= cb1_1;
+		s0b_2 <= s0_1[0];
 		ts_2[1] <= s1_1; tt_2[1] <= t0_1;
 		ts_2[2] <= s0_1; tt_2[2] <= t1_1;
 		ts_2[3] <= s1_1; tt_2[3] <= t1_1;
@@ -187,23 +209,24 @@ module n64_rdp_texp (
 		a = $signed({12'd0, offset}) + $signed({12'd0, stride}) * t + $signed({12'd0, sb});
 		byte_ix = (a[11:0] & msk) ^ {9'd0, t[0], 2'b00};
 	end endfunction
-	function [10:0] word_ix; input [10:0] s; input signed [9:0] t; input [11:0] msk; input [11:0] offset, stride;
+	function [10:0] word_ix; input signed [12:0] sb; input signed [9:0] t; input [11:0] msk; input [11:0] offset, stride;
 		reg signed [23:0] a; reg [11:0] m;
 	begin
-		a = $signed({12'd0, offset}) + $signed({12'd0, stride}) * t + $signed({12'd0, s, 1'b0});
+		a = $signed({12'd0, offset}) + $signed({12'd0, stride}) * t + sb;
 		m = a[11:0] & msk;
 		word_ix = m[11:1] ^ {9'd0, t[0], 1'b0};
 	end endfunction
 	reg  [11:0]  bix_3 [0:3];  reg [10:0] wix_3 [0:3];
 	reg  [10:0]  ts_3 [0:3];   reg [1:0] lo_3 [0:3];
-	reg  [4:0]   fx_3, fy_3;  reg mid_3, upr_3, up_3;
+	reg  [4:0]   fx_3, fy_3;  reg mid_3, upr_3, up_3, s0b_3;
 	always @(posedge clk) if (ce) begin : r1
 		reg [11:0] bi; reg [10:0] wi; reg [11:0] msk;
 		for (i = 0; i < 4; i = i + 1) begin
-			msk = (`M_TLUT(m2) || `M_SIZE(m2) == 2'd3) ? 12'h7FF : 12'hFFF;
+			msk = (`M_TLUT(m2) || `M_SIZE(m2) == 2'd3 || `M_YUV(m2)) ? 12'h7FF : 12'hFFF;
 			if (`M_SIZE(m2) == 2'd0) bi = byte_ix({1'b0, ts_2[i][10:1]}, tt_2[i], msk, {`M_TMEM(m2), 3'b000}, {`M_LINE(m2), 3'b000});
 			else bi = byte_ix({1'b0, ts_2[i]}, tt_2[i], msk, {`M_TMEM(m2), 3'b000}, {`M_LINE(m2), 3'b000});
-			wi = word_ix(ts_2[i], tt_2[i], msk, {`M_TMEM(m2), 3'b000}, {`M_LINE(m2), 3'b000});
+			// (YUV: the first read is the chroma word, the byte index the luma's)
+			wi = word_ix(`M_YUV(m2) ? cb_2[i] : $signed({1'b0, ts_2[i], 1'b0}), tt_2[i], msk, {`M_TMEM(m2), 3'b000}, {`M_LINE(m2), 3'b000});
 			bix_3[i] <= bi; wix_3[i] <= wi; ts_3[i] <= ts_2[i]; lo_3[i] <= lo_2[i];
 			case (i)
 			0: fa0 <= (`M_SIZE(m2) >= 2'd2) ? wi : bi[11:1];
@@ -212,16 +235,16 @@ module n64_rdp_texp (
 			default: fa3 <= (`M_SIZE(m2) >= 2'd2) ? wi : bi[11:1];
 			endcase
 		end
-		fx_3 <= fx_2; fy_3 <= fy_2; mid_3 <= mid_2; upr_3 <= upr_2; up_3 <= up_2;
+		fx_3 <= fx_2; fy_3 <= fy_2; mid_3 <= mid_2; upr_3 <= upr_2; up_3 <= up_2; s0b_3 <= s0b_2;
 		m3 <= m2; cp_3 <= cp_2;
 	end
 
 	// --- 4: TMEM reads (its own register) -----------------------------------------------------------
 	reg  [11:0]  bix_4 [0:3];  reg [10:0] wix_4 [0:3];  reg [10:0] ts_4 [0:3];  reg [1:0] lo_4 [0:3];
-	reg  [4:0]   fx_4, fy_4;  reg mid_4, upr_4, up_4;
+	reg  [4:0]   fx_4, fy_4;  reg mid_4, upr_4, up_4, s0b_4;
 	always @(posedge clk) if (ce) begin
 		for (i = 0; i < 4; i = i + 1) begin bix_4[i] <= bix_3[i]; wix_4[i] <= wix_3[i]; ts_4[i] <= ts_3[i]; lo_4[i] <= lo_3[i]; end
-		fx_4 <= fx_3; fy_4 <= fy_3; mid_4 <= mid_3; upr_4 <= upr_3; up_4 <= up_3;
+		fx_4 <= fx_3; fy_4 <= fy_3; mid_4 <= mid_3; upr_4 <= upr_3; up_4 <= up_3; s0b_4 <= s0b_3;
 		m4 <= m3; cp_4 <= cp_3;
 	end
 
@@ -229,7 +252,8 @@ module n64_rdp_texp (
 	reg  [15:0]  fw_5 [0:3];
 	reg  [39:0]  tx_5 [0:3];
 	reg  [15:0]  cw_5;
-	reg  [4:0]   fx_5, fy_5;  reg mid_5, up_5;
+	reg  [4:0]   fx_5, fy_5;  reg mid_5, up_5, upr_5, s0b_5;
+	reg  [3:0]   ybs_5, ybs_6;                // YUV: each texel's luma byte (1 the low)
 	always @(posedge clk) if (ce) begin : r2
 		reg [15:0] w; reg [7:0] byt; reg [3:0] nib; reg [7:0] v; reg [10:0] e; reg [1:0] sz; reg [2:0] fm;
 		sz = `M_SIZE(m4); fm = `M_FMT(m4);
@@ -243,7 +267,8 @@ module n64_rdp_texp (
 			v = (sz == 2'd0) ? {`M_PAL(m4), nib} : (sz == 2'd1) ? byt : w[15:8];
 			e = (({3'd0, v} << 2) + {9'd0, lo_4[i]}) ^ (upr_4 ? 11'd3 : 11'd0);
 			if (sz[1]) e = ({1'b0, w[15:8], 2'b00} + {9'd0, lo_4[i]}) ^ (upr_4 ? 11'd3 : 11'd0);
-			if (!`M_TLUT(m4)) e = wix_4[i] | 11'h400;
+			if (!`M_TLUT(m4)) e = `M_YUV(m4) ? {1'b1, bix_4[i][10:1]} : (wix_4[i] | 11'h400);
+			ybs_5[i] <= bix_4[i][0];
 			case (i)
 			0: sa0 <= {1'b1, e[9:0]};
 			1: sa1 <= {1'b1, e[9:0]};
@@ -270,7 +295,7 @@ module n64_rdp_texp (
 			default: tx_5[i] <= {2'b00, w[15:8], 2'b00, w[7:0], 2'b00, w[15:8], 2'b00, w[7:0]};
 			endcase
 		end
-		fx_5 <= fx_4; fy_5 <= fy_4; mid_5 <= mid_4; up_5 <= up_4;
+		fx_5 <= fx_4; fy_5 <= fy_4; mid_5 <= mid_4; up_5 <= up_4; upr_5 <= upr_4; s0b_5 <= s0b_4;
 		m5 <= m4; cp_5 <= cp_4;
 		// COPY: the word; or two texels, a byte each (8-bit: the byte; 4-bit: the nibble twice;
 		// 32-bit: the word's high byte)
@@ -280,48 +305,125 @@ module n64_rdp_texp (
 
 	// --- 6: TMEM's second reads (its own register) --------------------------------------------
 	reg  [15:0]  fw_6 [0:3];  reg [39:0] tx_6 [0:3];  reg [15:0] cw_6, cw_7;
-	reg  [4:0]   fx_6, fy_6;  reg mid_6, up_6;
+	reg  [4:0]   fx_6, fy_6;  reg mid_6, up_6, upr_6, s0b_6;
 	always @(posedge clk) if (ce) begin
 		for (i = 0; i < 4; i = i + 1) begin fw_6[i] <= fw_5[i]; tx_6[i] <= tx_5[i]; end
-		fx_6 <= fx_5; fy_6 <= fy_5; mid_6 <= mid_5; up_6 <= up_5;
+		fx_6 <= fx_5; fy_6 <= fy_5; mid_6 <= mid_5; up_6 <= up_5; upr_6 <= upr_5; s0b_6 <= s0b_5; ybs_6 <= ybs_5;
 		m6 <= m5; cp_6 <= cp_5; cw_6 <= cw_5;
 	end
 
 	// --- 7: the second words: a TLUT's colour, a 32-bit texel's blue and alpha --------------
 	reg  [39:0]  tx_7 [0:3];
-	reg  [4:0]   fx_7, fy_7;  reg mid_7, up_7;
+	reg  [4:0]   fx_7, fy_7;  reg mid_7, up_7, upr_7, s0b_7;
 	always @(posedge clk) if (ce) begin
 		for (i = 0; i < 4; i = i + 1) begin : w2
-			reg [15:0] w;
+			reg [15:0] w; reg [7:0] u, v, y;
 			w = (i == 0) ? sq0 : (i == 1) ? sq1 : (i == 2) ? sq2 : sq3;
+			u = fw_6[i][15:8]; v = fw_6[i][7:0]; y = ybs_6[i] ? w[7:0] : w[15:8];
 			if (`M_TLUT(m6)) tx_7[i] <= `M_TLT(m6) ? ia16(w) : rgba16(w);
+			// YUV: (U - 128, V - 128, Y, Y)
+			else if (`M_YUV(m6)) tx_7[i] <= {{2{~u[7]}}, ~u[7], u[6:0], {2{~v[7]}}, ~v[7], v[6:0], 2'b00, y, 2'b00, y};
 			else if (`M_SIZE(m6) == 2'd3 && `M_FMT(m6) == 3'd0)
 				tx_7[i] <= {2'b00, fw_6[i][15:8], 2'b00, fw_6[i][7:0], 2'b00, w[15:8], 2'b00, w[7:0]};   // RGBA32
 			else tx_7[i] <= tx_6[i];
 		end
-		fx_7 <= fx_6; fy_7 <= fy_6; mid_7 <= mid_6; up_7 <= up_6;
+		fx_7 <= fx_6; fy_7 <= fy_6; mid_7 <= mid_6; up_7 <= up_6; upr_7 <= upr_6; s0b_7 <= s0b_6;
 		m7 <= m6; cp_7 <= cp_6;
 		cw_7 <= `M_TLUT(m6) ? sq0 : cw_6;
 	end
 
-	// --- 8: the filter: mid-texel average; 3-tap bilinear; or the base texel ------------------
-	always @(posedge clk) if (ce) begin : filt
-		reg signed [11:0] b, a10, a01, a11, r; reg signed [17:0] acc;
+	// --- 8: the filter's operands (sample_texture's filters, all as one): per channel the base
+	// (t00; t11 where YUV's fractions add to a texel, and for the mid-texel cases), A and B (the
+	// differences the factors multiply: t10 - base, t01 - base; mid-texel t01 - t11, t10 - t11)
+	// and D (t00 - t11); per group (0: R, G -- YUV's chroma; 1: B, A -- its luma) the 3-tap
+	// factors and which case it is
+	reg  signed [9:0]  b_8 [0:3];
+	reg  signed [10:0] a_8 [0:3], c_8 [0:3], d_8 [0:3];
+	reg  [5:0]   f0_8 [0:1], f1_8 [0:1];
+	reg  [1:0]   mid_8, tap_8, sw_8;      // per group: the mid-texel case; 3-tap; (convert_one) factors swapped
+	reg  [15:0]  cw_8, cw_9;
+	always @(posedge clk) if (ce) begin : opnd
+		reg yv, bl; reg [4:0] cf, fxg; reg midg, upg; integer g;
+		reg signed [10:0] t00, t10, t01, t11, bs;
+		yv = `M_YUV(m7); bl = `M_BL(m7);
+		cf = {s0b_7, fx_7[4:1]};                       // (YUV's chroma fraction)
 		for (i = 0; i < 4; i = i + 1) begin
-			b   = {{2{tx_7[0][39 - 10 * i]}}, tx_7[0][39 - 10 * i -: 10]};
-			a10 = {{2{tx_7[1][39 - 10 * i]}}, tx_7[1][39 - 10 * i -: 10]};
-			a01 = {{2{tx_7[2][39 - 10 * i]}}, tx_7[2][39 - 10 * i -: 10]};
-			a11 = {{2{tx_7[3][39 - 10 * i]}}, tx_7[3][39 - 10 * i -: 10]};
-			if (mid_7) r = (b + a01 + a10 + a11 + 12'sd2) >>> 2;
-			else if (`M_BL(m7) && (`M_SQ(m7) || `M_TLUT(m7))) begin
-				acc = (a10 - b) * $signed({1'b0, up_7 ? 6'd32 - {1'b0, fy_7} : {1'b0, fx_7}})
-				    + (a01 - b) * $signed({1'b0, up_7 ? 6'd32 - {1'b0, fx_7} : {1'b0, fy_7}}) + 18'sd16;
-				r = (acc >>> 5) + b;
-			end else r = b;
-			texel[39 - 10 * i -: 10] <= r[9:0];
+			g = i >> 1;
+			fxg  = (g == 0 && yv) ? cf : fx_7;
+			midg = (g == 0 && yv) ? (mid_texel_en && bl && cf == 5'h10 && fy_7 == 5'h10) : mid_7;
+			upg  = ({1'b0, fxg} + {1'b0, fy_7}) >= 6'h20;
+			if (i == 0 || i == 2) begin
+				mid_8[g] <= midg;
+				tap_8[g] <= bl && (`M_SQ(m7) || `M_TLUT(m7)) && !midg;
+				sw_8[g] <= upg;
+				f0_8[g] <= upg ? 6'd32 - {1'b0, fy_7} : {1'b0, fxg};
+				f1_8[g] <= upg ? 6'd32 - {1'b0, fxg} : {1'b0, fy_7};
+			end
+			t00 = {tx_7[0][39 - 10 * i], tx_7[0][39 - 10 * i -: 10]};
+			t10 = {tx_7[1][39 - 10 * i], tx_7[1][39 - 10 * i -: 10]};
+			t01 = {tx_7[2][39 - 10 * i], tx_7[2][39 - 10 * i -: 10]};
+			t11 = {tx_7[3][39 - 10 * i], tx_7[3][39 - 10 * i -: 10]};
+			bs = (midg || (yv && upg)) ? t11 : t00;
+			b_8[i] <= bs[9:0];
+			a_8[i] <= midg ? t01 - t11 : t10 - bs;
+			c_8[i] <= midg ? t10 - t11 : t01 - bs;
+			d_8[i] <= t00 - t11;
 		end
 		// (an 8-bit framebuffer takes a byte: a TLUT's high one; else the offset's)
-		cword <= (!cp_7[1] || (cp_7[0] && !`M_TLUT(m7))) ? cw_7 : {cw_7[15:8], cw_7[15:8]};
+		cw_8 <= (!cp_7[1] || (cp_7[0] && !`M_TLUT(m7))) ? cw_7 : {cw_7[15:8], cw_7[15:8]};
+		m8 <= m7;
+	end
+
+	// --- 9: the filter: the mid-texel average; 3-tap bilinear; or the base texel -------------------
+	reg  [39:0]  r_9;
+	reg  signed [10:0] a_9 [0:3], c_9 [0:3], d_9 [0:3];
+	reg  [1:0]   mid_9, sw_9;
+	always @(posedge clk) if (ce) begin : filt
+		reg signed [12:0] r; reg signed [17:0] acc; reg signed [12:0] sm; integer g;
+		for (i = 0; i < 4; i = i + 1) begin
+			g = i >> 1;
+			sm = a_8[i] + c_8[i] + d_8[i] + 13'sd2;
+			acc = a_8[i] * $signed({1'b0, f0_8[g]}) + c_8[i] * $signed({1'b0, f1_8[g]}) + 18'sd16;
+			if (mid_8[g]) r = b_8[i] + (sm >>> 2);
+			else if (tap_8[g]) r = (acc >>> 5) + b_8[i];
+			else r = b_8[i];
+			r_9[39 - 10 * i -: 10] <= r[9:0];
+			a_9[i] <= a_8[i]; c_9[i] <= c_8[i]; d_9[i] <= d_8[i];
+		end
+		mid_9 <= mid_8; sw_9 <= sw_8;
+		cw_9 <= cw_8;
+		m9 <= m8;
+	end
+
+	// --- 10: the convert stage (texture_convert_factors, with BILERP off), or convert_one --------
+	// (the factors 2 K + 1, K sign-extended from nine bits; a texel's channels as nine bits)
+	function signed [10:0] kf; input [8:0] k; kf = {k[8], k, 1'b1}; endfunction
+	function signed [9:0] s9; input [9:0] v; s9 = {v[8], v[8:0]}; endfunction
+	wire signed [10:0] k0 = kf(kconv[35:27]), k1 = kf(kconv[26:18]), k2 = kf(kconv[17:9]), k3 = kf(kconv[8:0]);
+	// (convert_one's factors: the texel before this one, cycle 0's)
+	wire signed [9:0]  pv0 = s9(texel[39:30]), pv1 = s9(texel[29:20]), pv2 = s9(texel[19:10]);
+	wire               cvt_prev = `M_CV(m9) && !`M_BL(m9);
+	wire [39:0]        cvt_in = cvt_prev ? texel : r_9;
+	wire signed [9:0]  cu = s9(cvt_in[39:30]), cv = s9(cvt_in[29:20]), cy = s9(cvt_in[19:10]);
+	wire signed [21:0] pr = k0 * cv + 22'sd128;
+	wire signed [21:0] pg = k1 * cu + k2 * cv + 22'sd128;
+	wire signed [21:0] pb = k3 * cu + 22'sd128;
+	wire signed [13:0] cr = (pr >>> 8) + cy, cg = (pg >>> 8) + cy, cbl = (pb >>> 8) + cy;
+	always @(posedge clk) if (ce) begin : cvt
+		reg signed [9:0] fr0, fr1; reg signed [22:0] v; reg signed [14:0] o; integer g;
+		if (`M_Z(m9)) texel <= 40'd0;
+		else if (`M_CV(m9) && `M_BL(m9)) begin
+			for (i = 0; i < 4; i = i + 1) begin
+				g = i >> 1;
+				fr0 = sw_9[g] ? pv1 : pv0; fr1 = sw_9[g] ? pv0 : pv1;
+				v = fr0 * a_9[i] + fr1 * c_9[i] + 23'sd128 + (mid_9[g] ? ($signed(d_9[i]) <<< 6) : 23'sd0);
+				o = (v >>> 8) + pv2;
+				texel[39 - 10 * i -: 10] <= `M_SQ(m9) ? o[9:0] : pv2;
+			end
+		end else if (!`M_BL(m9))
+			texel <= {cr[9:0], cg[9:0], cbl[9:0], cy};
+		else texel <= r_9;
+		cword <= cw_9;
 	end
 	`undef M_FMT
 	`undef M_SIZE
@@ -332,6 +434,9 @@ module n64_rdp_texp (
 	`undef M_TLT
 	`undef M_SQ
 	`undef M_BL
+	`undef M_CV
+	`undef M_Z
+	`undef M_YUV
 endmodule
 
 `default_nettype wire

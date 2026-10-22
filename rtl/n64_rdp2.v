@@ -145,6 +145,7 @@ module n64_rdp2 #(
 	always @(posedge clk) at_q <= attr[at_ra];
 	reg          pr_go;
 	wire         pr_busy;
+	reg  [31:0]  prim_n;                  // primitives so far, this one counted (n64rdp.py RDP.prims: the noise's seed)
 
 	// attribute k (group k[4:2], component k[1:0]) from the command in cbuf:
 	// tools/n64/n64rdp.py decode_shade/texture/z. Its integer half is a 16-bit half of
@@ -290,7 +291,7 @@ module n64_rdp2 #(
 			start <= 24'd0; endp <= 24'd0; current <= 24'd0; start_valid <= 1'b0; source <= 1'b0; pend <= 1'b0;
 			freeze <= 1'b0; flush <= 1'b0; start_gclk <= 1'b0; clock <= 24'd0;
 			ws <= W_IDLE; lv <= 1'b0; wk_req <= 1'b0; tmem_mem <= 1'b0; xb_req <= 1'b0; wend <= 1'b0; raster_mem <= 1'b0;
-			cb_n <= 5'd0; cb_need <= 5'd1; dwin_v <= 1'b0;
+			cb_n <= 5'd0; cb_need <= 5'd1; dwin_v <= 1'b0; prim_n <= 32'd0;
 			om0 <= 32'd0; om1 <= 32'd0; comb0 <= 32'd0; comb1 <= 32'd0;
 			fill_color <= 32'd0; fog_color <= 32'd0; blend_color <= 32'd0; prim_color <= 32'd0; env_color <= 32'd0;
 			prim_min_level <= 5'd0; prim_lod_frac <= 8'd0; key_gb0 <= 32'd0; key_gb1 <= 32'd0; key_r1 <= 32'd0;
@@ -394,6 +395,7 @@ module n64_rdp2 #(
 					endcase
 				end
 				6'h08, 6'h09, 6'h0A, 6'h0B, 6'h0C, 6'h0D, 6'h0E, 6'h0F: begin           // a triangle
+					prim_n <= prim_n + 32'd1;
 					t_yl <= w0[13:0];
 					t_ym <= w1[29:16];
 					t_yh <= w1[13:0];
@@ -408,6 +410,7 @@ module n64_rdp2 #(
 					ws <= X_ATTR;
 				end
 				6'h36: begin                                                          // FILL_RECTANGLE
+					prim_n <= prim_n + 32'd1;
 					t_xh <= {3'd0, w1[23:12], 12'd0} <<< 1;  t_xl <= {3'd0, w0[23:12], 12'd0} <<< 1;
 					t_xm <= {3'd0, w0[23:12], 12'd0} <<< 1;
 					t_yh <= {2'd0, w1[11:0]};
@@ -418,11 +421,16 @@ module n64_rdp2 #(
 					ws <= X_ATTR;                                                     // (all zero)
 				end
 				6'h30, 6'h33, 6'h34: begin                                            // LOAD_TLUT, _BLOCK, _TILE
-					// (the load's tile takes its bounds, as tools/n64/n64rdp.py load_iteration's does)
-					tile_sz[w1[26:24]] <= {w0[23:12], w0[11:0], w1[23:12], w1[11:0]};
+					// (the load's tile takes its bounds, as tools/n64/n64rdp.py load_iteration's does -- unless
+					// RDP.load refuses it first: a tile/TLUT load with no rows or no texels, a block of none
+					// or more than 2048)
+					if (op0 == 6'h33 ? (w1[23:12] - w0[23:12] + 12'd1 != 12'd0 && w1[23:12] - w0[23:12] + 12'd1 <= 12'd2048)
+					                 : (w1[11:2] >= w0[11:2] && {2'd0, w1[23:14]} - {2'd0, w0[23:14]} + 12'd1 != 12'd0))
+						tile_sz[w1[26:24]] <= {w0[23:12], w0[11:0], w1[23:12], w1[11:0]};
 					ld_go <= 1'b1; tmem_mem <= 1'b1; ws <= X_LOAD;
 				end
 				6'h24, 6'h25: begin                                                   // TEXTURE_RECTANGLE (_FLIP)
+					prim_n <= prim_n + 32'd1;
 					t_xh <= {3'd0, w1[23:12], 12'd0} <<< 1;  t_xl <= {3'd0, w0[23:12], 12'd0} <<< 1;
 					t_xm <= {3'd0, w0[23:12], 12'd0} <<< 1;
 					t_yh <= {2'd0, w1[11:0]};
@@ -485,7 +493,7 @@ module n64_rdp2 #(
 		.om0(om0), .om1(om1), .comb0(comb0), .comb1(comb1),
 		.fill_color(fill_color), .fog_color(fog_color), .blend_color(blend_color), .prim_color(prim_color), .env_color(env_color),
 		.key_center({key_r1[15:8], key_gb1[31:24], key_gb1[15:8]}), .key_scale({key_r1[7:0], key_gb1[23:16], key_gb1[7:0]}),
-		.k4(convert[17:9]), .k5(convert[8:0]), .prim_lod_frac(prim_lod_frac), .prim_min_level(prim_min_level), .prim_dz(prim_dz),
+		.k4(convert[17:9]), .k5(convert[8:0]), .kconv(convert[53:18]), .prim_n(prim_n), .prim_lod_frac(prim_lod_frac), .prim_min_level(prim_min_level), .prim_dz(prim_dz),
 		.sc_xlo(sc_xlo), .sc_ylo(sc_ylo), .sc_xhi(sc_xhi), .sc_yhi(sc_yhi), .sc_field(sc_field), .sc_odd(sc_odd),
 		.fb_addr(fb_addr), .fb_width_m1(fb_width_m1), .fb_fmt(fb_fmt), .z_addr(z_addr), .prim_depth(prim_depth),
 		.tw_all(tw_all), .tsz_all(tsz_all), .tm_ce(tm_ce),

@@ -16,8 +16,13 @@
 //     doubleword's 32-bit halves are swapped.
 //   LOAD_TILE: rows tl..th of sl..sh, row r at the tile's address + r * its
 //     line; odd rows swapped the same way.
-//   32-bit and YUV texels split: R and G to the low 2 kB, B and A to the high.
-//   LOAD_TLUT: 16-bit entries into the high half, each written four times.
+//   32-bit texels split: R and G to the low 2 kB, B and A to the high. YUV (a 16-bit
+//     image, U Y0 V Y1 a texel pair): U and V to the low 2 kB, Y0 and Y1 to the high
+//     (tmem_word_32's yuv).
+//   LOAD_TLUT: 16-bit entries, each written four times (tmem_word_lut: from a 16-bit
+//     image a texel each; from an 8 or 32-bit one, the 16 bits at every 8th byte, or
+//     16th; an entry at an odd address takes four different words).
+//   The loads the model refuses (n64rdp.py load_iteration's early returns) write nothing.
 //////////////////////////////////////////////////////////////////////////////////
 
 `default_nettype none
@@ -116,25 +121,27 @@ module n64_rdp_tmem (
 	reg  [10:0]  dst;                     // the TMEM doubleword the next goes to (in 16-bit words: << 2)
 	reg  [10:0]  row_dst;
 	reg  [9:0]   hdst, row_hdst;          // 32-bit: the index in each 2 kB half (two texels a doubleword)
-	reg  [4:0]   tstep;                   // LOAD_TLUT: TMEM words from one entry to the next
+	reg  [5:0]   tstep;                   // LOAD_TLUT: TMEM words from one entry to the next
+	reg  [4:0]   sstep;                   // and source bytes
+	reg          tl_v3t0;                 // (a 32-bit image into a 4-bit tile: every 16 bytes, + 8 while 4k + 2 < eff)
+	reg  [12:0]  tl_c4;  reg [12:0] tl_eff;
+	reg  [23:0]  tl_base;                 // the entry's address before that 8
 	reg  [63:0]  dw;                      // the source doubleword, big-endian
 	reg          split;                   // 32-bit or YUV: halves to the two 2 kB
+	reg          yuv;                     // YUV: U, V low; Y0, Y1 high
 	reg  [127:0] lbuf; reg [18:0] ltag; reg lv;
 	reg  [127:0] lbuf2; reg [18:0] ltag2; reg lv2;   // the line after lbuf's (a doubleword across two)
 	localparam [2:0] L_IDLE = 3'd0, L_FETCH = 3'd1, L_WAIT = 3'd2, L_WRITE = 3'd3, L_WRITE2 = 3'd4, L_NEXT = 3'd5,
 	                 L_WAIT2 = 3'd6;
 	reg  [2:0]   ls;
 	assign busy = ls != L_IDLE;
-	wire [63:0]  dw_line = {lbuf[8 * {src[3], 3'd0} +: 8], lbuf[8 * {src[3], 3'd1} +: 8], lbuf[8 * {src[3], 3'd2} +: 8],
-	                        lbuf[8 * {src[3], 3'd3} +: 8], lbuf[8 * {src[3], 3'd4} +: 8], lbuf[8 * {src[3], 3'd5} +: 8],
-	                        lbuf[8 * {src[3], 3'd6} +: 8], lbuf[8 * {src[3], 3'd7} +: 8]};
 	// A tile's row starts wherever the image puts it: a 58-texel 16-bit image has rows 116 bytes
 	// apart, so every other row starts 4 bytes into a doubleword (Mario Kart 64's OPTION and DATA
 	// labels came out with every other row from the wrong bytes). The loads take the eight bytes
 	// from src itself -- across two lines when they run over -- as n64rdp.py (parallel-RDP) reads a
-	// texel at its own byte address. (LOAD_TLUT keeps its aligned doubleword: it picks its entry.)
+	// texel at its own byte address. (LOAD_TLUT too: an entry at an odd address is four words.)
 	wire [18:0]  sl0 = src[22:4], sl1 = src[22:4] + 19'd1;
-	wire         cross = (mode != M_TLUT) && (src[3:0] > 4'd8);
+	wire         cross = src[3:0] > 4'd8;
 	wire [255:0] lwin = {lbuf2, lbuf};
 	reg  [63:0]  dw_un;
 	always @(*) begin : un
@@ -151,9 +158,16 @@ module n64_rdp_tmem (
 			ls <= L_IDLE; mr_req <= 1'b0; lv <= 1'b0; lv2 <= 1'b0;
 		end else case (ls)
 		L_IDLE: if (go) begin : start
-			reg [11:0] npix; reg [23:0] base;
+			reg [11:0] npix; reg [23:0] base; reg [12:0] eff, cnt, cap; reg refuse;
 			lv <= 1'b0; lv2 <= 1'b0;
 			split <= (t_size == 2'd3) || (t_fmt == 3'd1);
+			yuv <= t_fmt == 3'd1;
+			// what load_iteration refuses, whatever the load: a 4-bit image; YUV but from or into
+			// other than 16 bits; a 32-bit tile not RGBA; (but LOAD_TLUT) a smaller tile than image
+			refuse = img_size == 2'd0 || (t_fmt == 3'd1 && (t_size != 2'd2 || img_size != 2'd2))
+			      || (t_size == 2'd3 && t_fmt != 3'd0)
+			      || (op != 6'h30 && ((img_size == 2'd3 && t_size == 2'd1) || (img_size == 2'd2 && t_size == 2'd0)
+			                          || (img_size == 2'd3 && t_size == 2'd0)));
 			case (op)
 			6'h33: begin                                             // LOAD_BLOCK
 				mode <= M_BLOCK;
@@ -166,7 +180,7 @@ module n64_rdp_tmem (
 				dxt <= thi; tacc <= 23'd0;
 				dst <= {t_tmem, 2'b00}; row_dst <= {t_tmem, 2'b00};
 				hdst <= {t_tmem[7:0], 2'b00}; row_hdst <= {t_tmem[7:0], 2'b00};
-				ls <= (npix == 12'd0 || npix > 12'd2048 || img_size == 2'd0) ? L_IDLE : L_FETCH;
+				ls <= (npix == 12'd0 || npix > 12'd2048 || refuse) ? L_IDLE : L_FETCH;
 			end
 			6'h34: begin                                             // LOAD_TILE
 				mode <= M_TILE;
@@ -178,25 +192,42 @@ module n64_rdp_tmem (
 				tacc <= 23'd0;
 				dst <= {t_tmem, 2'b00}; row_dst <= {t_tmem, 2'b00};
 				hdst <= {t_tmem[7:0], 2'b00}; row_hdst <= {t_tmem[7:0], 2'b00};
-				ls <= (thi[11:2] < tlo[11:2] || img_size == 2'd0) ? L_IDLE : L_FETCH;
+				ls <= (thi[11:2] < tlo[11:2] || npix == 12'd0 || refuse) ? L_IDLE : L_FETCH;
 			end
 			6'h30: begin                                             // LOAD_TLUT
 				mode <= M_TLUT;
 				npix = shi[11:2] - slo[11:2] + 12'd1;
-				base = img_addr + ((({13'd0, width} * {14'd0, tlo[11:2]}) + {14'd0, slo[11:2]}) << 1);
-				tstep <= 5'd4 << t_size;
-				src <= base; row_src <= base;
-				nwords <= npix;                                      // (one entry at a time)
+				base = img_addr + ((({13'd0, width} * {14'd0, tlo[11:2]}) + {14'd0, slo[11:2]}) << (img_size - 2'd1));
+				// (tmem_word_lut, entry k of the image's eff texels: TMEM words tstep apart, the source
+				// sstep bytes apart, as many as the texels give and TMEM holds)
+				eff = (img_size == 2'd1) ? ({1'b0, npix} + 13'd7) & ~13'd7 : (img_size == 2'd3) ? ({1'b0, npix} + 13'd1) & ~13'd1
+				    : {1'b0, npix};
+				case ({img_size, t_size})
+				4'b10_00: begin tstep <= 6'd4;  sstep <= 5'd2;  cnt = eff;               cap = 13'd512; end
+				4'b10_01: begin tstep <= 6'd8;  sstep <= 5'd2;  cnt = eff;               cap = 13'd256; end
+				4'b10_10: begin tstep <= 6'd16; sstep <= 5'd2;  cnt = eff;               cap = 13'd128; end
+				4'b01_00: begin tstep <= 6'd8;  sstep <= 5'd8;  cnt = eff >> 3;          cap = 13'd256; end
+				4'b01_01: begin tstep <= 6'd16; sstep <= 5'd8;  cnt = eff >> 3;          cap = 13'd128; end
+				4'b01_10: begin tstep <= 6'd32; sstep <= 5'd8;  cnt = eff >> 3;          cap = 13'd64;  end
+				4'b11_00: begin tstep <= 6'd4;  sstep <= 5'd16; cnt = (eff + 13'd3) >> 2; cap = 13'd512; end
+				4'b11_01: begin tstep <= 6'd4;  sstep <= 5'd8;  cnt = eff >> 1;          cap = 13'd512; end
+				default:  begin tstep <= 6'd8;  sstep <= 5'd8;  cnt = eff >> 1;          cap = 13'd256; end
+				endcase
+				tl_v3t0 <= img_size == 2'd3 && t_size == 2'd0;
+				tl_eff <= eff; tl_c4 <= 13'd2; tl_base <= base;
+				src <= base + ((img_size == 2'd3 && t_size == 2'd0 && eff > 13'd2) ? 24'd8 : 24'd0); row_src <= base;
+				nwords <= (cnt > cap) ? cap[11:0] : cnt[11:0];       // (one entry at a time)
 				rows <= 12'd1; row <= 12'd0; wi <= 12'd0;
 				dst <= {t_tmem, 2'b00}; row_dst <= {t_tmem, 2'b00};
-				ls <= (img_size != 2'd2) ? L_IDLE : L_FETCH;
+				// (nothing into a 32-bit tile, nor more than one row, nor from no texels)
+				ls <= (refuse || t_size == 2'd3 || thi[11:2] != tlo[11:2] || npix == 12'd0 || cnt == 13'd0) ? L_IDLE : L_FETCH;
 			end
 			default: ;
 			endcase
 		end
 		L_FETCH: begin
 			if (lv && ltag == sl0 && (!cross || (lv2 && ltag2 == sl1))) begin
-				dw <= (mode == M_TLUT) ? dw_line : dw_un; ls <= L_WRITE;
+				dw <= dw_un; ls <= L_WRITE;
 			end else if (!(lv && ltag == sl0)) begin
 				// (the line after the last one is often this one: no second read)
 				if (lv2 && ltag2 == sl0) begin lbuf <= lbuf2; ltag <= ltag2; end
@@ -208,10 +239,9 @@ module n64_rdp_tmem (
 		L_WRITE: begin
 			// the doubleword into TMEM
 			if (mode == M_TLUT) begin : tl
-				// the entry (16 bits at src) four times, at TMEM word 0x400 + 4n
-				reg [15:0] e;
-				e = src[2] ? (src[1] ? dw[15:0] : dw[31:16]) : (src[1] ? dw[47:32] : dw[63:48]);
-				wa <= dst[10:2]; wdw <= {e, e, e, e}; wen <= 4'hF;
+				// the entry (16 bits at src) four times; at an odd address, the four words at src,
+				// src + 2, src + 4, src + 6 (tmem_word_lut's a + 2 * (a & 1) * (po & 3))
+				wa <= dst[10:2]; wdw <= src[0] ? dw : {4{dw[63:48]}}; wen <= 4'hF;
 				ls <= L_NEXT;
 			end else if (!split) begin
 				// four words, swapped in pairs on odd lines
@@ -226,7 +256,7 @@ module n64_rdp_tmem (
 					reg [10:0] ix;
 					ix = {1'b0, hdst ^ (odd ? 10'd2 : 10'd0)};
 					wa <= ix[10:2];
-					wdw <= {2{dw[63:48], dw[31:16]}};
+					wdw <= yuv ? {2{dw[63:56], dw[47:40], dw[31:24], dw[15:8]}} : {2{dw[63:48], dw[31:16]}};
 					wen <= ix[1] ? 4'b1100 : 4'b0011;
 				end
 				ls <= L_WRITE2;
@@ -238,7 +268,7 @@ module n64_rdp_tmem (
 				reg [10:0] ix;
 				ix = {1'b1, hdst ^ (odd ? 10'd2 : 10'd0)};
 				wa <= ix[10:2];
-				wdw <= {2{dw[47:32], dw[15:0]}};
+				wdw <= yuv ? {2{dw[55:48], dw[39:32], dw[23:16], dw[7:0]}} : {2{dw[47:32], dw[15:0]}};
 				wen <= ix[1] ? 4'b1100 : 4'b0011;
 			end
 			ls <= L_NEXT;
@@ -247,7 +277,9 @@ module n64_rdp_tmem (
 			// on: the next doubleword of the row, or the next row
 			tacc <= tacc + {11'd0, dxt};
 			if (mode == M_TLUT) begin
-				src <= src + 24'd2; dst <= dst + {6'd0, tstep};
+				tl_base <= tl_base + {19'd0, sstep}; tl_c4 <= tl_c4 + 13'd4;
+				src <= tl_base + {19'd0, sstep} + ((tl_v3t0 && tl_c4 + 13'd4 < tl_eff) ? 24'd8 : 24'd0);
+				dst <= dst + {5'd0, tstep};
 			end else begin
 				src <= src + 24'd8; dst <= dst + 11'd4; hdst <= hdst + 10'd2;
 			end
