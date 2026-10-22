@@ -100,7 +100,7 @@ static const uint32_t XA_CTRL = 0x00080000;   // the console's register page (th
 static File     discFile;
 static String   discPath;                 // a card path: a .bin, or a .cue naming its tracks
 // A disc is a run of sectors laid end to end out of its files (a cue sheet's FILEs in order,
-// as pc/cdaudio.py laid them): segments of (first LBA, count, which file, first sector in it),
+// as tools/ps1/cdaudio.py laid them): segments of (first LBA, count, which file, first sector in it),
 // a PREGAP being silence that is in no file. The tracks' starts and kinds go to the drive as
 // its table of contents (ps1_cdrom.v toc_*: console 0x5000 + 4 * entry) so GetTN / GetTD and
 // Play know them, and an audio track's sectors reach it like any other -- it hears the audio
@@ -247,9 +247,8 @@ static const uint8_t *discSectorCard(uint32_t lba) {
 // [31:27] how many, [23:0] the oldest; a write of 1 takes it), and plays 44.1 kHz stereo out
 // of a 4096-sample FIFO filled through the window at 0x6000. 0x140 = {flushes [31:24], the
 // game filters [16], samples in the FIFO [12:0]}: a new flush count -- a seek, a pause, a new
-// read -- starts the decoder over, as the chip's does. The PC did this when it served the disc
-// (pc/server.py XaPump); off the card nobody did, and Gran Turismo 2 played no music. xa.h is
-// that decoder, checked word for word against it (tools/ps1/xatest.py).
+// read -- starts the decoder over, as the chip's does. Without it Gran Turismo 2 played no music.
+// xa.h is that decoder, checked word for word against tools/ps1/cdaudio.py (tools/ps1/xatest.py).
 static const uint32_t XA_PEND = 16384;        // decoded words waiting for room in the FIFO
 static uint32_t *xaPend = nullptr, *xaOut = nullptr;
 // a sound group at a time through internal RAM (xa.h: PSRAM in the inner loop cost 28 ms a sector)
@@ -378,7 +377,7 @@ static uint32_t msfFrames(const String &t) {   // "mm:ss:ff" -> sectors
   if (c1 < 0 || c2 < 0) return 0;
   return (uint32_t)t.substring(0, c1).toInt() * 4500 + (uint32_t)t.substring(c1 + 1, c2).toInt() * 75 + (uint32_t)t.substring(c2 + 1).toInt();
 }
-// The table of contents into the drive (pc/server.py upload_toc did this): track n's first
+// The table of contents into the drive: track n's first
 // sector with its audio bit (entry n), its start as mm:ss (entry 80h+n), the lead-out (0 / 80h),
 // first and last track (FFh).
 static void discTocUpload() {
@@ -394,7 +393,7 @@ static void discTocUpload() {
   fpga.busWrite(TOC + 4 * 0x80, ((s / 60) << 6) | (s % 60));
   fpga.busWrite(TOC + 4 * 0xFF, ((uint32_t)discTracks.front().number << 8) | discTracks.back().number);
 }
-// A cue sheet into discFiles / discSegs / discTracks, as pc/cdaudio.py Disc._parse_cue lays a
+// A cue sheet into discFiles / discSegs / discTracks, as tools/ps1/cdaudio.py Disc._parse_cue lays a
 // disc out: the FILEs end to end, each track starting at its INDEX 01, the INDEX 00 gap before
 // it kept (it is in the file), a PREGAP as silence in no file. Only BINARY files: a cue naming
 // MP3 or WAV audio is refused (the PC decoded those; the card holds raw tracks).
@@ -980,11 +979,11 @@ void setup() {
 //   boot / shell       start the installed core / go back to the shell
 // --- a file onto the card from the PC ----------------------------------------------------
 // "U open <path> <size>", then "U <base64>" lines (up to 189 bytes each), then "U close"; each is
-// answered "= ok", "= done" (the size reached) or "= error ...". pc/pad.py passes U lines through
+// answered "= ok", "= done" (the size reached) or "= error ...". tools/pad.py passes U lines through
 // and waits for the answer (tools/sdput.py). A homebrew ROM, a core: the card stays in the board.
 // Faster: "U blk <offset> <n> <crc32>" (hex) and then n raw bytes (n <= 4096). A block that is
 // not at the file's end, or whose CRC is wrong, is dropped with what follows it and answered
-// "= error at <end>" (serviceSerial); the PC sends again from there. pc/pad.py's "X" does this.
+// "= error at <end>" (serviceSerial); the PC sends again from there. tools/pad.py's "X" does this.
 static File     putFile;
 static uint32_t putLeft = 0, putPos = 0;
 static uint8_t  blkBuf[4096];
@@ -1061,8 +1060,8 @@ static uint32_t loopLastUs = 0, loopMaxUs = 0, loopN = 0, loopT0 = 0;
 static void serialCommand(String c) {
   c.trim();
   if (c.length() > 2 && c[0] == 'U' && c[1] == ' ') { putLine(c.substring(2)); return; }
-  if (c.length() && c[0] == 'P') { pads::usbLine(c); return; }   // the PC's pad (pc/pad.py): quietly
-  // a board register, for the PC's tools (pc/pad.py passes these through): "R addr" -> "= value",
+  if (c.length() && c[0] == 'P') { pads::usbLine(c); return; }   // the PC's pad (tools/pad.py): quietly
+  // a board register, for the PC's tools (tools/pad.py passes these through): "R addr" -> "= value",
   // "W addr value" -> "= ok" (hex)
   if (c.length() > 2 && (c[0] == 'R' || c[0] == 'W' || c[0] == 'D') && c[1] == ' ') {
     if (job.busy) { Serial.println("= busy"); return; }
@@ -1317,7 +1316,7 @@ static void serialCommand(String c) {
     }
     Serial.println("  installing " + cardCore + " from the card");
   } else if (c.startsWith("kb ")) {
-    // kb <hex> ...: bytes to the PC's keyboard (PS/2 set 2: pc/pad.py's keyboard window sends these)
+    // kb <hex> ...: bytes to the PC's keyboard (PS/2 set 2: tools/pad.py's keyboard window sends these)
     int i = 3;
     while (i < (int)c.length()) {
       while (i < (int)c.length() && c[i] == ' ') i++;

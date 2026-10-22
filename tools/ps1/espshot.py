@@ -1,6 +1,6 @@
 """espshot.py - the PlayStation's picture as the board shows it, without the network: the frame
 fb_ddr keeps in DDR3 (640 x 240 RGB555, two pixels a word, row r at word r * 320), read
-through regfile's pages 0x10-0x19 with the ESP32's block read (pc/pad.py's tool port, "D").
+through regfile's pages 0x10-0x19 with the ESP32's block read (tools/pad.py's tool port, "D").
 
     python tools/ps1/espshot.py OUT.png [WIDTH [HEIGHT]]      (default 640 x 240; ~1 min)
 """

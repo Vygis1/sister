@@ -3,7 +3,7 @@
 writes, each with the PC it was taken at) read out, oldest first. The rotation matrix is control
 registers 0-4; translation 5-7; the vertices data 0-5.
 
-    python tools/ps1/gtetrace.py [TRIES]      (through pc/pad.py's port; a game running)
+    python tools/ps1/gtetrace.py [TRIES]      (through tools/pad.py's port; a game running)
 """
 import os
 import random

@@ -1,4 +1,16 @@
-flask>=2.2
+# The PC-side tools (tools/). Python 3.10 or newer.
+# the ESP32's USB serial port (tools/pad.py, tools/esp.py)
+pyserial>=3.5
+# pictures: screen grabs, menu art, reference renders
+Pillow>=10.0
 numpy>=1.24
-# the PlayStation's audio tracks from MP3, FLAC, OGG and WAV files
+# a game controller on the PC, relayed to the board (tools/pad.py --relay)
+pygame>=2.5
+# the PlayStation's audio tracks from MP3, FLAC, OGG and WAV files (tools/ps1/cdaudio.py)
 miniaudio>=1.59
+
+# Only for a few development scripts:
+#   pycdlib     tools/ps1/exedisc.py      (a test program as a disc image)
+#   lameenc     tools/ps1/mktestdisc.py   (MP3 tracks for a test disc)
+#   zstandard   tools/ps1/memtrace.py     (DuckStation save states)
+#   pymupdf     tools/menu/mklogos.py     (the menu's logos from PDFs)

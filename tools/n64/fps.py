@@ -1,5 +1,5 @@
 """fps.py - the N64 game's frame rate on the board: how often VI_ORIGIN (console 0x154) changes,
-read through pc/pad.py's tool port.     python tools/n64/fps.py [SECONDS]"""
+read through tools/pad.py's tool port.     python tools/n64/fps.py [SECONDS]"""
 import socket, sys, time
 f = socket.create_connection(('127.0.0.1', 5557), timeout=5).makefile('rwb')
 def rd(a):

@@ -1,6 +1,6 @@
 """A small XA-ADPCM encoder, for making test discs.
 
-    python tools/ps1/xaenc.py --selftest     encode tones, decode them with pc/cdaudio.py, measure
+    python tools/ps1/xaenc.py --selftest     encode tones, decode them with tools/ps1/cdaudio.py, measure
 
 Encodes 37.8 kHz (or 18.9 kHz) stereo/mono 4-bit XA sectors: per 28-sample
 block it tries every filter and shift and keeps the one that decodes closest,
@@ -15,7 +15,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "pc"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdaudio import XaDecoder, _POS, _NEG   # noqa: E402
 
 SECTOR = 2352

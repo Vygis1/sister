@@ -1,9 +1,9 @@
-"""fbgrab.py - the N64's framebuffer as the VI shows it, off the board (through pc/pad.py's
+"""fbgrab.py - the N64's framebuffer as the VI shows it, off the board (through tools/pad.py's
 tool port and console_top's DDR3 line read, 0x7C/0x80), and what n64_vid's filters make of it.
 
     python tools/n64/fbgrab.py [OUT] [--jtag] [--live]   -> OUT.raw (the 16-bit frame) + OUT_<mode>.png
 
---jtag reads over the JTAG cable (a JTAG=1 debug build, tools/jtag.py) instead of pc/pad.py's tool
+--jtag reads over the JTAG cable (a JTAG=1 debug build, tools/jtag.py) instead of tools/pad.py's tool
 port; --live leaves the game running (the frame may change under the read: pause the game first).
 
 The N64 does not pause (NES_CTRL bit 2 stops the other consoles, not this one), and a

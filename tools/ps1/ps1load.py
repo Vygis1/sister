@@ -1,5 +1,5 @@
 """ps1load.py - what bounds the PlayStation core's frame rate, second by second, read through
-pc/pad.py's tool port (the ESP32 link; never the LAN).
+tools/pad.py's tool port (the ESP32 link; never the LAN).
 
     python tools/ps1/ps1load.py [SECONDS]
 

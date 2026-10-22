@@ -1,6 +1,6 @@
 """pad.py - the ESP32's serial port, held for the PC's tools; and, asked for, a game
 controller on this PC relayed to the board.
-    python pc/pad.py [--port COM8] [--relay]
+    python tools/pad.py [--port COM8] [--relay]
 --relay: a controller on this PC (PS5 DualSense, PS4, Xbox... anything SDL knows) goes down
 the ESP32's USB serial port as a line "P <buttons> <lx> <ly> <rx> <ry>" whenever it changes
 and ten times a second regardless, and the ESP32 (esp32/console/pads.h) lays it out for

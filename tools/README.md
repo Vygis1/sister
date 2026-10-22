@@ -26,20 +26,17 @@ Run everything from the repository root (`./tools/core.sh md`, `python tools/ps1
 
 | | |
 |---|---|
-| `serve.sh` | starts `pc/server.py` (the development setup, [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md)) |
+| `pad.py` | holds the ESP32's USB serial port for the other tools (port 5557: `R addr`, `W addr value`, `S command`); `--relay` passes a PC game controller to the board |
 | `esp.py` | the ESP32's serial console |
-| `bcmd.py` | one ESP32 console command, or console register reads/writes, through `pc/pad.py` (`bcmd.py "ls /roms/nes"`, `bcmd.py -r 80010`) |
+| `bcmd.py` | one ESP32 console command, or console register reads/writes, through `tools/pad.py` (`bcmd.py "ls /roms/nes"`, `bcmd.py -r 80010`) |
 | `coretest.py` | starts a game on every console in turn and checks that each one runs (frame counter, CPU position) |
 | `vgrab.py` | the picture a core sends to the TV, as a PNG (`rtl/line_grab.v`; not in the PS1 / N64 images) |
 | `sdput.py` | a file onto the SD card through the ESP32, checked by reading it back (~165 kB/s) |
 | `menunav.py`, `toolpad.py` | drive the on-screen menu / press pad buttons from the PC |
 | `jtag.py` | the console's registers over the JTAG cable (debug images) |
 | `padpress.py` | presses buttons on pad 1 |
-| `playtest.py` | loads a cartridge and reads frames back |
 | `fb2png.py`, `frame2png.py` | framebuffers and bench frame dumps to PNG |
-| `shellscope.py` | records the shell's pins |
 | `console.py`, `win.sh` | run a command in a window of its own |
-| `uicheck.js` | loads the web page's scripts as a browser would |
 
 ## Per console
 
@@ -48,10 +45,10 @@ Reference models, test-program generators, test runners and board debugging scri
 | | |
 |---|---|
 | `nes/` | `nes2hex.py` (cartridge to bench hex), `uxtest.py` |
-| `sms/` | the Z80 test harnesses (`z80hw.py`, `z80rom.py`, `z80shim.py`), Master System loading and screenshots |
+| `sms/` | the Z80 test harnesses (`z80rom.py`, `z80shim.py`), Master System bank and picture tools |
 | `md/` | the 68000 assembler and tests, the YM2612's tables, `mdtest.py` |
-| `ps1/` | the GTE model and its hardware vectors, the SPU reference (`spu_ref.py`), the R3000 test program, CD and XA tools, and the board debugging scripts (`ps1shot.py`, `ps1status.py`, `ps1flash.py`, ...) |
-| `n64/` | the N64 model (`n64model.py`: CPU, FPU, RSP, RDP), the krom test runners, the table generators, and the board debugger `n64dbg.py` |
+| `ps1/` | the GTE model and its hardware vectors, the SPU reference (`spu_ref.py`), the R3000 test program, CD and XA tools (`cdaudio.py`, `xaenc.py`), the cache and trace models, and the board scripts (`espshot.py`, `ps1fps.py`, `ps1suite.py`, `bootloop.py`) |
+| `n64/` | the N64 model (`n64model.py`: CPU, FPU, RSP, RDP), the krom test runners, the table generators, the EEPROM game list `n64_saves.py`, and the board debugger `n64dbg.py` |
 | `snes/` | Python models of the 65816, SPC700, DSP and PPU; the SingleStepTests and krom runners |
 | `gb/` | the SM83 single-step runner, blargg runner, cgb-acid2 check, frame tools |
 | `gba/` | the ARM7TDMI single-step converter, the BIOS converter, the reference renderer `ppuref.py` |

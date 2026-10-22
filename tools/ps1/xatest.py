@@ -1,4 +1,4 @@
-"""xatest.py - esp32/console/xa.h (the ESP32's XA decoder) against pc/cdaudio.py's XaDecoder,
+"""xatest.py - esp32/console/xa.h (the ESP32's XA decoder) against tools/ps1/cdaudio.py's XaDecoder,
 word for word, on a run of real XA sectors from a disc image.
 
     python tools/ps1/xatest.py DISC.bin [FIRST_LBA] [COUNT]
@@ -9,7 +9,7 @@ and reports the first differing word.
 import os, subprocess, sys
 import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, '..', '..', 'pc'))
+sys.path.insert(0, HERE)
 import cdaudio  # noqa: E402
 
 GCC = r'C:\msys64\mingw64\bin\g++.exe'

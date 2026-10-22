@@ -6,7 +6,7 @@ results: the text each prints (psx.log) and, for the GPU tests, video memory (vr
 Needs a debug build in the FPGA (core.sh PS1_DBG=1 JTAG=1: the TTY ring, the raw frame window and
 the register bus over JTAG -- tools/jtag.py) with the BIOS loaded (any PlayStation game started from
 the menu once), the tests on the card as /roms/ps1tests/NAME.bin (tools/ps1/exedisc.py), and
-pc/pad.py running: the ESP32 is the disc drive, so it is told which disc is in; everything else
+tools/pad.py running: the ESP32 is the disc drive, so it is told which disc is in; everything else
 goes over JTAG.
 
 Each test: its disc in, the console reset, its output followed until it stops changing; then
@@ -74,7 +74,7 @@ def exe_range(name):
 
 
 class Pad:
-    """pc/pad.py's port: only to tell the ESP32 (the disc drive) which disc is in"""
+    """tools/pad.py's port: only to tell the ESP32 (the disc drive) which disc is in"""
     def __init__(self):
         self.f = socket.create_connection(('127.0.0.1', 5557), timeout=10).makefile('rwb')
 

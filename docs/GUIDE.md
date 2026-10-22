@@ -115,7 +115,7 @@ Games dropped loose into `/roms` are sorted into their console's folder the firs
 time the card is read. You supply the games and the BIOS: none come with this.
 
 The card can also be written without taking it out: with the board on USB and
-`pc/pad.py` running, `python tools/sdput.py FILE /roms/gg/Game.gg` copies a file
+`tools/pad.py` running, `python tools/sdput.py FILE /roms/gg/Game.gg` copies a file
 onto it through the ESP32 (about 165 kB/s -- fine for cartridges, cores and DOS
 games; a 700 MB PlayStation disc is quicker with the card in a reader). Do not update the ESP32's firmware while a PlayStation disc is being read:
 the card can be left unreadable until the board is switched off and on.
@@ -198,7 +198,7 @@ circle, square, triangle). Keys are PC key names: `a`-`z`, `0`-`9`, `f1`-`f12`, 
 `kpplus`, `kpminus`, `kpstar`, `kpenter`, punctuation (`comma`, `period`, `minus`, `equals`,
 `slash`, `semicolon`, `quote`, `lbracket`, `rbracket`, `backslash`, `backquote`), and
 `mouse_left`, `mouse_right`, `mouse_middle`. A button the file leaves out does nothing. A keyboard on the
-PC running `pc/pad.py` also types into the game.
+PC running `tools/pad.py` also types into the game.
 
 ## How well each console runs
 

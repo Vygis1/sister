@@ -2,8 +2,7 @@
 //
 // The drive (rtl/ps1_cdrom.v) queues the LBA of every XA audio sector the game lets through
 // and plays 44.1 kHz stereo samples out of a 4096-sample FIFO; something has to turn the one
-// into the other. That was the PC (pc/server.py XaPump, pc/cdaudio.py) while the PC served
-// the disc; off the card, it is this. A line-for-line port of pc/cdaudio.py's XaDecoder --
+// into the other: this. A line-for-line port of tools/ps1/cdaudio.py's XaDecoder --
 // DuckStation's ADPCM decoder and its zigzag interpolator, 37.8/18.9 kHz to 44.1 -- and
 // tools/ps1/xatest.py checks it against that, word for word, on real sectors.
 //

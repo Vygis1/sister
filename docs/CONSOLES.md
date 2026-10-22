@@ -237,7 +237,7 @@ and the BIOS opens its CD player.
 
 **XA** is decoded on the PC. The drive queues each XA sector that passes the
 game's filter. The server reads it from the disc and decodes and resamples it,
-exactly as DuckStation does (`pc/cdaudio.py`). It sends the samples back into a
+exactly as DuckStation does (`tools/ps1/cdaudio.py`). It sends the samples back into a
 4096-sample buffer on the board. So XA plays only from a disc served by the PC.
 
 With no disc it reports lid open and motor off, as DuckStation's drive does,

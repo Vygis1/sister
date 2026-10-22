@@ -31,7 +31,7 @@
 #include "gfxmenu.h"
 namespace menu {
 
-// --- the board's registers (as pc/server.py) ------------------------------------
+// --- the board's registers -----------------------------------------------------
 static const uint32_t SYN_CTRL = 0x00030004, VID_CTRL = 0x00060004;
 static const uint32_t OSD = 0x00070000, OSD_CTRL = OSD + 0x04, OSD_CELLS = OSD + 0x2000;
 static const uint32_t NES = 0x00080000, NES_CTRL = NES + 0x04, NES_JOY1 = NES + 0x08,
@@ -521,8 +521,8 @@ static bool streamBanks(File &f, uint32_t n, int swap = 0) {
 // --- the PlayStation's memory card ----------------------------------------------
 // /saves/card1.mcr on the card (raw 128 kB, the format DuckStation reads), put into the
 // board's DDR3 card with the BIOS; every sector the game stores is queued on the board
-// (ps1_sio.v, CARD_Q) and copied back into the file from here -- as pc/server.py's
-// MemCard does over Ethernet. A missing file becomes a freshly formatted card.
+// (ps1_sio.v, CARD_Q) and copied back into the file from here. A missing file becomes a
+// freshly formatted card.
 static const uint32_t CARD_Q = NES + 0x138, HR_LINE = NES + 0x7C, HR_DATA = NES + 0x80;
 static const uint32_t CARD_LINE = 0x090000, CARD_BYTES = 128 * 1024;
 static const char *CARD_PATH = "/saves/card1.mcr";
@@ -615,7 +615,7 @@ static uint8_t *bigBuf(size_t n) {
 }
 
 // --- the N64's save EEPROM ---------------------------------------------------------
-// Which games have one, and its size, by the game ID at 0x3B (pc/n64_saves.py's table,
+// Which games have one, and its size, by the game ID at 0x3B (tools/n64/n64_saves.py's table,
 // from the games' own documentation). The EEPROM lives on the board (ctrl 0x16C, a byte
 // at a time); /saves/n64/<id> <title>.eep holds it between sessions, written back
 // whenever it has changed (looked at every 20 s, as the PC server does).
@@ -824,7 +824,7 @@ static void gbaSaveService(bool now_ = false) {
 // its coin cell keeps it while the power is off -- on GPIO 25 CLK, 26 DAT, 27 RST: read at the
 // first use and again every minute, millis() in between. Without the module the clock starts at
 // 2000-01-01 and runs only while the board does. "time <seconds since 1970, local>" on the serial
-// console sets it, the module too (pc/pad.py sends the PC's time when it connects).
+// console sets it, the module too (tools/pad.py sends the PC's time when it connects).
 static const int DS_CLK = 25, DS_DAT = 26, DS_RST = 27;
 static const uint32_t GBA_RTC_DATE = NES + 0x1E0, GBA_RTC_TIME = NES + 0x1E4;
 static bool clkInit = false, clkModule = false, gclkOn = false;

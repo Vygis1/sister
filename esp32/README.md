@@ -203,7 +203,7 @@ you are looking at rather than making you guess.
 
 ### Talking to it over USB
 
-Typed into the serial port at 115200 (what the PC's tools use through pc/pad.py):
+Typed into the serial port at 115200 (what the PC's tools use through tools/pad.py):
 
     state              what the board is, and what is on the card
     cores              the core library on the card

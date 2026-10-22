@@ -1,4 +1,4 @@
-"""bcmd.py - a command to the console's ESP32 (through pc/pad.py's tool port) and its answer.
+"""bcmd.py - a command to the console's ESP32 (through tools/pad.py's tool port) and its answer.
 
     python tools/bcmd.py "ls /roms/gb"              the answer (the lines the ESP32 printed after it)
     python tools/bcmd.py "play /roms/nes/x.nes" 20  waiting up to 20 s for the answer

@@ -65,7 +65,7 @@ The R3000, the GPU, the VRAM cache and the register fabric run together
 (`rtl/ps1_top.v`, `sim/tb_ps1.v`): the CPU executes tools/ps1/ps1demo.py's program
 out of a boot ROM, writes GPU commands itself, and draws a boot screen -- a
 Gouraud-shaded diamond and a menu bar, rendered to VRAM in DDR3 and scanned out
-320x240. `docs/ps1_boot.png` is that frame, straight off the simulated display.
+320x240. `docs/images/ps1_boot.png` is that frame, straight off the simulated display.
 
 Three bugs found getting there, each by a measurement:
 
@@ -185,7 +185,7 @@ Everything above is history; this is where the machine stands.
 * **XA.** Setmode bit 6 routes real-time audio sectors away from the CPU. With
   bit 3, only the Setfilter file and channel are kept. Each kept sector's LBA
   goes into a 16-entry queue (ctrl 0x13C). `pc/server.py`'s XaPump reads the
-  sector from the disc and decodes it with `pc/cdaudio.py`. That is
+  sector from the disc and decodes it with `tools/ps1/cdaudio.py`. That is
   DuckStation's ADPCM, its 7-phase zigzag resampler for 37.8 kHz, and
   Mednafen's table for 18.9 kHz. The pump pushes {R, L} words into a
   4096-sample FIFO (ctrl 0x6000). ctrl 0x140 counts the drive's flushes, and a

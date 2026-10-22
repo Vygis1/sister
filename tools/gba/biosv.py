@@ -11,6 +11,4 @@ out = ["// the open Game Boy Advance BIOS (Cult-of-GBA/BIOS, MIT) as the bios me
 for i in range(0, 4096, 4):
     out.append('	' + ' '.join("bios[%d] = 32'h%08x;" % (i + j, w[i + j]) for j in range(4)))
 out.append('end')
-open('rtl/gba_bios_data.vh', 'w').write('
-'.join(out) + '
-')
+open('rtl/gba_bios_data.vh', 'w', newline='').write('\n'.join(out) + '\n')

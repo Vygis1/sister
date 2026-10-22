@@ -12,7 +12,7 @@ How the cores are built, simulated and debugged on the board. Using the console 
   └── JTAG cable (optional) ───────────────────────────────────────────┘
 ```
 
-Everything the PC does to the board goes through the ESP32's USB serial port. `pc/pad.py` holds
+Everything the PC does to the board goes through the ESP32's USB serial port. `tools/pad.py` holds
 that port and opens a local tool port, **127.0.0.1:5557**, that every board tool talks to:
 
 | Line | Does |
@@ -25,7 +25,7 @@ The ESP32's output is logged to `build/pad.log`. Logging is off after every ESP3
 `pad.py` turns it on when it connects.
 
 ```sh
-python pc/pad.py                       # keep running in its own window
+python tools/pad.py                       # keep running in its own window
 python tools/bcmd.py "state"           # the ESP32's state: reset reason, clock, card, FPGA
 python tools/bcmd.py -r 80010 80014    # console registers: frame counter, CPU position
 ```

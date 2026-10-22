@@ -1,4 +1,4 @@
-"""menunav.py - drive the ESP32's on-screen menu from the PC (pc/pad.py's tool port), reading
+"""menunav.py - drive the ESP32's on-screen menu from the PC (tools/pad.py's tool port), reading
 where it is from its own log lines in build/pad.log ("menu: buttons .., open|closed, level L,
 item I [the highlighted item]", written once a press has done its work), so a sequence of
 presses does not depend on where the menu happened to be.

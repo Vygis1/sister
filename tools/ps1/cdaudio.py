@@ -27,7 +27,7 @@ import numpy as np
 
 SECTOR = 2352
 SAMPLES_PER_SECTOR = SECTOR // 4          # stereo 16-bit
-CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "cdda_cache")
+CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "cdda_cache")
 
 
 def msf_to_frames(s):

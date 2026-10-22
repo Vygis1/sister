@@ -2,7 +2,7 @@
 watched for 30 s each; an address/bus/reserved-instruction exception seen on 3 or more of the
 samples, or the processor outside RAM and BIOS, is a crash.
 
-    python tools/ps1/bootloop.py [N] [GAME]      (default 4, crash2; through pc/pad.py's port)
+    python tools/ps1/bootloop.py [N] [GAME]      (default 4, crash2; through tools/pad.py's port)
 """
 import socket, subprocess, sys, time
 

@@ -1,6 +1,6 @@
 """aring.py - what the board sends to HDMI as sound: the audio ring (rtl/ps1_aring.v, fed by
 the PlayStation's SPU or the N64's AI, 44.1 kHz stereo) read in one piece through the
-ESP32 (pc/pad.py's tool port, "D addr n"), saved as a WAV and drawn as a picture.
+ESP32 (tools/pad.py's tool port, "D addr n"), saved as a WAV and drawn as a picture.
 
     python tools/n64/aring.py [OUT_PREFIX] [--count N]
 

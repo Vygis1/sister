@@ -1,4 +1,4 @@
-"""sdput.py - a file onto the console's SD card, through the ESP32 (pc/pad.py running, its tool
+"""sdput.py - a file onto the console's SD card, through the ESP32 (tools/pad.py running, its tool
 port): the card stays in the board.
     python tools/sdput.py LOCALFILE /roms/gg/Game.gg
     python tools/sdput.py cores/gg.bin /cores/gg.bin

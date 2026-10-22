@@ -7,10 +7,7 @@ read through the server's register API.
 import json
 import sys
 import time
-import urllib.error
-import urllib.request
 
-SERVER = 'http://127.0.0.1:8080'      # (not localhost: urllib tries ::1 first, and each call waits)
 CTRL = 0x0008_0000
 NAMES = (['SP_MEM_ADDR', 'SP_DRAM_ADDR', 'SP_RD_LEN', 'SP_WR_LEN', 'SP_STATUS', 'SP_DMA_FULL', 'SP_DMA_BUSY',
           'SP_SEMAPHORE', 'SP_PC'] +
@@ -21,7 +18,7 @@ NAMES = (['SP_MEM_ADDR', 'SP_DRAM_ADDR', 'SP_RD_LEN', 'SP_WR_LEN', 'SP_STATUS', 
 
 
 # The board has no network: its registers are read through the ESP32, whose USB serial
-# port pc/pad.py holds and passes these through (127.0.0.1:5557, "R addr" / "W addr value").
+# port tools/pad.py holds and passes these through (127.0.0.1:5557, "R addr" / "W addr value").
 TOOLS = ('127.0.0.1', 5557)
 _sock = None
 
@@ -44,15 +41,6 @@ def reg(a, v=None):
             if attempt == 4:
                 raise
             time.sleep(0.2)
-
-
-def _reg_http(a, v=None):     # (the server's API, when the board had a network)
-    url = '%s/api/reg/0x%x' % (SERVER, a)
-    if v is None:
-        return json.load(urllib.request.urlopen(url, timeout=10))['value']
-    req = urllib.request.Request(url, data=json.dumps({'value': v}).encode(),
-                                 headers={'Content-Type': 'application/json'}, method='POST')
-    urllib.request.urlopen(req, timeout=10).read()
 
 
 def snapshot():

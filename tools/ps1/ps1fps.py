@@ -1,5 +1,5 @@
 """ps1fps.py - the PlayStation game's frame rate on the board, from its own display flips: how
-often the displayed buffer (console 0x6C, dbg_disp: y [25:17], x [9:0]) changes, read through pc/pad.py's
+often the displayed buffer (console 0x6C, dbg_disp: y [25:17], x [9:0]) changes, read through tools/pad.py's
 tool port -- no network. Reported per second, then the median and the slowest second.
 
     python tools/ps1/ps1fps.py [SECONDS]

@@ -1,5 +1,5 @@
 """vgrab.py - the picture a console core is sending to the TV, as a PNG: asks the ESP32 for "vgrab"
-(through pc/pad.py's tool port), which reads console_top's line grabber (rtl/line_grab.v) a line at a
+(through tools/pad.py's tool port), which reads console_top's line grabber (rtl/line_grab.v) a line at a
 time, and puts the rows back together out of pad.py's log. A still picture comes out whole; a moving
 one is a line from each of 480 frames. Not in the PlayStation or N64 images (their chips are full).
 

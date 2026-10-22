@@ -1,5 +1,5 @@
 """rtring.py - the N64 CPU's last 512 retired instructions, as the board froze them at the first
-TLB / address / bus fault (n64_top's retire ring, DBG builds), through pc/pad.py's tool port.
+TLB / address / bus fault (n64_top's retire ring, DBG builds), through tools/pad.py's tool port.
 
     python tools/n64/rtring.py [OUT]      -> OUT (default build/rtring.txt), oldest first, in
                                              tools/n64/n64sim.py's trace format

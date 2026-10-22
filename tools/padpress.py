@@ -1,5 +1,5 @@
 """padpress.py - press buttons on the board's joypad 1 from the PC, held long enough to
-survive pc/pad.py's half-second refresh: each press is rewritten every 20 ms for
+survive tools/pad.py's half-second refresh: each press is rewritten every 20 ms for
 250 ms, then released. The value is in the running machine's own bit order.
 
     from padpress import press;  press(0x40)

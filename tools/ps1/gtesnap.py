@@ -5,7 +5,7 @@ the command run and every register read again; the model, loaded with the first 
 same command and must read back the second.
 
     python tools/ps1/gtesnap.py [N] [SKIP]     N snapshots (default 20), each SKIP commands apart
-                                               (default random 0-2000); through pc/pad.py's port
+                                               (default random 0-2000); through tools/pad.py's port
 
 Each snapshot holds the GTE (and so the game) for the moment it takes to read: ~260 link calls.
 """

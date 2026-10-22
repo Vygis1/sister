@@ -4,7 +4,7 @@
 
 The test ROM (lemmy-64/n64-systemtest, MIT; build/n64-systemtest, `cargo run --release` with
 nust64) prints through the ISViewer: n64_top keeps that text in a 2 kB ring (n64_top isv_*),
-read here through the debug window (console 0x170 select, 0x174 data) with pc/pad.py's register
+read here through the debug window (console 0x170 select, 0x174 data) with tools/pad.py's register
 pass-through (tool port 5557, "R addr" / "W addr value"). Saying how far the text has been read
 turns on flow control in the core: the program waits for us rather than overwrite the ring.
 

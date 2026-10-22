@@ -2,7 +2,7 @@
 //
 // Every "disc: ...", "menu: ...", "pads: ..." line went out on the UART as it happened, and
 // Serial.print blocks once its small buffer is full -- time taken from loop(), which is the
-// pads. The replies to serial COMMANDS (pc/pad.py's register reads, "state", "install") are
+// pads. The replies to serial COMMANDS (tools/pad.py's register reads, "state", "install") are
 // not logging and still go through Serial; everything else goes through Log, which is quiet
 // until "log on" is typed (not kept across a reset).
 #pragma once

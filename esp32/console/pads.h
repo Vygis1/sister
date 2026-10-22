@@ -1,6 +1,6 @@
 // pads.h - the consoles' joypads, from wherever a pad is: Bluetooth pads (PS4, PS5, Xbox,
 // Switch...) through Bluepad32 on a classic ESP32 (the LilyGO T8: the S3 has no Bluetooth
-// Classic, which the PlayStation pads need), or a pad on the PC, whose state pc/pad.py
+// Classic, which the PlayStation pads need), or a pad on the PC, whose state tools/pad.py
 // sends over this chip's USB serial port as a line
 //
 //     P <buttons, hex> <left x> <left y> <right x> <right y>      (axes -128..127, up negative)
@@ -436,14 +436,14 @@ static void begin() {
   prefs.begin("menu", true); swapPlayers = prefs.getBool("swap", false); prefs.end();
 #if PADS_BT == 2
   bool ok = padbt::begin();
-  Log.printf("pads: Bluetooth (Bluedroid) %s, internal free %u -- pair a pad with SHARE + PS; or a pad on the PC (pc/pad.py)\n",
+  Log.printf("pads: Bluetooth (Bluedroid) %s, internal free %u -- pair a pad with SHARE + PS; or a pad on the PC (tools/pad.py)\n",
              ok ? "up" : "NOT up", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #elif PADS_BT
   BP32.setup(&onConnected, &onDisconnected);
   BP32.enableNewBluetoothConnections(true);
-  Log.println("pads: Bluetooth up -- pair a pad with SHARE + PS; or a pad on the PC (pc/pad.py)");
+  Log.println("pads: Bluetooth up -- pair a pad with SHARE + PS; or a pad on the PC (tools/pad.py)");
 #else
-  Log.println("pads: a pad on the PC (pc/pad.py, over this USB port)");
+  Log.println("pads: a pad on the PC (tools/pad.py, over this USB port)");
 #endif
 }
 

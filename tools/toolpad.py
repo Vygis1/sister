@@ -1,4 +1,4 @@
-"""toolpad.py - press buttons on the board from the PC's tools, through pc/pad.py's tool port
+"""toolpad.py - press buttons on the board from the PC's tools, through tools/pad.py's tool port
 (the pad's own bits: 0 cross, 1 circle, 2 square, 3 triangle, 4 select, 5 start, 6-9 up/down/
 left/right, 10 L1, 11 R1, 12 L2, 13 R2, 14 PS).
 

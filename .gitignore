@@ -44,13 +44,11 @@ hs_err_pid*
 /*.png
 
 # --- your own data -----------------------------------------------------------
-# memory card images (pc/server.py saves the console's card here) and backups
+# memory card images and backups
 saves/
 *.mcr
 *.mcr.bak
 
-# settings for one machine (see local.env.example)
-local.env
 
 # --- releases -----------------------------------------------------------------
 # tools/release.sh builds these from cores/ and the commit
