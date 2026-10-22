@@ -1429,6 +1429,19 @@ static void serialCommand(String c) {
     String path = c.substring(3); path.trim();
     if (pc::on) Serial.println("  rm: the PC is running a disk -- start another game first");
     else Serial.printf("  rm %s: %s" "\n", path.c_str(), SD.remove(path) ? "removed" : "FAILED (no such file?)");
+  } else if (c.startsWith("mv ")) {
+    // mv <from>|<to>: a file renamed or moved on the card ('|' between them: names have spaces); the
+    // target's folder is made if need be
+    String a = c.substring(3); int bar = a.indexOf('|');
+    String from = a.substring(0, bar < 0 ? 0 : bar), to = bar < 0 ? String("") : a.substring(bar + 1);
+    from.trim(); to.trim();
+    int sl = to.lastIndexOf('/');
+    if (bar < 0 || !from.length() || !to.length()) Serial.println("  mv <from>|<to>");
+    else if (pc::on) Serial.println("  mv: the PC is running a disk -- start another game first");
+    else {
+      if (sl > 0 && !SD.exists(to.substring(0, sl))) SD.mkdir(to.substring(0, sl));
+      Serial.printf("  mv %s -> %s: %s\n", from.c_str(), to.c_str(), SD.rename(from, to) ? "done" : "FAILED");
+    }
   } else if (c == "ds") {
     // the DS1302's own registers, twice two seconds apart: is it there, running (seconds bit 7 clear),
     // ticking, and what does it hold (it keeps time over a power cut only with a good coin cell)

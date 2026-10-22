@@ -115,7 +115,25 @@ def layout(top, run):
             if not bats:
                 sys.exit('no start .BAT in %s: give --run' % top)
             run = 'CALL C:\\%s' % bats[0].upper()
+    drop_temp_copies(stage)
     return stage, run, cue
+
+
+def drop_temp_copies(stage):
+    """MicroProse's CD games (Transport Tycoon Deluxe) keep a FILES.TMP: the files they copied from the CD
+    on their last start. At every start the game deletes those and copies them again -- 6.7 MB for TTD,
+    five minutes through the SD card. A pack holds the copies already, so the list goes: with no
+    FILES.TMP the game uses the files it finds (TTD then starts in 24 s instead of ~5 min)."""
+    for d, _, files in os.walk(stage):
+        for f in files:
+            if f.upper() != 'FILES.TMP':
+                continue
+            p = os.path.join(d, f)
+            names = [n.decode('ascii', 'replace') for n in open(p, 'rb').read().split(b'\0') if n]
+            have = {x.upper() for x in files}
+            if names and all(n.upper() in have for n in names):
+                os.remove(p)
+                print('dropped %s (its %d files are all there already)' % (os.path.relpath(p, stage), len(names)))
 
 
 def copy_cue(cue, out_dir, name):
