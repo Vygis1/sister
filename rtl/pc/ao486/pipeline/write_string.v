@@ -52,6 +52,9 @@ module write_string(
     input               es_cache_valid,
     input       [31:0]  es_base,
     input       [31:0]  es_limit,
+    input       [31:0]  es_bound_r,         // (SiSTer: w_string_es_bound below, registered -- write_register.v)
+    input       [31:0]  es_bound_lo_r,      // (SiSTer: w_string_es_bound - 2, registered)
+    input               es_bound_ge2_r,     // (SiSTer: w_string_es_bound >= 2, registered)
     
     //output
     output      [31:0]  wr_esi_final,
@@ -125,19 +128,25 @@ assign w_string_es_upper_limit = (es_cache[`DESC_BIT_D_B])? 32'hFFFFFFFF : 32'h0
 //  the length minus 1 is 0, 1 or 3 (1, 2 or 4 bytes), and with room = (bound - w_edi_offset) mod 2^32, room < 0
 //  is never, room < 1 is w_edi_offset == bound, room < 3 is w_edi_offset in [bound - 2, bound] mod 2^32: compares
 //  against bounds from the segment registers, no subtract in series with w_edi_offset)
-wire [31:0] w_string_es_bound    = (es_cache[43] || !es_cache[42])? es_limit : w_string_es_upper_limit;
-wire [31:0] w_string_es_bound_lo = w_string_es_bound - 32'd2;
+// (SiSTer, further: the bound, bound - 2 and bound >= 2 are registers kept beside es_cache (write_register.v:
+//  the same functions of the same next value). Was: w_string_es_bound = (es_cache[43] || !es_cache[42])?
+//  es_limit : w_string_es_upper_limit; w_string_es_bound_lo = w_string_es_bound - 2)
+wire [31:0] w_string_es_bound    = es_bound_r;
+wire [31:0] w_string_es_bound_lo = es_bound_lo_r;
 wire        w_string_es_room_0   = w_edi_offset == w_string_es_bound;
-wire        w_string_es_room_lt3 = (w_string_es_bound >= 32'd2)? (w_edi_offset >= w_string_es_bound_lo && w_edi_offset <= w_string_es_bound) :
-                                                                 (w_edi_offset >= w_string_es_bound_lo || w_edi_offset <= w_string_es_bound);
+wire        w_string_es_room_lt3 = (es_bound_ge2_r)? (w_edi_offset >= w_string_es_bound_lo && w_edi_offset <= w_string_es_bound) :
+                                                     (w_edi_offset >= w_string_es_bound_lo || w_edi_offset <= w_string_es_bound);
 assign w_string_es_not_fit =
     (wr_string_es_length_minus_1 == 3'd0)?  1'b0 :
     (wr_string_es_length_minus_1 == 3'd1)?  w_string_es_room_0 :
                                             w_string_es_room_lt3;
 
+// (SiSTer: was
+//      ((es_cache[43] || !es_cache[42]) && w_edi_offset > es_limit) ||
+//      (!es_cache[43] && es_cache[42] && (w_edi_offset <= es_limit || w_edi_offset > w_string_es_upper_limit));
+//  the bound is es_limit in the first case and the upper limit in the second, so it is the same as below)
 assign w_string_es_limit_overflow =
-    ((es_cache[43] || !es_cache[42]) && w_edi_offset > es_limit) ||
-    (!es_cache[43] && es_cache[42] && (w_edi_offset <= es_limit || w_edi_offset > w_string_es_upper_limit));
+    w_edi_offset > w_string_es_bound || (!es_cache[43] && es_cache[42] && w_edi_offset <= es_limit);
     
 // (CODE or not writable)
 assign w_string_es_no_write = es_cache[43] || !es_cache[41];

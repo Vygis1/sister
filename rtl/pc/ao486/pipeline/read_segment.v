@@ -253,13 +253,21 @@ assign rd_seg_ss_fault_init = seg_select == 3'd2 && seg_fault;
 
 //------------------------------------------------------------------------------
 
+// (SiSTer: the six sums are made beside each other (kept as nets of their own) and seg_select, decoded late from
+//  the read command, picks among the sums -- rather than picking a base and adding after the pick)
+(* keep = "true" *) wire [31:0] es_linear = es_base + rd_address_effective;
+(* keep = "true" *) wire [31:0] cs_linear = cs_base + rd_address_effective;
+(* keep = "true" *) wire [31:0] ss_linear = ss_base + rd_address_effective;
+(* keep = "true" *) wire [31:0] ds_linear = ds_base + rd_address_effective;
+(* keep = "true" *) wire [31:0] fs_linear = fs_base + rd_address_effective;
+(* keep = "true" *) wire [31:0] gs_linear = gs_base + rd_address_effective;
 assign rd_seg_linear =
-    (seg_select == 3'd0)?       es_base + rd_address_effective :
-    (seg_select == 3'd1)?       cs_base + rd_address_effective :
-    (seg_select == 3'd2)?       ss_base + rd_address_effective :
-    (seg_select == 3'd3)?       ds_base + rd_address_effective :
-    (seg_select == 3'd4)?       fs_base + rd_address_effective :
-                                gs_base + rd_address_effective;
+    (seg_select == 3'd0)?       es_linear :
+    (seg_select == 3'd1)?       cs_linear :
+    (seg_select == 3'd2)?       ss_linear :
+    (seg_select == 3'd3)?       ds_linear :
+    (seg_select == 3'd4)?       fs_linear :
+                                gs_linear;
 
 //------------------------------------------------------------------------------
 

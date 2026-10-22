@@ -46,6 +46,7 @@ module execute(
     input       [31:0]  esp,
     
     input       [63:0]  cs_cache,
+    input       [31:0]  cs_limit_r,     // (SiSTer)
     input       [63:0]  tr_cache,
     input       [63:0]  ss_cache,
     
@@ -212,6 +213,11 @@ module execute(
     
     //rd pipeline
     output              exe_busy,
+    // (SiSTer: exe_busy == exe_busy_nw || exe_waiting_o || (exe_has_cmd && wr_busy) -- read.v takes the late
+    //  exe_waiting and wr_busy last)
+    output              exe_busy_nw,
+    output              exe_has_cmd,
+    output              exe_waiting_o,
     input               rd_ready,
     
     input       [87:0]  rd_decoder,
@@ -293,7 +299,9 @@ wire [31:0] cs_limit;
 assign tr_base  = { tr_cache[63:56], tr_cache[39:16] };
 
 assign tr_limit = tr_cache[`DESC_BIT_G]? { tr_cache[51:48], tr_cache[15:0], 12'hFFF } : { 12'd0, tr_cache[51:48], tr_cache[15:0] };
-assign cs_limit = cs_cache[`DESC_BIT_G]? { cs_cache[51:48], cs_cache[15:0], 12'hFFF } : { 12'd0, cs_cache[51:48], cs_cache[15:0] };
+// (SiSTer: was cs_cache[`DESC_BIT_G]? { cs_cache[51:48], cs_cache[15:0], 12'hFFF } : { 12'd0, cs_cache[51:48], cs_cache[15:0] };
+//  the same value, registered beside cs_cache in the write stage -- write_register.v)
+assign cs_limit = cs_limit_r;
 
 //------------------------------------------------------------------------------
 
@@ -324,6 +332,14 @@ wire exe_eip_from_glob_param_2_16bit;
 assign exe_ready = ~(exe_reset) && ~(exe_waiting) && exe_cmd != `CMD_NULL && ~(wr_busy);
 
 assign exe_busy = exe_waiting || (exe_ready == `FALSE && exe_cmd != `CMD_NULL);
+
+// (SiSTer: exe_busy split on wr_busy, the end of the write stage's stall chain, and on exe_waiting, this stage's
+//  own late wait (its limit compares, the divider...): with exe_ready as above,
+//  exe_busy = exe_waiting || (exe_cmd != NULL && (exe_reset || exe_waiting || wr_busy))
+//           = (exe_cmd != NULL && exe_reset) || exe_waiting || (exe_cmd != NULL && wr_busy))
+assign exe_busy_nw   = exe_cmd != `CMD_NULL && exe_reset;
+assign exe_waiting_o = exe_waiting;
+assign exe_has_cmd = exe_cmd != `CMD_NULL;
 
 assign e_load = rd_ready;
 

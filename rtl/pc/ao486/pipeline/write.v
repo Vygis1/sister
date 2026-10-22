@@ -252,6 +252,7 @@ module write(
     output      [63:0]  fs_cache,
     output      [63:0]  gs_cache,
     output      [63:0]  cs_cache,
+    output      [31:0]  cs_limit_r,     // (SiSTer: cs_cache's limit, registered -- write_register.v)
     output      [63:0]  ldtr_cache,
     output      [63:0]  tr_cache,
 
@@ -319,6 +320,9 @@ wire [31:0] es_limit;
 
 wire [31:0] ss_base;
 wire [31:0] ss_limit;
+// (SiSTer: registered functions of es_cache and ss_cache -- write_register.v)
+wire [31:0] es_limit_r, es_bound_r, es_bound_lo_r, ss_limit_r, ss_bound_r, ss_bound_lo_r;
+wire        es_bound_ge2_r, ss_bound_ge2_r;
 
 wire [31:0] ldtr_base;
 
@@ -532,7 +536,9 @@ wire        wr_string_finish;
 assign tr_base     = {   tr_cache[63:56],   tr_cache[39:16] };
 
 assign cs_base     = { cs_cache[63:56], cs_cache[39:16] };
-assign cs_limit    = cs_cache[`DESC_BIT_G]? { cs_cache[51:48], cs_cache[15:0], 12'hFFF } : { 12'd0, cs_cache[51:48], cs_cache[15:0] };
+// (SiSTer: was cs_cache[`DESC_BIT_G]? { cs_cache[51:48], cs_cache[15:0], 12'hFFF } : { 12'd0, cs_cache[51:48], cs_cache[15:0] };
+//  the same, registered beside cs_cache -- write_register.v)
+assign cs_limit    = cs_limit_r;
 
 assign es_base     = { es_cache[63:56], es_cache[39:16] };
 assign es_limit    = es_cache[`DESC_BIT_G]? { es_cache[51:48], es_cache[15:0], 12'hFFF } : { 12'd0, es_cache[51:48], es_cache[15:0] };
@@ -781,23 +787,30 @@ wire wr_waiting_w0z0, wr_not_finished_w0z0, wr_string_in_progress_w0z0;
 wire wr_waiting_w0z1, wr_not_finished_w0z1, wr_string_in_progress_w0z1;
 wire wr_waiting_w1z0, wr_not_finished_w1z0, wr_string_in_progress_w1z0;
 wire wr_waiting_w1z1, wr_not_finished_w1z1, wr_string_in_progress_w1z1;
-wire [3:0] wr_busy_wz;      // [{write_for_wr_ready, wr_string_zf_finish}]
+// (SiSTer, further: and for each value of wr_debug_code_cmp -- the code-breakpoint compares, an add and four
+//  32-bit compares deep (write_debug.v) -- and of iflag_to_reg -- the next IF, decoded from the command (POPF, STI,
+//  IRET...) -- which pick last with the other two: wr_busy_v[{w, z, c, i}] is busy with write_for_wr_ready = w,
+//  wr_string_zf_finish = z, wr_debug_code_cmp = c, iflag_to_reg = i; the sixteen are kept and a 16:1 mux picks)
+(* keep = "true" *) wire [15:0] wr_busy_v;     // [{write_for_wr_ready, wr_string_zf_finish, wr_debug_code_cmp, iflag_to_reg}]
 generate
     genvar wx;
-    for(wx = 0; wx < 4; wx = wx + 1) begin : g_wr_busy
-        wire waiting  = (wx == 0)? wr_waiting_w0z0            : (wx == 1)? wr_waiting_w0z1            : (wx == 2)? wr_waiting_w1z0            : wr_waiting_w1z1;
-        wire nfin     = (wx == 0)? wr_not_finished_w0z0       : (wx == 1)? wr_not_finished_w0z1       : (wx == 2)? wr_not_finished_w1z0       : wr_not_finished_w1z1;
-        wire sip      = (wx == 0)? wr_string_in_progress_w0z0 : (wx == 1)? wr_string_in_progress_w0z1 : (wx == 2)? wr_string_in_progress_w1z0 : wr_string_in_progress_w1z1;
+    for(wx = 0; wx < 16; wx = wx + 1) begin : g_wr_busy
+        localparam integer WZ = wx / 4;
+        wire code_cmp = ((wx / 2) % 2) == 1;
+        wire iflag_n  = (wx % 2) == 1;
+        wire waiting  = (WZ == 0)? wr_waiting_w0z0            : (WZ == 1)? wr_waiting_w0z1            : (WZ == 2)? wr_waiting_w1z0            : wr_waiting_w1z1;
+        wire nfin     = (WZ == 0)? wr_not_finished_w0z0       : (WZ == 1)? wr_not_finished_w0z1       : (WZ == 2)? wr_not_finished_w1z0       : wr_not_finished_w1z1;
+        wire sip      = (WZ == 0)? wr_string_in_progress_w0z0 : (WZ == 1)? wr_string_in_progress_w0z1 : (WZ == 2)? wr_string_in_progress_w1z0 : wr_string_in_progress_w1z1;
         wire ready    = ~(waiting) && wr_cmd != `CMD_NULL;
-        wire finished = ready && (~(nfin) || (wr_hlt_in_progress && iflag_to_reg && interrupt_do) || sip);
-        wire dprep    = finished && ~(wr_inhibit_interrupts_and_debug) && (wr_debug_static || (~(sip) && wr_debug_code_cmp));
+        wire finished = ready && (~(nfin) || (wr_hlt_in_progress && iflag_n && interrupt_do) || sip);
+        wire dprep    = finished && ~(wr_inhibit_interrupts_and_debug) && (wr_debug_static || (~(sip) && code_cmp));
         wire intp     = interrupt_do && ready && (~(nfin) || wr_hlt_in_progress || sip) &&
-                        ~(wr_inhibit_interrupts_and_debug) && ~(wr_inhibit_interrupts) && iflag_to_reg;
+                        ~(wr_inhibit_interrupts_and_debug) && ~(wr_inhibit_interrupts) && iflag_n;
         wire busy     = waiting || exc_init || dprep || intp || (wr_one_cycle_wait && wr_first_cycle);
-        assign wr_busy_wz[wx] = busy;
+        assign wr_busy_v[wx] = busy;
     end
 endgenerate
-assign wr_busy = wr_busy_wz[{ write_for_wr_ready, wr_string_zf_finish }];
+assign wr_busy = wr_busy_v[{ write_for_wr_ready, wr_string_zf_finish, wr_debug_code_cmp, iflag_to_reg }];
 
 //------------------------------------------------------------------------------ write io
 
@@ -2958,6 +2971,15 @@ write_register write_register_inst(
     .cs_cache            (cs_cache),            //output [63:0]
     .ldtr_cache          (ldtr_cache),          //output [63:0]
     .tr_cache            (tr_cache),            //output [63:0]
+    .es_limit_r          (es_limit_r),          //output [31:0] (SiSTer)
+    .es_bound_r          (es_bound_r),          //output [31:0] (SiSTer)
+    .es_bound_lo_r       (es_bound_lo_r),       //output [31:0] (SiSTer)
+    .es_bound_ge2_r      (es_bound_ge2_r),      //output (SiSTer)
+    .ss_limit_r          (ss_limit_r),          //output [31:0] (SiSTer)
+    .cs_limit_r          (cs_limit_r),          //output [31:0] (SiSTer)
+    .ss_bound_r          (ss_bound_r),          //output [31:0] (SiSTer)
+    .ss_bound_lo_r       (ss_bound_lo_r),       //output [31:0] (SiSTer)
+    .ss_bound_ge2_r      (ss_bound_ge2_r),      //output (SiSTer)
     .es_cache_valid      (es_cache_valid),      //output
     .ds_cache_valid      (ds_cache_valid),      //output
     .ss_cache_valid      (ss_cache_valid),      //output
@@ -2986,7 +3008,10 @@ write_stack write_stack_inst(
     
     .ss_cache                   (ss_cache),                     //input [63:0]
     .ss_base                    (ss_base),                      //input [31:0]
-    .ss_limit                   (ss_limit),                     //input [31:0]
+    .ss_limit                   (ss_limit_r),                   //input [31:0] (SiSTer: ss_limit, registered)
+    .ss_bound_r                 (ss_bound_r),                   //input [31:0] (SiSTer)
+    .ss_bound_lo_r              (ss_bound_lo_r),                //input [31:0] (SiSTer)
+    .ss_bound_ge2_r             (ss_bound_ge2_r),               //input (SiSTer)
     
     .glob_desc_base             (glob_desc_base),               //input [31:0]
     .glob_desc_limit            (glob_desc_limit),              //input [31:0]
@@ -3039,7 +3064,10 @@ write_string write_string_inst(
     .es_cache                   (es_cache),                 //input [63:0]
     .es_cache_valid             (es_cache_valid),           //input
     .es_base                    (es_base),                  //input [31:0]
-    .es_limit                   (es_limit),                 //input [31:0]
+    .es_limit                   (es_limit_r),               //input [31:0] (SiSTer: es_limit, registered)
+    .es_bound_r                 (es_bound_r),               //input [31:0] (SiSTer)
+    .es_bound_lo_r              (es_bound_lo_r),            //input [31:0] (SiSTer)
+    .es_bound_ge2_r             (es_bound_ge2_r),           //input (SiSTer)
     
     //output
     .wr_esi_final               (wr_esi_final),             //output [31:0]

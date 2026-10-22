@@ -21,10 +21,10 @@ Legend: ✅ done · 🔧 in progress · ⬜ planned
 - ⬜ The remaining ps1-tests that DuckStation passes
 
 ### DOS PC
-- ✅ ao486 at 66.7 MHz (its pipeline restructured for timing, cycle-exact): Doom, Rayman (CD), Transport Tycoon Deluxe, Fallout
+- ✅ ao486 at 71.4 MHz (its pipeline restructured for timing, cycle-exact; a floorplan): Doom, Rayman (CD), Transport Tycoon Deluxe, Fallout
 - ✅ SVGA, Sound Blaster 16 + OPL3, ATAPI CD-ROM with CD audio, mouse from the controller
 - ✅ A game is one command away: `tools/pc/addgame.py`
-- ⬜ 71.4 MHz (missed by 0.16 ns); Doom's demo3 runs at 16.6 fps today
+- ⬜ 76.9 MHz would need the pipeline changed (misses by 1.07 ns); Doom's demo3 runs at 17.8 fps
 
 ### Super Nintendo
 - ✅ LoROM and HiROM up to 6 MB, save RAM on the SD card

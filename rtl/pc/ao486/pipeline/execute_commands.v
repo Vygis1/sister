@@ -408,6 +408,15 @@ wire _unused_ok = &{ 1'b0, edx[31:16], tr_cache[63:44], tr_cache[39:0], exe_mute
 
 //------------------------------------------------------------------------------
 
+// (SiSTer: glob_param_2 > glob_desc_limit (and the same with descriptor 2) without first building the limit, a G-bit
+//  mux, in series with the compare: with L = { d[51:48], d[15:0] }, the limit is { L, 12'hFFF } when G is set -- then
+//  p > limit is p[31:12] > L -- and { 12'd0, L } when it is not -- then p > limit is p[31:20] != 0 || p[19:0] > L.
+//  Both compares are made and G picks; autogen/execute_commands.v's cond_7, cond_44 and cond_97 read these)
+wire p2_gt_desc_limit   = (glob_descriptor[`DESC_BIT_G])?   (glob_param_2[31:12] > { glob_descriptor[51:48],   glob_descriptor[15:0] }) :
+                                                            (glob_param_2[31:20] != 12'd0 || glob_param_2[19:0] > { glob_descriptor[51:48],   glob_descriptor[15:0] });
+wire p2_gt_desc_2_limit = (glob_descriptor_2[`DESC_BIT_G])? (glob_param_2[31:12] > { glob_descriptor_2[51:48], glob_descriptor_2[15:0] }) :
+                                                            (glob_param_2[31:20] != 12'd0 || glob_param_2[19:0] > { glob_descriptor_2[51:48], glob_descriptor_2[15:0] });
+
 `include "autogen/execute_commands.v"
 
 // (SiSTer: was

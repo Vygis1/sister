@@ -500,6 +500,9 @@ wire        protected_mode;
 
 wire        micro_busy;
 wire        dec_ready;
+wire        wr_busy;
+wire [31:0] cs_limit_r;     // (SiSTer: cs_cache's limit, registered in the write stage)
+wire        micro_busy_nw, dec_ready_nw, rd_busy_nw, rd_stall_w, exe_busy_nw, exe_has_cmd, exe_waiting_o;   // (SiSTer: the stall chain split on wr_busy)
 
 wire [95:0] decoder;
 wire        dec_operand_32bit;
@@ -553,6 +556,9 @@ decode decode_inst(
     //pipeline
     .micro_busy                 (micro_busy),               //input
     .dec_ready                  (dec_ready),                //output
+    .micro_busy_nw              (micro_busy_nw),            //input (SiSTer)
+    .rd_stall_w                 (rd_stall_w),               //input (SiSTer)
+    .dec_ready_nw               (dec_ready_nw),             //output (SiSTer)
     
     .decoder                    (decoder),                  //output [95:0]
     .dec_eip                    (dec_eip),                  //output [31:0]
@@ -645,6 +651,10 @@ microcode microcode_inst(
     //micro
     .rd_busy                       (rd_busy),                       //input
     .micro_ready                   (micro_ready),                   //output
+    .rd_busy_nw                    (rd_busy_nw),                    //input (SiSTer)
+    .rd_stall_w                    (rd_stall_w),                    //input (SiSTer)
+    .micro_busy_nw                 (micro_busy_nw),                 //output (SiSTer)
+    .dec_ready_nw                  (dec_ready_nw),                  //input (SiSTer)
     
     .micro_decoder                 (micro_decoder),                 //output [87:0]
     .micro_eip                     (micro_eip),                     //output [31:0]
@@ -837,6 +847,12 @@ read read_inst(
     //micro pipeline
     .rd_busy                       (rd_busy),                       //output
     .micro_ready                   (micro_ready),                   //input
+    .rd_busy_nw                    (rd_busy_nw),                    //output (SiSTer)
+    .rd_stall_w                    (rd_stall_w),                    //output (SiSTer)
+    .exe_busy_nw                   (exe_busy_nw),                   //input (SiSTer)
+    .exe_has_cmd                   (exe_has_cmd),                   //input (SiSTer)
+    .exe_waiting                   (exe_waiting_o),                 //input (SiSTer)
+    .wr_busy                       (wr_busy),                       //input (SiSTer)
     
     .micro_decoder                 (micro_decoder),                 //input [87:0]
     .micro_eip                     (micro_eip),                     //input [31:0]
@@ -893,7 +909,7 @@ wire        dr6_bd_set;
 wire [31:0]  exe_buffer;
 wire [463:0] exe_buffer_shifted;
 
-wire        wr_busy;
+// (SiSTer: wr_busy is declared with the stall-chain nets above)
 wire        exe_ready;
 wire [39:0] exe_decoder;
 wire [31:0] exe_eip_final;
@@ -947,6 +963,7 @@ execute execute_inst(
     .esp                           (esp),                           //input [31:0]
     
     .cs_cache                      (cs_cache),                      //input [63:0]
+    .cs_limit_r                    (cs_limit_r),                    //input [31:0] (SiSTer)
     .tr_cache                      (tr_cache),                      //input [63:0]
     .ss_cache                      (ss_cache),                      //input [63:0]
     
@@ -1109,6 +1126,9 @@ execute execute_inst(
                      
     //rd pipeline
     .exe_busy                      (exe_busy),                      //output
+    .exe_busy_nw                   (exe_busy_nw),                   //output (SiSTer)
+    .exe_has_cmd                   (exe_has_cmd),                   //output (SiSTer)
+    .exe_waiting_o                 (exe_waiting_o),                 //output (SiSTer)
     .rd_ready                      (rd_ready),                      //input
     .rd_decoder                    (rd_decoder),                    //input [87:0]
     .rd_eip                        (rd_eip),                        //input [31:0]
@@ -1395,6 +1415,7 @@ write write_inst(
     .fs_cache            (fs_cache),            //output [63:0]
     .gs_cache            (gs_cache),            //output [63:0]
     .cs_cache            (cs_cache),            //output [63:0]
+    .cs_limit_r          (cs_limit_r),          //output [31:0] (SiSTer)
     .ldtr_cache          (ldtr_cache),          //output [63:0]
     .tr_cache            (tr_cache),            //output [63:0]
     

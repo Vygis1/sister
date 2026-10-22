@@ -51,7 +51,7 @@ whose open-source work several parts of this project build on.
 | PC Engine / TurboGrafx-16 | ✅ | HuCards |
 | PlayStation | ✅ | Disc images, memory cards, CD audio, FMV; needs a BIOS file |
 | Nintendo 64 | 🟡 | Super Mario 64, Mario Kart 64, Super Smash Bros.; every RDP mode, other games untested |
-| DOS PC | ✅ | 486 at 66.7 MHz, SVGA, Sound Blaster 16, CD-ROM. Doom, Rayman, Transport Tycoon Deluxe |
+| DOS PC | ✅ | 486 at 71.4 MHz, SVGA, Sound Blaster 16, CD-ROM. Doom, Rayman, Transport Tycoon Deluxe |
 
 ✅ playable · 🟡 partial. Details per system: [docs/CONSOLES.md](docs/CONSOLES.md) · Plans: [docs/ROADMAP.md](docs/ROADMAP.md)
 

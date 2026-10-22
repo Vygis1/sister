@@ -96,7 +96,7 @@ code and Sound Blaster, and Greg Taylor's OPL3. Every part's licence is listed i
 [THIRD_PARTY.md](THIRD_PARTY.md). Our own parts:
 
 - **`pc_top.v`:** the system (CPU, L2 cache, chipset, VGA, sound, IDE) on the console's DDR3
-  (`pc_ddr64.v`), at 66.7 MHz.
+  (`pc_ddr64.v`), at 71.4 MHz.
 - **`pc_fb.v`:** the VGA's picture out of DDR3, scaled to 640 x 480. VESA SVGA modes (8-bit
   through the palette, 16-bit RGB565) come from the framebuffer the L2 cache writes.
 - **`pc_disk.v`:** the IDE hard disk, served by the ESP32 from an image on the SD card, with

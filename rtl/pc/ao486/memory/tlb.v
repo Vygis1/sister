@@ -307,6 +307,9 @@ tlb_memtype tlb_memtype_inst(
     .write_transparent  (memtype_write_transparent)     //output
 );
 
+// (SiSTer: tlb_regs' way hits and looked-up entries -- see tlb_out below)
+wire [3:0]  tr_hit;
+wire [49:0] tr_e0, tr_e1, tr_e2, tr_e3;
 wire tlbregs_tlbflushsingle_do;
 wire tlbregs_tlbflushall_do;
 
@@ -342,6 +345,11 @@ tlb_regs tlb_regs_inst(
     .translate_valid            (translate_valid),              //output
     .translate_physical         (translate_physical),           //output [31:0]
     .translate_rgn              (translate_rgn),                //output [3:0] (SiSTer)
+    .translate_hit              (tr_hit),                       //output [3:0] (SiSTer)
+    .translate_e0               (tr_e0),                        //output [49:0] (SiSTer)
+    .translate_e1               (tr_e1),                        //output [49:0] (SiSTer)
+    .translate_e2               (tr_e2),                        //output [49:0] (SiSTer)
+    .translate_e3               (tr_e3),                        //output [49:0] (SiSTer)
     .translate_pwt              (translate_pwt),                //output
     .translate_pcd              (translate_pcd),                //output
     .translate_combined_rw      (translate_combined_rw),        //output
@@ -1248,7 +1256,6 @@ wire [15:0] tlb_code_pf_error_code_to_reg =
 //    (cond_0)? (    `FALSE) :
 //    (cond_22 && ~cond_23 && cond_17 && ~cond_18)? ( `TRUE) :
 //    tlbcode_do;
-assign tlbcode_do = (cond_22 && ~cond_23 && cond_17 && ~cond_18)? ( `TRUE) : `FALSE;
 wire  wp_to_reg =
     (cond_0 && ~cond_1 && ~cond_2 && ~cond_3 && cond_4)? (             cr0_wp) :
     (cond_0 && ~cond_1 && ~cond_2 && ~cond_3 && ~cond_4 && cond_5)? (             cr0_wp) :
@@ -1420,36 +1427,9 @@ always @(posedge clk) begin
     else              rw <= rw_to_reg;
 end
 //======================================================== sets
-assign dcachewrite_do =
-    (cond_19 && cond_17 && ~cond_18 && ~cond_20)? (`TRUE) :
-    (cond_35 && cond_36)? (`TRUE) :
-    (cond_35 && ~cond_36 && cond_37)? (`TRUE) :
-    (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? (`TRUE) :
-    (cond_41)? (`TRUE) :
-    (cond_42 && ~cond_38)? (`TRUE) :
-    1'd0;
-assign dcacheread_length =
-    (cond_15 && cond_17 && ~cond_18)? (           tlbread_length) :
-    (cond_15 && ~cond_17)? (           4'd4) :
-    (cond_19 && ~cond_17)? (           4'd4) :
-    (cond_21 && ~cond_17)? (           4'd4) :
-    (cond_22 && ~cond_23 && ~cond_17)? (           4'd4) :
-    (cond_30)? (           4'd4) :
-    (cond_39)? (           tlbread_length) :
-    (cond_40 && cond_12 && ~cond_37 && ~cond_28 && cond_29)? (           tlbread_length) :
-    (cond_43 && cond_12 && ~cond_28 && cond_29)? (           tlbread_length) :
-    4'd0;
 assign tlbregs_tlbflushall_do =
     (cond_0 && ~cond_1 && cond_2)? (`TRUE) :
     1'd0;
-assign dcachewrite_length =
-    (cond_19 && cond_17 && ~cond_18 && ~cond_20)? (          tlbwrite_length) :
-    (cond_35 && cond_36)? (          3'd4) :
-    (cond_35 && ~cond_36 && cond_37)? (          3'd4) :
-    (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? (          tlbwrite_length) :
-    (cond_41)? (          3'd4) :
-    (cond_42 && ~cond_38)? (          tlbwrite_length) :
-    3'd0;
 assign tlbregs_write_combined_rw =
     (cond_35)? (   rw_entry) :
     1'd0;
@@ -1470,13 +1450,6 @@ assign tlbregs_write_linear = linear;
 assign tlbread_done =
     (cond_13 && cond_14)? (`TRUE) :
     1'd0;
-assign dcachewrite_data =
-    (cond_19 && cond_17 && ~cond_18 && ~cond_20)? (            tlbwrite_data) :
-    (cond_35 && cond_36)? (            pde | 32'h00000020) :
-    (cond_35 && ~cond_36 && cond_37)? (            pte[31:0] | 32'h00000020 | ((pte[6] == `FALSE && rw)? 32'h00000040 : 32'h00000000)) :
-    (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? (            tlbwrite_data) :
-    (cond_41)? (            pte[31:0] | 32'h00000020 | ((pte[6] == `FALSE && rw)? 32'h00000040 : 32'h00000000)) :
-    tlbwrite_data; // (cond_42 && ~cond_38)
 assign tlbregs_tlbflushsingle_do =
     (cond_0 && cond_1)? (`TRUE) :
     1'd0;
@@ -1493,6 +1466,241 @@ assign tlbregs_write_do =
 assign tlbflushsingle_done =
     (cond_0 && cond_1)? (`TRUE) :
     1'd0;
+assign dcacheread_address = memtype_physical;
+assign tlbregs_write_combined_su =
+    (cond_35)? (   su_entry) :
+    1'd0;
+
+// (SiSTer: the L2 regions (ao486_l2_rgn) of memtype_physical -- and so of dcacheread_address and
+//  dcachewrite_address, which are memtype_physical -- from the same condition chain, each value's regions
+//  from where the value comes from: translate_physical's from tlb_regs (stored with the entry), the page-walk
+//  addresses' from cr3_base, pde, pte (registers). They are there as early as the address is, and the L2
+//  cache uses them instead of decoding the address at the end of the path)
+wire [3:0] memtype_rgn;
+wire [3:0] memtype_rgn_v1; ao486_l2_rgn memtype_rgn_v1_inst(.a({ cr3_base[31:12], linear[31:22], 2'd0 }), .f(memtype_rgn_v1));
+wire [3:0] memtype_rgn_v2; ao486_l2_rgn memtype_rgn_v2_inst(.a({ pde[31:12], linear[21:12], 2'd0 }), .f(memtype_rgn_v2));
+wire [3:0] memtype_rgn_v3; ao486_l2_rgn memtype_rgn_v3_inst(.a({ pde[31:12], linear[21:12], 2'b00 }), .f(memtype_rgn_v3));
+wire [3:0] memtype_rgn_v4; ao486_l2_rgn memtype_rgn_v4_inst(.a({ pte[31:12], linear[11:0] }), .f(memtype_rgn_v4));
+assign dcacheread_rgn  = memtype_rgn;
+assign dcachewrite_rgn = memtype_rgn;
+
+
+//------------------------------------------------------------------------------
+// (SiSTer: the translation-dependent outputs, made by tlb_out (below) once per candidate: way 0..3 of the
+//  looked-up set taken as the hit (translate_valid, _physical, _rgn, _pwt, _pcd, _combined_rw/_su, and so fault,
+//  from that way's entry: tlb_regs' selected), and no hit (selected = 0, the physical address the linear one).
+//  tlb_regs selects the first way that hits (its unique case, a priority mux in simulation), so taking the
+//  candidate of the first hit, else the no-hit one, is the same value -- with the compare only at the last mux)
+wire [3:0]  tr_linear_rgn;
+ao486_l2_rgn tr_linear_rgn_inst(.a(linear), .f(tr_linear_rgn));
+wire       c_dcachewrite_do [0:4];
+wire [3:0] c_dcacheread_length [0:4];
+wire [2:0] c_dcachewrite_length [0:4];
+wire [31:0] c_dcachewrite_data [0:4];
+wire       c_dcachewrite_write_through [0:4];
+wire       c_dcachewrite_cache_disable [0:4];
+wire       c_dcacheread_do [0:4];
+wire [31:0] c_memtype_physical [0:4];
+wire       c_prefetchfifo_signal_pf_do [0:4];
+wire       c_dcacheread_cache_disable [0:4];
+wire [3:0] c_memtype_rgn [0:4];
+wire       c_tlbcode_do [0:4];
+genvar tc;
+generate
+    for(tc = 0; tc < 5; tc = tc + 1) begin : g_tr
+        wire [49:0] e        = (tc == 0)? tr_e0 : (tc == 1)? tr_e1 : (tc == 2)? tr_e2 : (tc == 3)? tr_e3 : 50'd0;
+        wire        hit_any  = (tc < 4);
+        wire        tv       = hit_any && (~(rw) || e[45]);
+        wire [31:0] tphys    = tv ? { e[39:20], linear[11:0] } : linear;
+        wire [3:0]  trgn     = tv ? e[49:46] : tr_linear_rgn;
+        wire        rw_e     = (state == STATE_LOAD_PTE_END)? pde[1] & pte[1] : e[43];
+        wire        su_e     = (state == STATE_LOAD_PTE_END)? pde[2] & pte[2] : e[44];
+        wire        flt      = (su && ~(su_e)) || (su && su_e && ~(rw_e) && rw) || (wp && ~(su) && ~(rw_e) && rw);
+        wire        c17      = ~(cr0_pg) || tv;
+        wire        c18      = cr0_pg && flt;
+        wire        c20      = tv && write_double_state != WRITE_DOUBLE_NONE;
+        wire [43:0] cv       = { cond_43, cond_42, cond_41, cond_40, cond_39, cond_38, cond_37, cond_36, cond_35, cond_34,
+                                 cond_33, cond_32, cond_31, cond_30, cond_29, cond_28, cond_27, cond_26, cond_25, cond_24,
+                                 1'b0,    cond_22, cond_21, c20,     cond_19, c18,     c17,     cond_16, cond_15, cond_14,
+                                 cond_13, cond_12, cond_11, cond_10, cond_9,  cond_8,  cond_7,  cond_6,  cond_5,  cond_4,
+                                 cond_3,  cond_2,  cond_1,  cond_0 };
+        tlb_out tlb_out_inst(
+            .c(cv), .tlbread_length(tlbread_length), .tlbwrite_length(tlbwrite_length), .tlbwrite_data(tlbwrite_data),
+            .pde(pde), .pte(pte), .rw(rw), .linear(linear), .cr3_base(cr3_base), .cr0_cd(cr0_cd), .cr0_nw(cr0_nw),
+            .cr3_pcd(cr3_pcd), .cr3_pwt(cr3_pwt), .translate_physical(tphys), .translate_rgn(trgn),
+            .translate_pcd(e[41]), .translate_pwt(e[40]),
+            .memtype_rgn_v1(memtype_rgn_v1), .memtype_rgn_v2(memtype_rgn_v2), .memtype_rgn_v3(memtype_rgn_v3), .memtype_rgn_v4(memtype_rgn_v4),
+            .dcachewrite_do(c_dcachewrite_do[tc]),
+            .dcacheread_length(c_dcacheread_length[tc]),
+            .dcachewrite_length(c_dcachewrite_length[tc]),
+            .dcachewrite_data(c_dcachewrite_data[tc]),
+            .dcachewrite_write_through(c_dcachewrite_write_through[tc]),
+            .dcachewrite_cache_disable(c_dcachewrite_cache_disable[tc]),
+            .dcacheread_do(c_dcacheread_do[tc]),
+            .memtype_physical(c_memtype_physical[tc]),
+            .prefetchfifo_signal_pf_do(c_prefetchfifo_signal_pf_do[tc]),
+            .dcacheread_cache_disable(c_dcacheread_cache_disable[tc]),
+            .memtype_rgn(c_memtype_rgn[tc]),
+            .tlbcode_do(c_tlbcode_do[tc])
+        );
+    end
+endgenerate
+// (SiSTer: and cond_23 (pr_reset || pr_reset_waiting, late from the write stage) is taken last too: the candidates
+//  are made with it low, and with it high only cond_22 && cond_23 changes anything -- in STATE_CODE_CHECK every term
+//  of these outputs then fails (the other terms need another state), so each is its final else, written here;
+//  cond_26, which also reads pr_reset, is left as it is in the candidates)
+wire tr_c22_23 = cond_22 && cond_23;
+assign dcachewrite_do = tr_c22_23? 1'b0 : tr_hit[0]? c_dcachewrite_do[0] : tr_hit[1]? c_dcachewrite_do[1] : tr_hit[2]? c_dcachewrite_do[2] : tr_hit[3]? c_dcachewrite_do[3] : c_dcachewrite_do[4];
+assign dcacheread_length = tr_c22_23? 4'd0 : tr_hit[0]? c_dcacheread_length[0] : tr_hit[1]? c_dcacheread_length[1] : tr_hit[2]? c_dcacheread_length[2] : tr_hit[3]? c_dcacheread_length[3] : c_dcacheread_length[4];
+assign dcachewrite_length = tr_c22_23? 3'd0 : tr_hit[0]? c_dcachewrite_length[0] : tr_hit[1]? c_dcachewrite_length[1] : tr_hit[2]? c_dcachewrite_length[2] : tr_hit[3]? c_dcachewrite_length[3] : c_dcachewrite_length[4];
+// (SiSTer: dcachewrite_data is not taken from the candidates: its first term (cond_19 && cond_17 && ~cond_18 &&
+//  ~cond_20, in STATE_WRITE_CHECK) gives tlbwrite_data, and in STATE_WRITE_CHECK every later term fails (they need
+//  STATE_LOAD_PTE_END, STATE_SAVE_PTE_START or STATE_WRITE_WAIT_START) and the else is tlbwrite_data too -- so
+//  without that term it is the same value, and the translation does not reach it)
+assign dcachewrite_data =
+    (cond_35 && cond_36)? (            pde | 32'h00000020) :
+    (cond_35 && ~cond_36 && cond_37)? (            pte[31:0] | 32'h00000020 | ((pte[6] == `FALSE && rw)? 32'h00000040 : 32'h00000000)) :
+    (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? (            tlbwrite_data) :
+    (cond_41)? (            pte[31:0] | 32'h00000020 | ((pte[6] == `FALSE && rw)? 32'h00000040 : 32'h00000000)) :
+    tlbwrite_data; // (cond_42 && ~cond_38)
+assign dcachewrite_write_through = tr_c22_23? 1'b0 : tr_hit[0]? c_dcachewrite_write_through[0] : tr_hit[1]? c_dcachewrite_write_through[1] : tr_hit[2]? c_dcachewrite_write_through[2] : tr_hit[3]? c_dcachewrite_write_through[3] : c_dcachewrite_write_through[4];
+assign dcachewrite_cache_disable = tr_c22_23? 1'b0 : tr_hit[0]? c_dcachewrite_cache_disable[0] : tr_hit[1]? c_dcachewrite_cache_disable[1] : tr_hit[2]? c_dcachewrite_cache_disable[2] : tr_hit[3]? c_dcachewrite_cache_disable[3] : c_dcachewrite_cache_disable[4];
+assign dcacheread_do = tr_c22_23? 1'b0 : tr_hit[0]? c_dcacheread_do[0] : tr_hit[1]? c_dcacheread_do[1] : tr_hit[2]? c_dcacheread_do[2] : tr_hit[3]? c_dcacheread_do[3] : c_dcacheread_do[4];
+assign memtype_physical = tr_c22_23? { pte[31:12], linear[11:0] } : tr_hit[0]? c_memtype_physical[0] : tr_hit[1]? c_memtype_physical[1] : tr_hit[2]? c_memtype_physical[2] : tr_hit[3]? c_memtype_physical[3] : c_memtype_physical[4];
+assign prefetchfifo_signal_pf_do = tr_c22_23? 1'b0 : tr_hit[0]? c_prefetchfifo_signal_pf_do[0] : tr_hit[1]? c_prefetchfifo_signal_pf_do[1] : tr_hit[2]? c_prefetchfifo_signal_pf_do[2] : tr_hit[3]? c_prefetchfifo_signal_pf_do[3] : c_prefetchfifo_signal_pf_do[4];
+assign dcacheread_cache_disable = tr_c22_23? 1'b0 : tr_hit[0]? c_dcacheread_cache_disable[0] : tr_hit[1]? c_dcacheread_cache_disable[1] : tr_hit[2]? c_dcacheread_cache_disable[2] : tr_hit[3]? c_dcacheread_cache_disable[3] : c_dcacheread_cache_disable[4];
+assign memtype_rgn = tr_c22_23? memtype_rgn_v4 : tr_hit[0]? c_memtype_rgn[0] : tr_hit[1]? c_memtype_rgn[1] : tr_hit[2]? c_memtype_rgn[2] : tr_hit[3]? c_memtype_rgn[3] : c_memtype_rgn[4];
+assign tlbcode_do = tr_c22_23? 1'b0 : tr_hit[0]? c_tlbcode_do[0] : tr_hit[1]? c_tlbcode_do[1] : tr_hit[2]? c_tlbcode_do[2] : tr_hit[3]? c_tlbcode_do[3] : c_tlbcode_do[4];
+
+endmodule
+
+//------------------------------------------------------------------------------
+// (SiSTer: the outputs of tlb.v that depend on the translation (cond_17 = ~cr0_pg || translate_valid,
+//  cond_18 = cr0_pg && fault, cond_20 = translate_valid && write_double_state != NONE, translate_*), exactly the
+//  original assigns, for one candidate translation. tlb.v makes one per TLB way of the looked-up set (as if that
+//  way were the first that hit) and one for no hit, and the way hits pick at the end -- so the hit compare meets
+//  only the last mux instead of the whole chain of selects behind translate_valid)
+module tlb_out(
+    input       [43:0]  c,              // cond_0 .. cond_43 of tlb.v (17, 18, 20 for this candidate)
+    input       [3:0]   tlbread_length,
+    input       [2:0]   tlbwrite_length,
+    input       [31:0]  tlbwrite_data,
+    input       [31:0]  pde,
+    input       [31:0]  pte,
+    input               rw,
+    input       [31:0]  linear,
+    input       [31:0]  cr3_base,
+    input               cr0_cd,
+    input               cr0_nw,
+    input               cr3_pcd,
+    input               cr3_pwt,
+    input       [31:0]  translate_physical,
+    input       [3:0]   translate_rgn,
+    input               translate_pcd,
+    input               translate_pwt,
+    input       [3:0]   memtype_rgn_v1,
+    input       [3:0]   memtype_rgn_v2,
+    input       [3:0]   memtype_rgn_v3,
+    input       [3:0]   memtype_rgn_v4,
+    output              dcachewrite_do,
+    output      [3:0]   dcacheread_length,
+    output      [2:0]   dcachewrite_length,
+    output      [31:0]  dcachewrite_data,
+    output              dcachewrite_write_through,
+    output              dcachewrite_cache_disable,
+    output              dcacheread_do,
+    output      [31:0]  memtype_physical,
+    output              prefetchfifo_signal_pf_do,
+    output              dcacheread_cache_disable,
+    output      [3:0]   memtype_rgn,
+    output              tlbcode_do
+);
+
+wire cond_0 = c[0];
+wire cond_1 = c[1];
+wire cond_2 = c[2];
+wire cond_3 = c[3];
+wire cond_4 = c[4];
+wire cond_5 = c[5];
+wire cond_6 = c[6];
+wire cond_7 = c[7];
+wire cond_8 = c[8];
+wire cond_9 = c[9];
+wire cond_10 = c[10];
+wire cond_11 = c[11];
+wire cond_12 = c[12];
+wire cond_13 = c[13];
+wire cond_14 = c[14];
+wire cond_15 = c[15];
+wire cond_16 = c[16];
+wire cond_17 = c[17];
+wire cond_18 = c[18];
+wire cond_19 = c[19];
+wire cond_20 = c[20];
+wire cond_21 = c[21];
+wire cond_22 = c[22];
+wire cond_23 = c[23];
+wire cond_24 = c[24];
+wire cond_25 = c[25];
+wire cond_26 = c[26];
+wire cond_27 = c[27];
+wire cond_28 = c[28];
+wire cond_29 = c[29];
+wire cond_30 = c[30];
+wire cond_31 = c[31];
+wire cond_32 = c[32];
+wire cond_33 = c[33];
+wire cond_34 = c[34];
+wire cond_35 = c[35];
+wire cond_36 = c[36];
+wire cond_37 = c[37];
+wire cond_38 = c[38];
+wire cond_39 = c[39];
+wire cond_40 = c[40];
+wire cond_41 = c[41];
+wire cond_42 = c[42];
+wire cond_43 = c[43];
+localparam [1:0] TYPE_CODE  = 2'd0;
+localparam [1:0] TYPE_CHECK = 2'd1;
+localparam [1:0] TYPE_WRITE = 2'd2;
+localparam [1:0] TYPE_READ  = 2'd3;
+wire memtype_cache_disable;
+wire memtype_write_transparent;
+tlb_memtype tlb_memtype_inst(.physical(memtype_physical), .cache_disable(memtype_cache_disable), .write_transparent(memtype_write_transparent));
+assign dcachewrite_do =
+    (cond_19 && cond_17 && ~cond_18 && ~cond_20)? (`TRUE) :
+    (cond_35 && cond_36)? (`TRUE) :
+    (cond_35 && ~cond_36 && cond_37)? (`TRUE) :
+    (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? (`TRUE) :
+    (cond_41)? (`TRUE) :
+    (cond_42 && ~cond_38)? (`TRUE) :
+    1'd0;
+assign dcacheread_length =
+    (cond_15 && cond_17 && ~cond_18)? (           tlbread_length) :
+    (cond_15 && ~cond_17)? (           4'd4) :
+    (cond_19 && ~cond_17)? (           4'd4) :
+    (cond_21 && ~cond_17)? (           4'd4) :
+    (cond_22 && ~cond_23 && ~cond_17)? (           4'd4) :
+    (cond_30)? (           4'd4) :
+    (cond_39)? (           tlbread_length) :
+    (cond_40 && cond_12 && ~cond_37 && ~cond_28 && cond_29)? (           tlbread_length) :
+    (cond_43 && cond_12 && ~cond_28 && cond_29)? (           tlbread_length) :
+    4'd0;
+assign dcachewrite_length =
+    (cond_19 && cond_17 && ~cond_18 && ~cond_20)? (          tlbwrite_length) :
+    (cond_35 && cond_36)? (          3'd4) :
+    (cond_35 && ~cond_36 && cond_37)? (          3'd4) :
+    (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? (          tlbwrite_length) :
+    (cond_41)? (          3'd4) :
+    (cond_42 && ~cond_38)? (          tlbwrite_length) :
+    3'd0;
+assign dcachewrite_data =
+    (cond_19 && cond_17 && ~cond_18 && ~cond_20)? (            tlbwrite_data) :
+    (cond_35 && cond_36)? (            pde | 32'h00000020) :
+    (cond_35 && ~cond_36 && cond_37)? (            pte[31:0] | 32'h00000020 | ((pte[6] == `FALSE && rw)? 32'h00000040 : 32'h00000000)) :
+    (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? (            tlbwrite_data) :
+    (cond_41)? (            pte[31:0] | 32'h00000020 | ((pte[6] == `FALSE && rw)? 32'h00000040 : 32'h00000000)) :
+    tlbwrite_data; // (cond_42 && ~cond_38)
 assign dcachewrite_write_through =
     (cond_19 && cond_17 && ~cond_18 && ~cond_20)? (   cr0_nw || translate_pwt || memtype_write_transparent) :
     (cond_35 && cond_36)? (   cr0_nw || cr3_pwt || memtype_write_transparent) :
@@ -1501,7 +1709,6 @@ assign dcachewrite_write_through =
     (cond_41)? (   cr0_nw || pde[3] || memtype_write_transparent) :
     (cond_42 && ~cond_38)? (   cr0_nw || pte[3] || memtype_write_transparent) :
     1'd0;
-assign dcacheread_address = memtype_physical;
 assign dcachewrite_cache_disable =
     (cond_19 && cond_17 && ~cond_18 && ~cond_20)? (   cr0_cd || translate_pcd || memtype_cache_disable) :
     (cond_35 && cond_36)? (   cr0_cd || cr3_pcd || memtype_cache_disable) :
@@ -1509,9 +1716,6 @@ assign dcachewrite_cache_disable =
     (cond_35 && ~cond_36 && ~cond_37 && ~cond_38 && cond_28)? (   cr0_cd || pte[4] || memtype_cache_disable) :
     (cond_41)? (   cr0_cd || pde[4] || memtype_cache_disable) :
     (cond_42 && ~cond_38)? (   cr0_cd || pte[4] || memtype_cache_disable) :
-    1'd0;
-assign tlbregs_write_combined_su =
-    (cond_35)? (   su_entry) :
     1'd0;
 assign dcacheread_do =
     (cond_15 && cond_17 && ~cond_18)? (`TRUE) :
@@ -1559,17 +1763,6 @@ assign dcacheread_cache_disable =
     1'd0;
 
 //------------------------------------------------------------------------------
-
-// (SiSTer: the L2 regions (ao486_l2_rgn) of memtype_physical -- and so of dcacheread_address and
-//  dcachewrite_address, which are memtype_physical -- from the same condition chain, each value's regions
-//  from where the value comes from: translate_physical's from tlb_regs (stored with the entry), the page-walk
-//  addresses' from cr3_base, pde, pte (registers). They are there as early as the address is, and the L2
-//  cache uses them instead of decoding the address at the end of the path)
-wire [3:0] memtype_rgn;
-wire [3:0] memtype_rgn_v1; ao486_l2_rgn memtype_rgn_v1_inst(.a({ cr3_base[31:12], linear[31:22], 2'd0 }), .f(memtype_rgn_v1));
-wire [3:0] memtype_rgn_v2; ao486_l2_rgn memtype_rgn_v2_inst(.a({ pde[31:12], linear[21:12], 2'd0 }), .f(memtype_rgn_v2));
-wire [3:0] memtype_rgn_v3; ao486_l2_rgn memtype_rgn_v3_inst(.a({ pde[31:12], linear[21:12], 2'b00 }), .f(memtype_rgn_v3));
-wire [3:0] memtype_rgn_v4; ao486_l2_rgn memtype_rgn_v4_inst(.a({ pte[31:12], linear[11:0] }), .f(memtype_rgn_v4));
 assign memtype_rgn =
     (cond_15 && cond_17 && ~cond_18)? ( translate_rgn) :
     (cond_15 && ~cond_17)? ( memtype_rgn_v1) :
@@ -1587,7 +1780,6 @@ assign memtype_rgn =
     (cond_41)? ( memtype_rgn_v3) :
     (cond_42 && ~cond_38)? ( memtype_rgn_v4) :
     memtype_rgn_v4;
-assign dcacheread_rgn  = memtype_rgn;
-assign dcachewrite_rgn = memtype_rgn;
+assign tlbcode_do = (cond_22 && ~cond_23 && cond_17 && ~cond_18)? ( `TRUE) : `FALSE;
 
 endmodule

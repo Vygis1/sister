@@ -91,10 +91,14 @@ case "${1:-nes}" in
          # DDR3, its hard disk served by the ESP32 from an image on the card; VGA to 640x480.
          # 66.7 MHz (PC_DIV 15): ao486's decode/write/read stall chains restructured (2026-10-21, every change
          # checked cycle-exact by sim/pc's per-clock trace hash) -- closes with the Explore directives and the
-         # ExtraTimingOpt placer (+0.060 ns); Doom's demo3 16.6 fps against 15.6 at the old 62.5 MHz
-         NAME=pc;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PC:1 -gen CLK_DIV:${PC_DIV:-15} -gen JTAG_DBG:${JTAG:-0}"
-         [ "${PC_DIV:-15}" -lt 20 ] && { EFFORT=${EFFORT:-1}; export PLACE_DIR=${PLACE_DIR:-ExtraTimingOpt}; }
-         EXTRA="-ip $MIG_XCI" ;;
+         # ExtraTimingOpt placer (+0.060 ns); Doom's demo3 16.6 fps against 15.6 at the old 62.5 MHz.
+         # 71.4 MHz (PC_DIV 14, 2026-10-22): more of the same (limit bounds registered beside the segment caches,
+         # the stall chain split on its late ends, the TLB found direct-mapped...) and the 486 and its L2 held in
+         # one placement region, boards/qmtech_a100t/pc_floorplan.xdc (the same netlists ~0.3-0.45 ns better
+         # with it) -- closes at +0.008 ns; Doom's demo3 17.8 fps on the board. PC_DIV=15 still builds 66.7 MHz.
+         NAME=pc;    GEN="-gen CORE_NES:0 -gen CORE_SMS:0 -gen CORE_MD:0 -gen CORE_PC:1 -gen CLK_DIV:${PC_DIV:-14} -gen JTAG_DBG:${JTAG:-0}"
+         [ "${PC_DIV:-14}" -lt 20 ] && { EFFORT=${EFFORT:-1}; export PLACE_DIR=${PLACE_DIR:-ExtraTimingOpt}; }
+         EXTRA="-ip $MIG_XCI -xdc2 boards/qmtech_a100t/pc_floorplan.xdc" ;;
   dev)   NAME=dev;   GEN="-gen CORE_NES:1 -gen CORE_SMS:1"; EXTRA="$NOMIG" ;;
   shell) NAME=shell; TOP=shell_top; XDC=boards/qmtech_a100t/shell_top.xdc ;;
   *) echo "usage: tools/core.sh [nes|sms|gg|md|ps1|n64|snes|gb|a26|pce|gba|pc|dev|shell]" >&2; exit 1 ;;

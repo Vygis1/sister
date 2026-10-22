@@ -59,6 +59,10 @@ module decode(
     //pipeline
     input               micro_busy,
     output              dec_ready,
+    // (SiSTer: micro_busy == micro_busy_nw || rd_stall_w -- microcode.v)
+    input               micro_busy_nw,
+    input               rd_stall_w,
+    output              dec_ready_nw,
     
     output      [95:0]  decoder,
     output      [31:0]  dec_eip,
@@ -282,7 +286,11 @@ assign enable           = ~(stop);
 
 assign instr_prefix     = enable && ~(dec_prefix_2byte) && is_prefix && decoder_count > 4'd0; 
 
-assign dec_ready        = ~(dec_reset) && enable && ~(instr_prefix) && consume_count_local > 4'd0 && ~(micro_busy);
+// (SiSTer: was ~(dec_reset) && enable && ~(instr_prefix) && consume_count_local > 4'd0 && ~(micro_busy); with
+//  micro_busy = micro_busy_nw || rd_stall_w it is dec_ready_nw (kept as a net of its own) && ~rd_stall_w)
+(* keep = "true" *) wire dec_ready_nw_k = ~(dec_reset) && enable && ~(instr_prefix) && consume_count_local > 4'd0 && ~(micro_busy_nw);
+assign dec_ready_nw     = dec_ready_nw_k;
+assign dec_ready        = dec_ready_nw_k && ~(rd_stall_w);
 
 assign instr_finished   = dec_ready || dec_reset;
 
@@ -299,7 +307,8 @@ assign consume_count =
 //  dec_reset and micro_busy, the end of the write/read stall chain, then meet only the last mux)
 wire [3:0] consume_count_go    = (instr_prefix)? 4'd1 : consume_count_local;
 wire [3:0] consume_count_stall = (instr_prefix)? 4'd1 : 4'd0;
-wire       consume_stall       = dec_reset || micro_busy;
+(* keep = "true" *) wire consume_stall_nw = dec_reset || micro_busy_nw;   // (SiSTer: dec_reset || micro_busy is this || rd_stall_w)
+wire       consume_stall       = consume_stall_nw || rd_stall_w;
 
 assign dec_consumed = (dec_ready)? consume_count_local + prefix_count : 4'd0;
 

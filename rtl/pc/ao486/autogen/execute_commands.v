@@ -120,7 +120,7 @@ wire cond_3 = exe_mutex_current[`MUTEX_ECX_BIT];
 wire cond_4 = exe_jecxz_condition && exe_branch_eip > cs_limit;
 wire cond_5 = exe_cmd == `CMD_CALL && exe_cmdex == `CMDEX_CALL_protected_STEP_1;
 wire cond_6 = exe_cmd == `CMD_CALL_2  && exe_cmdex == `CMDEX_CALL_2_protected_seg_STEP_3;
-wire cond_7 = glob_param_2 > glob_desc_limit;
+wire cond_7 = p2_gt_desc_limit;   // (SiSTer: was glob_param_2 > glob_desc_limit -- execute_commands.v)
 wire cond_8 = exe_cmd == `CMD_CALL && (exe_cmdex == `CMDEX_CALL_Ev_STEP_0 || exe_cmdex == `CMDEX_CALL_Ep_STEP_0 || exe_cmdex == `CMDEX_CALL_Ap_STEP_0);
 wire cond_9 = exe_cmdex == `CMDEX_CALL_Ev_STEP_0;
 wire cond_10 = exe_mutex_current[`MUTEX_ESP_BIT];
@@ -157,7 +157,7 @@ wire cond_40 = exe_cmd == `CMD_CALL_3 && exe_cmdex == `CMDEX_CALL_3_call_gate_mo
 wire cond_41 = exe_cmd == `CMD_CALL_3 && exe_cmdex == `CMDEX_CALL_3_call_gate_more_STEP_7;
 wire cond_42 = glob_descriptor_2[`DESC_BIT_D_B];
 wire cond_43 = exe_cmd == `CMD_CALL_3 && exe_cmdex == `CMDEX_CALL_3_call_gate_more_STEP_8;
-wire cond_44 = glob_param_2 > glob_desc_2_limit;
+wire cond_44 = p2_gt_desc_2_limit;   // (SiSTer: was glob_param_2 > glob_desc_2_limit -- execute_commands.v)
 wire cond_45 = exe_cmd == `CMD_CALL_3 && exe_cmdex == `CMDEX_CALL_3_call_gate_more_STEP_9;
 wire cond_46 = exe_cmd == `CMD_CALL_3 && exe_cmdex == `CMDEX_CALL_3_call_gate_more_STEP_10;
 wire cond_47 = exe_cmd == `CMD_PUSH_MOV_SEG && { exe_cmdex[3], 3'b0 } == `CMDEX_PUSH_MOV_SEG_implicit;
@@ -210,7 +210,7 @@ wire cond_93 = exe_cmd == `CMD_int && exe_cmdex == `CMDEX_int_protected_STEP_1;
 wire cond_94 = exe_descriptor[`DESC_BIT_SEG] || ( (   exe_descriptor[`DESC_BITS_TYPE] != `DESC_TASK_GATE && exe_descriptor[`DESC_BITS_TYPE] != `DESC_INTERRUPT_GATE_386 && exe_descriptor[`DESC_BITS_TYPE] != `DESC_INTERRUPT_GATE_286 && exe_descriptor[`DESC_BITS_TYPE] != `DESC_TRAP_GATE_386      && exe_descriptor[`DESC_BITS_TYPE] != `DESC_TRAP_GATE_286 ) || (exc_soft_int && exe_descriptor[`DESC_BITS_DPL] < cpl) );
 wire cond_95 = ~(exe_trigger_gp_fault) && exe_descriptor[`DESC_BIT_P] == `FALSE;
 wire cond_96 = exe_cmd == `CMD_int_2 && exe_cmdex == `CMDEX_int_2_int_trap_gate_same_STEP_0;
-wire cond_97 = exe_int_2_int_trap_same_exception || (glob_param_2 > glob_desc_limit);
+wire cond_97 = exe_int_2_int_trap_same_exception || (p2_gt_desc_limit);   // (SiSTer: was glob_param_2 > glob_desc_limit)
 wire cond_98 = exe_cmd == `CMD_int_2 && exe_cmdex == `CMDEX_int_2_int_trap_gate_same_STEP_1;
 wire cond_99 = exe_cmd == `CMD_int_2 && exe_cmdex == `CMDEX_int_2_int_trap_gate_same_STEP_2;
 wire cond_100 = exe_cmd == `CMD_int_2 && exe_cmdex == `CMDEX_int_2_int_trap_gate_same_STEP_3;
@@ -509,69 +509,113 @@ assign offset_iret =
 assign exe_eip_from_glob_param_2_16bit =
     (cond_135)? (`TRUE) :
     1'd0;
-assign exe_trigger_gp_fault =
-    (cond_2 && ~cond_3 && cond_4)? (`TRUE) :
-    (cond_6 && cond_7)? (`TRUE) :
-    (cond_13 && cond_14)? (`TRUE) :
-    (cond_17 && cond_18)? (`TRUE) :
-    (cond_21 && cond_22)? (`TRUE) :
-    (cond_31 && cond_7)? (`TRUE) :
-    (cond_43 && cond_44)? (`TRUE) :
-    (cond_50 && ~cond_51 && cond_52)? (`TRUE) :
-    (cond_53 && cond_54)? (`TRUE) :
-    (cond_57 && cond_54)? (`TRUE) :
-    (cond_60 && cond_61)? (`TRUE) :
-    (cond_62 && cond_54)? (`TRUE) :
-    (cond_65 && cond_14)? (`TRUE) :
-    (cond_71 && cond_72)? (`TRUE) :
-    (cond_74 && cond_75)? (`TRUE) :
-    (cond_77 && cond_44)? (`TRUE) :
-    (cond_83 && cond_84)? (`TRUE) :
-    (cond_85 && cond_86)? (`TRUE) :
-    (cond_89 && cond_14)? (`TRUE) :
-    (cond_91 && cond_92)? (`TRUE) :
-    (cond_93 && cond_94)? (`TRUE) :
-    (cond_96 && cond_97)? (`TRUE) :
-    (cond_110 && cond_111 && cond_112)? (`TRUE) :
-    (cond_118 && cond_7)? (`TRUE) :
-    (cond_120 && cond_44)? (`TRUE) :
-    (cond_123 && cond_124)? (`TRUE) :
-    (cond_126 && cond_127)? (`TRUE) :
-    (cond_136 && cond_137)? (`TRUE) :
-    (cond_145 && cond_54)? (`TRUE) :
-    (cond_146 && cond_54)? (`TRUE) :
-    (cond_150 && cond_151)? (`TRUE) :
-    (cond_153 && cond_72)? (`TRUE) :
-    (cond_169 && cond_54)? (`TRUE) :
-    (cond_175 && ~cond_176 && cond_177)? (`TRUE) :
-    (cond_179 && cond_54)? (`TRUE) :
-    (cond_181 && cond_182)? (`TRUE) :
-    (cond_183 && cond_7)? (`TRUE) :
-    (cond_184 && cond_44)? (`TRUE) :
-    (cond_201 && cond_202)? (`TRUE) :
-    (cond_207 && cond_208)? (`TRUE) :
-    (cond_211 && cond_212)? (`TRUE) :
-    (cond_220 && ~cond_221 && cond_124)? (`TRUE) :
-    (cond_225 && cond_14)? (`TRUE) :
-    (cond_228 && cond_14)? (`TRUE) :
-    (cond_230 && cond_7)? (`TRUE) :
-    (cond_232 && cond_233)? (`TRUE) :
-    (cond_234 && cond_7)? (`TRUE) :
-    (cond_240 && ~cond_51 && cond_124)? (`TRUE) :
-    (cond_241 && ~cond_51 && cond_242)? (`TRUE) :
-    (cond_276 && cond_277)? (`TRUE) :
-    (cond_286 && ~cond_294 && cond_54)? (`TRUE) :
-    1'd0;
-assign exe_glob_descriptor_value =
+// (SiSTer: was an OR of these terms as a chain of `(t)? TRUE :` selects; regrouped by distributivity as the
+//  terms without a late (data-dependent) condition || (late condition && the OR of what it was paired with),
+//  the early part and each partner OR kept as nets of their own -- tools/or_regroup.py)
+(* keep = "true" *) wire exe_trigger_gp_fault_early =
+    (cond_53 && cond_54) ||
+    (cond_57 && cond_54) ||
+    (cond_60 && cond_61) ||
+    (cond_62 && cond_54) ||
+    (cond_71 && cond_72) ||
+    (cond_74 && cond_75) ||
+    (cond_83 && cond_84) ||
+    (cond_93 && cond_94) ||
+    (cond_110 && cond_111 && cond_112) ||
+    (cond_123 && cond_124) ||
+    (cond_136 && cond_137) ||
+    (cond_145 && cond_54) ||
+    (cond_146 && cond_54) ||
+    (cond_150 && cond_151) ||
+    (cond_153 && cond_72) ||
+    (cond_169 && cond_54) ||
+    (cond_179 && cond_54) ||
+    (cond_201 && cond_202) ||
+    (cond_207 && cond_208) ||
+    (cond_211 && cond_212) ||
+    (cond_220 && ~cond_221 && cond_124) ||
+    (cond_232 && cond_233) ||
+    (cond_240 && ~cond_51 && cond_124) ||
+    (cond_241 && ~cond_51 && cond_242) ||
+    (cond_286 && ~cond_294 && cond_54);
+(* keep = "true" *) wire exe_trigger_gp_fault_g0 =
+    (cond_2 && ~cond_3);
+(* keep = "true" *) wire exe_trigger_gp_fault_g1 =
+    (cond_6) ||
+    (cond_31) ||
+    (cond_118) ||
+    (cond_183) ||
+    (cond_230) ||
+    (cond_234);
+(* keep = "true" *) wire exe_trigger_gp_fault_g2 =
+    (cond_13) ||
+    (cond_65) ||
+    (cond_89) ||
+    (cond_225) ||
+    (cond_228);
+(* keep = "true" *) wire exe_trigger_gp_fault_g3 =
+    (cond_17);
+(* keep = "true" *) wire exe_trigger_gp_fault_g4 =
+    (cond_21);
+(* keep = "true" *) wire exe_trigger_gp_fault_g5 =
+    (cond_43) ||
+    (cond_77) ||
+    (cond_120) ||
+    (cond_184);
+(* keep = "true" *) wire exe_trigger_gp_fault_g6 =
+    (cond_50 && ~cond_51);
+(* keep = "true" *) wire exe_trigger_gp_fault_g7 =
+    (cond_85);
+(* keep = "true" *) wire exe_trigger_gp_fault_g8 =
+    (cond_91);
+(* keep = "true" *) wire exe_trigger_gp_fault_g9 =
+    (cond_96);
+(* keep = "true" *) wire exe_trigger_gp_fault_g10 =
+    (cond_126);
+(* keep = "true" *) wire exe_trigger_gp_fault_g11 =
+    (cond_175 && ~cond_176);
+(* keep = "true" *) wire exe_trigger_gp_fault_g12 =
+    (cond_181);
+(* keep = "true" *) wire exe_trigger_gp_fault_g13 =
+    (cond_276);
+assign exe_trigger_gp_fault = exe_trigger_gp_fault_early ||
+    (cond_4 && exe_trigger_gp_fault_g0) ||
+    (cond_7 && exe_trigger_gp_fault_g1) ||
+    (cond_14 && exe_trigger_gp_fault_g2) ||
+    (cond_18 && exe_trigger_gp_fault_g3) ||
+    (cond_22 && exe_trigger_gp_fault_g4) ||
+    (cond_44 && exe_trigger_gp_fault_g5) ||
+    (cond_52 && exe_trigger_gp_fault_g6) ||
+    (cond_86 && exe_trigger_gp_fault_g7) ||
+    (cond_92 && exe_trigger_gp_fault_g8) ||
+    (cond_97 && exe_trigger_gp_fault_g9) ||
+    (cond_127 && exe_trigger_gp_fault_g10) ||
+    (cond_177 && exe_trigger_gp_fault_g11) ||
+    (cond_182 && exe_trigger_gp_fault_g12) ||
+    (cond_277 && exe_trigger_gp_fault_g13);
+// (SiSTer: Shannon-split on exe_ready, late from the stall chain: the two cofactors (the same expression with it 1
+//  and 0) are kept, and exe_ready picks -- tools/shannon_assign.py)
+(* keep = "true" *) wire [63:0] exe_glob_descriptor_value_s1 =
     (cond_24)? (  ss_cache) :
     (cond_26 && ~cond_20)? ( glob_descriptor_2) :
-    (cond_45 && cond_36)? ( glob_descriptor_2) :
+    (cond_45 && 1'b1)? ( glob_descriptor_2) :
     (cond_79 && cond_80)? ( glob_descriptor_2) :
     (cond_120 && ~cond_44)? ( glob_descriptor_2) :
     (cond_121)? ( glob_descriptor_2) :
     (cond_184 && ~cond_44)? ( glob_descriptor_2) :
     (cond_185)? ( glob_descriptor_2) :
     64'd0;
+(* keep = "true" *) wire [63:0] exe_glob_descriptor_value_s0 =
+    (cond_24)? (  ss_cache) :
+    (cond_26 && ~cond_20)? ( glob_descriptor_2) :
+    (cond_45 && 1'b0)? ( glob_descriptor_2) :
+    (cond_79 && cond_80)? ( glob_descriptor_2) :
+    (cond_120 && ~cond_44)? ( glob_descriptor_2) :
+    (cond_121)? ( glob_descriptor_2) :
+    (cond_184 && ~cond_44)? ( glob_descriptor_2) :
+    (cond_185)? ( glob_descriptor_2) :
+    64'd0;
+assign exe_glob_descriptor_value = (exe_ready)? exe_glob_descriptor_value_s1 : exe_glob_descriptor_value_s0;
 assign offset_task =
     (cond_275)? (`TRUE) :
     1'd0;
@@ -735,132 +779,232 @@ assign exe_error_code =
     (cond_273 && cond_267 && cond_274)? ( `SELECTOR_FOR_CODE(glob_param_1)) :
     (cond_273 && cond_267 && cond_272)? ( `SELECTOR_FOR_CODE(glob_param_1)) :
     16'd0;
-assign exe_waiting =
-    (cond_2 && cond_3)? (`TRUE) :
-    (cond_2 && ~cond_3 && cond_4)? (`TRUE) :
-    (cond_6 && cond_7)? (`TRUE) :
-    (cond_8 && cond_9 && cond_10)? (`TRUE) :
-    (cond_12 && cond_10)? (`TRUE) :
-    (cond_13 && cond_14)? (`TRUE) :
-    (cond_17 && cond_18)? (`TRUE) :
-    (cond_19 && cond_20)? (`TRUE) :
-    (cond_21 && cond_22)? (`TRUE) :
-    (cond_26 && cond_20)? (`TRUE) :
-    (cond_31 && cond_7)? (`TRUE) :
-    (cond_34 && cond_35)? (`TRUE) :
-    (cond_43 && cond_44)? (`TRUE) :
-    (cond_47 && cond_10)? (`TRUE) :
-    (cond_50 && cond_51)? (`TRUE) :
-    (cond_50 && ~cond_51 && cond_52)? (`TRUE) :
-    (cond_53 && cond_54)? (`TRUE) :
-    (cond_55 && cond_56)? (`TRUE) :
-    (cond_57 && cond_54)? (`TRUE) :
-    (cond_58 && cond_59)? (`TRUE) :
-    (cond_60 && cond_61)? (`TRUE) :
-    (cond_62 && cond_54)? (`TRUE) :
-    (cond_65 && cond_14)? (`TRUE) :
-    (cond_71 && cond_72)? (`TRUE) :
-    (cond_74 && cond_75)? (`TRUE) :
-    (cond_74 && cond_76)? (`TRUE) :
-    (cond_77 && cond_44)? (`TRUE) :
-    (cond_79 && cond_20)? (`TRUE) :
-    (cond_82 && cond_20)? (`TRUE) :
-    (cond_83 && cond_84)? (`TRUE) :
-    (cond_85 && cond_86)? (`TRUE) :
-    (cond_89 && cond_14)? (`TRUE) :
-    (cond_91 && cond_92)? (`TRUE) :
-    (cond_93 && cond_94)? (`TRUE) :
-    (cond_93 && cond_95)? (`TRUE) :
-    (cond_96 && cond_97)? (`TRUE) :
-    (cond_106 && cond_107)? (`TRUE) :
-    (cond_108 && cond_109)? (`TRUE) :
-    (cond_110 && cond_111 && cond_112)? (`TRUE) :
-    (cond_113 && cond_114 && cond_115)? (`TRUE) :
-    (cond_118 && cond_7)? (`TRUE) :
-    (cond_120 && cond_44)? (`TRUE) :
-    (cond_123 && cond_124)? (`TRUE) :
-    (cond_126 && cond_127)? (`TRUE) :
-    (cond_129 && cond_130)? (`TRUE) :
-    (cond_131 && cond_132)? (`TRUE) :
-    (cond_131 && cond_133)? (`TRUE) :
-    (cond_136 && cond_137)? (`TRUE) :
-    (cond_141 && cond_109)? (`TRUE) :
-    (cond_142 && cond_51)? (`TRUE) :
-    (cond_145 && cond_54)? (`TRUE) :
-    (cond_146 && cond_54)? (`TRUE) :
-    (cond_150 && cond_151)? (`TRUE) :
-    (cond_153 && cond_72)? (`TRUE) :
-    (cond_154 && cond_10)? (`TRUE) :
-    (cond_156 && cond_157)? (`TRUE) :
-    (cond_158 && cond_51)? (`TRUE) :
-    (cond_160 && cond_161)? (`TRUE) :
-    (cond_162 && cond_10)? (`TRUE) :
-    (cond_164 && cond_10)? (`TRUE) :
-    (cond_166 && cond_107)? (`TRUE) :
-    (cond_169 && cond_54)? (`TRUE) :
-    (cond_170 && cond_171)? (`TRUE) :
-    (cond_172 && cond_173)? (`TRUE) :
-    (cond_174 && cond_107)? (`TRUE) :
-    (cond_175 && cond_176)? (`TRUE) :
-    (cond_175 && ~cond_176 && cond_177)? (`TRUE) :
-    (cond_179 && cond_54)? (`TRUE) :
-    (cond_181 && cond_182)? (`TRUE) :
-    (cond_183 && cond_7)? (`TRUE) :
-    (cond_184 && cond_44)? (`TRUE) :
-    (cond_186 && cond_20)? (`TRUE) :
-    (cond_193 && cond_10)? (`TRUE) :
-    (cond_196 && cond_197)? (`TRUE) :
-    (cond_201 && cond_202)? (`TRUE) :
-    (cond_201 && cond_203)? (`TRUE) :
-    (cond_207 && cond_208)? (`TRUE) :
-    (cond_207 && cond_95)? (`TRUE) :
-    (cond_211 && cond_212)? (`TRUE) :
-    (cond_211 && cond_95)? (`TRUE) :
-    (cond_213 && cond_214)? (`TRUE) :
-    (cond_213 && cond_215)? (`TRUE) :
-    (cond_217 && cond_218)? (`TRUE) :
-    (cond_219 && cond_218)? (`TRUE) :
-    (cond_220 && cond_221)? (`TRUE) :
-    (cond_220 && ~cond_221 && cond_124)? (`TRUE) :
-    (cond_223 && cond_224)? (`TRUE) :
-    (cond_225 && cond_14)? (`TRUE) :
-    (cond_228 && cond_14)? (`TRUE) :
-    (cond_230 && cond_7)? (`TRUE) :
-    (cond_232 && cond_233)? (`TRUE) :
-    (cond_232 && cond_95)? (`TRUE) :
-    (cond_234 && cond_7)? (`TRUE) :
-    (cond_236 && cond_237)? (`TRUE) :
-    (cond_240 && cond_51)? (`TRUE) :
-    (cond_240 && ~cond_51 && cond_124)? (`TRUE) :
-    (cond_241 && cond_51)? (`TRUE) :
-    (cond_241 && ~cond_51 && cond_242)? (`TRUE) :
-    (cond_244 && cond_245)? (`TRUE) :
-    (cond_246 && cond_247)? (`TRUE) :
-    (cond_246 && cond_248)? (`TRUE) :
-    (cond_249 && cond_250)? (`TRUE) :
-    (cond_249 && cond_251)? (`TRUE) :
-    (cond_252 && cond_250)? (`TRUE) :
-    (cond_252 && cond_251)? (`TRUE) :
-    (cond_253 && cond_250)? (`TRUE) :
-    (cond_253 && cond_251)? (`TRUE) :
-    (cond_254 && cond_250)? (`TRUE) :
-    (cond_254 && cond_251)? (`TRUE) :
-    (cond_255 && cond_250)? (`TRUE) :
-    (cond_255 && cond_251)? (`TRUE) :
-    (cond_256 && cond_250)? (`TRUE) :
-    (cond_256 && cond_251)? (`TRUE) :
-    (cond_264 && cond_265)? (`TRUE) :
-    (cond_266 && cond_267 && cond_268)? (`TRUE) :
-    (cond_266 && cond_267 && cond_269)? (`TRUE) :
-    (cond_270 && cond_267 && cond_271)? (`TRUE) :
-    (cond_270 && cond_267 && cond_272)? (`TRUE) :
-    (cond_273 && cond_267 && cond_274)? (`TRUE) :
-    (cond_273 && cond_267 && cond_272)? (`TRUE) :
-    (cond_276 && cond_277)? (`TRUE) :
-    (cond_286 && cond_294)? (`TRUE) :
-    (cond_286 && ~cond_294 && cond_54)? (`TRUE) :
-    (cond_296 && cond_51)? (`TRUE) :
-    1'd0;
+// (SiSTer: was an OR of these terms as a chain of `(t)? TRUE :` selects; regrouped by distributivity as the
+//  terms without a late (data-dependent) condition || (late condition && the OR of what it was paired with),
+//  the early part and each partner OR kept as nets of their own -- tools/or_regroup.py)
+(* keep = "true" *) wire exe_waiting_early =
+    (cond_2 && cond_3) ||
+    (cond_8 && cond_9 && cond_10) ||
+    (cond_12 && cond_10) ||
+    (cond_19 && cond_20) ||
+    (cond_26 && cond_20) ||
+    (cond_34 && cond_35) ||
+    (cond_47 && cond_10) ||
+    (cond_50 && cond_51) ||
+    (cond_53 && cond_54) ||
+    (cond_57 && cond_54) ||
+    (cond_60 && cond_61) ||
+    (cond_62 && cond_54) ||
+    (cond_71 && cond_72) ||
+    (cond_74 && cond_75) ||
+    (cond_79 && cond_20) ||
+    (cond_82 && cond_20) ||
+    (cond_83 && cond_84) ||
+    (cond_93 && cond_94) ||
+    (cond_110 && cond_111 && cond_112) ||
+    (cond_123 && cond_124) ||
+    (cond_129 && cond_130) ||
+    (cond_131 && cond_132) ||
+    (cond_136 && cond_137) ||
+    (cond_142 && cond_51) ||
+    (cond_145 && cond_54) ||
+    (cond_146 && cond_54) ||
+    (cond_150 && cond_151) ||
+    (cond_153 && cond_72) ||
+    (cond_154 && cond_10) ||
+    (cond_156 && cond_157) ||
+    (cond_158 && cond_51) ||
+    (cond_160 && cond_161) ||
+    (cond_162 && cond_10) ||
+    (cond_164 && cond_10) ||
+    (cond_169 && cond_54) ||
+    (cond_172 && cond_173) ||
+    (cond_175 && cond_176) ||
+    (cond_179 && cond_54) ||
+    (cond_186 && cond_20) ||
+    (cond_193 && cond_10) ||
+    (cond_196 && cond_197) ||
+    (cond_201 && cond_202) ||
+    (cond_207 && cond_208) ||
+    (cond_211 && cond_212) ||
+    (cond_213 && cond_214) ||
+    (cond_217 && cond_218) ||
+    (cond_219 && cond_218) ||
+    (cond_220 && cond_221) ||
+    (cond_220 && ~cond_221 && cond_124) ||
+    (cond_223 && cond_224) ||
+    (cond_232 && cond_233) ||
+    (cond_236 && cond_237) ||
+    (cond_240 && cond_51) ||
+    (cond_240 && ~cond_51 && cond_124) ||
+    (cond_241 && cond_51) ||
+    (cond_241 && ~cond_51 && cond_242) ||
+    (cond_264 && cond_265) ||
+    (cond_266 && cond_267 && cond_268) ||
+    (cond_266 && cond_267 && cond_269) ||
+    (cond_270 && cond_267 && cond_271) ||
+    (cond_273 && cond_267 && cond_274) ||
+    (cond_286 && cond_294) ||
+    (cond_286 && ~cond_294 && cond_54) ||
+    (cond_296 && cond_51);
+(* keep = "true" *) wire exe_waiting_g0 =
+    (cond_2 && ~cond_3);
+(* keep = "true" *) wire exe_waiting_g1 =
+    (cond_6) ||
+    (cond_31) ||
+    (cond_118) ||
+    (cond_183) ||
+    (cond_230) ||
+    (cond_234);
+(* keep = "true" *) wire exe_waiting_g2 =
+    (cond_13) ||
+    (cond_65) ||
+    (cond_89) ||
+    (cond_225) ||
+    (cond_228);
+(* keep = "true" *) wire exe_waiting_g3 =
+    (cond_17);
+(* keep = "true" *) wire exe_waiting_g4 =
+    (cond_21);
+(* keep = "true" *) wire exe_waiting_g5 =
+    (cond_43) ||
+    (cond_77) ||
+    (cond_120) ||
+    (cond_184);
+(* keep = "true" *) wire exe_waiting_g6 =
+    (cond_50 && ~cond_51);
+(* keep = "true" *) wire exe_waiting_g7 =
+    (cond_55);
+(* keep = "true" *) wire exe_waiting_g8 =
+    (cond_58);
+(* keep = "true" *) wire exe_waiting_g9 =
+    (cond_74);
+(* keep = "true" *) wire exe_waiting_g10 =
+    (cond_85);
+(* keep = "true" *) wire exe_waiting_g11 =
+    (cond_91);
+(* keep = "true" *) wire exe_waiting_g12 =
+    (cond_93) ||
+    (cond_207) ||
+    (cond_211) ||
+    (cond_232);
+(* keep = "true" *) wire exe_waiting_g13 =
+    (cond_96);
+(* keep = "true" *) wire exe_waiting_g14 =
+    (cond_106) ||
+    (cond_166) ||
+    (cond_174);
+(* keep = "true" *) wire exe_waiting_g15 =
+    (cond_108) ||
+    (cond_141);
+(* keep = "true" *) wire exe_waiting_g16 =
+    (cond_113 && cond_114);
+(* keep = "true" *) wire exe_waiting_g17 =
+    (cond_126);
+(* keep = "true" *) wire exe_waiting_g18 =
+    (cond_131);
+(* keep = "true" *) wire exe_waiting_g19 =
+    (cond_170);
+(* keep = "true" *) wire exe_waiting_g20 =
+    (cond_175 && ~cond_176);
+(* keep = "true" *) wire exe_waiting_g21 =
+    (cond_181);
+(* keep = "true" *) wire exe_waiting_g22 =
+    (cond_201);
+(* keep = "true" *) wire exe_waiting_g23 =
+    (cond_213);
+(* keep = "true" *) wire exe_waiting_g24 =
+    (cond_244);
+(* keep = "true" *) wire exe_waiting_g25 =
+    (cond_246);
+(* keep = "true" *) wire exe_waiting_g26 =
+    (cond_246);
+(* keep = "true" *) wire exe_waiting_g27 =
+    (cond_249) ||
+    (cond_252) ||
+    (cond_253) ||
+    (cond_254) ||
+    (cond_255) ||
+    (cond_256);
+(* keep = "true" *) wire exe_waiting_g28 =
+    (cond_249) ||
+    (cond_252) ||
+    (cond_253) ||
+    (cond_254) ||
+    (cond_255) ||
+    (cond_256);
+(* keep = "true" *) wire exe_waiting_g29 =
+    (cond_270 && cond_267) ||
+    (cond_273 && cond_267);
+(* keep = "true" *) wire exe_waiting_g30 =
+    (cond_276);
+// (SiSTer: and Shannon-split on exe_trigger_gp_fault (itself an OR of compares): cond_76, cond_95 and cond_203 are
+//  ~exe_trigger_gp_fault && their _t0 part, so with it high those groups drop out and with it low they read _t0)
+wire cond_76_t0  = glob_param_3[15:2] == 14'd0;
+wire cond_95_t0  = exe_descriptor[`DESC_BIT_P] == `FALSE;
+wire cond_203_t0 = exe_descriptor[`DESC_BIT_P] == `FALSE &&  (exe_descriptor[`DESC_BIT_SEG] || exe_descriptor[`DESC_BITS_TYPE] == 4'd1 || exe_descriptor[`DESC_BITS_TYPE] == 4'd9 ||  exe_descriptor[`DESC_BITS_TYPE] == 4'd4 || exe_descriptor[`DESC_BITS_TYPE] == 4'd12 ||  exe_descriptor[`DESC_BITS_TYPE] == 4'd5);
+(* keep = "true" *) wire exe_waiting_tg0 = exe_waiting_early ||
+    (cond_4 && exe_waiting_g0) ||
+    (cond_7 && exe_waiting_g1) ||
+    (cond_14 && exe_waiting_g2) ||
+    (cond_18 && exe_waiting_g3) ||
+    (cond_22 && exe_waiting_g4) ||
+    (cond_44 && exe_waiting_g5) ||
+    (cond_52 && exe_waiting_g6) ||
+    (cond_56 && exe_waiting_g7) ||
+    (cond_59 && exe_waiting_g8) ||
+    (cond_76_t0 && exe_waiting_g9) ||
+    (cond_86 && exe_waiting_g10) ||
+    (cond_92 && exe_waiting_g11) ||
+    (cond_95_t0 && exe_waiting_g12) ||
+    (cond_97 && exe_waiting_g13) ||
+    (cond_107 && exe_waiting_g14) ||
+    (cond_109 && exe_waiting_g15) ||
+    (cond_115 && exe_waiting_g16) ||
+    (cond_127 && exe_waiting_g17) ||
+    (cond_133 && exe_waiting_g18) ||
+    (cond_171 && exe_waiting_g19) ||
+    (cond_177 && exe_waiting_g20) ||
+    (cond_182 && exe_waiting_g21) ||
+    (cond_203_t0 && exe_waiting_g22) ||
+    (cond_215 && exe_waiting_g23) ||
+    (cond_245 && exe_waiting_g24) ||
+    (cond_247 && exe_waiting_g25) ||
+    (cond_248 && exe_waiting_g26) ||
+    (cond_250 && exe_waiting_g27) ||
+    (cond_251 && exe_waiting_g28) ||
+    (cond_272 && exe_waiting_g29) ||
+    (cond_277 && exe_waiting_g30);
+(* keep = "true" *) wire exe_waiting_tg1 = exe_waiting_early ||
+    (cond_4 && exe_waiting_g0) ||
+    (cond_7 && exe_waiting_g1) ||
+    (cond_14 && exe_waiting_g2) ||
+    (cond_18 && exe_waiting_g3) ||
+    (cond_22 && exe_waiting_g4) ||
+    (cond_44 && exe_waiting_g5) ||
+    (cond_52 && exe_waiting_g6) ||
+    (cond_56 && exe_waiting_g7) ||
+    (cond_59 && exe_waiting_g8) ||
+    (cond_86 && exe_waiting_g10) ||
+    (cond_92 && exe_waiting_g11) ||
+    (cond_97 && exe_waiting_g13) ||
+    (cond_107 && exe_waiting_g14) ||
+    (cond_109 && exe_waiting_g15) ||
+    (cond_115 && exe_waiting_g16) ||
+    (cond_127 && exe_waiting_g17) ||
+    (cond_133 && exe_waiting_g18) ||
+    (cond_171 && exe_waiting_g19) ||
+    (cond_177 && exe_waiting_g20) ||
+    (cond_182 && exe_waiting_g21) ||
+    (cond_215 && exe_waiting_g23) ||
+    (cond_245 && exe_waiting_g24) ||
+    (cond_247 && exe_waiting_g25) ||
+    (cond_248 && exe_waiting_g26) ||
+    (cond_250 && exe_waiting_g27) ||
+    (cond_251 && exe_waiting_g28) ||
+    (cond_272 && exe_waiting_g29) ||
+    (cond_277 && exe_waiting_g30);
+assign exe_waiting = (exe_trigger_gp_fault)? exe_waiting_tg1 : exe_waiting_tg0;
 assign exe_trigger_pf_fault =
     (cond_249 && cond_251)? (`TRUE) :
     (cond_252 && cond_251)? (`TRUE) :
@@ -901,25 +1045,40 @@ assign offset_call_int_same_first =
 assign exe_trigger_db_fault =
     (cond_286 && cond_294)? (`TRUE) :
     1'd0;
-assign exe_glob_descriptor_2_set =
+// (SiSTer: Shannon-split on exe_ready, late from the stall chain: the two cofactors (the same expression with it 1
+//  and 0) are kept, and exe_ready picks -- tools/shannon_assign.py)
+(* keep = "true" *) wire  exe_glob_descriptor_2_set_s1 =
     (cond_24)? (`TRUE) :
-    (cond_34 && cond_36)? (`TRUE) :
-    (cond_74 && cond_36)? (`TRUE) :
+    (cond_34 && 1'b1)? (`TRUE) :
+    (cond_74 && 1'b1)? (`TRUE) :
     (cond_79 && cond_80)? (`TRUE) :
     (cond_120 && ~cond_44)? (`TRUE) :
     (cond_121)? (`TRUE) :
     (cond_184 && ~cond_44)? (`TRUE) :
-    (cond_185)? ( exe_ready) :
+    (cond_185)? ( 1'b1) :
     1'd0;
-assign exe_glob_param_1_value =
+(* keep = "true" *) wire  exe_glob_descriptor_2_set_s0 =
+    (cond_24)? (`TRUE) :
+    (cond_34 && 1'b0)? (`TRUE) :
+    (cond_74 && 1'b0)? (`TRUE) :
+    (cond_79 && cond_80)? (`TRUE) :
+    (cond_120 && ~cond_44)? (`TRUE) :
+    (cond_121)? (`TRUE) :
+    (cond_184 && ~cond_44)? (`TRUE) :
+    (cond_185)? ( 1'b0) :
+    1'd0;
+assign exe_glob_descriptor_2_set = (exe_ready)? exe_glob_descriptor_2_set_s1 : exe_glob_descriptor_2_set_s0;
+// (SiSTer: Shannon-split on exe_ready, late from the stall chain: the two cofactors (the same expression with it 1
+//  and 0) are kept, and exe_ready picks -- tools/shannon_assign.py)
+(* keep = "true" *) wire [31:0] exe_glob_param_1_value_s1 =
     (cond_15)? ( { 13'd0, `SEGMENT_CS, src[15:0] }) :
     (cond_16 && cond_11)? ( { 13'd0, `SEGMENT_CS, exe_extra[31:16] }) :
     (cond_16 && ~cond_11)? ( { 13'd0, `SEGMENT_CS, exe_extra[15:0] }) :
     (cond_28)? ( { 7'd0, glob_descriptor[36:32], glob_descriptor[`DESC_BITS_TYPE] == `DESC_CALL_GATE_386, `SEGMENT_CS, glob_descriptor[31:16] }) :
-    (cond_34 && cond_36)? ( { 13'd0, `SEGMENT_SS, glob_param_3[15:0] }) :
-    (cond_45 && cond_36)? ( glob_param_3) :
+    (cond_34 && 1'b1)? ( { 13'd0, `SEGMENT_SS, glob_param_3[15:0] }) :
+    (cond_45 && 1'b1)? ( glob_param_3) :
     (cond_73)? ( { 11'd0, glob_descriptor[`DESC_BIT_TYPE_BIT_0], glob_descriptor[`DESC_BITS_TYPE] >= `DESC_INTERRUPT_GATE_386, `SEGMENT_CS, glob_descriptor[31:16] }) :
-    (cond_74 && cond_36)? ( { 13'd0, `SEGMENT_SS, glob_param_3[15:0] }) :
+    (cond_74 && 1'b1)? ( { 13'd0, `SEGMENT_SS, glob_param_3[15:0] }) :
     (cond_79 && cond_80)? ( glob_param_3) :
     (cond_120 && ~cond_44)? ( glob_param_3) :
     (cond_121)? ( glob_param_3) :
@@ -938,20 +1097,50 @@ assign exe_glob_param_1_value =
     (cond_227 && ~cond_11)? ( { 13'd0, `SEGMENT_CS, exe_extra[15:0] }) :
     (cond_236 && ~cond_237)? ( (exe_cmdex == `CMDEX_OUT_dx)? { 16'd0, edx[15:0] } : { 24'd0, exe_decoder[15:8] }) :
     32'd0;
-assign exe_glob_param_1_set =
+(* keep = "true" *) wire [31:0] exe_glob_param_1_value_s0 =
+    (cond_15)? ( { 13'd0, `SEGMENT_CS, src[15:0] }) :
+    (cond_16 && cond_11)? ( { 13'd0, `SEGMENT_CS, exe_extra[31:16] }) :
+    (cond_16 && ~cond_11)? ( { 13'd0, `SEGMENT_CS, exe_extra[15:0] }) :
+    (cond_28)? ( { 7'd0, glob_descriptor[36:32], glob_descriptor[`DESC_BITS_TYPE] == `DESC_CALL_GATE_386, `SEGMENT_CS, glob_descriptor[31:16] }) :
+    (cond_34 && 1'b0)? ( { 13'd0, `SEGMENT_SS, glob_param_3[15:0] }) :
+    (cond_45 && 1'b0)? ( glob_param_3) :
+    (cond_73)? ( { 11'd0, glob_descriptor[`DESC_BIT_TYPE_BIT_0], glob_descriptor[`DESC_BITS_TYPE] >= `DESC_INTERRUPT_GATE_386, `SEGMENT_CS, glob_descriptor[31:16] }) :
+    (cond_74 && 1'b0)? ( { 13'd0, `SEGMENT_SS, glob_param_3[15:0] }) :
+    (cond_79 && cond_80)? ( glob_param_3) :
+    (cond_120 && ~cond_44)? ( glob_param_3) :
+    (cond_121)? ( glob_param_3) :
+    (cond_184 && ~cond_44)? ( glob_param_3) :
+    (cond_185)? ( glob_param_3) :
+    (cond_196 && ~cond_197)? ( (exe_cmdex == `CMDEX_IN_dx)? { 16'd0, edx[15:0] } : { 24'd0, exe_decoder[15:8] }) :
+    (cond_204 && cond_205)? ( { 14'd0, `TASK_SWITCH_FROM_CALL, glob_param_1[15:0] }) :
+    (cond_204 && cond_206)? ( { 14'd0, `TASK_SWITCH_FROM_JUMP, glob_param_1[15:0] }) :
+    (cond_207 && cond_205)? ( { 14'd0, `TASK_SWITCH_FROM_CALL, glob_param_1[15:0] }) :
+    (cond_207 && cond_206)? ( { 14'd0, `TASK_SWITCH_FROM_JUMP, glob_param_1[15:0] }) :
+    (cond_207 && cond_209)? ( { 14'd0, `TASK_SWITCH_FROM_INT,  glob_param_1[15:0] }) :
+    (cond_217 && ~cond_218)? ( { 16'd0, edx[15:0] }) :
+    (cond_219 && ~cond_218)? ( { 16'd0, edx[15:0] }) :
+    (cond_226)? ( { 13'd0, `SEGMENT_CS, src[15:0] }) :
+    (cond_227 && cond_11)? ( { 13'd0, `SEGMENT_CS, exe_extra[31:16] }) :
+    (cond_227 && ~cond_11)? ( { 13'd0, `SEGMENT_CS, exe_extra[15:0] }) :
+    (cond_236 && ~cond_237)? ( (exe_cmdex == `CMDEX_OUT_dx)? { 16'd0, edx[15:0] } : { 24'd0, exe_decoder[15:8] }) :
+    32'd0;
+assign exe_glob_param_1_value = (exe_ready)? exe_glob_param_1_value_s1 : exe_glob_param_1_value_s0;
+// (SiSTer: Shannon-split on exe_ready, late from the stall chain: the two cofactors (the same expression with it 1
+//  and 0) are kept, and exe_ready picks -- tools/shannon_assign.py)
+(* keep = "true" *) wire  exe_glob_param_1_set_s1 =
     (cond_15)? (`TRUE) :
     (cond_16 && cond_11)? (`TRUE) :
     (cond_16 && ~cond_11)? (`TRUE) :
     (cond_28)? (`TRUE) :
-    (cond_34 && cond_36)? (`TRUE) :
-    (cond_45 && cond_36)? (`TRUE) :
+    (cond_34 && 1'b1)? (`TRUE) :
+    (cond_45 && 1'b1)? (`TRUE) :
     (cond_73)? (`TRUE) :
-    (cond_74 && cond_36)? (`TRUE) :
+    (cond_74 && 1'b1)? (`TRUE) :
     (cond_79 && cond_80)? (`TRUE) :
     (cond_120 && ~cond_44)? (`TRUE) :
     (cond_121)? (`TRUE) :
     (cond_184 && ~cond_44)? (`TRUE) :
-    (cond_185)? ( exe_ready) :
+    (cond_185)? ( 1'b1) :
     (cond_196 && ~cond_197)? (`TRUE) :
     (cond_204 && cond_205)? (`TRUE) :
     (cond_204 && cond_206)? (`TRUE) :
@@ -965,6 +1154,34 @@ assign exe_glob_param_1_set =
     (cond_227 && ~cond_11)? (`TRUE) :
     (cond_236 && ~cond_237)? (`TRUE) :
     1'd0;
+(* keep = "true" *) wire  exe_glob_param_1_set_s0 =
+    (cond_15)? (`TRUE) :
+    (cond_16 && cond_11)? (`TRUE) :
+    (cond_16 && ~cond_11)? (`TRUE) :
+    (cond_28)? (`TRUE) :
+    (cond_34 && 1'b0)? (`TRUE) :
+    (cond_45 && 1'b0)? (`TRUE) :
+    (cond_73)? (`TRUE) :
+    (cond_74 && 1'b0)? (`TRUE) :
+    (cond_79 && cond_80)? (`TRUE) :
+    (cond_120 && ~cond_44)? (`TRUE) :
+    (cond_121)? (`TRUE) :
+    (cond_184 && ~cond_44)? (`TRUE) :
+    (cond_185)? ( 1'b0) :
+    (cond_196 && ~cond_197)? (`TRUE) :
+    (cond_204 && cond_205)? (`TRUE) :
+    (cond_204 && cond_206)? (`TRUE) :
+    (cond_207 && cond_205)? (`TRUE) :
+    (cond_207 && cond_206)? (`TRUE) :
+    (cond_207 && cond_209)? (`TRUE) :
+    (cond_217 && ~cond_218)? (`TRUE) :
+    (cond_219 && ~cond_218)? (`TRUE) :
+    (cond_226)? (`TRUE) :
+    (cond_227 && cond_11)? (`TRUE) :
+    (cond_227 && ~cond_11)? (`TRUE) :
+    (cond_236 && ~cond_237)? (`TRUE) :
+    1'd0;
+assign exe_glob_param_1_set = (exe_ready)? exe_glob_param_1_set_s1 : exe_glob_param_1_set_s0;
 assign offset_call_int_same_next =
     (cond_30)? (`TRUE) :
     (cond_98)? (`TRUE) :
@@ -983,9 +1200,11 @@ assign invdcode_do =
 assign exe_is_8bit_clear =
     (cond_284)? ( exe_is_8bit) :
     1'd0;
-assign exe_glob_param_3_value =
-    (cond_34 && cond_36)? ( glob_param_1) :
-    (cond_74 && cond_36)? ( glob_param_1) :
+// (SiSTer: Shannon-split on exe_ready, late from the stall chain: the two cofactors (the same expression with it 1
+//  and 0) are kept, and exe_ready picks -- tools/shannon_assign.py)
+(* keep = "true" *) wire [31:0] exe_glob_param_3_value_s1 =
+    (cond_34 && 1'b1)? ( glob_param_1) :
+    (cond_74 && 1'b1)? ( glob_param_1) :
     (cond_79 && cond_80)? ( glob_param_1) :
     (cond_120 && ~cond_44)? ( glob_param_1) :
     (cond_121)? ( glob_param_1) :
@@ -995,6 +1214,19 @@ assign exe_glob_param_3_value =
     (cond_207 && cond_210)? ( { 10'd0, exe_consumed, 1'd0, 1'd0, 16'd0 }) :
     (cond_207 && cond_209)? ( { 10'd0, exe_consumed, 1'd0, exc_push_error, exc_error_code[15:0] }) :
     32'd0;
+(* keep = "true" *) wire [31:0] exe_glob_param_3_value_s0 =
+    (cond_34 && 1'b0)? ( glob_param_1) :
+    (cond_74 && 1'b0)? ( glob_param_1) :
+    (cond_79 && cond_80)? ( glob_param_1) :
+    (cond_120 && ~cond_44)? ( glob_param_1) :
+    (cond_121)? ( glob_param_1) :
+    (cond_184 && ~cond_44)? ( glob_param_1) :
+    (cond_185)? ( glob_param_1) :
+    (cond_204)? ( { 10'd0, exe_consumed, 1'd0, 1'd0, 16'd0 }) :
+    (cond_207 && cond_210)? ( { 10'd0, exe_consumed, 1'd0, 1'd0, 16'd0 }) :
+    (cond_207 && cond_209)? ( { 10'd0, exe_consumed, 1'd0, exc_push_error, exc_error_code[15:0] }) :
+    32'd0;
+assign exe_glob_param_3_value = (exe_ready)? exe_glob_param_3_value_s1 : exe_glob_param_3_value_s0;
 assign tlbcheck_do =
     (cond_249)? (`TRUE) :
     (cond_252)? (`TRUE) :
@@ -1045,16 +1277,29 @@ assign exe_arith_index =
     (cond_172)? ( {`TRUE, exe_cmd[2:0]}) :
     (cond_178)? ( (`ARITH_VALID | `ARITH_AND)) :
     4'd0;
-assign exe_glob_descriptor_set =
+// (SiSTer: Shannon-split on exe_ready, late from the stall chain: the two cofactors (the same expression with it 1
+//  and 0) are kept, and exe_ready picks -- tools/shannon_assign.py)
+(* keep = "true" *) wire  exe_glob_descriptor_set_s1 =
     (cond_24)? (`TRUE) :
     (cond_26 && ~cond_20)? (`TRUE) :
-    (cond_45 && cond_36)? (`TRUE) :
+    (cond_45 && 1'b1)? (`TRUE) :
     (cond_79 && cond_80)? (`TRUE) :
     (cond_120 && ~cond_44)? (`TRUE) :
     (cond_121)? (`TRUE) :
     (cond_184 && ~cond_44)? (`TRUE) :
-    (cond_185)? ( exe_ready) :
+    (cond_185)? ( 1'b1) :
     1'd0;
+(* keep = "true" *) wire  exe_glob_descriptor_set_s0 =
+    (cond_24)? (`TRUE) :
+    (cond_26 && ~cond_20)? (`TRUE) :
+    (cond_45 && 1'b0)? (`TRUE) :
+    (cond_79 && cond_80)? (`TRUE) :
+    (cond_120 && ~cond_44)? (`TRUE) :
+    (cond_121)? (`TRUE) :
+    (cond_184 && ~cond_44)? (`TRUE) :
+    (cond_185)? ( 1'b0) :
+    1'd0;
+assign exe_glob_descriptor_set = (exe_ready)? exe_glob_descriptor_set_s1 : exe_glob_descriptor_set_s0;
 assign exe_result =
     (cond_0)? (  exe_arith_add[31:0]) :
     (cond_1)? ( exe_buffer) :
@@ -1121,28 +1366,56 @@ assign exe_trigger_ts_fault =
     (cond_270 && cond_267 && cond_271)? (`TRUE) :
     (cond_273 && cond_267 && cond_274)? (`TRUE) :
     1'd0;
-assign exe_glob_param_3_set =
-    (cond_34 && cond_36)? (`TRUE) :
-    (cond_74 && cond_36)? (`TRUE) :
+// (SiSTer: Shannon-split on exe_ready, late from the stall chain: the two cofactors (the same expression with it 1
+//  and 0) are kept, and exe_ready picks -- tools/shannon_assign.py)
+(* keep = "true" *) wire  exe_glob_param_3_set_s1 =
+    (cond_34 && 1'b1)? (`TRUE) :
+    (cond_74 && 1'b1)? (`TRUE) :
     (cond_79 && cond_80)? (`TRUE) :
     (cond_120 && ~cond_44)? (`TRUE) :
     (cond_121)? (`TRUE) :
     (cond_184 && ~cond_44)? (`TRUE) :
-    (cond_185)? ( exe_ready) :
+    (cond_185)? ( 1'b1) :
     (cond_204)? (`TRUE) :
     (cond_207 && cond_210)? (`TRUE) :
     (cond_207 && cond_209)? (`TRUE) :
     1'd0;
-assign exe_glob_descriptor_2_value =
+(* keep = "true" *) wire  exe_glob_param_3_set_s0 =
+    (cond_34 && 1'b0)? (`TRUE) :
+    (cond_74 && 1'b0)? (`TRUE) :
+    (cond_79 && cond_80)? (`TRUE) :
+    (cond_120 && ~cond_44)? (`TRUE) :
+    (cond_121)? (`TRUE) :
+    (cond_184 && ~cond_44)? (`TRUE) :
+    (cond_185)? ( 1'b0) :
+    (cond_204)? (`TRUE) :
+    (cond_207 && cond_210)? (`TRUE) :
+    (cond_207 && cond_209)? (`TRUE) :
+    1'd0;
+assign exe_glob_param_3_set = (exe_ready)? exe_glob_param_3_set_s1 : exe_glob_param_3_set_s0;
+// (SiSTer: Shannon-split on exe_ready, late from the stall chain: the two cofactors (the same expression with it 1
+//  and 0) are kept, and exe_ready picks -- tools/shannon_assign.py)
+(* keep = "true" *) wire [63:0] exe_glob_descriptor_2_value_s1 =
     (cond_24)? ( glob_descriptor) :
-    (cond_34 && cond_36)? ( glob_descriptor) :
-    (cond_74 && cond_36)? ( glob_descriptor) :
+    (cond_34 && 1'b1)? ( glob_descriptor) :
+    (cond_74 && 1'b1)? ( glob_descriptor) :
     (cond_79 && cond_80)? ( glob_descriptor) :
     (cond_120 && ~cond_44)? ( glob_descriptor) :
     (cond_121)? ( glob_descriptor) :
     (cond_184 && ~cond_44)? ( glob_descriptor) :
     (cond_185)? ( glob_descriptor) :
     64'd0;
+(* keep = "true" *) wire [63:0] exe_glob_descriptor_2_value_s0 =
+    (cond_24)? ( glob_descriptor) :
+    (cond_34 && 1'b0)? ( glob_descriptor) :
+    (cond_74 && 1'b0)? ( glob_descriptor) :
+    (cond_79 && cond_80)? ( glob_descriptor) :
+    (cond_120 && ~cond_44)? ( glob_descriptor) :
+    (cond_121)? ( glob_descriptor) :
+    (cond_184 && ~cond_44)? ( glob_descriptor) :
+    (cond_185)? ( glob_descriptor) :
+    64'd0;
+assign exe_glob_descriptor_2_value = (exe_ready)? exe_glob_descriptor_2_value_s1 : exe_glob_descriptor_2_value_s0;
 assign dr6_bd_set =
     (cond_286 && cond_294)? ( `TRUE) :
     1'd0;

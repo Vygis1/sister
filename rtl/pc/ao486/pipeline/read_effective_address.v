@@ -379,9 +379,30 @@ assign address_bits_transform_reg =
     (rd_modregrm_reg == 3'b110)?    esi :
                                     edi;
 
-assign address_bits_transform_sum = 
-    (rd_operand_32bit)?     address_effective_modrm + { { 3{address_bits_transform_reg[31]}}, address_bits_transform_reg[31:5], 2'b0 } :
-                            address_effective_modrm + { {19{address_bits_transform_reg[15]}}, address_bits_transform_reg[15:4], 1'b0 };
+// (SiSTer: was
+//      (rd_operand_32bit)? address_effective_modrm + T32 : address_effective_modrm + T16
+//  (T: the bit offset's word/dword part, the two constants below), address_effective_modrm being one of four sums.
+//  Here T is added to each of the four as one more carry-save stage -- for the 32-bit modrm form the four operands
+//  ea32_a + ea32_b + disp32 + T in one carry chain -- and the same four-way choice picks. For the two 16-bit forms
+//  only bits 15..0 are used: rd_address_effective takes { {16{rd_address_32bit}} & sum[31:16], sum[15:0] }, and
+//  rd_address_32bit is low for them, so their upper halves (here the 16-bit sums' carries out are not kept) are
+//  never read. All sums mod 2^32 / 2^16, as before)
+wire [31:0] bt_t =
+    (rd_operand_32bit)?     { { 3{address_bits_transform_reg[31]}}, address_bits_transform_reg[31:5], 2'b0 } :
+                            { {19{address_bits_transform_reg[15]}}, address_bits_transform_reg[15:4], 1'b0 };
+wire [31:0] bt32_s = ea32_sum ^ ea32_carry ^ bt_t;
+wire [31:0] bt32_c = { (ea32_sum[30:0] & ea32_carry[30:0]) | (ea32_sum[30:0] & bt_t[30:0]) | (ea32_carry[30:0] & bt_t[30:0]), 1'b0 };
+wire [31:0] bt32   = bt32_s + bt32_c;
+wire [15:0] bt16_s = ea16_sum ^ ea16_carry ^ bt_t[15:0];
+wire [15:0] bt16_c = { (ea16_sum[14:0] & ea16_carry[14:0]) | (ea16_sum[14:0] & bt_t[14:0]) | (ea16_carry[14:0] & bt_t[14:0]), 1'b0 };
+wire [15:0] bt16   = bt16_s + bt16_c;
+wire [15:0] bt_disp16      = address_disp16 + bt_t[15:0];
+wire [31:0] bt_disp32      = address_disp32_no_sib + bt_t;
+assign address_bits_transform_sum =
+    (rd_address_16bit && rd_modregrm_mod == 2'b00 && rd_modregrm_rm == 3'b110)?     { 16'd0, bt_disp16 } :
+    (rd_address_32bit && rd_modregrm_mod == 2'b00 && rd_modregrm_rm == 3'b101)?     bt_disp32 :
+    (rd_address_16bit)?                                                             { 16'd0, bt16 } :
+                                                                                    bt32;
 
 //------------------------------------------------------------------------------ ENTER
 

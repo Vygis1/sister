@@ -78,6 +78,12 @@ module microcode(
     
     //micro
     input               rd_busy,
+    // (SiSTer: the stall chain split on its late end: rd_busy == rd_busy_nw || rd_stall_w, and so
+    //  micro_busy == micro_busy_nw || rd_stall_w, dec_ready == dec_ready_nw && ~rd_stall_w (decode.v))
+    input               rd_busy_nw,
+    input               rd_stall_w,
+    output              micro_busy_nw,
+    input               dec_ready_nw,
     output              micro_ready,
         
     output      [87:0]  micro_decoder,
@@ -125,9 +131,18 @@ reg [3:0]   mc_cmdex_last;
 
 assign micro_busy  = rd_busy || m_overlay;
 
-assign micro_ready = ~(micro_reset) && ((~(m_overlay) && dec_ready) || (m_overlay && ~(rd_busy)));
+// (SiSTer: was
+//      micro_ready = ~micro_reset && ((~m_overlay && dec_ready) || (m_overlay && ~rd_busy));
+//      m_load      = dec_ready && dec_is_complex;
+//  with dec_ready = dec_ready_nw && ~rd_stall_w and rd_busy = rd_busy_nw || rd_stall_w both are their _nw
+//  versions (below, kept as nets of their own) && ~rd_stall_w)
+assign micro_busy_nw = rd_busy_nw || m_overlay;
+(* keep = "true" *) wire micro_ready_nw = ~(micro_reset) && ((~(m_overlay) && dec_ready_nw) || (m_overlay && ~(rd_busy_nw)));
+(* keep = "true" *) wire m_load_nw      = dec_ready_nw && dec_is_complex;
 
-assign m_load      = dec_ready && dec_is_complex;
+assign micro_ready = micro_ready_nw && ~(rd_stall_w);
+
+assign m_load      = m_load_nw && ~(rd_stall_w);
 
 assign m_overlay   = mc_cmd != `CMD_NULL;
 

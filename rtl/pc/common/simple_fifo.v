@@ -56,7 +56,10 @@ reg [widthu-1:0] wr_index = 0;
 
 wire do_rd = rdreq && ~(empty);
 wire do_wr = wrreq && (~(full) || rdreq);
-wire [widthu-1:0] rd_next = (rst_n == 1'b0 || sclr) ? {widthu{1'b0}} : rd_index + { {widthu-1{1'b0}}, do_rd };
+// (SiSTer: was (rst_n == 1'b0 || sclr) ? 0 : rd_index + do_rd -- the same, with the increment made from the
+//  register alone and the late do_rd only choosing it)
+wire [widthu-1:0] rd_index_p1 = rd_index + { {widthu-1{1'b0}}, 1'b1 };
+wire [widthu-1:0] rd_next = (rst_n == 1'b0 || sclr) ? {widthu{1'b0}} : (do_rd ? rd_index_p1 : rd_index);
 reg  [width-1:0] q_r;
 always @(posedge clk) q_r <= (do_wr && wr_index == rd_next) ? data : mem[rd_next];
 assign q    = BLOCK ? q_r : mem[rd_index];

@@ -42,7 +42,13 @@ module tlb_regs(
     output              translate_pcd,
     output              translate_combined_rw,
     output              translate_combined_su,
-    output  [3:0]       translate_rgn       // (SiSTer: the L2 regions of translate_physical)
+    output  [3:0]       translate_rgn,      // (SiSTer: the L2 regions of translate_physical)
+    // (SiSTer: the way hits and the four entries of the looked-up set, for tlb.v's per-way outputs)
+    output  [3:0]       translate_hit,
+    output  [49:0]      translate_e0,
+    output  [49:0]      translate_e1,
+    output  [49:0]      translate_e2,
+    output  [49:0]      translate_e3
     //END
 );
 
@@ -57,52 +63,41 @@ module tlb_regs(
     // [45]    DIRTY (set on write fill)
     // [49:46] (SiSTer) the L2 regions of the physical page (ao486_l2_rgn), stored at the fill
 
-    localparam WAYS = 4;
-    localparam SETS = 8;          // 32 entries total
-    localparam SETBITS = 3;       // log2(SETS)
+    // (SiSTer: only way 0 of each set is ever used. The fill takes the first free way with
+    //      casez (free_way) 4'b1???: way 0; 4'b01??: way 1; 4'b001?: way 2; 4'b0001: way 3
+    //  where free_way[w] = ~valid[w] -- so while way 3 is free (free_way[3] = 1) it is way 0, and ways 1..3 are only
+    //  ever written by a fill that picked them. From reset all are invalid, so by induction ways 1..3 stay invalid
+    //  for ever (the flushes and the dirty-miss invalidation only write zeros), way 3 stays free, every fill goes to
+    //  way 0 and the round-robin pointer (read only when no way is free) is never read. The TLB is therefore the
+    //  8-entry direct-mapped one below: the same hits, the same entries, the same outputs on every clock --
+    //  translate_hit[3:1] and translate_e1..e3 are the constant zeros ways 1..3 always held.)
+    localparam SETS = 8;
+    localparam SETBITS = 3;
 
-    reg  [49:0] tlb   [0:SETS-1][0:WAYS-1];
-    reg  [1:0]  rrptr [0:SETS-1];    // simple round-robin replacement per set
+    reg  [49:0] tlb   [0:SETS-1];
 
     wire [19:0] lin_page_t  = translate_linear[31:12];
     wire [SETBITS-1:0] set_t = translate_linear[12 +: SETBITS];    // bits [14:12]
     wire [SETBITS-1:0] set_w = tlbregs_write_linear[12 +: SETBITS];
 
-    // Hit detection within selected set
-    wire [WAYS-1:0] way_valid_t;
-    wire [WAYS-1:0] way_hit;
+    wire [49:0] selected = tlb[set_t];
+    wire        hit_any  = translate_do && selected[42] && (selected[19:0] == lin_page_t);
 
-    genvar wi;
-    generate
-        for (wi = 0; wi < WAYS; wi = wi + 1) begin : g_hit
-            assign way_valid_t[wi] = tlb[set_t][wi][42];
-            assign way_hit[wi]     = translate_do && way_valid_t[wi] && (tlb[set_t][wi][19:0] == lin_page_t);
-        end
-    endgenerate
+    assign translate_hit = { 3'b000, hit_any };
+    assign translate_e0  = selected;
+    assign translate_e1  = 50'd0;
+    assign translate_e2  = 50'd0;
+    assign translate_e3  = 50'd0;
 
-    // Selected entry mux (one-hot)
-    reg  [49:0] selected;
-    always @* begin
-        selected = 50'd0;
-        unique case (1'b1)
-            way_hit[0]: selected = tlb[set_t][0];
-            way_hit[1]: selected = tlb[set_t][1];
-            way_hit[2]: selected = tlb[set_t][2];
-            way_hit[3]: selected = tlb[set_t][3];
-            default:    ;
-        endcase
-    end
-
-    // Outputs
-    wire hit_any = |way_hit;
+    // Outputs (as before, with selected the hit entry -- 0 when nothing hit: it is only read under hit_any)
     wire translate_valid_but_not_dirty = hit_any && rw && ~selected[45];
 
     assign translate_valid       = hit_any && (~rw || selected[45]);
     assign translate_physical    = translate_valid ? { selected[39:20], translate_linear[11:0] } : translate_linear;
-    assign translate_pwt         = selected[40];
-    assign translate_pcd         = selected[41];
-    assign translate_combined_rw = selected[43];
-    assign translate_combined_su = selected[44];
+    assign translate_pwt         = hit_any && selected[40];
+    assign translate_pcd         = hit_any && selected[41];
+    assign translate_combined_rw = hit_any && selected[43];
+    assign translate_combined_su = hit_any && selected[44];
 
     // (SiSTer: the L2 regions of translate_physical: with translate_valid it is { selected[39:20], linear[11:0] }
     //  and the regions read only bits 31..13, the page's, stored at the fill; else it is translate_linear)
@@ -113,34 +108,6 @@ module tlb_regs(
     // Single flush comparator against full tag
     wire [19:0] lin_page_flush = tlbflushsingle_address[31:12];
 
-    // Write selection within write set
-    wire [WAYS-1:0] way_valid_w;
-    wire [WAYS-1:0] free_way;
-    generate
-        for (wi = 0; wi < WAYS; wi = wi + 1) begin : g_free
-            assign way_valid_w[wi] = tlb[set_w][wi][42];
-            assign free_way[wi]    = ~way_valid_w[wi];
-        end
-    endgenerate
-    wire any_free = |free_way;
-
-    // pick first free or rrptr when full
-    reg  [1:0] sel_way_w;
-    always @* begin
-        if (any_free) begin
-            // first free way (0..3)
-            casez (free_way)
-                4'b1???: sel_way_w = 2'd0;
-                4'b01??: sel_way_w = 2'd1;
-                4'b001?: sel_way_w = 2'd2;
-                4'b0001: sel_way_w = 2'd3;
-                default: sel_way_w = 2'd0;
-            endcase
-        end else begin
-            sel_way_w = rrptr[set_w];
-        end
-    end
-
     // Compose write data
     wire [3:0]  write_rgn;     // (SiSTer)
     ao486_l2_rgn write_rgn_inst(.a(tlbregs_write_physical), .f(write_rgn));
@@ -148,48 +115,26 @@ module tlb_regs(
                                tlbregs_write_pcd, tlbregs_write_pwt,
                                tlbregs_write_physical[31:12], tlbregs_write_linear[31:12] };
 
-    integer si, sj;
+    integer si;
     always @(posedge clk) begin
         if (rst_n == 1'b0) begin
-            for (si = 0; si < SETS; si = si + 1) begin
-                rrptr[si] <= 2'd0;
-                for (sj = 0; sj < WAYS; sj = sj + 1)
-                    tlb[si][sj] <= 50'd0;
-            end
+            for (si = 0; si < SETS; si = si + 1)
+                tlb[si] <= 50'd0;
         end else begin
             // Flush-all
             if (tlbflushall_do) begin
                 for (si = 0; si < SETS; si = si + 1)
-                    for (sj = 0; sj < WAYS; sj = sj + 1)
-                        tlb[si][sj] <= 50'd0;
+                    tlb[si] <= 50'd0;
             end else begin
                 // Flush single and dirty-miss invalidation
                 for (si = 0; si < SETS; si = si + 1) begin
-                    for (sj = 0; sj < WAYS; sj = sj + 1) begin
-                        // default stay
-                        reg do_inval;
-                        do_inval = 1'b0;
-                        // explicit single flush
-                        if (tlbflushsingle_do && tlb[si][sj][42] && tlb[si][sj][19:0] == lin_page_flush)
-                            do_inval = 1'b1;
-                        // write requires dirty but entry is clean: invalidate hit entry in its set
-                        if (translate_valid_but_not_dirty && way_hit[sj] && si[SETBITS-1:0] == set_t)
-                            do_inval = 1'b1;
-                        if (do_inval)
-                            tlb[si][sj] <= 50'd0;
-                    end
+                    if ((tlbflushsingle_do && tlb[si][42] && tlb[si][19:0] == lin_page_flush) ||
+                        (translate_valid_but_not_dirty && si[SETBITS-1:0] == set_t))
+                        tlb[si] <= 50'd0;
                 end
-
-                // Install write (fill)
-                if (tlbregs_write_do) begin
-                    tlb[set_w][sel_way_w] <= write_data;
-                    if (~any_free)
-                        rrptr[set_w] <= rrptr[set_w] + 2'd1; // advance replacement on full set
-                end
-
-                // Optional: on hit, bump rrptr to favor others (weak aging)
-                if (hit_any)
-                    rrptr[set_t] <= rrptr[set_t] + 2'd1;
+                // Install write (fill): always way 0 (see above)
+                if (tlbregs_write_do)
+                    tlb[set_w] <= write_data;
             end
         end
     end

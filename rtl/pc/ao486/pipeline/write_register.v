@@ -296,6 +296,18 @@ module write_register(
     output reg  [63:0]  ldtr_cache,
     output reg  [63:0]  tr_cache,
 
+    // (SiSTer: the ES and SS limits and the bounds the write stage's limit checks compare against
+    //  (write_stack.v, write_string.v), kept beside the caches -- see below)
+    output reg  [31:0]  es_limit_r,
+    output reg  [31:0]  es_bound_r,
+    output reg  [31:0]  es_bound_lo_r,
+    output reg          es_bound_ge2_r,
+    output reg  [31:0]  ss_limit_r,
+    output reg  [31:0]  cs_limit_r,     // (SiSTer: cs_cache's limit, registered the same way)
+    output reg  [31:0]  ss_bound_r,
+    output reg  [31:0]  ss_bound_lo_r,
+    output reg          ss_bound_ge2_r,
+
     output reg          es_cache_valid,
     output reg          ds_cache_valid,
     output reg          ss_cache_valid,
@@ -607,6 +619,39 @@ always @(posedge clk) begin if(rst_n[2] == 1'b0) tr_rpl   <= `STARTUP_TR_RPL;   
 `ALWAYS cs_cache   <= `STARTUP_CS_CACHE;   else if(write_seg_cache && wr_seg_index == 3'd1)                             cs_cache   <= (cs_cache   & wr_seg_cache_mask) | w_seg_cache; else cs_cache   <= cs_cache_to_reg;   end
 `ALWAYS ldtr_cache <= `STARTUP_LDTR_CACHE; else if(write_seg_cache && wr_seg_index == 3'd6 && w_seg_cache[`DESC_BIT_P]) ldtr_cache <= (ldtr_cache & wr_seg_cache_mask) | w_seg_cache; else ldtr_cache <= ldtr_cache_to_reg; end
 `ALWAYS tr_cache   <= `STARTUP_TR_CACHE;   else if(write_seg_cache && wr_seg_index == 3'd7)                             tr_cache   <= (tr_cache   & wr_seg_cache_mask) | w_seg_cache; else tr_cache   <= tr_cache_to_reg;   end
+
+// (SiSTer: functions of a segment cache that the write stage's limit checks use (write_stack.v,
+//  write_string.v): its limit (the G bit applied), its bound (the limit, or the top of an expand-down
+//  segment: 0000FFFF/FFFFFFFF by the D/B bit), the bound minus 2, and bound >= 2. Each is registered from
+//  the same next value as the cache itself (es_cache_next, ss_cache_next: exactly the right-hand sides of
+//  the cache registers above, and the same reset), so on every clock x_r == f(x_cache) -- a register read
+//  for the checks instead of the mux and subtract in series with them)
+function [31:0] seg_limit_f(input [63:0] c);
+    seg_limit_f = c[`DESC_BIT_G]? { c[51:48], c[15:0], 12'hFFF } : { 12'd0, c[51:48], c[15:0] };
+endfunction
+function [31:0] seg_bound_f(input [63:0] c);
+    seg_bound_f = (c[43] || ~(c[42]))? (c[`DESC_BIT_G]? { c[51:48], c[15:0], 12'hFFF } : { 12'd0, c[51:48], c[15:0] }) :
+                  (c[`DESC_BIT_D_B])? 32'hFFFFFFFF : 32'h0000FFFF;
+endfunction
+wire [63:0] es_cache_next = (write_seg_cache && wr_seg_index == 3'd0)? ((es_cache & wr_seg_cache_mask) | w_seg_cache) : es_cache_to_reg;
+wire [63:0] ss_cache_next = (write_seg_cache && wr_seg_index == 3'd2)? ((ss_cache & wr_seg_cache_mask) | w_seg_cache) : ss_cache_to_reg;
+wire [63:0] cs_cache_next = (write_seg_cache && wr_seg_index == 3'd1)? ((cs_cache & wr_seg_cache_mask) | w_seg_cache) : cs_cache_to_reg;
+wire [63:0] cs_cache_start = `STARTUP_CS_CACHE;
+`ALWAYS cs_limit_r <= seg_limit_f(cs_cache_start); else cs_limit_r <= seg_limit_f(cs_cache_next); end
+wire [63:0] es_cache_start = `STARTUP_ES_CACHE;
+wire [63:0] ss_cache_start = `STARTUP_SS_CACHE;
+wire [31:0] es_bound_next  = seg_bound_f(es_cache_next);
+wire [31:0] ss_bound_next  = seg_bound_f(ss_cache_next);
+wire [31:0] es_bound_start = seg_bound_f(es_cache_start);
+wire [31:0] ss_bound_start = seg_bound_f(ss_cache_start);
+`ALWAYS es_limit_r <= seg_limit_f(es_cache_start); else es_limit_r <= seg_limit_f(es_cache_next); end
+`ALWAYS ss_limit_r <= seg_limit_f(ss_cache_start); else ss_limit_r <= seg_limit_f(ss_cache_next); end
+`ALWAYS es_bound_r <= es_bound_start; else es_bound_r <= es_bound_next; end
+`ALWAYS ss_bound_r <= ss_bound_start; else ss_bound_r <= ss_bound_next; end
+`ALWAYS es_bound_lo_r <= es_bound_start - 32'd2; else es_bound_lo_r <= es_bound_next - 32'd2; end
+`ALWAYS ss_bound_lo_r <= ss_bound_start - 32'd2; else ss_bound_lo_r <= ss_bound_next - 32'd2; end
+`ALWAYS es_bound_ge2_r <= es_bound_start >= 32'd2; else es_bound_ge2_r <= es_bound_next >= 32'd2; end
+`ALWAYS ss_bound_ge2_r <= ss_bound_start >= 32'd2; else ss_bound_ge2_r <= ss_bound_next >= 32'd2; end
 
 `ALWAYS es_cache_valid   <= `STARTUP_ES_VALID; else if(es_invalidate) es_cache_valid <= 1'b0; else if(write_seg_cache_valid && wr_seg_index == 3'd0) es_cache_valid   <= wr_seg_cache_valid; else es_cache_valid   <= es_cache_valid_to_reg;   end
 `ALWAYS ds_cache_valid   <= `STARTUP_DS_VALID; else if(ds_invalidate) ds_cache_valid <= 1'b0; else if(write_seg_cache_valid && wr_seg_index == 3'd3) ds_cache_valid   <= wr_seg_cache_valid; else ds_cache_valid   <= ds_cache_valid_to_reg;   end

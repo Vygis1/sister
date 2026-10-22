@@ -171,6 +171,14 @@ module read(
     
     //micro pipeline
     output              rd_busy,
+    // (SiSTer: rd_busy == rd_busy_nw || rd_stall_w; rd_stall_w is the write stage's wr_busy reaching back
+    //  through the execute stage -- microcode.v and decode.v take it last)
+    output              rd_busy_nw,
+    output              rd_stall_w,
+    input               exe_busy_nw,
+    input               exe_has_cmd,
+    input               exe_waiting,
+    input               wr_busy,
     input               micro_ready,
         
     input       [87:0]  micro_decoder,
@@ -390,11 +398,19 @@ wire rd_dst_is_eip;
 //  an rd_cmd other than CMD_NULL (autogen/read_commands.v), so rd_waiting implies rd_cmd != CMD_NULL)
 wire rd_waiting_r0;
 wire rd_waiting_r0_f0, rd_waiting_r0_f1;   // (SiSTer: read_commands_r0f0/f1_inst)
-wire rd_ready_r0 = ~(rd_waiting_r0) && ~(rd_io_allow_2_fault_w) && rd_cmd != `CMD_NULL && ~(exe_busy);   // (rd_waiting_r0 || the io compare: below)
+// (SiSTer, further: exe_busy is exe_busy_nw || exe_waiting || (exe_has_cmd && wr_busy) (execute.v), so
+//      rd_ready = rd_ready_nw && ~exe_waiting && ~(exe_has_cmd && wr_busy)
+//      rd_busy  = rd_busy_nw || rd_stall_w,   rd_stall_w = ~rd_reset && rd_cmd != NULL && (exe_waiting || (exe_has_cmd && wr_busy))
+//  with the _nw terms the same expressions with exe_busy_nw; they are kept as nets of their own so that
+//  exe_waiting and wr_busy meet only the last gate)
+(* keep = "true" *) wire rd_ready_nw = ~(rd_reset) && ~(rd_waiting_r0) && ~(rd_io_allow_2_fault_w) && rd_cmd != `CMD_NULL && ~(exe_busy_nw);
+(* keep = "true" *) wire rd_has_cmd_nr = ~(rd_reset) && rd_cmd != `CMD_NULL;
 
-assign rd_ready = ~(rd_reset) && rd_ready_r0;
+assign rd_ready = rd_ready_nw && ~(exe_waiting) && ~(exe_has_cmd && wr_busy);
 
-assign rd_busy  = (rd_reset)? rd_cmd != `CMD_NULL : rd_waiting_r0 || rd_io_allow_2_fault_w || (rd_cmd != `CMD_NULL && exe_busy);
+assign rd_busy_nw = (rd_reset)? rd_cmd != `CMD_NULL : rd_waiting_r0 || rd_io_allow_2_fault_w || (rd_cmd != `CMD_NULL && exe_busy_nw);
+assign rd_stall_w = rd_has_cmd_nr && (exe_waiting || (exe_has_cmd && wr_busy));
+assign rd_busy    = rd_busy_nw || rd_stall_w;
 
 // (SiSTer: both read_commands instances are built with io_allow_2_fault_off, as if CMD_io_allow's step-2
 //  permission compare (rd_memory_last + port/8 >= tr_limit: an add and a compare) were false, and it is
