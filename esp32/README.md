@@ -114,6 +114,9 @@ loads the game.
     /roms/SCPH*.BIN (or /bios)  the PlayStation BIOS
     /saves/card1.mcr            the PlayStation's memory card (made, formatted, when missing)
     /saves/n64/*.eep            N64 EEPROM saves
+    /saves/snes/*.srm           SNES save RAM
+    /saves/gb/*.sav             Game Boy battery RAM (+ the MBC3 clock: BGB / VBA-M's 48-byte trailer)
+    /saves/gba/*.sav            GBA saves (SRAM 32 kB, flash 64 / 128 kB, EEPROM 512 B / 8 kB)
 
 A game left loose in `/roms` is moved into its console's folder, by its extension, the
 first time the card is read.
@@ -137,6 +140,11 @@ N64 its stick. Pair a PlayStation pad by holding SHARE and PS until the light fl
     microSD: the T8's own slot (GPIO 27/12/14/33)
 
 Bluepad32 is Apache-2.0 but runs on BTstack, which is free for non-commercial use only.
+The replacement is ESP-IDF's own stack, Bluedroid (Apache-2.0): the same sketch built on the
+stock `esp32:esp32` 3.3.11 platform uses it (`pads_bluedroid.h`). It works on the board with a
+DualShock 4 and is still opt-in; see [docs/BLUETOOTH.md](../docs/BLUETOOTH.md).
+
+    ./tools/arduino/arduino-cli.exe compile --fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d-bluedroid esp32/console
 
 A core is a **`.bin`, not a `.bit`**. They are not interchangeable and the
 difference is not cosmetic: a `.bit` carries a header -- design name, part,

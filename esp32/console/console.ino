@@ -812,7 +812,21 @@ void setup() {
   // The task watchdog logs and carries on instead of resetting the chip: a reset in the middle of a
   // game is what left the PC's disk image with a broken directory entry on the card (2026-10-18) --
   // a stall is found from the log (and pc::watch's step), a damaged card is worse
+#if ESP_IDF_VERSION_MAJOR >= 5
+  // (IDF 5 -- arduino-esp32 3.x, the Bluedroid pads build: the watchdog is already running, so
+  // it is reconfigured, not started)
+  { uint32_t idle = 0;
+#ifdef CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+    idle |= 1;
+#endif
+#ifdef CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+    idle |= 2;
+#endif
+    esp_task_wdt_config_t wc = { .timeout_ms = 5000, .idle_core_mask = idle, .trigger_panic = false };
+    if (esp_task_wdt_reconfigure(&wc) != ESP_OK) esp_task_wdt_init(&wc); }
+#else
   esp_task_wdt_init(5, false);
+#endif
   // Small allocations to PSRAM too. By default everything under 4 kB comes out of internal
   // RAM, and the menu's strings broke it into pieces: minutes after boot 9 kB was free with
   // nothing over 3 kB (2026-10-10, T8 with a DualShock 4 in). Bluetooth and task stacks still
@@ -1042,6 +1056,8 @@ static void putWrite(const uint8_t *buf, size_t n) {
   } else Serial.println("= ok");
 }
 
+// how often the loop (the pads, the PC's keys) gets to run: the longest gap and the mean, since asked
+static uint32_t loopLastUs = 0, loopMaxUs = 0, loopN = 0, loopT0 = 0;
 static void serialCommand(String c) {
   c.trim();
   if (c.length() > 2 && c[0] == 'U' && c[1] == ' ') { putLine(c.substring(2)); return; }
@@ -1370,13 +1386,7 @@ static void serialCommand(String c) {
     for (int i = 0; i < 2; i++)
       Serial.printf("  player %d: %s %s%s, JOY%d = %08x\n", i + 1, p[i].on ? "on" : "off",
                     p[i].name, p[i].bt ? " (Bluetooth)" : "", i + 1, (unsigned)pads::last[i]);
-#if PADS_BT
-    for (int i = 0; i < 2; i++)
-      Serial.printf("  BT slot %d: %s\n", i, !pads::slot[i] ? "empty" :
-                    (String(pads::slot[i]->isConnected() ? "connected" : "gone") +
-                     (pads::slot[i]->isGamepad() ? ", gamepad, " : ", NOT a gamepad, ") +
-                     pads::slot[i]->getModelName().c_str()).c_str());
-#endif
+    pads::btDebug();                    // (the Bluetooth backend's own view: pads.h)
     Serial.printf("  console %u, %s, swap %d\n", pads::which, pads::there ? "there" : "not there", pads::swapPlayers);
   } else if (c == "log on" || c == "log off") {
     Log.on = c.endsWith("on");
@@ -1500,6 +1510,38 @@ static void serialCommand(String c) {
       menu::playGame(g);
       Serial.printf("  play: %s on %s%s%s\n", path.c_str(), menu::MACHINES[m].name, menu::note.length() ? " -- " : "", menu::note.c_str());
     }
+#if PADS_BT == 2
+  } else if (c == "btactive on" || c == "btactive off") {
+    padbt::keepActive = c.endsWith("on"); padbt::policyGen = padbt::policyGen + 1;
+    Serial.printf("  Bluetooth links kept active: %s (from the next connection or report)\n", padbt::keepActive ? "yes" : "no");
+#endif
+  } else if (c.startsWith("xd ")) {
+    // xd <path> [offset] [bytes]: a file on the card in hex (saves, configs), 16 bytes a line, at most 1 kB
+    String a = c.substring(3); a.trim();
+    String path = a; uint32_t off = 0, len = 64;
+    int sp = a.indexOf(' ');
+    if (sp > 0) { path = a.substring(0, sp); sscanf(a.c_str() + sp + 1, "%i %i", (int *)&off, (int *)&len); }
+    if (len > 1024) len = 1024;
+    File f = SD.open(path);
+    if (!f) Serial.printf("  xd: no %s\n", path.c_str());
+    else {
+      Serial.printf("  %s: %u bytes\n", path.c_str(), (unsigned)f.size());
+      f.seek(off);
+      uint8_t b[16];
+      for (uint32_t at = off; at < off + len; at += 16) {
+        int n = f.read(b, 16);
+        if (n <= 0) break;
+        Serial.printf("  %06x:", (unsigned)at);
+        for (int i = 0; i < n; i++) Serial.printf(" %02x", b[i]);
+        Serial.println();
+      }
+      f.close();
+    }
+  } else if (c == "looptime") {
+    uint32_t ms = millis() - loopT0;
+    Serial.printf("  loop: %u runs in %u ms (every %u us on average), longest gap %u us\n", (unsigned)loopN, (unsigned)ms,
+                  loopN ? (unsigned)(ms * 1000ull / loopN) : 0u, (unsigned)loopMaxUs);
+    loopN = 0; loopMaxUs = 0; loopT0 = millis();
   } else if (c == "boot" || c == "core") {
     fpga.boot(true);
     Serial.println("  booting the core");
@@ -1514,6 +1556,9 @@ static void serialCommand(String c) {
 }
 
 void loop() {
+  uint32_t nowUs = micros();
+  if (loopLastUs && nowUs - loopLastUs > loopMaxUs) loopMaxUs = nowUs - loopLastUs;
+  loopLastUs = nowUs; loopN++;
   pads::poll();
   pc::watch();
   noteStep();

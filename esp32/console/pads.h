@@ -19,13 +19,33 @@
 // flashes; the ESP32 remembers the pad after that.
 //
 // Bluepad32 is Apache-2.0 and runs on BTstack, which is free for non-commercial use
-// only -- to be settled before anything here is sold.
+// only -- to be settled before anything here is sold. The way out is the Bluedroid backend
+// (pads_bluedroid.h, ESP-IDF's own stack, Apache-2.0): docs/BLUETOOTH.md.
+//
+// The backend, at compile time (PADS_BT: 0 none, 1 Bluepad32, 2 Bluedroid):
+//   PADS_BACKEND_NONE       no Bluetooth: the PC's pad only
+//   PADS_BACKEND_BLUEPAD32  Bluepad32 (the esp32-bluepad32 platform)
+//   PADS_BACKEND_BLUEDROID  Bluedroid (the stock esp32:esp32 3.3.x platform)
+//   none of them            Bluepad32 if the platform has it (the default build), else Bluedroid
+//                           if the platform has that (stock arduino-esp32 3.3.x), else none
 
 #pragma once
+#include <sdkconfig.h>
 
-#if __has_include(<Bluepad32.h>)
+#if defined(PADS_BACKEND_NONE)
+#define PADS_BT 0
+#elif defined(PADS_BACKEND_BLUEDROID)
+#if __has_include(<Bluepad32.h>) || !CONFIG_BT_BLUEDROID_ENABLED
+#error "PADS_BACKEND_BLUEDROID: build on the stock esp32:esp32 3.3.x platform (the Bluepad32 platform has no Bluedroid)"
+#endif
+#include "pads_bluedroid.h"
+#define PADS_BT 2
+#elif defined(PADS_BACKEND_BLUEPAD32) || __has_include(<Bluepad32.h>)
 #include <Bluepad32.h>
 #define PADS_BT 1
+#elif CONFIG_BT_BLUEDROID_ENABLED && CONFIG_BT_CLASSIC_ENABLED && __has_include(<esp_hidh.h>)
+#include "pads_bluedroid.h"
+#define PADS_BT 2
 #else
 #define PADS_BT 0
 #endif
@@ -209,21 +229,26 @@ static bool usbOn = false;
 static uint32_t usbT = 0;
 static volatile bool menuPressed = false;
 static bool usbHome = false;
-// a "P ..." line (console.ino's serialCommand hands it over)
-static void usbLine(const String &l) {
-  unsigned bits = 0; int lx = 0, ly = 0, rx = 0, ry = 0;
-  if (sscanf(l.c_str() + 1, "%x %d %d %d %d", &bits, &lx, &ly, &rx, &ry) < 1) return;
+// the "P" line's button bits (the Bluedroid backend uses the same order)
+static In fromBits(unsigned bits, int lx, int ly, int rx, int ry) {
   In p{};
   p.a = bits & 1; p.b = bits >> 1 & 1; p.x = bits >> 2 & 1; p.y = bits >> 3 & 1; p.sel = bits >> 4 & 1; p.start = bits >> 5 & 1;
   p.du = bits >> 6 & 1; p.dd = bits >> 7 & 1; p.dl = bits >> 8 & 1; p.dr = bits >> 9 & 1;
   p.l1 = bits >> 10 & 1; p.r1 = bits >> 11 & 1; p.l2 = bits >> 12 & 1; p.r2 = bits >> 13 & 1; p.home = bits >> 14 & 1;
   p.lx = lx; p.ly = ly; p.rx = rx; p.ry = ry;
+  return p;
+}
+// a "P ..." line (console.ino's serialCommand hands it over)
+static void usbLine(const String &l) {
+  unsigned bits = 0; int lx = 0, ly = 0, rx = 0, ry = 0;
+  if (sscanf(l.c_str() + 1, "%x %d %d %d %d", &bits, &lx, &ly, &rx, &ry) < 1) return;
+  In p = fromBits(bits, lx, ly, rx, ry);
   if (p.home && !usbHome) menuPressed = true;
   usbHome = p.home;
   usb = p; usbOn = true; usbT = millis();
 }
 
-#if PADS_BT
+#if PADS_BT == 1
 // --- Bluetooth pads ------------------------------------------------------------------------
 static ControllerPtr slot[2];
 static void onConnected(ControllerPtr c) {
@@ -247,8 +272,21 @@ static In fromBt(ControllerPtr c) {
   return p;
 }
 static bool sysWas[2] = { false, false };
+static void btDebug() {
+  for (int i = 0; i < 2; i++)
+    Serial.printf("  BT slot %d: %s\n", i, !slot[i] ? "empty" :
+                  (String(slot[i]->isConnected() ? "connected" : "gone") +
+                   (slot[i]->isGamepad() ? ", gamepad, " : ", NOT a gamepad, ") +
+                   slot[i]->getModelName().c_str()).c_str());
+}
+#elif PADS_BT == 2
+// --- Bluetooth pads: Bluedroid (pads_bluedroid.h) --------------------------------------------
+static bool sysWas[2] = { false, false };
+static padbt::Pad btPad[2];                   // (poll()'s copy)
+static void btDebug() { padbt::debug(Serial); }
 #else
 static bool btOn(int) { return false; }
+static void btDebug() { Serial.println("  no Bluetooth in this build"); }
 #endif
 
 // --- the two players, as the menu sees them ------------------------------------------------
@@ -256,6 +294,14 @@ struct Player { bool on; In in; char name[32]; int battery; bool bt; };
 static Player players[2];                     // (written by poll(), read by the menu: copy under mux)
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static bool swapPlayers = false;
+#if PADS_BT == 2
+static int playerSlot[2] = { -1, -1 };        // (the Bluetooth slot behind each player, for rumble)
+// rumble, 0..255 per motor, on a player's pad (nothing calls it yet: no core sends rumble)
+[[maybe_unused]] static void rumble(int player, uint8_t strong, uint8_t weak) {
+  portENTER_CRITICAL(&mux); int s = player >= 0 && player < 2 ? playerSlot[player] : -1; portEXIT_CRITICAL(&mux);
+  if (s >= 0) padbt::rumble(s, strong, weak);
+}
+#endif
 static void view(Player out[2]) { portENTER_CRITICAL(&mux); out[0] = players[0]; out[1] = players[1]; portEXIT_CRITICAL(&mux); }
 
 // the menu's buttons: both players' together (either drives it)
@@ -288,7 +334,7 @@ static volatile bool busBusy = false;         // (the menu sending a lot: wait)
 
 // From loop()
 static void poll() {
-#if PADS_BT
+#if PADS_BT == 1
   BP32.update();
   if (cmd != CMD_NONE) {
     int c = cmd; cmd = CMD_NONE;
@@ -304,12 +350,25 @@ static void poll() {
     if (sys && !sysWas[i]) menuPressed = true;
     sysWas[i] = sys;
   }
+#elif PADS_BT == 2
+  if (cmd != CMD_NONE) {
+    int c = cmd; cmd = CMD_NONE;
+    if (c == CMD_FORGET) { padbt::forget(); Log.println("pads: paired pads forgotten"); }
+    else if (c == CMD_PAIR_ON) { padbt::setPairing(true); pairing = true; }
+    else if (c == CMD_PAIR_OFF) { padbt::setPairing(false); pairing = false; }
+  }
+  for (int i = 0; i < 2; i++) {
+    padbt::read(i, btPad[i]);
+    bool sys = btPad[i].on && (btPad[i].btn & padbt::B_HOME);
+    if (sys && !sysWas[i]) menuPressed = true;
+    sysWas[i] = sys;
+  }
 #endif
   if (usbOn && millis() - usbT > 1000) { usb = In{}; usbOn = false; }   // the PC has let go
   // the players: the connected pads in order, the first two
   Player np[2] = {};
   int k = 0;
-#if PADS_BT
+#if PADS_BT == 1
   for (int i = 0; i < 2 && k < 2; i++)
     if (btOn(i)) {
       Player &q = np[k++];
@@ -318,9 +377,24 @@ static void poll() {
       int bat = slot[i]->battery();
       q.battery = bat ? bat * 100 / 255 : -1;
     }
+#elif PADS_BT == 2
+  int npSlot[2] = { -1, -1 };                   // (which Bluetooth slot each player is)
+  for (int i = 0; i < 2 && k < 2; i++)
+    if (btPad[i].on) {
+      const padbt::Pad &b = btPad[i];
+      npSlot[k] = i;
+      Player &q = np[k++];
+      q.on = true; q.bt = true; q.in = fromBits(b.btn, b.lx, b.ly, b.rx, b.ry);
+      snprintf(q.name, sizeof q.name, "%s", b.name);
+      q.battery = b.battery;
+    }
 #endif
   if (k < 2 && usbOn) { Player &q = np[k++]; q.on = true; q.bt = false; q.in = usb; snprintf(q.name, sizeof q.name, "PC pad"); q.battery = -1; }
   if (swapPlayers) std::swap(np[0], np[1]);
+#if PADS_BT == 2
+  if (swapPlayers) std::swap(npSlot[0], npSlot[1]);
+  portENTER_CRITICAL(&mux); playerSlot[0] = npSlot[0]; playerSlot[1] = npSlot[1]; portEXIT_CRITICAL(&mux);
+#endif
   portENTER_CRITICAL(&mux); players[0] = np[0]; players[1] = np[1]; portEXIT_CRITICAL(&mux);
 
   if (job.busy || busBusy) return;              // (nothing on the link while a core goes in)
@@ -360,7 +434,11 @@ static void poll() {
 static void begin() {
   loadBinds();
   prefs.begin("menu", true); swapPlayers = prefs.getBool("swap", false); prefs.end();
-#if PADS_BT
+#if PADS_BT == 2
+  bool ok = padbt::begin();
+  Log.printf("pads: Bluetooth (Bluedroid) %s, internal free %u -- pair a pad with SHARE + PS; or a pad on the PC (pc/pad.py)\n",
+             ok ? "up" : "NOT up", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#elif PADS_BT
   BP32.setup(&onConnected, &onDisconnected);
   BP32.enableNewBluetoothConnections(true);
   Log.println("pads: Bluetooth up -- pair a pad with SHARE + PS; or a pad on the PC (pc/pad.py)");
