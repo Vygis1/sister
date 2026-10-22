@@ -1,13 +1,18 @@
 # PS1 MDEC (motion decoder): implementation notes
 
-Clean-room notes for the RTL. Everything is in my own words, describing behaviour.
-No emulator code was copied. Where sources disagree, every candidate is listed
-and tagged with where it came from:
+Clean-room notes for the RTL, written in our own words, describing behaviour. No emulator code
+was copied. Where sources disagree, every candidate is listed and tagged with where it came
+from:
 - [SPX] psx-spx (nocash), the public documentation
 - [MF] Mednafen / Beetle-PSX `mdec.c`, GPL: behaviour only
 - [DS] DuckStation `mdec.cpp`, CC-BY-NC-ND: behaviour only
 - [MR] PSX_MiSTer `mdec.vhd`, GPL: behaviour only
 - [DECAP] psxdev.ru die-trace thread
+
+**In this core.** `rtl/ps1_mdec.v` implements [MF]'s arithmetic. It keeps a colour macroblock
+whole and hands it out as four 8x8 blocks, as the chip does; DMA1 puts them in 16-pixel rows as
+it writes RAM (`rtl/ps1_dma.v`, section 6). `tools/ps1/mdec.py` is the model it is checked
+against word for word (`sim/tb_ps1_mdec.v`); `sim/tb_ps1_mdecdma.v` checks the DMA path.
 
 **Status of knowledge (read first).** Nobody has published a bit-exact hardware
 IDCT. nocash wrote that he could not reproduce the IDCT without rounding errors.
@@ -16,7 +21,7 @@ that its "PSX" IDCT does not match the chip either. The most hardware-tested
 model is [MF]: Mednafen's author tested MDEC on real hardware, and DuckStation's
 current "new" routines follow it. **Recommendation: implement [MF] as the
 reference (sections 3.3, 4.2, 5.1), and keep the alternatives behind parameters.**
-I ran 300 random blocks through Python models: [MF] vs [DS-new] disagree on 3.6% of
+300 random blocks through Python models: [MF] vs [DS-new] disagree on 3.6% of
 pixels (max ±1), [MF] vs [SPX]/[DS-old] on 12% (max ±2), and [MF] vs [MR] on 50%
 (max ±2, because [MR] truncates). Without a capture from a real console, ±1 LSB
 cannot be settled.

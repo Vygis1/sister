@@ -26,10 +26,10 @@ pick from the menu.
 |---|---|
 | **QMTECH Artix-7 XC7A100T core board** (DDR3, 8 MB SPI flash) | The console. [BOARD.md](BOARD.md) has its facts. |
 | **HDMI breakout**: a bare HDMI socket on a 2 x 10 2.54 mm header | Plugs straight onto header U4, pins 7-26. |
-| **LilyGO T8** (ESP32-WROVER, microSD slot) | The menu, the SD card, Bluetooth pads. It has to be a *classic* ESP32 -- the S3, C3 and C6 have no Bluetooth Classic, which PlayStation pads need. (An ESP32-S3 also works, without Bluetooth pads.) |
+| **LilyGO T8** (ESP32-WROVER, microSD slot) | The menu, the SD card, Bluetooth pads. It has to be a *classic* ESP32: the S3, C3 and C6 have no Bluetooth Classic, which PlayStation and Switch pads need. |
 | **microSD card**, FAT32 | Cores, games, saves. Cards above 32 GB come exFAT: reformat them as FAT32. |
 | **JTAG cable** (Xilinx, Digilent, or an FT2232H with openFPGALoader) | Only for the first programming of the shell. |
-| Six short wires (eight for faster loading) | ESP32 to header U2. Keep them short (a few cm): the link runs at 5 MHz. |
+| Six short wires (eight for faster loading) | ESP32 to header U2. Keep them short (a few cm): the link runs at up to 10 MHz. |
 
 ## Putting it together
 
@@ -47,7 +47,8 @@ plain 3.3 V outputs at the weakest drive strength the chip has: a TV terminates 
 with 50 ohms to 3.3 V, and a stronger driver swings the line several times further than
 the HDMI standard allows. One TV took that, a 4K Philips did not ("no signal"). It is
 still not a standard TMDS signal; a TV that refuses it wants a powered HDMI splitter in
-between, or the socket rewired to true differential pin pairs (see HEADERS.md).
+between, or the socket rewired to true differential pin pairs (see
+[HEADERS.md](../boards/qmtech_a100t/HEADERS.md)).
 
 **The ESP32 (LilyGO T8).**
 
@@ -66,9 +67,8 @@ board's own program button, which is not on any header. Power the ESP32 from its
 USB socket. **Never take power from U2 pins 63 / 64**: those are the board's raw
 input voltage and will destroy a 3.3 V part.
 
-(On an ESP32-S3: GPIO12 / 11 / 13 / 10 for clock / data in / data out / select,
-GPIO14 for PROGRAM_B, and an SD module on GPIO5 / 6 / 4 / 7 -- see
-[esp32/README.md](../esp32/README.md).)
+The firmware also has pin definitions for an ESP32-S3, without Bluetooth Classic or quad
+writes; see [esp32/README.md](../esp32/README.md).
 
 ## The first programming
 
@@ -79,18 +79,18 @@ into, and what installs the consoles from the SD card. It is written once, over 
     # or, with openFPGALoader:
     openFPGALoader -c <your cable> --fpga-part xc7a100tfgg676 --write-flash cores/shell.bin
 
-Writing the shell this way erases the console slot as well; the menu installs a
-console again the first time you pick a game.
+`tools/vivado.sh flash` erases only the sectors the shell covers. If the consoles in
+the flash are lost some other way, nothing is harmed: a console that does not start is
+installed again from the card.
 
-The ESP32's firmware:
+The ESP32's firmware, from a release package (`tools/release.sh` writes one to
+`dist/`):
 
     # LilyGO T8 (Bluetooth pads):
     esptool.py --chip esp32 write_flash 0x0 esp32/console-t8.bin
-    # ESP32-S3:
-    esptool.py --chip esp32s3 write_flash 0x0 esp32/console-esp32s3.bin
 
-or build it yourself (Arduino CLI, the esp32-bluepad32 platform for the T8 -- the
-commands are in [esp32/README.md](../esp32/README.md)).
+or build it yourself with the Arduino CLI; the commands are in
+[esp32/README.md](../esp32/README.md).
 
 ## The SD card
 
@@ -105,36 +105,42 @@ commands are in [esp32/README.md](../esp32/README.md)).
     /roms/md/       *.md *.gen
     /roms/snes/     *.sfc *.smc
     /roms/n64/      *.z64 *.n64 *.v64
-    /roms/pc/       DOS games: Game.img (its hard disk), Game.cfg, and Game.cue / .bin (its CD) -- see below
+    /roms/pc/       DOS games: Game.img (its hard disk), Game.cfg, Game.pad, and Game.cue / .bin (its CD) -- see below
     /pc/            the PC's BIOS: boot0.rom (Bochs BIOS) and boot1.rom (VGA BIOS), from 486Tang's tools/
-    /discs/         PlayStation discs: .bin, raw 2352-byte sectors, one data track
+    /discs/         PlayStation discs: a .bin of raw 2352-byte sectors, or a .cue with .bin tracks (also /roms/ps1/)
     /bios/          the PlayStation BIOS (SCPH1001.BIN or another 512 kB SCPH*.BIN)
-    /saves/         written by the console: card1.mcr (PlayStation), n64/*.eep
+    /saves/         written by the console: card1.mcr (PlayStation), n64/*.eep, snes/*.srm, gb/*.sav, gba/*.sav
+    /menu/          optional: the menu's console logos and button icons (tools/menu/mklogos.py)
 
 Games dropped loose into `/roms` are sorted into their console's folder the first
-time the card is read. You supply the games and the BIOS: none come with this.
+time the card is read. A PlayStation `.cue` must name `.bin` tracks: audio tracks as MP3 or
+WAV files are not read. You supply the games and the BIOS: none come with this.
 
 The card can also be written without taking it out: with the board on USB and
 `tools/pad.py` running, `python tools/sdput.py FILE /roms/gg/Game.gg` copies a file
-onto it through the ESP32 (about 165 kB/s -- fine for cartridges, cores and DOS
-games; a 700 MB PlayStation disc is quicker with the card in a reader). Do not update the ESP32's firmware while a PlayStation disc is being read:
-the card can be left unreadable until the board is switched off and on.
+onto it through the ESP32 (fine for cartridges, cores and DOS games; a 700 MB
+PlayStation disc is quicker with the card in a reader). Do not update the ESP32's
+firmware while a PlayStation disc is being read: the card can be left unreadable until
+the board is switched off and on.
 
 ## Playing
 
-Turn it on: the board starts the shell, the ESP32 starts the console last
-installed, and the menu comes up on the TV.
+Turn it on: the board starts the shell and the menu comes up on the TV. (Settings,
+System, *At power-up* can start the last game instead.)
 
 | | |
 |---|---|
-| **Up / Down** | move (Left / Right: a page at a time) |
-| **A** (Cross) | open a console's games / play the game |
+| **Up / Down** | move (Left / Right or L1 / R1: a page at a time) |
+| **A** (Cross) or **Start** | open a console's games / play the game / change a setting |
 | **B** (Circle) | back |
-| **PS / Home**, or **Start + Select** | the menu, from any game (the NES and Master System pause under it) |
+| **Triangle** | the settings |
+| **PS / Home**, or **Start + Select** | the menu, from any game: back to the game, reset, settings, home |
 
-Picking a game for another console switches the board: the shell shows "SWITCHING
-CONSOLE" and a bar while it writes that console into the flash (about a minute),
-then the game starts. Picking another game for the same console takes a few seconds.
+Picking a game for another console switches the board. The flash holds two consoles
+besides the menu, and a console already there starts in a few seconds. Otherwise a
+progress bar shows while that console is written into the flash (up to about a
+minute), then the game starts. Picking another game for the same console takes a few
+seconds.
 
 **Pairing a pad:** PS4 / PS5 -- hold SHARE (CREATE) and the PS button until the light
 flashes quickly; the ESP32 remembers it after that. Xbox: the pairing button on top.
@@ -143,15 +149,20 @@ Switch Pro: the sync button. Two pads can be connected.
 On the Super NES the buttons go by position: cross is B, circle A, square Y, triangle X,
 L1 / R1 the shoulders.
 
-Saves: the PlayStation's memory card and the N64's EEPROM are written to `/saves`
-within seconds of the game saving.
+Saves are written to `/saves` within seconds of the game saving: the PlayStation's
+memory card, N64 EEPROM, SNES save RAM, Game Boy battery RAM (with the MBC3 clock) and
+Game Boy Advance saves.
 
-**Settings** (the last entry under the consoles; A changes the one highlighted, and
-the picture's take effect at once, in the game behind the menu):
+**Settings** (the last entry under the consoles):
 
-| | |
+- **Picture**: the options below. They take effect at once, in the game behind the menu.
+- **Controllers**: the connected pads, pairing a new one, a button test, each console's
+  button mapping, swapping players 1 and 2, forgetting paired pads.
+- **System**: *At power-up* (this menu, or straight into the last game), the start-up
+  logo, restarting the console.
+
+| Picture | |
 |---|---|
-| **At power-up** | this menu, or straight into the last game |
 | **Scaling** (N64, PlayStation) | *as the console* (the N64 smooths across the line, as its video chip does), *sharp* (each pixel doubled), *smooth* (blended both ways), *edge-directed* (diagonal edges rounded off) |
 | **Scanlines** | off, light, heavy -- dark lines between the picture's, as a CRT showed them |
 | **N64 VI filters** | *as the game* asks the N64's video chip: edge anti-aliasing, dither removal, the divot filter; or *off* (the raw picture), or *all on* |
@@ -204,17 +215,17 @@ PC running `tools/pad.py` also types into the game.
 
 | Console | State |
 |---|---|
-| NES | Full speed, sound right. Mappers 0-4 and 7 (NROM, MMC1, UxROM, CNROM, MMC3, AxROM). |
+| NES | Full speed. Mappers 0, 1, 2 and 4 (NROM, MMC1, UxROM, MMC3). |
 | Master System | Full speed. |
 | Game Gear | The Master System core with the Gear's palette and START. |
-| Game Boy | Game Boy and Game Boy Color: passes the standard CPU and picture tests (dmg-acid2, cgb-acid2). No battery saves yet. |
-| Game Boy Advance | The processor passes the ARM7TDMI single-step suite; Pokémon Emerald plays, with its clock. The open BIOS is built in (put a real one at /bios/gba_bios.bin for the boot logo and perfect compatibility). |
+| Game Boy | Game Boy and Game Boy Color: passes the standard CPU and picture tests (dmg-acid2, cgb-acid2). MBC1, MBC3 and MBC5; battery saves and the MBC3 clock on the SD card. |
+| Game Boy Advance | The processor passes the ARM7TDMI single-step suite; Pokémon Emerald plays, with its clock. The open BIOS is built in; a real one at /bios/gba_bios.bin is used instead when present. |
 | PC Engine | HuCards; the processor passes the 65C02 single-step suite. No CD-ROM. |
 | Atari 2600 | Bank switching 2K-32K. Select / Reset are on the pad's Select / Start. |
-| Mega Drive | Full speed, stereo. Cartridges up to 4 MB. |
+| Mega Drive | Stereo. Cartridges up to 4 MB. |
 | Super NES | Plays Super Mario World; save RAM kept on the SD card. LoROM and HiROM cartridges up to 6 MB; no add-on chips (Super FX, SA-1, DSP-1...). Hi-res screens are shown 256 wide. |
-| PlayStation | Boots the real BIOS, plays commercial games at the console's own frame rates (Crash Bandicoot 30 fps, Syphon Filter 20), memory card, CD audio and XA from the disc image, FMVs. |
-| Nintendo 64 | Plays Super Mario 64 and Mario Kart 64 at close to the console's speed (SM64 27-30 of its 30 fps); the RDP (graphics) still lacks a few modes. |
+| PlayStation | Boots the real BIOS and plays commercial games (Crash Bandicoot, Syphon Filter, Tekken 2, MediEvil): memory card, CD audio and XA from the disc image, FMVs. Details in [PLAYSTATION.md](PLAYSTATION.md). |
+| Nintendo 64 | Plays Super Mario 64, Mario Kart 64 and Super Smash Bros., close to the console's speed; other games are untested. EEPROM saves. Details in [N64.md](N64.md). |
 | DOS PC | A 486 at 71.4 MHz (ao486), 32 MB, VGA and VESA SVGA, Sound Blaster 16 + OPL3, CD-ROM with CD audio. Doom, Rayman, Transport Tycoon Deluxe, Fallout. No FPU. |
 
 ## When something goes wrong
@@ -226,8 +237,8 @@ PC running `tools/pad.py` also types into the game.
 - **A switch ends on the shell's screen:** the core on the card is missing or did
   not write right; the menu tries each sector three times. Re-copy the core file.
 - **"no SD card":** FAT32 only.
-- **Stuck:** press the board's program button (SW1) -- it restarts into the shell,
-  and the ESP32 starts the console again.
+- **Stuck:** press the board's program button (SW1). It restarts into the shell and
+  the menu comes back.
 
 ## Legal
 

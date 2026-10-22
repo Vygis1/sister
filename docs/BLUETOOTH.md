@@ -19,8 +19,9 @@ pairing, reconnecting, two players, PS/Home and rumble. On the board (T8, 2026-1
 Open: Doom felt "sticky" with the pad. The loop that turns the pad into keys runs every ~30 us
 (2 ms at worst), so the suspect is the link going into sniff mode (reports in bursts). The
 firmware now keeps the links active (`btactive on|off` switches it live; `pads` shows the report
-spacing and the link mode) -- to be measured with the pad. DualSense, Switch Pro and Xbox are
-untried. Bluepad32 stays the default build until these are done.
+spacing and the link mode) -- to be measured with the pad. One pairing attempt failed with
+status 9 and the retry succeeded at once. DualSense, Switch Pro and Xbox are untried. Bluepad32
+stays the default build until these are done.
 
 ## 1. Assessment
 
@@ -146,8 +147,9 @@ No BTstack and no Bluepad32 code is in the Bluedroid build (checked: `nm` of the
   plain `malloc()` on IDF 5 (`osi_malloc_base`). The firmware's
   `heap_caps_malloc_extmem_enable(64)` runs before Bluetooth starts, so everything over 64 bytes
   goes to PSRAM. ESP-IDF itself offers this as `CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST`.
-  **Expected: about as much free internal RAM as today, possibly more. Not measured.** The boot
-  log line `pads: Bluetooth (Bluedroid) up, internal free N` and the `pads` command show it.
+  Measured on the board: about 10.5 kB of internal RAM free at the lowest with Doom running
+  and a pad connected, 16 kB with no pad. The boot log line
+  `pads: Bluetooth (Bluedroid) up, internal free N` and the `pads` command show it.
 - IRAM: 126,507 B of about 128 kB (Bluepad32: 119,723). It links, but there is little room left.
 
 ### Risks
@@ -159,10 +161,10 @@ No BTstack and no Bluepad32 code is in the Bluedroid build (checked: `nm` of the
    passes; a planted mismatch fails). The header refuses to build on any ESP-IDF but 5.5.x. On a
    platform upgrade, run the check before anything else.
 2. **The whole firmware moves to arduino-esp32 3.x / ESP-IDF 5.5**, not just the pads. It
-   compiles with one change: the task-watchdog call, under `#if ESP_IDF_VERSION_MAJOR >= 5`. But
-   none of these have run on IDF 5 on the board: the SD card, the FPGA link (`link.h` drives the
-   SPI peripheral's registers), PSRAM, the 2 Mbaud serial port, the CD/XA tasks, the menu. **This
-   is the biggest risk, and it has nothing to do with Bluetooth.**
+   compiles with one change: the task-watchdog call, under `#if ESP_IDF_VERSION_MAJOR >= 5`. On
+   the board the IDF 5 build runs the SD card, the FPGA link at 10 MHz with no errors
+   (`link.h` drives the SPI peripheral's registers), cartridges, a PlayStation disc with XA
+   audio and a DOS game. Any later platform upgrade has to be checked the same way.
 3. **Pad behaviour this code has not seen**:
    - whether a pad accepts the HID channels without an SDP query (BlueZ and Bluepad32 query SDP
      first; Bluedroid's own HID host does too);
@@ -213,9 +215,7 @@ Selecting the backend (compile time, in `pads.h`):
 
 A macro is passed with `--build-property "compiler.cpp.extra_flags=-DPADS_BACKEND_NONE"`.
 
-Builds. Leave out `--config-file`: `tools/arduino/arduino-cli.yaml`, named in
-`docs/DEVELOPMENT.md`, does not exist, and the default configuration already has the esp32
-board-manager URL.
+Builds (the default arduino-cli configuration already has the esp32 board-manager URL):
 
     # Bluepad32 (the default, as before)
     tools/arduino/arduino-cli.exe compile --fqbn "esp32-bluepad32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console
@@ -272,27 +272,4 @@ Flash the Bluedroid image (`build/fw-t8d-bluedroid`), type `log on`, then reset,
 If a step fails, the `pads` output (the last 12 events, the slot's state/step, the last report
 id/length) says where it stopped.
 
-## Progress notes
-
-- 2026-10-21: on the board (section 4 steps 1-3 for the DS4). One pairing attempt failed with
-  status 9 and the retry succeeded at once. `looptime` and `xd` serial commands added to the
-  firmware; `pads` prints the report spacing and the link's power mode.
-
-- 2026-10-20: platforms surveyed (section 1). The firmware builds on 3.3.11 with Bluetooth off
-  once the watchdog call is fixed. The ESP-IDF v5.5.5 Bluetooth sources were fetched (sparse)
-  into `build/dl/esp-idf-v5.5.5` for the internal declarations and to read Bluedroid's
-  behaviour.
-- 2026-10-20: `pads_bluedroid.h` written; both variants compile. Review against the Bluedroid
-  source and the reference drivers changed:
-  - **Bonding first:** a pad paired from an L2CAP connection is paired as "no bonding" by
-    Bluedroid (`BTM_AUTH_SP_NO`). We keep the key either way, but the pad might not, and then it
-    would not reconnect. Now `BTA_DmBond` first, then the channels within the 3 s post-bond
-    window.
-  - Switch subcommands spaced at least 70 ms apart (hid-nintendo).
-  - DS4 retries alternate features 0x05 and 0x02 (Linux and SDL).
-  - Xbox fw 4.8's 17-byte Classic report and its separate Xbox-button report.
-  - SDL's exact Xbox rumble packet.
-  - No `snprintf` inside spinlock sections.
-  - Finder/esp_hidh stacks raised to ESP-IDF's example values.
-  - The BLE reconnect scan runs only while a bonded BLE pad is away.
-- 2026-10-20: `tools/bt_abi/check.sh` added. It passes; a negative control fails as it should.
+Steps 1-3 pass with a DualShock 4. The others have not been tried yet.

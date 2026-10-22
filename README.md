@@ -40,14 +40,14 @@ whose open-source work several parts of this project build on.
 
 | System | Status | Notes |
 |---|:---:|---|
-| NES | ✅ | Mappers 0, 1, 2, 3, 4, 7 |
+| NES | ✅ | Mappers 0, 1, 2, 4 (NROM, MMC1, UxROM, MMC3) |
 | Master System | ✅ | |
 | Game Gear | ✅ | |
 | Game Boy / Game Boy Color | ✅ | MBC1, MBC3, MBC5 |
 | Game Boy Advance | ✅ | Built-in open BIOS, cartridge clock |
 | Atari 2600 | ✅ | Bank switching up to 32 KB |
 | Mega Drive / Genesis | ✅ | Up to 4 MB |
-| Super NES | ✅ | No enhancement chips yet |
+| Super NES | ✅ | LoROM and HiROM; no enhancement chips |
 | PC Engine / TurboGrafx-16 | ✅ | HuCards |
 | PlayStation | ✅ | Disc images, memory cards, CD audio, FMV; needs a BIOS file |
 | Nintendo 64 | 🟡 | Super Mario 64, Mario Kart 64, Super Smash Bros.; every RDP mode, other games untested |

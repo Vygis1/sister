@@ -8,11 +8,10 @@ Legend: ✅ done · 🔧 in progress · ⬜ planned
 ## Systems
 
 ### Nintendo 64
-- ✅ Super Mario 64 and Mario Kart 64 play; SM64 at 27-30 of its 30 frames a second
+- ✅ Super Mario 64, Mario Kart 64 and Super Smash Bros. play
 - ✅ Saves (EEPROM) on the SD card; the VI's filters selectable in the menu
+- ✅ Every RDP mode the reference model has, YUV textures included
 - ⬜ Full speed in every scene (the RSP and RDP's throughput)
-- ✅ YUV textures and the remaining RDP modes (krom's 127 RDP tests pass; Super Smash Bros. runs)
-- ✅ Super Smash Bros. boots
 
 ### PlayStation
 - ✅ Real BIOS, disc images, memory cards, CD audio, XA streaming, MDEC movies
@@ -21,10 +20,10 @@ Legend: ✅ done · 🔧 in progress · ⬜ planned
 - ⬜ The remaining ps1-tests that DuckStation passes
 
 ### DOS PC
-- ✅ ao486 at 71.4 MHz (its pipeline restructured for timing, cycle-exact; a floorplan): Doom, Rayman (CD), Transport Tycoon Deluxe, Fallout
+- ✅ ao486 at 71.4 MHz: Doom, Rayman (CD), Transport Tycoon Deluxe, Fallout
 - ✅ SVGA, Sound Blaster 16 + OPL3, ATAPI CD-ROM with CD audio, mouse from the controller
 - ✅ A game is one command away: `tools/pc/addgame.py`
-- ⬜ 76.9 MHz would need the pipeline changed (misses by 1.07 ns); Doom's demo3 runs at 17.8 fps
+- ⬜ A faster CPU clock (Doom's demo3 runs at 17.8 fps)
 
 ### Super Nintendo
 - ✅ LoROM and HiROM up to 6 MB, save RAM on the SD card
@@ -46,16 +45,17 @@ Legend: ✅ done · 🔧 in progress · ⬜ planned
 
 ### NES · Master System · Game Gear · Mega Drive · Atari 2600
 - ✅ Playable; see [CONSOLES.md](CONSOLES.md) for mapper and cartridge coverage
-- ⬜ NES: more mappers (VRC, MMC5)
+- ⬜ NES: more mappers (CNROM, AxROM, VRC, MMC5)
 
 ## The console
 
 - ✅ Graphical menu composed by the FPGA, Bluetooth controllers, settings, saves on the card
 - ✅ Every system checked by picture on the board (`tools/coreshots.py`)
-- ⬜ Faster core switching (two flash slots)
+- ✅ Two systems kept in the flash at once; switching between them takes a few seconds
 - ⬜ HDMI with true differential pairs (some TVs reject the current pseudo-differential signal)
 
 ## The project
 
-- ⬜ A licence (see [PUBLISHING_RISKS.md](PUBLISHING_RISKS.md))
-- ⬜ Release packages: FPGA images and ESP32 firmware, with notices for third-party parts
+- ⬜ Release packages for every system: FPGA images and ESP32 firmware, with notices for
+  third-party parts (`tools/release.sh` packages the shell, NES, Master System, Mega Drive,
+  PlayStation and N64 so far)

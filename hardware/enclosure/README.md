@@ -16,7 +16,7 @@ jack. About 97 x 94 x 29 mm closed, plain rounded box, screw posts inside.
           |          +---------- T8 ----------+    |
           |          | antenna          USB ->|   =| <- micro-USB
           |(o)       +------------[SD]--------+    |
-          |    [7-10] U2 pins ==========[61][63]   |
+          |    [7-12] U2 pins ==========[61]       |
           +-------------------------||-------------+
                 SD wall       card sticks out ~7 mm
                                           (o) = screw post, inside
@@ -49,7 +49,7 @@ Ender-3 V3 SE bed.
 | QMTECH outline 84.1 x 67.1, header pin positions | vendor manual fig. 2-1, `docs/BOARD.md` | measured by vendor |
 | DC jack position | vendor PCB drawing | good; the hole has 0.6 mm margin |
 | T8 outline, M2 holes, header rows, USB | LilyGO `T8_V1.7.dxf` | exact |
-| wiring: short wires soldered to the T8 and onto U2 7-10, 61 (GND), 63 (5 V); GPIO32 to SW1 | the session that wired it, 2026-10-06 | as built (the lid assumes nothing taller than a soldered pin on U2) |
+| wiring: short wires soldered to the T8 and onto U2 7-12 and 61 (GND); GPIO32 to SW1; the T8 powered from its own USB | `docs/GUIDE.md` | as built (the lid assumes nothing taller than a soldered pin on U2) |
 | T8 microSD: small holder (TF-CKT01-009D) at the T8's right edge past the bolt hole; the card goes in flat from the side and sticks out ~10 mm | DXF part outline + the user, looking at the board | position exact; card height above the T8 assumed 0.9 mm (slot 1.8 tall) |
 | T8 micro-USB 7.6 x 2.6, overhangs the PCB by 0.36 | DXF part J1 | exact |
 | HDMI type A plug 13.9 x 4.45 | HDMI spec | exact |
@@ -83,11 +83,10 @@ You need:
    into the three standoffs. Its micro-USB lines up with the small opening in
    the right wall, its card side with the slot in the front wall.
 3. Lower the lid onto the base (the T8's wires to U2 and SW1 stay soldered).
-   Push the card in through the front slot; about 7 mm of it stays outside.
-4. Lower the lid. The lip drops inside the base wall. Fingers on the lid's
-   underside then press the board down at both short edges, hold the U4 socket
-   strip, and sit on top of the HDMI socket so pulling a cable can't lift the
-   breakout off its header.
+   The lip drops inside the base wall. Fingers on the lid's underside press the
+   board down at both short edges, hold the U4 socket strip, and sit on top of
+   the HDMI socket so pulling a cable can't lift the breakout off its header.
+4. Push the card in through the front slot; about 7 mm of it stays outside.
 5. Three M3 screws from the top into the posts inside the corners; the heads sit
    flush in the lid. The fourth corner (front-right, by the card and the jack) has
    no room for a post; the lid's lip holds it.

@@ -1,8 +1,7 @@
 # The board: QMTECH XC7A100T
 
 Board facts, constraints and the Vivado flow for the QMTECH Artix-7 core board,
-derived from the vendor schematic and proven on real hardware. This was the
-project's first README; the overview is now the top-level README.md.
+taken from the vendor schematic and checked on the board.
 
 | | |
 |---|---|
@@ -11,7 +10,7 @@ project's first README; the overview is now the top-level README.md.
 | Fabric | 63,400 LUT · 126,800 FF · 135 × BRAM36 · 240 DSP48 |
 | Clock | 50 MHz onboard oscillator, ball **U22** |
 | LEDs | **T23**, **R23** |
-| I/O | 108 pins on headers U2/U4 — see [`boards/qmtech_a100t/HEADERS.md`](boards/qmtech_a100t/HEADERS.md) |
+| I/O | 108 pins on headers U2/U4 — see [`boards/qmtech_a100t/HEADERS.md`](../boards/qmtech_a100t/HEADERS.md) |
 | Also on board | 256 MB DDR3, QSPI config flash, 2 push-buttons |
 | Toolchain | Vivado 2026.1 — no licence needed for this part |
 
@@ -19,6 +18,8 @@ project's first README; the overview is now the top-level README.md.
 
     boards/qmtech_a100t/
       qmtech_a100t.xdc      base constraints: clock, LEDs, config settings
+      shell_top.xdc         the menu image (the shell): ESP32 link, flash, HDMI
+      ddr3.xdc              the DDR3 pins (tools/migpins.py makes the MIG's pin file from it)
       HEADERS.md            full U2/U4 pin -> ball map, JTAG J1 pinout, wiring warnings
       reference-ps2net.xdc  ps2net's pinout, kept as a worked example of using the headers
     rtl/blink.v             bring-up blinky
@@ -26,7 +27,7 @@ project's first README; the overview is now the top-level README.md.
     tools/check.tcl         is the install usable for this part?
     tools/build.tcl         non-project RTL -> bitstream
     tools/program.tcl       JTAG load, or burn to QSPI
-    prebuilt/smoke-a100t.bit  known-good blinky bitstream, built 2026-08-28
+    prebuilt/smoke-a100t.bit  known-good blinky bitstream
 
 ## Use
 
@@ -45,23 +46,23 @@ Persist it to the config flash so the board boots standalone:
 
     ./tools/vivado.sh flash build/blink/blink.bit -mem <cfgmem-part>
 
-The flash part on this board is **identified**: a Micron **N25Q064A** at U3
-(marking `25Q064A` / `13E40`; the chip's own JEDEC ID reads `20 BA 17`). So:
+This replaces the shell at address 0. Write `cores/shell.bit` back afterwards, or the
+console's menu will not start.
 
-    ./tools/vivado.sh flash build/eth_top/eth_top.bit -mem n25q64-3.3v-spi-x1_x2_x4
+The flash part on this board is a Micron **N25Q064A** at U3 (marking `25Q064A` /
+`13E40`; the chip's own JEDEC ID reads `20 BA 17`). So, for the menu image:
+
+    ./tools/vivado.sh flash cores/shell.bit -mem n25q64-3.3v-spi-x1_x2_x4
 
 Note the `-spi-x1_x2_x4` suffix. The `n25q64-3.3v-qspi-*` parts also exist and
 look like the obvious choice, but they are UltraScale only and Vivado rejects
 them for artix7 with a message that reads like the part name is wrong.
 
-## Bring-up order
+## Bring-up
 
-1. **Power and JTAG only.** Load `prebuilt/smoke-a100t.bit`, or build `blink`
-   yourself. Both LEDs blinking at visibly different rates means the board, the
-   3.3 V rail, the oscillator, JTAG, the Vivado install and the constraint flow
-   are all good. That is every variable eliminated at once.
-2. Then UART on a header pin, so hardware can talk back.
-3. Then DDR3 via MIG, which is the gate on anything large.
+Power and JTAG only: load `prebuilt/smoke-a100t.bit`, or build `blink`. Both LEDs
+blinking at visibly different rates means the board, the 3.3 V rail, the
+oscillator, JTAG, the Vivado install and the constraint flow all work.
 
 ## Programmer
 
@@ -78,8 +79,8 @@ Cable and Digilent. A bare FT2232H breakout will not show up; use
 
 ## 6502
 
-`rtl/cpu6502.v` is a cycle-accurate NMOS 6502 — 921 LUTs, 174 flip-flops, no
-block RAM, no DSP. It passes Klaus Dormann's functional test in full:
+`rtl/cpu6502.v` is a cycle-accurate NMOS 6502, the CPU of the NES and (with RDY)
+the Atari 2600. It passes Klaus Dormann's functional test in full:
 
     ./tools/sim.sh tb_cpu6502     # ~4 minutes, 96M cycles, 30.6M instructions
 
@@ -99,7 +100,7 @@ map, with RAM mirrored four times across $0000-$1FFF and a 16 KB PRG ROM
 appearing at both $8000 and $C000. Mirrors are exactly where an address decode
 goes wrong.
 
-Three things the two tests between them caught:
+Three things the two tests check that are easy to get wrong:
 
 - **The NES has no decimal mode.** The 2A03 keeps the D flag but ADC and SBC are
   always binary. `DECIMAL` defaults to 0 for that; Klaus's test instantiates the
@@ -109,10 +110,9 @@ Three things the two tests between them caught:
   them, and nestest diverges at exactly the instruction where they begin.
 - **RRA is ROR then ADC, and the ADC must see the carry the ROR just made.**
   Reading the flag register gives the value from before the shift, because the
-  non-blocking assignment has not landed yet. That one bug accounted for every
-  remaining mismatch from 94% onward.
+  non-blocking assignment has not landed yet.
 
-Two things about Klaus's test that cost time:
+Two things to know about Klaus's test:
 
 - **Success is `0x3469`, not the highest self-jump in the image.** Klaus ends
   with `lda #$f0 / sta test_case / jmp *`. The higher trap at `0x382F` belongs

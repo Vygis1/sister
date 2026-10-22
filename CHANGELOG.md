@@ -54,7 +54,7 @@ from the card, the console switched by writing its image into the flash.
   FLAC or OGG files, decoded once into `build/cdda_cache/`.
 - **XA-ADPCM.** The drive applies the game's filter and queues each XA sector.
   The PC decodes and resamples it exactly as DuckStation does
-  (`pc/cdaudio.py`), and sends the samples back to the drive.
+  (`tools/ps1/cdaudio.py`), and sends the samples back to the drive.
 - **The SPU's capture buffers**, with the IRQ on them, and CD audio in the mix
   and the reverb.
 - **A second pad and memory card** (`saves/card2.mcr`). A second gamepad on the

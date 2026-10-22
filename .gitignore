@@ -78,3 +78,6 @@ rtl/pc/z486/*.mem
 # private notes, agent worktrees
 outreach/
 .claude/
+
+# one machine's own settings
+local.env

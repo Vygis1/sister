@@ -1,6 +1,7 @@
 > **NOT USED.** This one-plug cable on U2 57-64 was a proposal and was never built.
-> The console is wired as in `docs/GUIDE.md`: jumpers on U2 7-10 and 61, GPIO32 to
-> PROGRAM_B on SW1, the T8 powered from its own USB. The case (`enclosure/`) is laid
+> The console is wired as in `docs/GUIDE.md`: jumpers on U2 7-12 and 61 (11 and 12 are
+> the quad data wires, which this cable does not carry), GPIO32 to PROGRAM_B on SW1, the
+> T8 powered from its own USB. The case (`enclosure/`) is laid
 > out for that wiring. `cable/` (the harness drawing) belongs to this proposal too.
 
 # The ESP32 cable — LilyGO T8 to the QMTECH board
@@ -62,8 +63,8 @@ to the two ground pins and the 5 V feed, so one plug carries everything, and the
 return path is millimetres long. Pins 57-60 (bank 13, 3.3 V) are unused by every
 XDC in `boards/qmtech_a100t/` (checked).
 
-**This needs a constraint change before the cable works.** In both
-`boards/qmtech_a100t/eth_top.xdc` and `boards/qmtech_a100t/shell_top.xdc`:
+**This needs a constraint change before the cable works.** In every constraint file in
+`boards/qmtech_a100t/` that places `esp_sclk` (the shell's and the system images'):
 
 | port | was | becomes |
 |---|---|---|
@@ -83,8 +84,9 @@ carry over.
 | function | ESP32 pins | bus |
 |---|---|---|
 | FPGA link | SCK 18, MISO 19, MOSI 23, CS 5 | VSPI (IO_MUX pins, full speed) |
-| microSD (built in) | CLK 14, CMD 15, D0 2, D3/CS 13 (D1 4, D2 12) | SD_MMC 1-bit, or HSPI |
-| spare for later | IO22 -> PROGRAM_B, IO34 <- DONE | needs a fly-wire on the QMTECH |
+| quad data 2, 3 | IO22, IO21 | VSPI's WP and HD |
+| PROGRAM_B | IO32 | a fly-wire to SW1 on the QMTECH |
+| microSD (built in) | CLK 14, CMD 15, D0 2, D3/CS 13 (D1 4, D2 12) | HSPI (SPI mode) |
 
 **Correction:** the SD pins are **13/15/14/2**, read off LilyGO's V1.7.1 schematic
 and pinout. The IO33/14/12/27 set in the T8 GitHub README belongs to an older
@@ -97,13 +99,15 @@ with a pull-up, so it never pulls IO5 low.
 ## Power
 
 The T8 runs from the console's own 5 V: U2 pin 63 (VIN, the same net as the DC
-jack) into the T8's 5V pin, then through its SY8008 regulator. That keeps Wi-Fi's
+jack) into the T8's 5V pin, then through its SY8008 regulator. That keeps the radio's
 transmit bursts off the FPGA's 3.3 V rail, which also sets the HDMI pins' output
 swing.
 
 - Its USB port stays usable for flashing: a Schottky diode (D13) sits between
   the USB VBUS and the rest of the board, so the 5 V from the console cannot
   back-feed the PC.
+- VIN is whatever feeds the board's DC jack. This only works with a 5 V supply: anything
+  higher reaches the T8's 5V pin.
 - **Never connect a LiPo** to the T8's battery connector while it is wired in.
 - Leave the T8's ON/OFF switch **on**.
 

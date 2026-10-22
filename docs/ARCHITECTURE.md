@@ -1,147 +1,233 @@
-# Where everything lives
+# How the console works
 
-Three questions, and they have different answers because they have different
-constraints:
+The console is two boards. The FPGA board runs one game system at a time and sends its
+picture and sound to HDMI. The ESP32 (a LilyGO T8) runs everything around it: the menu, the
+SD card, installing systems, loading games, serving discs and hard disks, saving games and
+reading Bluetooth controllers. There is no network of any kind.
 
-- **Cores** — 1.9 MB bitstreams. Only one place on earth can load them, and it
-  is not negotiable: the board's configuration flash.
-- **Cartridges** — 32 kB to 4 MB ROMs. Need to be in front of the CPU core at
-  full speed, and need to be picked from a library of hundreds.
-- **The front door** — what a person touches to change either of those.
+```
+  Bluetooth pads ))) ESP32 (LilyGO T8) ==== SPI link, 4-bit writes ==== FPGA board ── HDMI ── TV
+                     │ microSD card                                     │ configuration flash
+                     │ USB serial (optional PC)                         │ 256 MB DDR3
+                     └── PROGRAM_B wire ────────────────────────────────┘
+```
 
-## The four stores
+Video and audio never cross the link. The FPGA makes them and drives the HDMI socket itself.
 
-    ESP32 microSD        the library      every core, every cartridge
-    board SPI flash      the boot medium  shell + 3 resident cores, 8 MB
-    board DDR3           the cartridge    256 MB, volatile
-    board block RAM      the machine      video, work RAM, line buffers
+## Where things are stored
 
-Each one is there because of a hard property the others do not have.
+| Store | Size | Holds |
+|---|---|---|
+| FPGA configuration flash (N25Q064) | 8 MB | the menu image and two installed systems |
+| microSD card on the ESP32 | any, FAT32 | every system image, every game, BIOS files, saves, menu art |
+| DDR3 on the FPGA board | 256 MB | large memories of the running system: cartridges, RAM, VRAM |
+| FPGA block RAM | 135 × 36 kb | what must answer in one clock: video memory, line buffers, caches |
 
-**The SPI flash is the only thing the FPGA can boot from.** That is the whole
-reason it is special. It is 8 MB, which is four bitstreams, which is why it
-cannot be the library:
+### The flash
 
-    0x000000   shell        golden image, loads on power-up, never rewritten
-    0x200000   core slot 1  2 MB
-    0x400000   core slot 2  2 MB
-    0x600000   core slot 3  2 MB
+The FPGA can only configure itself from this flash, so a system has to be in it to run.
 
-**The SD card is the only thing that is big and removable.** A 32 GB card holds
-every Master System and NES cartridge ever pressed several times over, and the
-user can fill it on a PC without any of this software being involved. Layout:
+| Address | Size | Contents |
+|---|---|---|
+| `0x000000` | 2 MB | the menu image, called the *shell*. Loaded at every power-up. |
+| `0x200000` | 3 MB | slot 0: an installed system |
+| `0x500000` | 3 MB | slot 1: another installed system |
 
-    /cores/nes.bit            /roms/nes/*.nes
-    /cores/sms.bit            /roms/sms/*.sms
-    /cores/megadrive.bit      /roms/megadrive/*.md
-    /cores/index.json         which core a file extension wants
+The shell itself only knows one rule: an erase or a write is an offset below 6 MB, added to
+`0x200000` (`rtl/shell_flash.v`). The split into two 3 MB slots is the firmware's
+(`SLOT1_OFF`, `SLOT_HALF` in `esp32/console/menu.h`). A system image larger than 3 MB goes in
+slot 0 and uses the space of both. The ESP32 records which image is in which slot in its own
+non-volatile storage (name and size).
 
-**The DDR3 is the only thing both big and fast.** A 4 MB Mega Drive cartridge
-does not fit in block RAM under any arrangement and does not need to: it is a
-ROM being read a byte at a time, which is what DDR3 with a small cache is good
-at. It is volatile, so it is a copy, never the original.
+Images are compressed bitstreams (`BITSTREAM.GENERAL.COMPRESS`). They are raw `.bin` files: a
+`.bit` file carries a header that the FPGA's configuration engine rejects.
 
-**Block RAM is the only thing with single-cycle latency**, so it keeps what the
-renderer touches every pixel and nothing else. That is the whole reason to move
-the cartridge out: the design is at 98% of 135 tiles today, and 96 of those are
-cartridge.
+### The SD card
 
-## How a thing gets from the card to the screen
+```
+/cores/<system>.bin     the system images: nes sms gg gb gba a26 md snes pce n64 ps1 pc
+/roms/<system>/         the games, one folder per system (see GUIDE.md for file types)
+/discs/                 PlayStation discs (also accepted in /roms/ps1)
+/bios/                  BIOS files: the PlayStation's SCPH*.BIN, optionally gba_bios.bin
+/pc/                    the DOS PC's BIOS: boot0.rom and boot1.rom
+/saves/                 written by the console: card1.mcr, n64/, snes/, gb/, gba/
+/menu/logos/, /menu/icons/   optional menu art (tools/menu/mklogos.py)
+```
 
-Changing the core:
+The menu lists every `.bin` in `/cores` and every system folder in `/roms`. A game left
+loose in `/roms` is moved into its system's folder, by its extension, when the card is read.
+The card must be FAT32.
 
-    phone -> ESP32 -> shell -> SPI flash -> ICAPE2 -> the core is now a NES
+## The link
 
-    1. The ESP32 reads /cores/nes.bit off the card.
-    2. It streams it to the shell, which erases 32 sectors and programs
-       8192 pages into a slot.
-    3. It tells the shell to boot that slot. The shell writes the address into
-       WBSTAR and issues IPROG. The chip reconfigures.
+The ESP32 is the SPI master and the FPGA the slave. The same wires reach the shell and every
+system image, and each answers the commands it knows.
 
-    Only step 2 is slow, and only the first time: a core already in a slot is
-    booted in step 3 alone, which is milliseconds.
+| ESP32 (T8) | Signal | FPGA header U2 |
+|---|---|---|
+| GPIO18 | SCLK | pin 7 |
+| GPIO23 | MOSI, data 0 | pin 8 |
+| GPIO19 | MISO, data 1 | pin 9 |
+| GPIO5 | CS | pin 10 |
+| GPIO22 | data 2 | pin 12 |
+| GPIO21 | data 3 | pin 11 |
+| GPIO32 | PROGRAM_B | the non-ground side of SW1 |
+| GND | ground | pin 61 |
 
-Changing the cartridge:
+SPI mode 0, most significant bit first. The FPGA samples the pins in its own clock domain
+(`rtl/esp_link.v`), so the SPI clock must stay well below the FPGA's clock: it needs about four
+FPGA clocks per SPI period.
 
-    phone -> ESP32 -> core -> DDR3 -> the game is running
+- **Short frames** (status, commands, single register reads and writes) run at 5 MHz.
+- **Bulk transfers** (game data, disc sectors, flash blocks) run at 10 MHz by default. The
+  menu sets this clock from the running image's own clock.
+- **Quad writes** send the data four bits per clock, on MOSI, MISO, data 2 and data 3, high
+  nibble first. The command and address still go one bit per clock; the FPGA releases MISO
+  for the data. A quad write carries about 3.9 MB/s.
 
-    No reconfiguration, no flash write. Seconds.
+### Frames
 
-## What each part is for
+Chip select low to high is one frame. Byte 0 from the ESP32 is the command; the rest is its
+payload. There is no length field. The FPGA's first byte out is always `0xA5`, so one byte
+answers "is a configured image listening". Reply bytes come back one byte behind the byte
+that asked for them.
 
-**The ESP32 is a control plane, not a data plane.** It picks cores and
-cartridges, serves the page that picks them, and nothing else. It does not
-carry video: 256x240 at 60 Hz is 22 MB/s and an ESP32's Wi-Fi is not close.
-Video and audio stay on the Ethernet link today and move to HDMI when the
-connector exists.
+Every image answers:
 
-Saying this plainly now avoids the obvious trap — building a beautiful ESP32
-web UI and then discovering the picture cannot come down it.
+| Command | Payload | Reply |
+|---|---|---|
+| `01` PING, `02` STATUS | — | `A5`, version, image id, busy |
 
-**The shell is deliberately tiny.** Flash writer, the ESP32 link, ICAPE2, and
-a status word. Nothing that could fail to fit, nothing that changes when a core
-changes. It is the golden image and its job is to always work.
+The image id is `0` for the shell, or the system's letter: `N` NES, `S` Master System,
+`G` Game Gear, `B` Game Boy, `V` Game Boy Advance, `A` Atari 2600, `M` Mega Drive,
+`F` Super NES, `E` PC Engine, `P` PlayStation, `6` Nintendo 64, `C` DOS PC.
 
-**Power-up always loads address 0**, so a broken core cannot brick the board:
-pull the power and the shell comes back. If even that fails, the ESP32 holds
-PROGRAM_B and can force it.
+The shell's flash commands (`rtl/shell_top.v`; offsets are 3 bytes, relative to `0x200000`):
 
-## The link between the ESP32 and the FPGA
+| Command | Payload | Does |
+|---|---|---|
+| `15` UNLOCK | `C0 DE 5A FE` | allows the next erase or write, within 50 ms |
+| `10` ERASE | offset | erase one 64 kB sector |
+| `11` WRITE | offset, 256 bytes | program one page |
+| `19` WRITE, quad | offset, 256 bytes | the same, data four bits per clock |
+| `1A` BUFFER, quad | word index, data | fill the shell's 16 kB block buffer |
+| `1B` PROGRAM | offset, n | program the buffer's first n pages (1-64) |
+| `16` SUM | absolute address | checksum a 64 kB block of the flash |
+| `17` SUM READ | 8 bytes | the checksum |
+| `12` READ | absolute address | fetch one page into the buffer |
+| `13` PAGE | 257 bytes | the fetched page |
+| `20` BOOT | `0`, `1` or `2` | restart from `0x000000`, `0x200000` or `0x500000` |
 
-SPI, ESP32 as master, four wires plus two.
+After an erase, write, program, sum or read, the ESP32 polls STATUS until the operation has
+started and then until it is no longer busy.
 
-    ESP32           FPGA header      why
-    -----           -----------      ---
-    SCLK    ->      esp_sclk         up to 40 MHz
-    MOSI    ->      esp_mosi
-    MISO    <-      esp_miso
-    CS      ->      esp_cs_n
-    IO      ->      PROGRAM_B        force the shell back, the last resort
-    IO      <-      DONE             did configuration finish
+Every system image has a 32-bit register bus behind the link (`rtl/esp_bus.v`). The shell
+has one too, for the menu's picture; it accepts writes there and nowhere else.
 
-UART was the alternative and is not good enough: 2 MB at 3 Mbaud is seven
-seconds of staring at a progress bar, per core install. SPI at 20 MHz is under
-a second, and the pins are there.
+| Command | Payload | Does |
+|---|---|---|
+| `40` BUS WRITE | address (4 bytes), then 32-bit words | write words to consecutive addresses |
+| `43` BUS WRITE, quad | the same | the same, data four bits per clock |
+| `41` BUS READ | address, 4 bytes of wait | one word |
+| `42` BUS READ BLOCK | address, 4 bytes of wait | words for as long as CS stays low |
 
-The protocol is one byte of command, then a payload:
+Addresses are big-endian; words are little-endian. The PlayStation image adds its disc
+commands (`rtl/cd_feed.v`):
 
-    0x01  PING                        -> 0xA5, version, what core is running
-    0x02  STATUS                      -> flash busy, slot contents, core id
-    0x10  FLASH_ERASE   slot          erase one 2 MB slot: 32 sectors
-    0x11  FLASH_WRITE   slot, off,    one 256-byte page
-                        256 bytes
-    0x12  FLASH_VERIFY  slot          -> CRC32 of the slot
-    0x20  BOOT          slot          WBSTAR + IPROG, no reply, the chip is gone
-    0x30  CART_LOAD     off, len,     stream a ROM into cartridge memory
-                        data
-    0x31  CART_INFO     mapper, size  what the core should believe about it
-    0x40  RESET         run           hold or release the console core
-    0x41  INPUT         pad1, pad2    a control pad over Wi-Fi, if wanted
+| Command | Payload | Does |
+|---|---|---|
+| `30` CD STATUS | — | the sector the drive wants next, how many it has room for, disc and motor state |
+| `31` CD SECTOR | LBA (3 bytes), 2352 bytes | one raw sector; dropped unless it is the one asked for |
+| `32` CD DISC | 1 byte | a disc is in (1) or the tray is empty (0) |
 
-A flash write is one page and not one kilobyte because the board has one page
-buffer and no way to say "wait" in the middle of a frame. Programming a page
-takes about twice as long as clocking one in, so anything larger would overrun.
-The master sends a page, then polls STATUS until the board stops being busy.
+The ESP32's side of all of this is `esp32/console/link.h`.
 
-That sets the honest cost of installing a core, and it is worth writing down
-rather than discovering: 32 sector erases at most of a second each is about
-twenty seconds, and 8192 page programs at half a millisecond is four more. The
-SPI link is not the slow part and making it faster would not help. Booting a
-core already in a slot is a single command and a reconfiguration -- under a
-second, which is the number that actually matters, because that is the one a
-person does repeatedly.
+## Starting a system
 
-Commands 0x01-0x02 and 0x40-0x41 exist in every image. 0x10-0x20 are the
-shell's. 0x30-0x31 are a console core's. So the same four wires and the same
-framing serve both, and the ESP32 does not need to know which image is loaded
-before it can ask.
+When the player picks a game for a system that is not running, the ESP32
+(`switchTo` in `esp32/console/menu.h`):
 
-## Order of work
+1. Sends the running system back to the shell: it writes `0xB0070000` to bus address
+   `0x0014`, and the image restarts the FPGA from address 0 (`rtl/icap_reboot.v`). If the
+   shell does not answer within two seconds, the ESP32 pulses PROGRAM_B.
+2. If a slot already holds this system's image (same name and size), skips to step 4.
+3. Otherwise it writes the image from `/cores` into the slot used less recently. Each 64 kB
+   sector is erased; the data goes into the shell's block buffer in 16 kB pieces by quad
+   writes, and the shell programs the pages itself. The shell then checksums each 64 kB block
+   and the ESP32 compares the sum with its own. A block that does not match is erased and
+   written again, up to three times. The shell's own screen (`rtl/shell_screen.v`) or the
+   graphical menu shows the progress.
+4. Sends BOOT with the slot. The shell writes the slot's address to the FPGA's WBSTAR register
+   and issues IPROG through ICAPE2; the FPGA reconfigures from that address.
+5. Waits for STATUS to report the system's id. If it does not, the ESP32 returns to the shell
+   and installs the image once more.
 
-1. `esp_link.v` — the SPI slave and command decode. Testable on its own, and
-   needed by both the shell and the cores.
-2. `shell_top.v` — that plus `spi_flash.v` plus ICAPE2. The golden image.
-3. ESP32 firmware — Wi-Fi AP, web page, SD card, the client side of the above.
-4. `CART_LOAD` in the console cores, so a ROM can arrive without a PC.
-5. DDR3, so the cartridge stops eating block RAM and Mega Drive becomes
-   possible.
+Switching to a system that is already in a slot takes a few seconds. While the menu shows a
+system that is in neither slot, the ESP32 erases the less recently used slot in the
+background, one sector at a time, so a later install has less to do.
+
+## Loading a game
+
+Games go into the running system over the register bus (`load` in `esp32/console/menu.h`):
+
+1. The ESP32 holds the system in reset and selects which machine the image runs, where an
+   image has more than one.
+2. It reads the file in 16 kB pieces, one piece ahead, on the other CPU core, and sends each
+   piece by quad writes into the cartridge window. Large cartridges go through a 256 kB window
+   with a bank register, into DDR3.
+3. The FPGA folds every word it receives, with its address, into a checksum (bus address
+   `0x0018`). The ESP32 computes the same sum and sends a piece again if they differ.
+4. It writes the cartridge's settings (mapper, size, save type), then releases reset.
+
+Some systems need more from the card while they run:
+
+- **PlayStation.** The BIOS and the memory card are loaded into DDR3 first. The disc stays on
+  the card. The ESP32 reads sectors ahead of the drive into a ring in its PSRAM, on one CPU
+  core, and sends each one the drive asks for from the other. It also decodes the disc's XA audio (`esp32/console/xa.h`) and feeds the
+  samples to the drive.
+- **DOS PC.** The ESP32 loads the BIOS files and the game's configuration, then serves the hard
+  disk image sector by sector as the PC asks (`esp32/console/pc.h`), and the CD-ROM drive from a
+  `.cue` / `.bin` image (`esp32/console/cdrom.h`).
+
+## Controllers
+
+The ESP32 reads Bluetooth controllers (`esp32/console/pads.h`), maps their buttons for the
+running system, and writes them into the system's pad registers. A pad write goes ahead of
+any bulk transfer waiting for the link. A controller on a PC can also be relayed over USB
+(`tools/pad.py --relay`).
+
+## Saves
+
+The ESP32 watches the running system's save memory and writes it to `/saves` on the card
+shortly after the game changes it: the PlayStation's memory card (`/saves/card1.mcr`), N64
+EEPROM, SNES save RAM, Game Boy battery RAM with the MBC3 clock, and GBA SRAM, flash and EEPROM.
+
+## The menu
+
+In the shell, the menu is a picture composed by the FPGA (`rtl/shell_ui.v`). The ESP32 uploads
+fonts and images once, then writes a short list of objects for each page: a background,
+rounded rectangles, text and images. The FPGA draws each line from the list just before the
+TV shows it. `tools/menu/ui_model.cpp` renders the same lists on a PC, and `sim/tb_shell_ui.v`
+compares the two pixel for pixel.
+
+Over a running game, the menu is text drawn by the system image (`rtl/osd.v`: 40 × 30 cells of
+16 × 16 pixels over the picture). It offers: back to the game, reset, settings, and home.
+
+## Why the board cannot be bricked
+
+- The FPGA always configures from address 0 at power-up, and that is the shell.
+- The shell cannot write to its own area: erase and write offsets are checked and added to
+  `0x200000` in one place, `rtl/shell_flash.v`. Reads are absolute and cannot damage anything.
+- An erase or write is accepted only straight after the five-byte unlock frame. Noise on the
+  wires, for example while the ESP32 resets, cannot erase a slot.
+- The shell's bitstream enables `CONFIGFALLBACK`: if an image in a slot fails to load, the FPGA
+  returns to the shell.
+- The ESP32 drives PROGRAM_B (the board's SW1 button) low to force a restart into the shell.
+  It only ever pulls it low or leaves it as an input, so the button and the ESP32 cannot fight.
+- JTAG works regardless of what is in the flash.
+
+## A PC on the USB port
+
+The ESP32's USB serial port (2 Mbaud) has a text console: board state, the card, installing,
+reading and writing registers, copying files onto the card. `tools/pad.py` holds that port and
+lets other PC tools use it through 127.0.0.1:5557. See [DEVELOPMENT.md](DEVELOPMENT.md).

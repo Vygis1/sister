@@ -25,7 +25,7 @@ The ESP32's output is logged to `build/pad.log`. Logging is off after every ESP3
 `pad.py` turns it on when it connects.
 
 ```sh
-python tools/pad.py                       # keep running in its own window
+python tools/pad.py                    # keep running in its own window (--relay: a PC controller as pad 1)
 python tools/bcmd.py "state"           # the ESP32's state: reset reason, clock, card, FPGA
 python tools/bcmd.py -r 80010 80014    # console registers: frame counter, CPU position
 ```
@@ -35,7 +35,7 @@ python tools/bcmd.py -r 80010 80014    # console registers: frame counter, CPU p
 | Task | Command |
 |---|---|
 | Build a core | `./tools/core.sh <system>` → `cores/<system>.bin` (only if timing passes) |
-| Put a file on the SD card | `python tools/sdput.py cores/nes.bin /cores/nes.bin` (~165 kB/s, read back and checked) |
+| Put a file on the SD card | `python tools/sdput.py cores/nes.bin /cores/nes.bin` (sent in CRC-checked blocks) |
 | Start a game | `python tools/bcmd.py "play /roms/snes/Game.sfc"` (installs the core if needed) |
 | List a folder on the card | `python tools/bcmd.py "ls /roms/pc"` |
 | See the picture | `python tools/vgrab.py out.png` (most systems) · `tools/pc/pcgrab.py` · `tools/n64/fbgrab.py` · `tools/ps1/espshot.py` |
@@ -53,7 +53,7 @@ ESP32 serial commands worth knowing (`S` lines, or `bcmd.py "<command>"`): `stat
 | | |
 |---|---|
 | FPGA | Vivado 2026.1. `tools/core.sh` wraps `tools/build.tcl`; `EFFORT=1`, `AREA=1`, `RETIME=1`, `PLACE_DIR=<directive>` tune a run, `RELEASE=1` leaves out debug hardware. Reports land in `build/core_<name>/`. |
-| ESP32 | `tools/arduino/arduino-cli.exe compile --config-file tools/arduino/arduino-cli.yaml --fqbn "esp32-bluepad32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console` |
+| ESP32 | `tools/arduino/arduino-cli.exe compile --fqbn "esp32-bluepad32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console` (Bluepad32, the default). The Bluedroid variant: `--fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d-bluedroid` ([BLUETOOTH.md](BLUETOOTH.md)). |
 | DOS disk images | `python tools/pc/addgame.py <game folder or zip>` (WSL: `mtools`, `nasm`, `sfdisk`) |
 
 Vivado uses about 1.5 cores a run: independent builds go faster in parallel than one after another.

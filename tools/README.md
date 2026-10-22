@@ -1,6 +1,7 @@
 # tools
 
-Run everything from the repository root (`./tools/core.sh md`, `python tools/ps1/ps1shot.py`).
+Run everything from the repository root (`./tools/core.sh md`, `python tools/ps1/espshot.py`).
+The board tools need `tools/pad.py` running; see [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md).
 
 ## Building, simulating, releasing
 
@@ -17,10 +18,12 @@ Run everything from the repository root (`./tools/core.sh md`, `python tools/ps1
 | `vfuncscan.py` | finds Verilog function patterns xsim simulates wrongly |
 | `longpaths.tcl`, `longpaths.py` | a routed design's failing paths, grouped by module |
 | `vidref.py` | the reference for the N64 video filters, and the gate for `tb_n64_vid` |
-| `menu_art.py`, `menu/` | the menu's tiles, font and logos (`esp32/console/art.h`, `gfx_font.h`) |
+| `menu_art.py`, `menu/` | the menu's tiles, fonts and logos (`esp32/console/art.h`, `gfx_font.h`, `/menu` on the card), and `menu/ui_model.cpp`, the reference for `rtl/shell_ui.v` |
 | `hdmi_check.py` | checks the HDMI data islands a bench recorded |
 | `mipsasm.py` | a MIPS assembler, for the PlayStation's and the N64's test programs |
-| `menu_preview/` | renders the ESP32 menu to a PNG on the PC |
+| `menu_preview/` | renders the ESP32's text menu to a PNG on the PC |
+| `arduino/` | the Arduino CLI that builds the ESP32 firmware ([esp32/README.md](../esp32/README.md)) |
+| `bt_abi/` | checks the Bluedroid declarations in `pads_bluedroid.h` against ESP-IDF's headers ([docs/BLUETOOTH.md](../docs/BLUETOOTH.md)) |
 
 ## The board, from the PC
 
@@ -31,7 +34,7 @@ Run everything from the repository root (`./tools/core.sh md`, `python tools/ps1
 | `bcmd.py` | one ESP32 console command, or console register reads/writes, through `tools/pad.py` (`bcmd.py "ls /roms/nes"`, `bcmd.py -r 80010`) |
 | `coretest.py` | starts a game on every console in turn and checks that each one runs (frame counter, CPU position) |
 | `vgrab.py` | the picture a core sends to the TV, as a PNG (`rtl/line_grab.v`; not in the PS1 / N64 images) |
-| `sdput.py` | a file onto the SD card through the ESP32, checked by reading it back (~165 kB/s) |
+| `sdput.py` | a file onto the SD card through the ESP32, in CRC-checked blocks |
 | `menunav.py`, `toolpad.py` | drive the on-screen menu / press pad buttons from the PC |
 | `jtag.py` | the console's registers over the JTAG cable (debug images) |
 | `padpress.py` | presses buttons on pad 1 |

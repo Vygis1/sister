@@ -1,6 +1,0 @@
-{ "cores": [
-    { "id": "nes", "name": "Nintendo Entertainment System",
-      "bitstream": "/cores/nes.bit", "ext": ".nes" },
-    { "id": "sms", "name": "Sega Master System",
-      "bitstream": "/cores/sms.bit", "ext": ".sms" }
-] }
