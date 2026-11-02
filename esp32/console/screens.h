@@ -126,19 +126,14 @@ static void splash(int t) {
       if (L.glyph == 0 && L.bg == art::C_BLACK) continue;
       glyph(lc + x, lr + y, L.glyph ? L.glyph : ' ', L.ink, L.bg == art::C_BLACK ? 0 : bgBits(L.bg));
     }
-  // the name: BYBA, then GAMES, a letter every three frames
-  static const int top[4] = { PINK, PINK, RED, RED }, bot[4] = { YELLOW, YELLOW, YELLOW, YELLOW };
+  // the name: SISTER, a letter every three frames
+  static const int top[4] = { PINK, PINK, YELLOW, YELLOW };
   int shown = (t - 18) / 3;
   if (shown > 0) {
-    std::string a = "BYBA", b = "GAMES";
-    std::string aa = a.substr(0, shown < 4 ? shown : 4);
-    bigText((COLS - bigWidth(a)) / 2, 12, aa, top);
-    if (shown > 4) {
-      std::string bb = b.substr(0, shown - 4 < 5 ? shown - 4 : 5);
-      bigText((COLS - bigWidth(b)) / 2, 17, bb, bot);
-    }
+    std::string a = "SISTER";
+    bigText((COLS - bigWidth(a)) / 2, 13, a.substr(0, shown < 6 ? shown : 6), top);
   }
-  if (t > 50) centre(23, "the FPGA game console", GREY);
+  if (t > 50) centre(21, "Silicon Systems Together", GREY);
   if (t > 70 && (t / 15) % 2 == 0) centre(26, "press any button", WHITE);
 }
 

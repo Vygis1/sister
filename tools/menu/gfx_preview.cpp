@@ -30,7 +30,7 @@ int main(int argc, char **argv) {
   const char *dir = argc > 1 ? argv[1] : ".";
   gfx::link(w1, wN, r1);
   gfx::begin();
-  Top t; t.title = "FPGA CONSOLE"; t.time = "18:42"; t.date = "Sat 17 Oct"; t.gear = true;
+  Top t; t.title = "SiSTer"; t.time = "18:42"; t.date = "Sat 17 Oct"; t.gear = true;
   struct { const char *n, *k; RGB c; int g; } sys[] = {
     { "NES", "nes", { 215, 55, 60 }, 12 }, { "Super NES", "snes", { 125, 100, 210 }, 8 }, { "Nintendo 64", "n64", { 40, 160, 90 }, 3 },
     { "Game Boy", "gb", { 130, 175, 50 }, 9 }, { "GB Advance", "gba", { 80, 100, 235 }, 6 }, { "Master System", "sms", { 210, 60, 70 }, 4 },
@@ -47,9 +47,9 @@ int main(int argc, char **argv) {
   g.badges = true; g.accent = { 80, 100, 235 };
   const char *names[] = { "Celeste Classic", "Tonc: Brinstar demo", "Tonc: Mode 7", "Tonc: Sprites", "Tonc: Windows", "Tonc: Blending", "jsmolka ARM test", "jsmolka Thumb test" };
   for (auto n : names) { Row r; r.text = n; g.rows.push_back(r); }
-  g.rows[0].sub = "last played today 18:20"; g.rows[0].tag = "SAVE";
+  g.rows[0].sub = "last played today 18:20"; g.rows[0].tag = "SAVE"; g.rows[0].fav = true; g.rows[1].fav = true;
   g.sel = 0; g.first = 0;
-  g.hints = { { S_CROSS, "Play" }, { S_CIRCLE, "Back" }, { S_L1R1, "Page" } };
+  g.hints = { { S_CROSS, "Play" }, { S_CIRCLE, "Back" }, { S_SQUARE, "Favourite" }, { S_L1R1, "Page" } };
   SHOT("gfx_games.ppm", listPage(g));
 
   ListView s; s.top = t; s.top.title = "Picture"; s.top.crumbs = "Home  >  Settings  >  Picture"; s.top.gear = false; s.accent = { 60, 120, 140 };

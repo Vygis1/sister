@@ -109,7 +109,7 @@ or build it yourself with the Arduino CLI; the commands are in
     /discs/         PlayStation discs: a .bin of raw 2352-byte sectors, or a .cue with .bin tracks (also /roms/ps1/)
     /bios/          the PlayStation BIOS (SCPH1001.BIN or another 512 kB SCPH*.BIN)
     /saves/         written by the console: card1.mcr (PlayStation), n64/*.eep, snes/*.srm, gb/*.sav, gba/*.sav
-    /menu/          optional: the menu's console logos and button icons (tools/menu/mklogos.py)
+    /menu/          optional: your own console art and button icons, drawn instead of the built-in ones (tools/menu/mkart.py)
 
 Games dropped loose into `/roms` are sorted into their console's folder the first
 time the card is read. A PlayStation `.cue` must name `.bin` tracks: audio tracks as MP3 or
@@ -132,6 +132,7 @@ System, *At power-up* can start the last game instead.)
 | **Up / Down** | move (Left / Right or L1 / R1: a page at a time) |
 | **A** (Cross) or **Start** | open a console's games / play the game / change a setting |
 | **B** (Circle) | back |
+| **Square** (in a console's games) | mark or unmark a favourite: favourites come first, with a gold badge (kept in `/saves/favourites.txt`) |
 | **Triangle** | the settings |
 | **PS / Home**, or **Start + Select** | the menu, from any game: back to the game, reset, settings, home |
 

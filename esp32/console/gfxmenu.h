@@ -15,7 +15,7 @@ using namespace gfxfont;
 static const RGB WHITE = { 255, 255, 255 }, DIM = { 170, 178, 212 }, FAINT = { 120, 128, 165 }, ROW = { 205, 210, 235 },
                  SOFT = { 190, 200, 255 }, GREEN = { 150, 230, 170 }, TILE = { 226, 229, 238 }, TILE_ON = { 246, 247, 251 };
 
-// --- the consoles' art from the card (/menu/logos: tools/menu/mklogos.py), loaded once -------------
+// --- the consoles' art: built in (gfx_art.h, tools/menu/mkart.py) or the card's own /menu/logos ------
 struct Art { gfx::Image logo, pad; bool tried = false; };
 static Art art[16];
 static Art &artOf(int m, const char *key) {
@@ -110,7 +110,8 @@ static void homeScreen(const HomeView &v, RGB accent) {
 }
 
 // --- a list: a console's games, a settings page ----------------------------------------------------
-struct Row { std::string text, sub, value, tag; RGB tagInk = GREEN; bool gap = false; };
+struct Row { std::string text, sub, value, tag; RGB tagInk = GREEN; bool gap = false, fav = false; };
+static const RGB GOLD = { 245, 200, 90 };
 struct ListView {
   Top top; std::vector<Row> rows; int sel = 0, first = 0;
   bool badges = false;              // the games' initials in a square at the left
@@ -129,13 +130,15 @@ static void listScreen(const ListView &v) {
     rrect(24, y, 592, 48, 12, WHITE, 14);
     int tx = 40;
     if (v.badges) {
-      rrect(36, y + 10, 28, 28, 7, on ? RGB{ 255, 255, 255 } : WHITE, on ? 60 : 30);
+      // (a favourite's badge is gold, its letter dark)
+      if (r.fav) rrect(36, y + 10, 28, 28, 7, GOLD);
+      else rrect(36, y + 10, 28, 28, 7, on ? RGB{ 255, 255, 255 } : WHITE, on ? 60 : 30);
       const char *p = r.text.c_str();
       uint32_t cp = nextCp(p);
       char ini[8] = {0};
       if (cp < 0x80) { ini[0] = (char)toupper((int)cp); }
       else { size_t k = p - r.text.c_str(); memcpy(ini, r.text.c_str(), min((size_t)7, k)); }
-      text(F14B, 50, y + 14, ini, WHITE, CENTRE);
+      text(F14B, 50, y + 14, ini, r.fav ? RGB{ 70, 52, 10 } : WHITE, CENTRE);
       tx = 78;
     }
     int right = 600;

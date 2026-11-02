@@ -52,7 +52,7 @@ FAT32 only. Cards larger than 32 GB usually come formatted exFAT and have to be 
     /bios/       the PlayStation BIOS (SCPH*.BIN, 512 kB); optionally gba_bios.bin
     /pc/         boot0.rom and boot1.rom, the DOS PC's BIOS and VGA BIOS
     /saves/      written by the console: card1.mcr, n64/*.eep, snes/*.srm, gb/*.sav, gba/*.sav
-    /menu/       optional menu art: logos/ and icons/ (tools/menu/mklogos.py)
+    /menu/       optional menu art: logos/ and icons/ (tools/menu/mkart.py)
 
 A system's folder can also have its long name (for example `/roms/genesis`, `/roms/gameboy`,
 `/roms/ps1` for discs). A game left loose in `/roms` is moved into its system's folder by its

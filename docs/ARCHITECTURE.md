@@ -51,7 +51,7 @@ Images are compressed bitstreams (`BITSTREAM.GENERAL.COMPRESS`). They are raw `.
 /bios/                  BIOS files: the PlayStation's SCPH*.BIN, optionally gba_bios.bin
 /pc/                    the DOS PC's BIOS: boot0.rom and boot1.rom
 /saves/                 written by the console: card1.mcr, n64/, snes/, gb/, gba/
-/menu/logos/, /menu/icons/   optional menu art (tools/menu/mklogos.py)
+/menu/logos/, /menu/icons/   optional menu art (tools/menu/mkart.py)
 ```
 
 The menu lists every `.bin` in `/cores` and every system folder in `/roms`. A game left

@@ -223,7 +223,7 @@ static const gfx::RGB HOME_ACCENT = { 70, 60, 160 };
 static void message(const String &a, const String &b = "", int colour = ui::WHITE) {
   if (gmode) {
     gfx::highlightOff(gW1);
-    gscr::Top t = gtop("FPGA CONSOLE");
+    gscr::Top t = gtop("SiSTer");
     grender(0, 0, gfx::W, gfx::H, [&] { gscr::messageScreen(t, a.c_str(), b.c_str(), HOME_ACCENT); });
     return;
   }
@@ -235,7 +235,7 @@ static String gmA, gmB; static int gmM = -1;
 static void gmessage(const String &a, const String &b, int m, float progress = -1) {
   gmA = a; gmB = b; gmM = m;
   gfx::highlightOff(gW1);
-  gscr::Top t = gtop("FPGA CONSOLE");
+  gscr::Top t = gtop("SiSTer");
   grender(0, 0, gfx::W, gfx::H, [&] {
     gscr::messageScreen(t, a.c_str(), b.c_str(), m >= 0 ? MCOL[m] : HOME_ACCENT, m, m >= 0 ? MACHINES[m].core : nullptr, progress);
   });
@@ -303,8 +303,56 @@ static void tidy() {
     if (SD.rename("/roms/" + n, dir + "/" + n)) Log.println("menu: moved " + n + " into " + dir);
   }
 }
+// --- favourites: games marked with square in a console's list, first in it with a gold badge ----
+// One path a line in /saves/favourites.txt (on the card, so they go where the games go).
+static const char *FAV_FILE = "/saves/favourites.txt";
+static std::vector<std::string> favs;
+static bool favsLoaded = false;
+static void favsLoad() {
+  favs.clear(); favsLoaded = true;
+  if (!haveCard) return;
+  File f = SD.open(FAV_FILE);
+  while (f && f.available()) {
+    String l = f.readStringUntil('\n'); l.trim();
+    if (l.length()) favs.push_back(l.c_str());
+  }
+  if (f) f.close();
+}
+static bool isFav(const char *path) {
+  if (!favsLoaded) favsLoad();
+  for (auto &x : favs) if (!strcasecmp(x.c_str(), path)) return true;
+  return false;
+}
+static void favsSave() {
+  SD.mkdir("/saves");
+  File f = SD.open(FAV_FILE, FILE_WRITE);
+  if (!f) return;
+  for (auto &x : favs) { f.print(x.c_str()); f.print('\n'); }
+  f.close();
+}
+static void sortGames(int m) {
+  std::sort(lists[m].begin(), lists[m].end(), [](const Game &a, const Game &b) {
+    bool fa = isFav(a.path), fb = isFav(b.path);
+    if (fa != fb) return fa;
+    return strcasecmp(a.name, b.name) < 0;
+  });
+}
+// square on a game: mark it or unmark it; the list re-sorts and the selection stays on the game
+static int toggleFav(int m, int i) {
+  if (i < 0 || i >= (int)lists[m].size()) return i;
+  std::string p = lists[m][i].path;
+  bool was = isFav(p.c_str());
+  if (was) { for (size_t k = 0; k < favs.size(); k++) if (!strcasecmp(favs[k].c_str(), p.c_str())) { favs.erase(favs.begin() + k); break; } }
+  else favs.push_back(p);
+  favsSave();
+  sortGames(m);
+  for (int k = 0; k < (int)lists[m].size(); k++) if (p == lists[m][k].path) return k;
+  return i;
+}
+
 static void scan() {
   for (auto &l : lists) l.clear();
+  favsLoaded = false;
   poolClear();
   consoles.clear();
   if (!haveCard) return;
@@ -383,7 +431,7 @@ static void scan() {
     }
   }
   for (int m = 0; m < NMACH; m++) {
-    std::sort(lists[m].begin(), lists[m].end(), [](const Game &a, const Game &b) { return strcasecmp(a.name, b.name) < 0; });
+    sortGames(m);
     if (!lists[m].empty()) consoles.push_back(m);
   }
 }
@@ -1540,9 +1588,9 @@ static std::vector<std::string> info() {
                               std::to_string((uint32_t)((SD.totalBytes() - SD.usedBytes()) >> 30)) + " GB free");
     else v.push_back("SD card: none");
   } else if (nav.page == P_PICTURE) {
-    v.push_back("left / right or cross change it; at once");
+    v.push_back("Left / right or cross changes a setting; it applies at once");
   } else if (nav.page == P_MAP) {
-    v.push_back("cross: set the button, square: a second one");
+    v.push_back("Cross sets the button; square adds a second one");
   }
   return v;
 }
@@ -1659,7 +1707,7 @@ static void gpaint() {
   using namespace gscr;
   switch (nav.page) {
   case P_HOME: {
-    HomeView v; v.top = gtop("FPGA CONSOLE"); v.top.gear = true;
+    HomeView v; v.top = gtop("SiSTer"); v.top.gear = true;
     std::vector<HomeItem> h = homeItems();
     int hc = (!h.empty() && h[0].act == H_CONTINUE) ? 1 : 0;
     if (hc) {
@@ -1681,7 +1729,7 @@ static void gpaint() {
   case P_GAMES: {
     ListView v; v.badges = true; v.accent = MCOL[cur];
     v.top = gtop(MACHINES[cur].name, std::string("Home  >  ") + MACHINES[cur].name);
-    for (auto &g : lists[cur]) { Row r; r.text = shown(g.name).c_str(); v.rows.push_back(r); }
+    for (auto &g : lists[cur]) { Row r; r.text = shown(g.name).c_str(); r.fav = isFav(g.path); v.rows.push_back(r); }
     if (v.rows.empty()) v.info.push_back("No games for this console on the card");
     keepVisible(listRows(v));
     v.first = nav.top; v.sel = nav.sel;
@@ -1692,7 +1740,7 @@ static void gpaint() {
     }
     Last l = lastGame();
     if (l.m == cur && l.i >= 0 && l.i < (int)v.rows.size()) v.rows[l.i].sub = "last played " + whenText();
-    v.hints = { { S_CROSS, "Play" }, { S_CIRCLE, "Back" }, { S_L1R1, "Page" } };
+    v.hints = { { S_CROSS, "Play" }, { S_CIRCLE, "Back" }, { S_SQUARE, "Favourite" }, { S_L1R1, "Page" } };
     v.note = note.c_str();
     listPage(v);
     break; }
@@ -1713,8 +1761,8 @@ static void gpaint() {
       "", "Press the pad's button for it now", std::to_string(left < 0 ? 0 : left) + " seconds" }, {});
     break; }
   case P_ABOUT:
-    glines("About", { "BYBA GAMES", "the FPGA game console", "", "Text: Nunito (SIL Open Font License)",
-      "Console art: RetroPie's carbon theme (from the card)" }, { { S_CIRCLE, "Back" } });
+    glines("About", { "SiSTer  -  Silicon Systems Together", "every machine written for this console, GPL-3", "",
+      "Text: Nunito (SIL Open Font License)", "Console art: drawn for SiSTer (tools/menu/mkart.py)" }, { { S_CIRCLE, "Back" } });
     break;
   default: {
     ListView v; v.accent = { 60, 120, 140 };
@@ -1798,7 +1846,7 @@ static void draw() {
       ui::centre(26, "circle: back", ui::GREY);
     } else {
       // (an image built before the menu's own glyphs: no logo to draw)
-      scr::message(ch, "BYBA GAMES", "the FPGA game console", ui::YELLOW);
+      scr::message(ch, "SiSTer", "Silicon Systems Together", ui::YELLOW);
     }
     break;
   default:
@@ -2180,6 +2228,12 @@ static void task(void *) {
     }
     if ((edge & pads::M_A) || ((edge & pads::M_START) && !(p & pads::M_SEL))) pickItem();
     else if ((edge & pads::M_X) && nav.page == P_MAP) pickItem(true);
+    else if ((edge & pads::M_X) && nav.page == P_GAMES && !lists[cur].empty()) {
+      nav.sel = toggleFav(cur, nav.sel);
+      saveSeenFor = -1;                     // (the rows moved: their SAVE tags are looked up again)
+      note = isFav(lists[cur][nav.sel].path) ? "added to favourites" : "removed from favourites";
+      draw();
+    }
     else if ((edge & pads::M_Y) && nav.page == P_HOME) go(P_SETTINGS);
     else if (edge & pads::M_B) back();
     // (the settings pages show live things -- the pads coming and going, Wi-Fi: now and then)

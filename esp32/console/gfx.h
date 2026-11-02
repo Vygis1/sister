@@ -2,9 +2,10 @@
 // picture itself, a line at a time, from objects: esp32/console/ui_list.h). The screens
 // (gfxmenu.h) call the drawing functions here as they would draw pixels; each call is an object
 // in the list, and render() sends the list (a couple of kilobytes) and swaps it in at the next
-// frame. The fonts (gfx_font.h, from tools/menu/mkfont.py) and the images (the consoles' logos and
-// the pad's symbols from the card, tools/menu/mklogos.py) go to the board once (begin(), and an
-// image the first time it is drawn).
+// frame. The fonts (gfx_font.h, from tools/menu/mkfont.py) and the images (the consoles' name
+// plates and drawings and the pad's symbols: tools/menu/mkart.py, built in as gfx_art.h, or from
+// the card when it has its own) go to the board once (begin(), and an image the first time it is
+// drawn).
 //
 // (Until 2026-10-17 evening the pixels were drawn here and sent -- a page took two seconds.)
 
@@ -14,6 +15,7 @@
 #include <esp_heap_caps.h>
 #include <string>
 #include <vector>
+#include "gfx_art.h"
 #include "gfx_font.h"
 #include "ui_list.h"
 
@@ -79,13 +81,23 @@ static bool begin() {
 static void forget() {}                // (the list is sent whole each time)
 static void end() { ready = false; }
 
-// --- images: RGBA from the card (.lgo, tools/menu/mklogos.py), on the board the first time drawn ----
+// --- images: RGBA from the card (.lgo, tools/menu/mkart.py), on the board the first time drawn ----
 struct Image { uint16_t w = 0, h = 0; uint8_t *px = nullptr; uint32_t at = 0, gen = 0; };
 static uint32_t imgNext = 0, imgGen = 0;
+static Image builtIn(const char *path) {
+  Image im;
+  for (int i = 0; i < gfxart::NPICS; i++)
+    if (!strcmp(gfxart::PICS[i].path, path)) {
+      im.w = gfxart::PICS[i].w; im.h = gfxart::PICS[i].h;
+      im.px = const_cast<uint8_t *>(gfxart::PICS[i].px);   // (only ever read: ensure())
+      break;
+    }
+  return im;
+}
 static Image loadImage(const char *path) {
   Image im;
   File f = SD.open(path);
-  if (!f) return im;
+  if (!f) return builtIn(path);
   uint8_t hd[8];
   if (f.read(hd, 8) == 8 && !memcmp(hd, "LGO1", 4)) {
     im.w = hd[4] | (hd[5] << 8); im.h = hd[6] | (hd[7] << 8);
@@ -94,7 +106,7 @@ static Image loadImage(const char *path) {
     if (!im.px || f.read(im.px, n) != (int)n) { if (im.px) free(im.px); im = Image(); }
   }
   f.close();
-  return im;
+  return im.px ? im : builtIn(path);
 }
 static bool ensure(Image &im) {
   if (!im.px) return false;

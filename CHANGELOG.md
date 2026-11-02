@@ -7,6 +7,12 @@
 - **The DOS PC is removed** (ao486, 486Tang's chipset, MiSTer's L2/IDE/Sound Blaster, the
   OPL3, the floorplan, the Verilator bench and pccfg.py): a new PC, our own 486 and chipset, is
   being written in `rtl/pc/`. `tools/build.tcl` reads that folder whole when `CORE_PC=1`.
+- **The menu's art is our own and built in** (`tools/menu/mkart.py` -> `esp32/console/gfx_art.h`):
+  each console's name in the menu's typeface and a drawing of its controller or handheld, made
+  here; the RetroPie theme art (and mklogos.py, which fetched it) is gone, and nothing has to be
+  copied to the card for the menu to look right. A card's own `/menu/logos` still wins.
+- **Favourites:** square on a game marks it; favourites sort first with a gold badge.
+- **SiSTer** on the home screen, the splash and About (it said FPGA CONSOLE / BYBA GAMES).
 - **The pad as keys** in DOS games: the left stick's four directions are buttons of their own in
   a game's `.pad` file (`lstick_up` ...), and `mouse_y = off` keeps the right stick to turning.
 
