@@ -1498,7 +1498,7 @@ module console_top #(
 	end endgenerate
 
 	// --- the PC ---------------------------------------------------------------------------------------
-	// pc_top: a 486 (ao486, from 486Tang), its memory and its picture in DDR3 (its own arbiter), its
+	// pc_top: a 486 (rtl/pc, our own), its memory and its picture in DDR3 (its own arbiter), its
 	// registers at 0x7000 of this page, its disk buffer at 0x8000, its CD drive from 0xA000 (pc_top's map),
 	// the BIOSes in through the fill
 	// (written at FILL_BASE + the word index * 4).

@@ -13,7 +13,7 @@
 // task; the disc is the cue sheet named as the image (/roms/pc/rayman.img -> /roms/pc/rayman.cue), its
 // bin files beside it. Its CD audio goes into the core's 44.1 kHz FIFO a sector at a time.
 //
-// The keyboard: bytes (PS/2 set 2 scan codes, make and F0 break) from the PC -- pc/pad.py's keyboard
+// The keyboard: bytes (PS/2 set 2 scan codes, make and F0 break) from the PC -- tools/pad.py's keyboard
 // window -- through the serial console ("kb <hex> ..."), and the controller's buttons as the keys
 // Doom wants, while no menu is up.
 #pragma once
@@ -304,11 +304,14 @@ static void stop() {
 // --- the controller as keys (set 2) ---------------------------------------------------------------------
 // Each of the 14 buttons sends up to three keys, pressed and released with it. The game's own map is the
 // text file beside its image (/roms/pc/<name>.pad): a line a button, "button = key, key ...", '#' a
-// comment -- buttons up down left right a b x y l1 r1 l2 r2 start select; keys as in KEYS below. With
-// no file, Doom's: arrows, fire (Ctrl), use (Space), run (Shift), strafe (, .), map (Tab), Enter, Esc, Y, N.
+// comment -- buttons up down left right a b x y l1 r1 l2 r2 start select, and the left stick's four ways
+// lstick_up lstick_down lstick_left lstick_right (left out: as the D-pad's); keys as in KEYS below. With
+// no file, Doom's: arrows, fire (Ctrl), use (Space), run (Shift), strafe (, .), map (Tab), Enter, Esc, Y, N,
+// the left stick walking and strafing (arrows up/down, comma/period) and the right stick turning only.
 struct PadKey { uint8_t code; bool e0; };
-static const int NBTN = 14, KPB = 3;
-static const char *const BTN[NBTN] = { "up", "down", "left", "right", "a", "b", "x", "l1", "r1", "y", "start", "select", "r2", "l2" };
+static const int NBTN = 18, KPB = 3;
+static const char *const BTN[NBTN] = { "up", "down", "left", "right", "a", "b", "x", "l1", "r1", "y", "start", "select", "r2", "l2",
+                                       "lstick_up", "lstick_down", "lstick_left", "lstick_right" };
 struct KeyName { const char *name; uint8_t code; bool e0; };
 static const KeyName KEYS[] = {
   { "a", 0x1C }, { "b", 0x32 }, { "c", 0x21 }, { "d", 0x23 }, { "e", 0x24 }, { "f", 0x2B }, { "g", 0x34 },
@@ -335,13 +338,16 @@ static const KeyName KEYS[] = {
 static const uint8_t MB_FIRST = 0xF1;
 static bool lstickMouse = false;            // the .pad file's "lstick = mouse": the left stick moves it too
 static float mouseSpeed = 4.0f;             // "mouse_speed = N": counts a 10 ms tick at full tilt (12 was too fast)
+static bool mouseY = true;                  // "mouse_y = off": the right stick only turns (Doom: the mouse's y walks)
 static PadKey padMap[NBTN][KPB];
 static const PadKey DOOM_MAP[NBTN] = { { 0x75, true }, { 0x72, true }, { 0x6B, true }, { 0x74, true }, { 0x14, false },
                                        { 0x29, false }, { 0x12, false }, { 0x41, false }, { 0x49, false }, { 0x0D, false },
-                                       { 0x5A, false }, { 0x76, false }, { 0x35, false }, { 0x31, false } };
+                                       { 0x5A, false }, { 0x76, false }, { 0x35, false }, { 0x31, false },
+                                       { 0x75, true }, { 0x72, true }, { 0x41, false }, { 0x49, false } };
 static void padMapDefault() {
   memset(padMap, 0, sizeof padMap);
   for (int b = 0; b < NBTN; b++) padMap[b][0] = DOOM_MAP[b];
+  mouseY = false;                           // (Doom's: the right stick turns; walking is the left stick's)
 }
 static const KeyName *keyNamed(const String &n) {
   for (auto &k : KEYS) if (n.equalsIgnoreCase(k.name)) return &k;
@@ -356,6 +362,7 @@ static void padMapLoad(const String &imgPath) {
   File f = SD.open(path);
   if (!f) return;
   memset(padMap, 0, sizeof padMap);
+  mouseY = true;
   int lines = 0;
   while (f.available()) {
     String l = f.readStringUntil('\n');
@@ -371,6 +378,12 @@ static void padMapLoad(const String &imgPath) {
     if (bn.equalsIgnoreCase("lstick")) {
       String v = l.substring(eq + 1); v.trim();
       lstickMouse = v.equalsIgnoreCase("mouse");
+      lines++;
+      continue;
+    }
+    if (bn.equalsIgnoreCase("mouse_y")) {
+      String v = l.substring(eq + 1); v.trim();
+      mouseY = !v.equalsIgnoreCase("off");
       lines++;
       continue;
     }
@@ -391,15 +404,17 @@ static void padMapLoad(const String &imgPath) {
     lines++;
   }
   f.close();
+  for (int k = 0; k < 4; k++)               // (a stick way the file leaves out: the D-pad's keys, as before)
+    if (!padMap[14 + k][0].code) memcpy(padMap[14 + k], padMap[k], sizeof padMap[k]);
   Log.printf("pc pad: %s, %d buttons\n", path.c_str(), lines);
 }
-static uint16_t padWas = 0;
-template <class In> static uint16_t padBits(const In &i) {
+static uint32_t padWas = 0;
+template <class In> static uint32_t padBits(const In &i) {
   const int DIGI = 48;
-  uint16_t b = 0;
+  uint32_t b = 0;
   int ly = lstickMouse ? 0 : i.ly, lx = lstickMouse ? 0 : i.lx;
-  if (i.du || ly < -DIGI) b |= 1 << 0; if (i.dd || ly > DIGI) b |= 1 << 1;
-  if (i.dl || lx < -DIGI) b |= 1 << 2; if (i.dr || lx > DIGI) b |= 1 << 3;
+  if (i.du) b |= 1 << 0; if (i.dd) b |= 1 << 1; if (i.dl) b |= 1 << 2; if (i.dr) b |= 1 << 3;
+  if (ly < -DIGI) b |= 1 << 14; if (ly > DIGI) b |= 1 << 15; if (lx < -DIGI) b |= 1 << 16; if (lx > DIGI) b |= 1 << 17;
   if (i.a) b |= 1 << 4; if (i.b) b |= 1 << 5; if (i.x) b |= 1 << 6;
   if (i.l1) b |= 1 << 7; if (i.r1) b |= 1 << 8; if (i.y) b |= 1 << 9;
   if (i.start) b |= 1 << 10; if (i.sel) b |= 1 << 11; if (i.r2) b |= 1 << 12; if (i.l2) b |= 1 << 13;
@@ -421,7 +436,7 @@ template <class In> static void mouseMove(const In &i) {
     return f * fabsf(f) * mouseSpeed;       // (counts a 10 ms tick at full tilt)
   };
   mfx += axis(i.rx) + (lstickMouse ? axis(i.lx) : 0.0f);
-  mfy -= axis(i.ry) + (lstickMouse ? axis(i.ly) : 0.0f);
+  mfy -= (mouseY ? axis(i.ry) : 0.0f) + (lstickMouse ? axis(i.ly) : 0.0f);
   int dx = (int)mfx, dy = (int)mfy;
   mfx -= dx; mfy -= dy;
   if (dx > 127) dx = 127; if (dx < -127) dx = -127; if (dy > 127) dy = 127; if (dy < -127) dy = -127;
@@ -432,8 +447,8 @@ template <class In> static void mouseMove(const In &i) {
 }
 // (called by the pads' loop with the first player's buttons, when the board is the PC)
 template <class In> static void padKeys(bool there, const In &i) {
-  uint16_t now = (there && on && focus) ? padBits(i) : 0;
-  uint16_t ch = now ^ padWas;
+  uint32_t now = (there && on && focus) ? padBits(i) : 0;
+  uint32_t ch = now ^ padWas;
   for (int k = 0; k < NBTN; k++) {
     if (!((ch >> k) & 1)) continue;
     for (int j = 0; j < KPB; j++) {

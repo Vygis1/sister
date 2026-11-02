@@ -1,12 +1,13 @@
-# Bluetooth controllers without BTstack
+# Bluetooth controllers
 
-The ESP32 firmware (`esp32/console`) reads Bluetooth pads through Bluepad32, and Bluepad32 runs
-on BTstack. BTstack's licence allows use "for personal benefit and not for any commercial
-purpose". This project is GPL-3 and the consoles are meant to be sold, so BTstack has to go
-before any are sold. This page covers what replaces it, why, what it costs, and what is still
-to be checked on a board.
+The ESP32 firmware (`esp32/console`) reads Bluetooth pads through our own HID host on ESP-IDF's
+Bluedroid stack (`pads_bluedroid.h`, Apache-2.0 underneath). It replaced Bluepad32, which runs on
+BTstack -- BTstack's licence allows use "for personal benefit and not for any commercial
+purpose", and the consoles are meant to be sold. Since 2026-10-23 it is the only Bluetooth in the
+firmware: the Bluepad32 path is gone. This page covers the design, why, what it costs, and what is
+still to be checked on a board.
 
-**Status (2026-10-22): works on the board with a DualShock 4; still opt-in.** The Bluedroid
+**Status: works on the board with a DualShock 4 (2026-10-21); the default and only stack since 2026-10-23.** The Bluedroid
 backend covers DualShock 4, DualSense, Switch Pro and Xbox (BLE and old Classic firmware):
 pairing, reconnecting, two players, PS/Home and rumble. On the board (T8, 2026-10-21):
 
@@ -20,8 +21,7 @@ Open: Doom felt "sticky" with the pad. The loop that turns the pad into keys run
 (2 ms at worst), so the suspect is the link going into sniff mode (reports in bursts). The
 firmware now keeps the links active (`btactive on|off` switches it live; `pads` shows the report
 spacing and the link mode) -- to be measured with the pad. One pairing attempt failed with
-status 9 and the retry succeeded at once. DualSense, Switch Pro and Xbox are untried. Bluepad32
-stays the default build until these are done.
+status 9 and the retry succeeded at once. DualSense, Switch Pro and Xbox are untried.
 
 ## 1. Assessment
 
@@ -207,21 +207,14 @@ Selecting the backend (compile time, in `pads.h`):
 
 | Macro | Backend |
 |---|---|
-| (none), building on esp32-bluepad32 | Bluepad32 (the default, unchanged) |
-| (none), building on stock esp32:esp32 3.3.x | Bluedroid (the only Bluetooth stack there) |
-| `PADS_BACKEND_BLUEDROID` | Bluedroid; a clear `#error` on the Bluepad32 platform (checked) |
-| `PADS_BACKEND_BLUEPAD32` | Bluepad32 |
+| (none), on stock esp32:esp32 3.3.x | Bluedroid, our HID host |
 | `PADS_BACKEND_NONE` | no Bluetooth, the PC pad over USB only; the controller's memory is released |
 
 A macro is passed with `--build-property "compiler.cpp.extra_flags=-DPADS_BACKEND_NONE"`.
 
 Builds (the default arduino-cli configuration already has the esp32 board-manager URL):
 
-    # Bluepad32 (the default, as before)
-    tools/arduino/arduino-cli.exe compile --fqbn "esp32-bluepad32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console
-
-    # Bluedroid
-    tools/arduino/arduino-cli.exe compile --fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d-bluedroid esp32/console
+    tools/arduino/arduino-cli.exe compile --fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console
 
     # the Bluedroid declarations against the installed platform
     sh tools/bt_abi/check.sh
@@ -233,7 +226,7 @@ must pass `check.sh` first).
 
 | Build | Platform (ESP-IDF) | Flash (sketch) | "Global variables" | .dram0.bss | .iram0.text | DRAM heap starts at |
 |---|---|---|---|---|---|---|
-| Bluepad32 (default) | esp32-bluepad32 4.1.0 (4.4) | 1,111,509 B | 123,768 B | 101,296 | 119,723 | 0x3FFDBED8 |
+| Bluepad32 (removed 2026-10-23) | esp32-bluepad32 4.1.0 (4.4) | 1,111,509 B | 123,768 B | 101,296 | 119,723 | 0x3FFDBED8 |
 | **Bluedroid** | esp32:esp32 3.3.11 (5.5.5) | **1,470,542 B** | **79,080 B** | 55,992 | 126,507 | **0x3FFD1048** (44,688 B more heap) |
 | no Bluetooth (`PADS_BACKEND_NONE`) | esp32:esp32 3.3.11 (5.5.5) | 681,482 B | 58,896 B | 41,344 | 75,051 | 0x3FFCC170 |
 
@@ -243,7 +236,7 @@ this chip) and one format-truncation note.
 
 ## 4. To verify on the board
 
-Flash the Bluedroid image (`build/fw-t8d-bluedroid`), type `log on`, then reset, or just use
+Flash the image (`build/fw-t8d`), type `log on`, then reset, or just use
 `pads` at any time.
 
 1. **The firmware as a whole on IDF 5** (before any pad): menu on HDMI, the SD card read, a

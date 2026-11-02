@@ -99,20 +99,13 @@ foreach f [lsort $srcs] {
     puts " read: [file tail $f]"
     if {[file extension $f] eq ".sv"} { read_verilog -sv $f } else { read_verilog $f }
 }
-# the PC (CORE_PC=1): ao486 and its chipset from rtl/pc, by its file list (rtl/pc/files.f -- the
-# folder holds 486Tang's alternatives too, under the same module names)
+# the PC (CORE_PC=1): its own folder, rtl/pc (the 486 and its chipset), read whole
 set incdirs {}
 if {[lsearch -exact $generics "CORE_PC=1"] >= 0} {
-    set fl [open $rtldir/pc/files.f]
-    foreach f [split [read $fl] "
-"] {
-        set f [string trim $f]
-        if {$f eq ""} continue
-        puts " read: pc/$f"
-        read_verilog -sv $rtldir/pc/$f      ;# (all of it as SystemVerilog: some of ao486's .v files are)
-    }
-    close $fl
-    lappend incdirs $rtldir/pc/ao486
+    set pcsrcs [concat [glob -nocomplain $rtldir/pc/*.v] [glob -nocomplain $rtldir/pc/*.sv]]
+    if {[llength $pcsrcs] == 0} { puts " *** CORE_PC=1 but rtl/pc holds no sources"; exit 1 }
+    foreach f $pcsrcs { puts " read: [file tail $f]"; read_verilog -sv $f }
+    lappend incdirs $rtldir/pc
 }
 if {![file exists $xdc]} { puts " *** no such xdc: $xdc"; exit 1 }
 read_xdc $xdc

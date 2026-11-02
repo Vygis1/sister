@@ -65,17 +65,11 @@ part, date) that the FPGA's configuration engine rejects. `tools/core.sh` writes
 
 ## Building
 
-With the Arduino CLI in `tools/arduino/`. There are two variants; they differ only in the
-Bluetooth stack (see [docs/BLUETOOTH.md](../docs/BLUETOOTH.md)).
+With the Arduino CLI in `tools/arduino/`, on the stock esp32:esp32 3.3.x platform. The Bluetooth
+pads use our own HID host on ESP-IDF's Bluedroid stack (Apache-2.0; see
+[docs/BLUETOOTH.md](../docs/BLUETOOTH.md)).
 
-    # Bluepad32 (the default; on the esp32-bluepad32 platform)
-    ./tools/arduino/arduino-cli.exe compile --fqbn "esp32-bluepad32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console
-
-    # Bluedroid (opt-in; on the stock esp32:esp32 3.3.11 platform)
-    ./tools/arduino/arduino-cli.exe compile --fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d-bluedroid esp32/console
-
-Bluepad32 is Apache-2.0 but runs on BTstack, which is free for non-commercial use only. The
-Bluedroid build uses ESP-IDF's own stack (Apache-2.0) and works on the board with a DualShock 4.
+    ./tools/arduino/arduino-cli.exe compile --fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console
 
 Flashing, with `tools/pad.py` stopped so the serial port is free:
 

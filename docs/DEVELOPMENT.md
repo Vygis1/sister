@@ -53,7 +53,7 @@ ESP32 serial commands worth knowing (`S` lines, or `bcmd.py "<command>"`): `stat
 | | |
 |---|---|
 | FPGA | Vivado 2026.1. `tools/core.sh` wraps `tools/build.tcl`; `EFFORT=1`, `AREA=1`, `RETIME=1`, `PLACE_DIR=<directive>` tune a run, `RELEASE=1` leaves out debug hardware. Reports land in `build/core_<name>/`. |
-| ESP32 | `tools/arduino/arduino-cli.exe compile --fqbn "esp32-bluepad32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console` (Bluepad32, the default). The Bluedroid variant: `--fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d-bluedroid` ([BLUETOOTH.md](BLUETOOTH.md)). |
+| ESP32 | `tools/arduino/arduino-cli.exe compile --fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app" --build-path build/fw-t8d esp32/console` (our Bluetooth on Bluedroid: [BLUETOOTH.md](BLUETOOTH.md)). |
 | DOS disk images | `python tools/pc/addgame.py <game folder or zip>` (WSL: `mtools`, `nasm`, `sfdisk`) |
 
 Vivado uses about 1.5 cores a run: independent builds go faster in parallel than one after another.

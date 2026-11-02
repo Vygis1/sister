@@ -57,4 +57,4 @@ Reference models, test-program generators, test runners and board debugging scri
 | `gba/` | the ARM7TDMI single-step converter, the BIOS converter, the reference renderer `ppuref.py` |
 | `pce/` | the 65C02 single-step runner, frame tools, the Mednafen comparison |
 | `a26/` | a 6502 assembler and disassembler, bank-switching gate, the NTSC palette |
-| `pc/` | `addgame.py` (a DOS game onto the card), `mkdisk.sh`, `pccfg.py`, `pcgrab.py` (the PC's screen), `pctype.py` |
+| `pc/` | `addgame.py` (a DOS game onto the card), `mkdisk.sh`, `pcgrab.py` (the PC's screen), `pctype.py` |

@@ -1,7 +1,7 @@
 // pads.h - the consoles' joypads, from wherever a pad is: Bluetooth pads (PS4, PS5, Xbox,
-// Switch...) through Bluepad32 on a classic ESP32 (the LilyGO T8: the S3 has no Bluetooth
-// Classic, which the PlayStation pads need), or a pad on the PC, whose state tools/pad.py
-// sends over this chip's USB serial port as a line
+// Switch Pro) through our own HID host on the ESP32's Bluedroid stack (pads_bluedroid.h; the
+// LilyGO T8 -- the S3 has no Bluetooth Classic, which the PlayStation pads need), or a pad on
+// the PC, whose state tools/pad.py sends over this chip's USB serial port as a line
 //
 //     P <buttons, hex> <left x> <left y> <right x> <right y>      (axes -128..127, up negative)
 //
@@ -16,34 +16,15 @@
 // here too (menuButtons, view).
 //
 // Pairing a Bluetooth pad: hold SHARE (or CREATE) and the PS button until the light
-// flashes; the ESP32 remembers the pad after that.
+// flashes; the ESP32 remembers the pad after that. docs/BLUETOOTH.md has the details.
 //
-// Bluepad32 is Apache-2.0 and runs on BTstack, which is free for non-commercial use
-// only -- to be settled before anything here is sold. The way out is the Bluedroid backend
-// (pads_bluedroid.h, ESP-IDF's own stack, Apache-2.0): docs/BLUETOOTH.md.
-//
-// The backend, at compile time (PADS_BT: 0 none, 1 Bluepad32, 2 Bluedroid):
-//   PADS_BACKEND_NONE       no Bluetooth: the PC's pad only
-//   PADS_BACKEND_BLUEPAD32  Bluepad32 (the esp32-bluepad32 platform)
-//   PADS_BACKEND_BLUEDROID  Bluedroid (the stock esp32:esp32 3.3.x platform)
-//   none of them            Bluepad32 if the platform has it (the default build), else Bluedroid
-//                           if the platform has that (stock arduino-esp32 3.3.x), else none
+// PADS_BT: 2 Bluetooth (the stock esp32:esp32 3.3.x platform), 0 none (PADS_BACKEND_NONE, or a
+// platform without Bluedroid Classic: then only the PC's pad).
 
 #pragma once
 #include <sdkconfig.h>
 
-#if defined(PADS_BACKEND_NONE)
-#define PADS_BT 0
-#elif defined(PADS_BACKEND_BLUEDROID)
-#if __has_include(<Bluepad32.h>) || !CONFIG_BT_BLUEDROID_ENABLED
-#error "PADS_BACKEND_BLUEDROID: build on the stock esp32:esp32 3.3.x platform (the Bluepad32 platform has no Bluedroid)"
-#endif
-#include "pads_bluedroid.h"
-#define PADS_BT 2
-#elif defined(PADS_BACKEND_BLUEPAD32) || __has_include(<Bluepad32.h>)
-#include <Bluepad32.h>
-#define PADS_BT 1
-#elif CONFIG_BT_BLUEDROID_ENABLED && CONFIG_BT_CLASSIC_ENABLED && __has_include(<esp_hidh.h>)
+#if !defined(PADS_BACKEND_NONE) && CONFIG_BT_BLUEDROID_ENABLED && CONFIG_BT_CLASSIC_ENABLED && __has_include(<esp_hidh.h>)
 #include "pads_bluedroid.h"
 #define PADS_BT 2
 #else
@@ -248,38 +229,7 @@ static void usbLine(const String &l) {
   usb = p; usbOn = true; usbT = millis();
 }
 
-#if PADS_BT == 1
-// --- Bluetooth pads ------------------------------------------------------------------------
-static ControllerPtr slot[2];
-static void onConnected(ControllerPtr c) {
-  for (auto &s : slot) if (!s) { s = c; Log.printf("pads: %s in\n", c->getModelName().c_str()); return; }
-  Log.println("pads: a third pad -- ignored");
-}
-static void onDisconnected(ControllerPtr c) {
-  for (auto &s : slot) if (s == c) { s = nullptr; Log.println("pads: a pad left"); }
-}
-static bool btOn(int i) { return slot[i] && slot[i]->isConnected() && slot[i]->isGamepad(); }
-static In fromBt(ControllerPtr c) {
-  In p{};
-  uint16_t b = c->buttons(), m = c->miscButtons();
-  uint8_t d = c->dpad();
-  p.a = b & BUTTON_A; p.b = b & BUTTON_B; p.x = b & BUTTON_X; p.y = b & BUTTON_Y;
-  p.sel = m & MISC_BUTTON_SELECT; p.start = m & MISC_BUTTON_START; p.home = c->miscSystem();
-  p.l1 = b & BUTTON_SHOULDER_L; p.r1 = b & BUTTON_SHOULDER_R; p.l2 = b & BUTTON_TRIGGER_L; p.r2 = b & BUTTON_TRIGGER_R;
-  p.du = d & DPAD_UP; p.dd = d & DPAD_DOWN; p.dl = d & DPAD_LEFT; p.dr = d & DPAD_RIGHT;
-  auto ax = [](int v) { v /= 4; return v < -128 ? -128 : v > 127 ? 127 : v; };     // (Bluepad32: +-512)
-  p.lx = ax(c->axisX()); p.ly = ax(c->axisY()); p.rx = ax(c->axisRX()); p.ry = ax(c->axisRY());
-  return p;
-}
-static bool sysWas[2] = { false, false };
-static void btDebug() {
-  for (int i = 0; i < 2; i++)
-    Serial.printf("  BT slot %d: %s\n", i, !slot[i] ? "empty" :
-                  (String(slot[i]->isConnected() ? "connected" : "gone") +
-                   (slot[i]->isGamepad() ? ", gamepad, " : ", NOT a gamepad, ") +
-                   slot[i]->getModelName().c_str()).c_str());
-}
-#elif PADS_BT == 2
+#if PADS_BT == 2
 // --- Bluetooth pads: Bluedroid (pads_bluedroid.h) --------------------------------------------
 static bool sysWas[2] = { false, false };
 static padbt::Pad btPad[2];                   // (poll()'s copy)
@@ -321,7 +271,7 @@ static uint16_t menuButtons() {
   return o;
 }
 
-// what the menu asks of Bluetooth, done here (Bluepad32 wants its own task's calls)
+// what the menu asks of Bluetooth, done here (from the loop, not the menu's task)
 enum { CMD_NONE, CMD_FORGET, CMD_PAIR_ON, CMD_PAIR_OFF };
 static volatile int cmd = CMD_NONE;
 static volatile bool pairing = true;          // new pads are let in (from power-up, as before)
@@ -334,23 +284,7 @@ static volatile bool busBusy = false;         // (the menu sending a lot: wait)
 
 // From loop()
 static void poll() {
-#if PADS_BT == 1
-  BP32.update();
-  if (cmd != CMD_NONE) {
-    int c = cmd; cmd = CMD_NONE;
-    if (c == CMD_FORGET) {
-      BP32.forgetBluetoothKeys();
-      for (auto &s : slot) if (s) s->disconnect();
-      Log.println("pads: paired pads forgotten");
-    } else if (c == CMD_PAIR_ON) { BP32.enableNewBluetoothConnections(true); pairing = true; }
-    else if (c == CMD_PAIR_OFF) { BP32.enableNewBluetoothConnections(false); pairing = false; }
-  }
-  for (int i = 0; i < 2; i++) {
-    bool sys = btOn(i) && slot[i]->miscSystem();
-    if (sys && !sysWas[i]) menuPressed = true;
-    sysWas[i] = sys;
-  }
-#elif PADS_BT == 2
+#if PADS_BT == 2
   if (cmd != CMD_NONE) {
     int c = cmd; cmd = CMD_NONE;
     if (c == CMD_FORGET) { padbt::forget(); Log.println("pads: paired pads forgotten"); }
@@ -368,16 +302,7 @@ static void poll() {
   // the players: the connected pads in order, the first two
   Player np[2] = {};
   int k = 0;
-#if PADS_BT == 1
-  for (int i = 0; i < 2 && k < 2; i++)
-    if (btOn(i)) {
-      Player &q = np[k++];
-      q.on = true; q.bt = true; q.in = fromBt(slot[i]);
-      snprintf(q.name, sizeof q.name, "%s", slot[i]->getModelName().c_str());
-      int bat = slot[i]->battery();
-      q.battery = bat ? bat * 100 / 255 : -1;
-    }
-#elif PADS_BT == 2
+#if PADS_BT == 2
   int npSlot[2] = { -1, -1 };                   // (which Bluetooth slot each player is)
   for (int i = 0; i < 2 && k < 2; i++)
     if (btPad[i].on) {
@@ -438,10 +363,6 @@ static void begin() {
   bool ok = padbt::begin();
   Log.printf("pads: Bluetooth (Bluedroid) %s, internal free %u -- pair a pad with SHARE + PS; or a pad on the PC (tools/pad.py)\n",
              ok ? "up" : "NOT up", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#elif PADS_BT
-  BP32.setup(&onConnected, &onDisconnected);
-  BP32.enableNewBluetoothConnections(true);
-  Log.println("pads: Bluetooth up -- pair a pad with SHARE + PS; or a pad on the PC (tools/pad.py)");
 #else
   Log.println("pads: a pad on the PC (tools/pad.py, over this USB port)");
 #endif

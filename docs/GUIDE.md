@@ -106,7 +106,6 @@ or build it yourself with the Arduino CLI; the commands are in
     /roms/snes/     *.sfc *.smc
     /roms/n64/      *.z64 *.n64 *.v64
     /roms/pc/       DOS games: Game.img (its hard disk), Game.cfg, Game.pad, and Game.cue / .bin (its CD) -- see below
-    /pc/            the PC's BIOS: boot0.rom (Bochs BIOS) and boot1.rom (VGA BIOS), from 486Tang's tools/
     /discs/         PlayStation discs: a .bin of raw 2352-byte sectors, or a .cue with .bin tracks (also /roms/ps1/)
     /bios/          the PlayStation BIOS (SCPH1001.BIN or another 512 kB SCPH*.BIN)
     /saves/         written by the console: card1.mcr (PlayStation), n64/*.eep, snes/*.srm, gb/*.sav, gba/*.sav
@@ -226,7 +225,7 @@ PC running `tools/pad.py` also types into the game.
 | Super NES | Plays Super Mario World; save RAM kept on the SD card. LoROM and HiROM cartridges up to 6 MB; no add-on chips (Super FX, SA-1, DSP-1...). Hi-res screens are shown 256 wide. |
 | PlayStation | Boots the real BIOS and plays commercial games (Crash Bandicoot, Syphon Filter, Tekken 2, MediEvil): memory card, CD audio and XA from the disc image, FMVs. Details in [PLAYSTATION.md](PLAYSTATION.md). |
 | Nintendo 64 | Plays Super Mario 64, Mario Kart 64 and Super Smash Bros., close to the console's speed; other games are untested. EEPROM saves. Details in [N64.md](N64.md). |
-| DOS PC | A 486 at 71.4 MHz (ao486), 32 MB, VGA and VESA SVGA, Sound Blaster 16 + OPL3, CD-ROM with CD audio. Doom, Rayman, Transport Tycoon Deluxe, Fallout. No FPU. |
+| DOS PC | Being rewritten as our own 486 (the first PC, built on ao486, was removed). No image yet. |
 
 ## When something goes wrong
 
@@ -243,8 +242,6 @@ PC running `tools/pad.py` also types into the game.
 ## Legal
 
 The consoles are written from public documentation and checked against public test
-programs. The DOS PC is the exception: it is built from open-source projects (ao486, 486Tang,
-the OPL3, MiSTer's cache and IDE code), each under its own licence -- see
-[THIRD_PARTY.md](THIRD_PARTY.md). Games, the PlayStation BIOS and DOS games are copyrighted:
-use your own. Bluepad32 (the Bluetooth pads) is
-Apache-2.0 but runs on BTstack, which is free for non-commercial use only.
+programs. What remains from other projects is listed in [THIRD_PARTY.md](THIRD_PARTY.md), and is
+being replaced. Games, the PlayStation BIOS and DOS games are copyrighted: use your own.
+The Bluetooth pads run on ESP-IDF's own Bluetooth stack (Apache-2.0).

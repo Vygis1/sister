@@ -8,7 +8,7 @@ menu (PC -> its name) like a console's ROM.
 What goes on the card, in /roms/pc/:
     NAME.img   a bootable hard disk: FreeDOS (HIMEMX, the CD-ROM driver and SHSUCDX when there is a CD) and
                the game, started from AUTOEXEC.BAT
-    NAME.cfg   the core's configuration for it (tools/pc/pccfg.py)
+    NAME.cfg   the core's configuration for it (with the new PC core)
     NAME.cue   the game's CD, if it has one, with its .bin file(s) as NAME.bin (NAME-2.bin ...) -- the
                firmware puts it in the CD-ROM drive (D:) when NAME.img starts
 
@@ -199,9 +199,10 @@ def main():
         r = subprocess.run(['wsl', '-d', 'Ubuntu', '--', 'bash', wsl_path(sh)], capture_output=True, text=True)
         if r.returncode:
             sys.exit('mkdisk.sh failed:\n' + r.stdout + r.stderr)
-        subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'pc', 'pccfg.py'), img], check=True)
+        # (the core's .cfg beside the image comes back with the new PC: the old pccfg.py was
+        # derived from 486Tang and went with it)
         cfg = os.path.splitext(img)[0] + '.cfg'
-        for f in (img, cfg):
+        for f in [img] + ([cfg] if os.path.exists(cfg) else []):
             dst = os.path.join(out, os.path.basename(f))
             if os.path.abspath(dst) != os.path.abspath(f):
                 shutil.copyfile(f, dst)

@@ -88,25 +88,16 @@ user guide is [GUIDE.md](GUIDE.md).)
 
 Covered in [N64.md](N64.md).
 
-### DOS PC — `rtl/pc_top.v`, `pc_*.v`, `rtl/pc/` (third-party)
+### DOS PC — `rtl/pc/` (being rewritten)
 
-The one machine **not** written from scratch for this project. It is nand2mario's 486Tang (a
-port of ao486_MiSTer: Aleksander Osman's ao486 CPU and chipset), with MiSTer's L2 cache, IDE
-code and Sound Blaster, and Greg Taylor's OPL3. Every part's licence is listed in
-[THIRD_PARTY.md](THIRD_PARTY.md). Our own parts:
+The first PC was built on third-party code (ao486 and 486Tang's chipset). It was removed on
+2026-10-23 so that everything in the repository is our own; the new PC -- our own 486 and
+chipset, written like the other machines from public documentation and checked against public
+test suites -- is being written in `rtl/pc/`. Until it boots, there is no PC image.
 
-- **`pc_top.v`:** the system (CPU, L2 cache, chipset, VGA, sound, IDE) on the console's DDR3
-  (`pc_ddr64.v`), at 71.4 MHz.
-- **`pc_fb.v`:** the VGA's picture out of DDR3, scaled to 640 x 480. VESA SVGA modes (8-bit
-  through the palette, 16-bit RGB565) come from the framebuffer the L2 cache writes.
-- **`pc_disk.v`:** the IDE hard disk, served by the ESP32 from an image on the SD card, with
-  read-ahead.
-- **CD-ROM:** an ATAPI drive on the second IDE channel. The ESP32 serves its sectors from a
-  `.cue` / `.bin` image (`esp32/console/cdrom.h`, a port of MiSTer's CD-ROM code). CD audio
-  plays through `pc_cdda.v`.
-- **Mouse and keyboard:** the pad, mapped per game (`esp32/console/pc.h`).
-- **The BIOS load** (`pc_ddr64.v`): the ESP32's words gathered four to a DDR3 line behind a queue,
-  so none is lost when DDR3 is slow; a lost word would raise ctrl `0x706C`.
+Parts kept from the first PC, all ours: `pc_fb.v` (the picture out of DDR3), `pc_disk.v` (the
+hard disk served by the ESP32 from an image on the card), `pc_ddr64.v` (the memory on DDR3) and
+`pc_cdda.v` (CD audio); on the ESP32 `pc.h` (disk, keyboard, the pad as keys and mouse).
 
 ### PlayStation — `rtl/ps1_*.v`, `r3000.v`
 

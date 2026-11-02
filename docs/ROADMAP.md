@@ -20,7 +20,7 @@ Legend: ✅ done · 🔧 in progress · ⬜ planned
 - ⬜ The remaining ps1-tests that DuckStation passes
 
 ### DOS PC
-- ✅ ao486 at 71.4 MHz: Doom, Rayman (CD), Transport Tycoon Deluxe, Fallout
+- 🔧 Our own 486 and chipset (the first PC, on third-party ao486, was removed 2026-10-23); the bar: DOS, Doom, Rayman, TTD, Fallout
 - ✅ SVGA, Sound Blaster 16 + OPL3, ATAPI CD-ROM with CD audio, mouse from the controller
 - ✅ A game is one command away: `tools/pc/addgame.py`
 - ⬜ A faster CPU clock (Doom's demo3 runs at 17.8 fps)

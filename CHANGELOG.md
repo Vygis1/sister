@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased -- everything our own
+
+- **Bluetooth:** our HID host on ESP-IDF's Bluedroid is the only stack; Bluepad32 and
+  BTstack (non-commercial only) are gone from the firmware, the build and the release script.
+- **The DOS PC is removed** (ao486, 486Tang's chipset, MiSTer's L2/IDE/Sound Blaster, the
+  OPL3, the floorplan, the Verilator bench and pccfg.py): a new PC, our own 486 and chipset, is
+  being written in `rtl/pc/`. `tools/build.tcl` reads that folder whole when `CORE_PC=1`.
+- **The pad as keys** in DOS games: the left stick's four directions are buttons of their own in
+  a game's `.pad` file (`lstick_up` ...), and `mouse_y = off` keeps the right stick to turning.
+
 ## 0.2.0 -- the stand-alone console
 
 **HDMI, a menu, no PC.** The board drives a TV through an HDMI breakout on header U4,

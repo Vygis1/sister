@@ -47,19 +47,19 @@ if [ -x tools/arduino/arduino-cli.exe ] || command -v arduino-cli >/dev/null; th
   "$CLI" compile --fqbn "$FQBN" --output-dir "$OUT/esp32/build" esp32/console >/dev/null
   cp "$OUT/esp32/build/console.ino.merged.bin" "$OUT/esp32/console-esp32s3.bin" 2>/dev/null || true
   rm -rf "$OUT/esp32/build"
-  # the LilyGO T8 (classic ESP32, Bluetooth pads): Bluepad32's board package, one
-  # image for offset 0 merged by hand (that package's build does not merge)
-  T8="esp32-bluepad32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app"
+  # the LilyGO T8 (classic ESP32, Bluetooth pads): the stock platform, one image for
+  # offset 0 merged by hand
+  T8="esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=huge_app"
   if "$CLI" compile --fqbn "$T8" --output-dir "$OUT/esp32/t8" esp32/console >/dev/null 2>&1; then
     ESPTOOL=$(ls -d "$LOCALAPPDATA"/Arduino15/packages/esp32/tools/esptool_py/*/esptool.exe ~/.arduino15/packages/esp32/tools/esptool_py/*/esptool 2>/dev/null | head -1)
-    BOOT0=$(find "$LOCALAPPDATA/Arduino15/packages/esp32-bluepad32" ~/.arduino15/packages/esp32-bluepad32 -name boot_app0.bin 2>/dev/null | head -1)
+    BOOT0=$(find "$LOCALAPPDATA/Arduino15/packages/esp32" ~/.arduino15/packages/esp32 -name boot_app0.bin 2>/dev/null | head -1)
     if [ -n "$ESPTOOL" ] && [ -n "$BOOT0" ]; then
       "$ESPTOOL" --chip esp32 merge_bin -o "$OUT/esp32/console-t8.bin" --flash_mode dio --flash_size 4MB         0x1000 "$OUT/esp32/t8/console.ino.bootloader.bin" 0x8000 "$OUT/esp32/t8/console.ino.partitions.bin"         0xe000 "$BOOT0" 0x10000 "$OUT/esp32/t8/console.ino.bin" >/dev/null
     else
       echo "(no esptool or boot_app0.bin: the T8 firmware is not in this release)"
     fi
   else
-    echo "(the Bluepad32 board package is not installed: the T8 firmware is not in this release)"
+    echo "(the T8 firmware did not build: it is not in this release)"
   fi
   rm -rf "$OUT/esp32/t8"
 else

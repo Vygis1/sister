@@ -1,5 +1,5 @@
 // pads_bluedroid.h - Bluetooth pads on ESP-IDF's own Bluetooth stack, Bluedroid (Apache-2.0), in
-// place of Bluepad32 on BTstack (BTstack is free for non-commercial use only). docs/BLUETOOTH.md
+// place of Bluepad32 on BTstack, removed 2026-10-23 (BTstack is free for non-commercial use only). docs/BLUETOOTH.md
 // has the why, the licences and what is still to be checked on a board.
 //
 // Two transports:

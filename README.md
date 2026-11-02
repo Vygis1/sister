@@ -124,7 +124,7 @@ SiSTer is free and open source. If you enjoy it, you can support its development
 ## License
 
 GPL-3.0, see [LICENSE](LICENSE). Some components come from other projects and keep their own
-compatible licences; see [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md). The DOS PC is built on
-ao486 by Aleksander Osman and 486Tang by nand2mario.
+compatible licences; see [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md); that list is being
+emptied: every part is being rewritten as our own.
 
 No games or BIOS files are included. Use your own.
